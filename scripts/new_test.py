@@ -21,6 +21,7 @@ def main():
     (base / "rtl").mkdir(parents=True)
     (base / "tb").mkdir()
     (base / "work" / "verilator").mkdir(parents=True)
+    (base / "work" / "custom-sim" / "stimuli").mkdir(parents=True)
 
     # RTL stub
     (base / "rtl" / f"{module}.v").write_text(

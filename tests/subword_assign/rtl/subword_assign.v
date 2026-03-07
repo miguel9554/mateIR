@@ -7,7 +7,7 @@ module subword_assign (
 );
 
     always @(posedge clk) begin
-        // This block is intentionally left empty to demonstrate that the assignments are combinational
+        // Just for our simulator to work
         subword_out_2 <= subword_in[7:4];
     end
 

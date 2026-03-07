@@ -1,0 +1,6 @@
+source_file: "tests/pindonga/rtl/pindonga.v"
+top_module: pindonga
+inputs:
+  clk: "tests/pindonga/work/custom-sim/stimuli/clk.txt"
+  rst_n: "tests/pindonga/work/custom-sim/stimuli/rst_n.txt"
+output_dir: "tests/pindonga/work/custom-sim/output"

@@ -9,10 +9,13 @@ RTL_DIR = $(ROOT_DIR)/rtl
 TB_DIR = $(ROOT_DIR)/tb
 
 # Source files
-RTL_SRCS = $(shell find $(RTL_DIR) -type f)
-TB_SRCS = $(shell find $(TB_DIR) -type f)
+RTL_SRCS = $(shell find -L $(RTL_DIR) -type f)
+TB_SRCS = $(shell find -L $(TB_DIR) -type f)
 SRCS= $(RTL_SRCS) $(TB_SRCS)
 TOP_MODULE = tb
+
+$(info RTL_SRCS=$(RTL_SRCS))
+$(info TB_SRCS=$(TB_SRCS))
 
 # Compiled file name
 OUT = obj_dir/V$(TOP_MODULE)

@@ -279,10 +279,24 @@ static bool tryInferType(DFGNode* node) {
 
             // Packed dimension indexing
             if (!atype.packed_dims.empty()) {
-                // Both indices must be CONST for packed selects
+                // Dynamic bit select (high and low are the same node):
+                // peel one packed dim regardless of constness.
+                if (highNode == lowNode) {
+                    std::vector<ResolvedDimension> remaining(
+                        atype.packed_dims.begin() + 1, atype.packed_dims.end());
+                    int new_width = 1;
+                    for (const auto& d : remaining) {
+                        new_width *= d.size();
+                    }
+                    node->type = ResolvedType::makeInteger(
+                        new_width, atype.isSigned(), remaining);
+                    return true;
+                }
+
+                // Range select requires constant indices to determine width
                 if (highNode->op != DFGOp::CONST || lowNode->op != DFGOp::CONST) {
                     throw CompilerError(std::format(
-                        "Type propagation: INDEX {} has non-constant packed indices "
+                        "Type propagation: INDEX {} has non-constant packed range indices "
                         "(dynamic range selects not supported)",
                         node->str()), node->loc);
                 }
@@ -290,8 +304,7 @@ static bool tryInferType(DFGNode* node) {
                 int64_t low_val = std::get<int64_t>(lowNode->data);
 
                 if (high_val == low_val) {
-                    // Single-element bit-select: peel one packed dim,
-                    // recompute width from remaining packed dims.
+                    // Constant single-element bit-select: peel one packed dim
                     std::vector<ResolvedDimension> remaining(
                         atype.packed_dims.begin() + 1, atype.packed_dims.end());
                     int new_width = 1;

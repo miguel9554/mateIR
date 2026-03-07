@@ -24,6 +24,7 @@ module tb;
 
     logic [4-1:0] subword_out_1;
     logic [4-1:0] subword_out_2;
+    logic [8-1:0] word_out;
 
     subword_assign uut(.*);
     uut_recorder u_recorder(.*);

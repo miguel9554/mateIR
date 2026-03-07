@@ -1,0 +1,6 @@
+source_file: "tests/uart/rtl/uart.v"
+top_module: uart
+inputs:
+  clk: "tests/uart/work/custom-sim/stimuli/clk.txt"
+  rst_n: "tests/uart/work/custom-sim/stimuli/rst_n.txt"
+output_dir: "tests/uart/work/custom-sim/output"

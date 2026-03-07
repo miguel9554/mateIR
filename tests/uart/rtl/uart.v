@@ -24,14 +24,10 @@ THE SOFTWARE.
 
 // Language: Verilog 2001
 
-`timescale 1ns / 1ps
-
-`include "uart_tx.vh"
-`include "uart_rx.vh"
-
 /*
  * AXI4-Stream UART
  */
+
 module uart #
 (
     parameter DATA_WIDTH = 8

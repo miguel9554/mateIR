@@ -1,0 +1,17 @@
+resets: []
+clock_domains:
+  clk:
+    - rst
+    - s_axis_tdata
+    - s_axis_tvalid
+    - s_axis_tready
+    - m_axis_tdata
+    - m_axis_tvalid
+    - m_axis_tready
+    - rxd
+    - txd
+    - tx_busy
+    - rx_busy
+    - rx_overrun_error
+    - rx_frame_error
+    - prescale

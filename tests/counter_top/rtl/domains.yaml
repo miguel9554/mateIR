@@ -1,4 +1,5 @@
 resets:
-  - rst_n
+  - a_rst
 clock_domains:
-  clk: []
+  clk:
+    - count

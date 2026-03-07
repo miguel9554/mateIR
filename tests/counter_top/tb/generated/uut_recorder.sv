@@ -12,9 +12,9 @@ module uut_recorder(
         .data(_if.clk)
     );
     async_recorder#(
-        .filepath(path("rst_n.txt"))
-    ) u_rst_recorder(
-        .data(_if.rst_n)
+        .filepath(path("a_rst.txt"))
+    ) u_a_rst_recorder(
+        .data(_if.a_rst)
     );
 
 endmodule

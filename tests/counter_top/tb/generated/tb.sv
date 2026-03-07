@@ -3,16 +3,18 @@
 module tb;
     // Inputs
     logic clk;
-    logic rst_n;
+    logic a_rst;
 
     // Outputs
+    logic [7:0] count;
 
     // Interface and connection to UUT
     uut_if _if();
 
     assign clk = _if.clk;
-    assign rst_n = _if.rst_n;
+    assign a_rst = _if.a_rst;
 
+    assign _if.count = count;
 
     // modules
     counter_top uut(.*);

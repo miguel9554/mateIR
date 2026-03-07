@@ -37,7 +37,7 @@ all: simulate
 
 # Auto-generate TB files from RTL + domains.yaml
 $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv: $(RTL_SRCS) $(DOMAINS_YAML)
-	cd $(PROJECT_ROOT) && python scripts/gen_tb.py $(MODULE_NAME)
+	cd $(PROJECT_ROOT) && poetry run python scripts/gen_tb.py $(MODULE_NAME)
 
 # Compile the TB and RTL
 $(OUT): $(SRCS) $(GEN_DIR)/tb.sv

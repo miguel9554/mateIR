@@ -24,11 +24,13 @@ module tb;
         .N_ITER(N_ITER)
     ) _if();
 
+    // Inputs assign
     assign clk = _if.clk;
     assign rst_n = _if.rst_n;
     assign start = _if.start;
     assign angle_in = _if.angle_in;
 
+    // Outputs assign
     assign _if.cos_out = cos_out;
     assign _if.sin_out = sin_out;
     assign _if.done = done;

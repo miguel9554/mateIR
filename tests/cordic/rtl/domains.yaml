@@ -1,0 +1,9 @@
+resets:
+  - rst_n
+clock_domains:
+  clk:
+    - start
+    - angle_in
+    - cos_out
+    - sin_out
+    - done

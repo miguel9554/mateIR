@@ -1,1 +1,1 @@
-../../../verilator.mk
+../../../common/verilator.mk

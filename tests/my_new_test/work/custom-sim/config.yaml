@@ -1,6 +1,0 @@
-source_file: "tests/my_new_test/rtl/my_new_test.v"
-top_module: my_new_test
-inputs:
-  clk: "tests/my_new_test/work/custom-sim/stimuli/clk.txt"
-  rst_n: "tests/my_new_test/work/custom-sim/stimuli/rst_n.txt"
-output_dir: "tests/my_new_test/work/custom-sim/output"

@@ -39,6 +39,7 @@ void resolveDomains(ResolvedModule& module) {
     for (auto& sig : module.inputs)  assign(sig);
     for (auto& sig : module.outputs) assign(sig);
     for (auto& sig : module.signals) assign(sig);
+    for (auto& flop : module.flops)  assign(flop.type);
 }
 
 } // namespace custom_hdl

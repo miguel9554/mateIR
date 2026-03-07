@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Create a new test structure for a given module name."""
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +32,14 @@ f"""module {module} (
 endmodule
 """)
 
+    # Domains config
+    (base / "rtl" / "domains.yaml").write_text(
+f"""resets:
+  - rst_n
+clock_domains:
+  clk: []
+""")
+
     # Testbench
     (base / "tb" / f"uut_tb.sv").write_text(
 f"""module uut_tb(
@@ -58,6 +67,10 @@ output_dir: "tests/{module}/work/custom-sim/output"
     # Verilator Makefile — symlink to shared template
     makefile_path = base / "work" / "verilator" / "Makefile"
     os.symlink("../../../common/verilator.mk", makefile_path)
+
+    # Generate TB files (uut_if.sv, tb.sv, uut_recorder.sv)
+    gen_tb = Path(__file__).resolve().parent / "gen_tb.py"
+    subprocess.run([sys.executable, str(gen_tb), module], check=True)
 
     print(f"Created test structure at {base}")
 

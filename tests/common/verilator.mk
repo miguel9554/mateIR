@@ -5,17 +5,23 @@ WAVES = waves.vcd
 
 # Directories
 ROOT_DIR = ../..
+PROJECT_ROOT = $(ROOT_DIR)/../..
 RTL_DIR = $(ROOT_DIR)/rtl
 TB_DIR = $(ROOT_DIR)/tb
+GEN_DIR = $(TB_DIR)/generated
+MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
 
 # Source files
-RTL_SRCS = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
-TB_SRCS  = $(shell find -L $(TB_DIR)  -type f \( -name "*.v" -o -name "*.sv" \))
-SRCS= $(RTL_SRCS) $(TB_SRCS)
+RTL_SRCS    = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
+TB_SRCS     = $(shell find -L $(TB_DIR) -path $(GEN_DIR) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print)
+GEN_SRCS    = $(shell find -L $(GEN_DIR) -type f \( -name "*.v" -o -name "*.sv" \) 2>/dev/null)
+DOMAINS_YAML = $(RTL_DIR)/domains.yaml
+SRCS = $(RTL_SRCS) $(TB_SRCS) $(GEN_SRCS)
 TOP_MODULE = tb
 
 $(info RTL_SRCS=$(RTL_SRCS))
 $(info TB_SRCS=$(TB_SRCS))
+$(info GEN_SRCS=$(GEN_SRCS))
 
 # Compiled file name
 OUT = obj_dir/V$(TOP_MODULE)
@@ -29,8 +35,12 @@ SEED_ARG = $(if $(seed),+verilator+seed+$(seed))
 # Default target
 all: simulate
 
+# Auto-generate TB files from RTL + domains.yaml
+$(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv: $(RTL_SRCS) $(DOMAINS_YAML)
+	cd $(PROJECT_ROOT) && python scripts/gen_tb.py $(MODULE_NAME)
+
 # Compile the TB and RTL
-$(OUT): $(SRCS)
+$(OUT): $(SRCS) $(GEN_DIR)/tb.sv
 	verilator $(VERILATOR_OPTS) $(VERILATOR_WARNS) --top $(TOP_MODULE) $(SRCS)
 
 # Generate waves database

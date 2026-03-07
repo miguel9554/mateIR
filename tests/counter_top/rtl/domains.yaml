@@ -1,0 +1,4 @@
+resets:
+  - rst_n
+clock_domains:
+  clk: []

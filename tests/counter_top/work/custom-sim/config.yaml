@@ -1,0 +1,6 @@
+source_file: "tests/counter_top/rtl/counter_top.v"
+top_module: counter_top
+inputs:
+  clk: "tests/counter_top/work/custom-sim/stimuli/clk.txt"
+  rst_n: "tests/counter_top/work/custom-sim/stimuli/rst_n.txt"
+output_dir: "tests/counter_top/work/custom-sim/output"

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <sys/types.h>
 
@@ -26,24 +27,47 @@ using namespace slang::syntax;
 using namespace custom_hdl;
 
 void printUsage(const char* progName) {
-    std::cerr << "Usage: " << progName << " [options] <verilog_file>" << std::endl;
-    std::cerr << "       " << progName << " --simulate <config.yaml>" << std::endl;
+    std::cerr << "Usage: " << progName << " [--passes <1|2>] <verilog_file>" << std::endl;
+    std::cerr << "       " << progName << " --simulate --top <module>"
+              << " --inputs-dir <dir> --output-dir <dir>" << std::endl;
+    std::cerr << "           [--flops-initial <random|zeros|ones>] [--flops-seed <n>]" << std::endl;
+    std::cerr << "           [--debug-nodes <n1,n2,...>] [--params <K=V,K=V,...>]" << std::endl;
+    std::cerr << "           <source1.v> [source2.v ...]" << std::endl;
     std::cerr << "\nOptions:" << std::endl;
-    std::cerr << "  --passes <1|2>          Number of passes to run (default: 1)" << std::endl;
-    std::cerr << "                          1 = extraction only (unresolved IR)" << std::endl;
-    std::cerr << "                          2 = extraction + resolution" << std::endl;
-    std::cerr << "  --simulate <config.yaml> Run cycle-based simulation (source file from config)" << std::endl;
-    std::cerr << "\nExample:" << std::endl;
-    std::cerr << "  " << progName << " examples/test.v" << std::endl;
-    std::cerr << "  " << progName << " --passes 2 examples/test.v" << std::endl;
-    std::cerr << "  " << progName << " --simulate config.yaml" << std::endl;
+    std::cerr << "  --passes <1|2>            Number of passes (default: 1)" << std::endl;
+    std::cerr << "  --simulate                Run cycle-based simulation" << std::endl;
+    std::cerr << "  --top <module>            Top module name (simulate mode)" << std::endl;
+    std::cerr << "  --inputs-dir <dir>        Directory containing input stimuli files" << std::endl;
+    std::cerr << "  --output-dir <dir>        Directory for simulation output" << std::endl;
+    std::cerr << "  --flops-initial <mode>    Flop init: random (default), zeros, ones" << std::endl;
+    std::cerr << "  --flops-seed <n>          Seed for random flop initialization" << std::endl;
+    std::cerr << "  --debug-nodes <n1,n2,...> Comma-separated node names for debug DOTs" << std::endl;
+    std::cerr << "  --params <K=V,K=V,...>    Comma-separated parameter overrides" << std::endl;
+}
+
+// Split a comma-separated string into a vector of strings
+static std::vector<std::string> splitComma(const std::string& s) {
+    std::vector<std::string> result;
+    std::istringstream iss(s);
+    std::string token;
+    while (std::getline(iss, token, ',')) {
+        if (!token.empty()) result.push_back(token);
+    }
+    return result;
 }
 
 int main(int argc, char** argv) {
     // Parse command line arguments
     int numPasses = 1;
-    std::string filename;
-    std::string simConfigPath;
+    bool simulateMode = false;
+    std::string topModule;
+    std::string inputsDir;
+    std::string outputDir;
+    std::string flopsInitialStr;
+    std::string flopsSeedStr;
+    std::string debugNodesStr;
+    std::string paramsStr;
+    std::vector<std::string> sourceFiles;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--passes") == 0) {
@@ -59,60 +83,182 @@ int main(int argc, char** argv) {
                 return 1;
             }
         } else if (std::strcmp(argv[i], "--simulate") == 0) {
+            simulateMode = true;
+            numPasses = 2;
+        } else if (std::strcmp(argv[i], "--top") == 0) {
             if (i + 1 >= argc) {
-                std::cerr << "ERROR: --simulate requires a config file argument" << std::endl;
+                std::cerr << "ERROR: --top requires an argument" << std::endl;
                 printUsage(argv[0]);
                 return 1;
             }
-            simConfigPath = argv[++i];
-            numPasses = 2;  // --simulate implies --passes 2
+            topModule = argv[++i];
+        } else if (std::strcmp(argv[i], "--inputs-dir") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --inputs-dir requires an argument" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+            inputsDir = argv[++i];
+        } else if (std::strcmp(argv[i], "--output-dir") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --output-dir requires an argument" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+            outputDir = argv[++i];
+        } else if (std::strcmp(argv[i], "--flops-initial") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --flops-initial requires an argument" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+            flopsInitialStr = argv[++i];
+        } else if (std::strcmp(argv[i], "--flops-seed") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --flops-seed requires an argument" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+            flopsSeedStr = argv[++i];
+        } else if (std::strcmp(argv[i], "--debug-nodes") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --debug-nodes requires an argument" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+            debugNodesStr = argv[++i];
+        } else if (std::strcmp(argv[i], "--params") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --params requires an argument" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+            paramsStr = argv[++i];
         } else if (argv[i][0] == '-') {
             std::cerr << "ERROR: Unknown option: " << argv[i] << std::endl;
             printUsage(argv[0]);
             return 1;
         } else {
-            if (!filename.empty()) {
-                std::cerr << "ERROR: Multiple input files not supported" << std::endl;
-                printUsage(argv[0]);
-                return 1;
-            }
-            filename = argv[i];
+            sourceFiles.push_back(argv[i]);
         }
     }
 
-    // In simulate mode, source file comes from the config YAML
+    // Build SimConfig if in simulate mode
     std::optional<SimConfig> simConfig;
-    if (!simConfigPath.empty()) {
-        if (!filename.empty()) {
-            std::cerr << "ERROR: --simulate gets source file from config; do not pass a positional file" << std::endl;
+    std::string filename;  // used in non-simulate mode
+
+    if (simulateMode) {
+        if (topModule.empty()) {
+            std::cerr << "ERROR: --simulate requires --top <module>" << std::endl;
             printUsage(argv[0]);
             return 1;
         }
-        simConfig = parseSimConfig(simConfigPath);
-        filename = simConfig->source_file;
-    }
+        if (inputsDir.empty()) {
+            std::cerr << "ERROR: --simulate requires --inputs-dir <dir>" << std::endl;
+            printUsage(argv[0]);
+            return 1;
+        }
+        if (outputDir.empty()) {
+            std::cerr << "ERROR: --simulate requires --output-dir <dir>" << std::endl;
+            printUsage(argv[0]);
+            return 1;
+        }
+        if (sourceFiles.empty()) {
+            std::cerr << "ERROR: --simulate requires at least one source file" << std::endl;
+            printUsage(argv[0]);
+            return 1;
+        }
 
-    if (filename.empty()) {
-        printUsage(argv[0]);
-        return 1;
+        SimConfig cfg;
+        cfg.source_files = sourceFiles;
+        cfg.top_module = topModule;
+        cfg.inputs_dir = inputsDir;
+        cfg.output_dir = outputDir;
+
+        if (!flopsInitialStr.empty()) {
+            if (flopsInitialStr == "random") {
+                cfg.flops_initial = FlopsInitial::Random;
+            } else if (flopsInitialStr == "zeros") {
+                cfg.flops_initial = FlopsInitial::AllZeros;
+            } else if (flopsInitialStr == "ones") {
+                cfg.flops_initial = FlopsInitial::AllOnes;
+            } else {
+                std::cerr << "ERROR: --flops-initial must be random, zeros, or ones" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+        }
+
+        if (!flopsSeedStr.empty()) {
+            cfg.flops_initial_seed = std::stoull(flopsSeedStr);
+        }
+
+        if (!debugNodesStr.empty()) {
+            cfg.debug_dfg_nodes = splitComma(debugNodesStr);
+        }
+
+        if (!paramsStr.empty()) {
+            for (const auto& kv : splitComma(paramsStr)) {
+                auto eq = kv.find('=');
+                if (eq == std::string::npos) {
+                    std::cerr << "ERROR: --params entry '" << kv << "' must be KEY=VALUE" << std::endl;
+                    printUsage(argv[0]);
+                    return 1;
+                }
+                cfg.parameters[kv.substr(0, eq)] = std::stoll(kv.substr(eq + 1));
+            }
+        }
+
+        simConfig = std::move(cfg);
+    } else {
+        // Non-simulate mode: single source file
+        if (sourceFiles.size() != 1) {
+            if (sourceFiles.empty()) {
+                printUsage(argv[0]);
+            } else {
+                std::cerr << "ERROR: Multiple input files only supported in --simulate mode" << std::endl;
+                printUsage(argv[0]);
+            }
+            return 1;
+        }
+        filename = sourceFiles[0];
     }
 
     std::cout << "========================================" << std::endl;
     std::cout << "Custom HDL Compiler" << std::endl;
     std::cout << "========================================" << std::endl;
-    std::cout << "Parsing: " << filename << std::endl;
+    if (simulateMode) {
+        std::cout << "Parsing: ";
+        for (size_t i = 0; i < simConfig->source_files.size(); ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << simConfig->source_files[i];
+        }
+        std::cout << std::endl;
+    } else {
+        std::cout << "Parsing: " << filename << std::endl;
+    }
     std::cout << "Passes: " << numPasses << std::endl;
     std::cout << "----------------------------------------" << std::endl;
 
-    // Parse the Verilog file using Slang
-    auto treeResult = SyntaxTree::fromFile(filename);
-
-    if (!treeResult) {
-        std::cerr << "ERROR: Failed to load file: " << filename << std::endl;
-        return 1;
+    // Parse the Verilog file(s) using Slang
+    std::shared_ptr<SyntaxTree> tree;
+    if (simulateMode) {
+        std::vector<std::string_view> paths(simConfig->source_files.begin(),
+                                            simConfig->source_files.end());
+        auto treeResult = SyntaxTree::fromFiles(std::span<const std::string_view>(paths));
+        if (!treeResult) {
+            std::cerr << "ERROR: Failed to load source files" << std::endl;
+            return 1;
+        }
+        tree = std::move(treeResult).value();
+    } else {
+        auto treeResult = SyntaxTree::fromFile(filename);
+        if (!treeResult) {
+            std::cerr << "ERROR: Failed to load file: " << filename << std::endl;
+            return 1;
+        }
+        tree = std::move(treeResult).value();
     }
-
-    auto tree = std::move(treeResult).value();
 
     // Check for syntax errors
     auto& diagnostics = tree->diagnostics();

@@ -1,9 +1,0 @@
-source_file: "tests/subword_assign/rtl/subword_assign.v"
-top_module: subword_assign
-inputs:
-  clk: "tests/subword_assign/work/custom-sim/stimuli/clk.txt"
-  subword_in: "tests/subword_assign/work/custom-sim/stimuli/subword_in.txt"
-output_dir: "tests/subword_assign/work/custom-sim/output"
-debug_dfg_nodes:
-flops-initial:
-  mode: zeros

@@ -13,17 +13,15 @@ namespace custom_hdl {
 enum class FlopsInitial { Random, AllZeros, AllOnes };
 
 struct SimConfig {
-    std::string source_file;
+    std::vector<std::string> source_files;
     std::string top_module;
-    std::map<std::string, std::string> input_files;  // input_name -> file_path
+    std::string inputs_dir;
     std::string output_dir;
-    std::map<std::string, int64_t> parameters;        // parameter_name -> value (overrides)
-    std::vector<std::string> debug_dfg_nodes;           // node names to dump fanin cone DOTs
+    std::map<std::string, int64_t> parameters;
+    std::vector<std::string> debug_dfg_nodes;
     FlopsInitial flops_initial = FlopsInitial::Random;
-    std::optional<uint64_t> flops_initial_seed;         // if nullopt, use random system seed
+    std::optional<uint64_t> flops_initial_seed;
 };
-
-SimConfig parseSimConfig(const std::string& yaml_path);
 
 struct AsyncEvent {
     int64_t time;

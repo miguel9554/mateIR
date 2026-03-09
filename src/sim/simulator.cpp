@@ -11,71 +11,8 @@
 #include <set>
 #include <sstream>
 
-#include "yaml-cpp/yaml.h"
 
 namespace custom_hdl {
-
-// ============================================================================
-// Config parser
-// ============================================================================
-
-SimConfig parseSimConfig(const std::string& yaml_path) {
-    YAML::Node root = YAML::LoadFile(yaml_path);
-
-    SimConfig config;
-
-    if (!root["source_file"])
-        throw CompilerError("Sim config missing 'source_file'");
-    config.source_file = root["source_file"].as<std::string>();
-
-    if (!root["top_module"])
-        throw CompilerError("Sim config missing 'top_module'");
-    config.top_module = root["top_module"].as<std::string>();
-
-    if (!root["inputs"])
-        throw CompilerError("Sim config missing 'inputs'");
-    for (auto it = root["inputs"].begin(); it != root["inputs"].end(); ++it) {
-        config.input_files[it->first.as<std::string>()] = it->second.as<std::string>();
-    }
-
-    if (!root["output_dir"])
-        throw CompilerError("Sim config missing 'output_dir'");
-    config.output_dir = root["output_dir"].as<std::string>();
-
-    if (root["parameters"]) {
-        for (auto it = root["parameters"].begin(); it != root["parameters"].end(); ++it) {
-            config.parameters[it->first.as<std::string>()] = it->second.as<int64_t>();
-        }
-    }
-
-    if (root["debug_dfg_nodes"]) {
-        for (const auto& node : root["debug_dfg_nodes"]) {
-            config.debug_dfg_nodes.push_back(node.as<std::string>());
-        }
-    }
-
-    if (root["flops-initial"]) {
-        auto fi = root["flops-initial"];
-        if (!fi["mode"])
-            throw CompilerError("Sim config: flops-initial requires 'mode' key");
-        std::string mode = fi["mode"].as<std::string>();
-
-        if (mode == "random") {
-            config.flops_initial = FlopsInitial::Random;
-            if (fi["seed"])
-                config.flops_initial_seed = fi["seed"].as<uint64_t>();
-        } else if (mode == "zeros") {
-            config.flops_initial = FlopsInitial::AllZeros;
-        } else if (mode == "ones") {
-            config.flops_initial = FlopsInitial::AllOnes;
-        } else {
-            throw CompilerError(std::format(
-                "Sim config: invalid flops-initial mode '{}' (expected: random, zeros, ones)", mode));
-        }
-    }
-
-    return config;
-}
 
 // ============================================================================
 // Bit mask helper
@@ -215,16 +152,12 @@ void Simulator::buildTimeline() {
 
     // Parse async input files: "time value" format per line
     for (const auto& name : async_inputs_) {
-        auto it = config_.input_files.find(name);
-        if (it == config_.input_files.end()) {
-            throw CompilerError(std::format(
-                "Simulator: async input '{}' has no file in config", name));
-        }
+        std::string path = config_.inputs_dir + "/" + name + ".txt";
 
-        std::ifstream file(it->second);
+        std::ifstream file(path);
         if (!file.is_open()) {
             throw CompilerError(std::format(
-                "Simulator: cannot open async input file '{}'", it->second));
+                "Simulator: cannot open async input file '{}'", path));
         }
 
         std::string line;
@@ -235,9 +168,9 @@ void Simulator::buildTimeline() {
             int64_t value;
             if (!(iss >> time_token >> value)) {
                 throw CompilerError(std::format(
-                    "Simulator: bad line in async file '{}': {}", it->second, line));
+                    "Simulator: bad line in async file '{}': {}", path, line));
             }
-            int64_t time = parseTimeWithUnit(time_token, it->second, line);
+            int64_t time = parseTimeWithUnit(time_token, path, line);
             timeline_.push_back({time, name, value});
         }
     }
@@ -265,9 +198,10 @@ void Simulator::buildFlopMaps() {
 // ============================================================================
 
 void Simulator::loadSyncInputs() {
-    for (const auto& [name, path] : config_.input_files) {
+    for (const auto& [name, node] : module_.dfg->inputs) {
         if (async_inputs_.count(name)) continue;  // skip async inputs
 
+        std::string path = config_.inputs_dir + "/" + name + ".txt";
         std::ifstream file(path);
         if (!file.is_open()) {
             throw CompilerError(std::format(
@@ -813,14 +747,6 @@ Simulator::Simulator(const ResolvedModule& module, const SimConfig& config)
             throw CompilerError(std::format(
                 "Simulator: node '{}' has width {} (max 64 supported)",
                 node->str(), node->type->width), node.get());
-        }
-    }
-
-    // Validate all module inputs have config entries
-    for (const auto& [name, node] : module_.dfg->inputs) {
-        if (config_.input_files.find(name) == config_.input_files.end()) {
-            throw CompilerError(std::format(
-                "Simulator: module input '{}' has no corresponding file in config", name));
         }
     }
 

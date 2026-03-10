@@ -49,17 +49,9 @@ f"""module uut_tb(
 endmodule
 """)
 
-    # Custom-sim config
-    custom_sim = base / "work" / "custom-sim"
-    custom_sim.mkdir(parents=True)
-    (custom_sim / "config.yaml").write_text(
-f"""source_file: "tests/{module}/rtl/{module}.v"
-top_module: {module}
-inputs:
-  clk: "tests/{module}/work/custom-sim/stimuli/clk.txt"
-  rst_n: "tests/{module}/work/custom-sim/stimuli/rst_n.txt"
-output_dir: "tests/{module}/work/custom-sim/output"
-""")
+    # Custom-sim Makefile — symlink to shared template
+    custom_sim_makefile = base / "work" / "custom-sim" / "Makefile"
+    os.symlink("../../../common/custom-sim.mk", custom_sim_makefile)
 
     # TB common dir
     tb_common_path = base / "tb" / "common"

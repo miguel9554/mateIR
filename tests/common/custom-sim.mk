@@ -1,4 +1,4 @@
-.PHONY: simulate clean force
+.PHONY: simulate clean
 
 ROOT_DIR = ../..
 PROJECT_ROOT = $(ROOT_DIR)/../..
@@ -16,20 +16,11 @@ EXTRA_ARGS = $(shell cat custom-sim.args 2>/dev/null)
 
 all: simulate
 
-# Rebuild simulator via root Makefile
-$(SIMULATOR): force
+simulate:
 	$(MAKE) -C $(PROJECT_ROOT) build
-
-# Symlink for convenience
-sim: $(SIMULATOR)
-	ln -sf $(realpath $(SIMULATOR)) sim
-
-simulate: sim
-	./sim --simulate --top $(MODULE_NAME) \
+	$(SIMULATOR) --simulate --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
 		$(EXTRA_ARGS) $(RTL_SRCS)
 
 clean:
-	rm -rf $(OUTPUT_DIR) sim
-
-force:
+	rm -rf $(OUTPUT_DIR)

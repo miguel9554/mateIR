@@ -1,5 +1,5 @@
 # time value followed by value
-0 0
+0.000000ns 0
 15.000000ns 1
 25.000000ns 0
 55.000000ns 1

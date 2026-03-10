@@ -20,7 +20,7 @@ module async_recorder#(
         $fwrite(file, "# time value followed by value\n");
 
         // Initialize old_data and write initial value
-        old_data = data;
+        #0 old_data = data;
         $fwrite(file, "%0t %0d\n", $realtime, data);
     end
 

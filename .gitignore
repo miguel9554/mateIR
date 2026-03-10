@@ -41,3 +41,4 @@ tests/**/*.txt
 !tests/**/stimuli/*.txt
 tests/**/obj_dir
 **/*.gtkw
+tests/*/work/custom-sim/debug_output

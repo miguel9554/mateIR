@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -75,6 +76,9 @@ struct ResolvedTypes {
     using Hierarchy = UnresolvedTypes::Hierarchy;
 };
 
+// Per-module combinational dependency map: output_port -> {input_ports it depends on}
+using ComboDeps = std::map<std::string, std::set<std::string>>;
+
 // ============================================================================
 // Resolved IR module (output of pass 2)
 // ============================================================================
@@ -95,6 +99,9 @@ struct ResolvedModule {
     std::unique_ptr<DFG> dfg;
 
     std::map<std::string, std::vector<asyncTrigger_t>> flopsTriggers;
+
+    // Combinational dependency map: output_port -> {input_ports}
+    ComboDeps combo_deps;
 
     void print(int indent = 0) const;
 };

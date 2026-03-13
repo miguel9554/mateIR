@@ -179,6 +179,9 @@ struct DFGNode {
     // Multi-output support: empty = single unnamed output
     std::vector<std::string> output_names;
 
+    // Input port names (MODULE nodes only): parallel to in vector
+    std::vector<std::string> input_names;
+
     bool hasType() const { return type.has_value(); }
 
     int num_outputs() const {
@@ -188,6 +191,12 @@ struct DFGNode {
     int output_index(const std::string& oname) const {
         for (int i = 0; i < static_cast<int>(output_names.size()); i++)
             if (output_names[i] == oname) return i;
+        return -1;
+    }
+
+    int input_index(const std::string& iname) const {
+        for (int i = 0; i < static_cast<int>(input_names.size()); i++)
+            if (input_names[i] == iname) return i;
         return -1;
     }
 

@@ -165,49 +165,161 @@ void validateNoCombLoops(const ResolvedModule& module) {
 
     const auto& nodes = module.dfg->nodes;
 
-    // The DFG is purely combinational — no node should participate in a cycle.
-    // Kahn's algorithm: any node not sorted has a cycle.
-    std::map<const DFGNode*, int> in_degree;
-    std::map<const DFGNode*, std::vector<const DFGNode*>> successors;
+    // Virtual node: {DFGNode*, port}.
+    // Non-MODULE nodes get one virtual node {node, -1}.
+    // MODULE nodes get one virtual node per output port: {node, 0}, {node, 1}, ...
+    using VNode = std::pair<const DFGNode*, int>;
 
-    for (const auto& node : nodes) {
-        in_degree[node.get()] = 0;
-    }
+    std::map<VNode, int> in_degree;
+    std::map<VNode, std::vector<VNode>> successors;
 
+    // Helper: find combo_deps for a module type via hierarchyInstantiation
+    auto findSubComboDeps = [&](const std::string& typeName) -> const ComboDeps* {
+        for (const auto& sub : module.hierarchyInstantiation) {
+            if (sub.name == typeName) return &sub.combo_deps;
+        }
+        return nullptr;
+    };
+
+    // 1. Create all virtual nodes
     for (const auto& node : nodes) {
-        for (const auto& input : node->in) {
-            in_degree[node.get()]++;
-            successors[input.node].push_back(node.get());
+        if (node->op == DFGOp::MODULE) {
+            int nOutputs = node->num_outputs();
+            for (int p = 0; p < nOutputs; p++) {
+                in_degree[{node.get(), p}] = 0;
+            }
+        } else {
+            in_degree[{node.get(), -1}] = 0;
         }
     }
 
-    std::queue<const DFGNode*> q;
-    for (const auto& [node, deg] : in_degree) {
-        if (deg == 0) q.push(node);
+    // 2. Build edges
+    for (const auto& node : nodes) {
+        if (node->op == DFGOp::MODULE) continue; // MODULE edges handled below
+
+        VNode dst = {node.get(), -1};
+
+        for (const auto& input : node->in) {
+            VNode src;
+            if (input.node->op == DFGOp::MODULE) {
+                src = {input.node, input.port};
+            } else {
+                src = {input.node, -1};
+            }
+            in_degree[dst]++;
+            successors[src].push_back(dst);
+        }
     }
 
-    std::set<const DFGNode*> sorted;
+    // MODULE internal edges: for each output vnode, add edges from input drivers
+    for (const auto& node : nodes) {
+        if (node->op != DFGOp::MODULE) continue;
+
+        const std::string& moduleType = std::get<std::string>(node->data);
+        const ComboDeps* deps = findSubComboDeps(moduleType);
+
+        int nOutputs = node->num_outputs();
+        for (int p = 0; p < nOutputs; p++) {
+            VNode dst = {node.get(), p};
+
+            if (deps && !deps->empty() &&
+                p < static_cast<int>(node->output_names.size())) {
+                // Use combo_deps: only edges from input ports this output depends on
+                const std::string& outPortName = node->output_names[p];
+                auto it = deps->find(outPortName);
+                if (it != deps->end()) {
+                    for (const auto& inputPort : it->second) {
+                        int idx = node->input_index(inputPort);
+                        if (idx >= 0 && idx < static_cast<int>(node->in.size())) {
+                            VNode src;
+                            if (node->in[idx].node->op == DFGOp::MODULE) {
+                                src = {node->in[idx].node, node->in[idx].port};
+                            } else {
+                                src = {node->in[idx].node, -1};
+                            }
+                            in_degree[dst]++;
+                            successors[src].push_back(dst);
+                        }
+                    }
+                }
+                // If output not in combo_deps, it has no combinational deps — no edges
+            } else {
+                // Conservative fallback: all inputs feed all outputs
+                for (const auto& input : node->in) {
+                    VNode src;
+                    if (input.node->op == DFGOp::MODULE) {
+                        src = {input.node, input.port};
+                    } else {
+                        src = {input.node, -1};
+                    }
+                    in_degree[dst]++;
+                    successors[src].push_back(dst);
+                }
+            }
+        }
+    }
+
+    // 3. Kahn's algorithm
+    std::queue<VNode> q;
+    for (const auto& [vn, deg] : in_degree) {
+        if (deg == 0) q.push(vn);
+    }
+
+    std::set<VNode> sorted;
     while (!q.empty()) {
-        const DFGNode* curr = q.front();
+        VNode curr = q.front();
         q.pop();
         sorted.insert(curr);
 
-        for (const DFGNode* succ : successors[curr]) {
+        for (const VNode& succ : successors[curr]) {
             if (--in_degree[succ] == 0) {
                 q.push(succ);
             }
         }
     }
 
-    if (sorted.size() == nodes.size()) return;  // no cycles
+    size_t totalVNodes = 0;
+    for (const auto& [vn, deg] : in_degree) {
+        (void)deg;
+        totalVNodes++;
+    }
 
-    // Report all nodes involved in cycles
-    std::string msg = "Combinational loop(s) detected in module '" + module.name + "':\n";
-    for (const auto& node : nodes) {
-        if (!sorted.count(node.get())) {
-            msg += std::format("  - {} (id in DFG)\n", node->str());
+    if (sorted.size() == totalVNodes) return;  // no cycles
+
+    // Collect cycle DFGNodes (map virtual nodes back)
+    std::set<const DFGNode*> cycleNodes;
+    for (const auto& [vn, deg] : in_degree) {
+        if (!sorted.count(vn)) {
+            cycleNodes.insert(vn.first);
         }
     }
+
+    // Write .dot file with cycle nodes highlighted
+    std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
+    std::filesystem::create_directories(dir);
+    std::string dotPath = dir + "/combo_loop.dot";
+    std::ofstream(dotPath) << module.dfg->toDot("combo_loop", cycleNodes);
+
+    // Build informative error message
+    std::string msg = std::format(
+        "Combinational loop(s) detected in module '{}':\n"
+        "  {} node(s) are part of a cycle.\n"
+        "  DOT file written to: {}\n\n"
+        "  Nodes in cycle:\n",
+        module.name, cycleNodes.size(), dotPath);
+
+    for (const DFGNode* node : cycleNodes) {
+        // Show which of this node's inputs are also in the cycle
+        std::string loopInputs;
+        for (const auto& input : node->in) {
+            if (cycleNodes.count(input.node)) {
+                if (!loopInputs.empty()) loopInputs += ", ";
+                loopInputs += input.node->str();
+            }
+        }
+        msg += std::format("    {} <- [{}]\n", node->str(), loopInputs);
+    }
+
     throw CompilerError(msg);
 }
 

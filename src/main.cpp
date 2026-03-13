@@ -15,6 +15,7 @@
 #include "passes/condition_normalization.h"
 #include "passes/dce.h"
 #include "passes/flop_resolve.h"
+#include "passes/combo_deps.h"
 #include "passes/domain_resolve.h"
 #include "passes/type_propagation.h"
 #include "sim/simulator.h"
@@ -357,6 +358,7 @@ int main(int argc, char** argv) {
             module.dfg->validateNoOrphans();
             runPass(6, "flop_resolve", [&]{ resolveFlops(module); });
             runPass(7, "domain_resolve", [&]{ resolveDomains(module); });
+            computeComboDepsBU(module);
             validateNoCombLoops(module);
 
             if (simConfig && !simConfig->debug_dfg_nodes.empty()) {

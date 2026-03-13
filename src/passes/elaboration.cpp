@@ -1607,6 +1607,7 @@ void resolveNamedPortConnection(
         const std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
         auto* driver = graph.lookupSignal(name);
         moduleNode->in.push_back(driver);
+        moduleNode->input_names.push_back(portName);
     } else if (subOutputNames.contains(portName)) {
         if (!named.expr) {
             throw CompilerError(
@@ -1633,6 +1634,7 @@ void resolveWildcardPortConnection(
         auto* driver = graph.lookupSignal(inp.name);
         if (driver) {
             moduleNode->in.push_back(driver);
+            moduleNode->input_names.push_back(inp.name);
         }
     }
     for (size_t oi = 0; oi < resolvedSub.outputs.size(); ++oi) {

@@ -22,6 +22,8 @@ def main():
     (base / "tb").mkdir()
     (base / "work" / "verilator").mkdir(parents=True)
     (base / "work" / "custom-sim" / "stimuli").mkdir(parents=True)
+    (base / "work" / "vcd-diff").mkdir(parents=True)
+    (base / "work" / "validate").mkdir(parents=True)
 
     # RTL stub
     (base / "rtl" / f"{module}.v").write_text(
@@ -60,6 +62,12 @@ endmodule
     # Verilator Makefile — symlink to shared template
     makefile_path = base / "work" / "verilator" / "Makefile"
     os.symlink("../../../common/verilator.mk", makefile_path)
+
+    # VCD-diff Makefile — symlink to shared template
+    os.symlink("../../../common/vcd-diff.mk", base / "work" / "vcd-diff" / "Makefile")
+
+    # Validate Makefile — symlink to shared template
+    os.symlink("../../../common/validate.mk", base / "work" / "validate" / "Makefile")
 
     # Generate TB files (uut_if.sv, tb.sv, uut_recorder.sv)
     gen_tb = Path(__file__).resolve().parent / "gen_tb.py"

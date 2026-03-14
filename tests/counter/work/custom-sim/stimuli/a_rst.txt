@@ -1,3 +1,0 @@
-# time value — active-low async reset: asserted at start, deasserted at time 22
-0ns 0
-22ns 1

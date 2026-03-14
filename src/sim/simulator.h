@@ -101,6 +101,7 @@ private:
     // Testbench infrastructure
     std::vector<AsyncEvent> timeline_;
     std::set<std::string> async_inputs_;
+    std::set<std::string> clock_inputs_;  // inputs with type Clock
     std::map<std::string, std::vector<int64_t>> sync_input_data_;
     std::map<std::string, size_t> sync_input_pos_;
     std::map<std::string, std::vector<int64_t>> recorded_values_;

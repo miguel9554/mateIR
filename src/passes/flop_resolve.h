@@ -14,4 +14,9 @@ namespace custom_hdl {
 // the reset MUX pattern is in canonical form.
 void resolveFlops(ResolvedModule& module);
 
+// Propagate Clock/Reset type tags from submodule inputs up to parent
+// inputs through MODULE node connections. Must run after resolveFlops
+// (bottom-up) so submodule input types are already resolved.
+void propagatePortTypes(ResolvedModule& module);
+
 } // namespace custom_hdl

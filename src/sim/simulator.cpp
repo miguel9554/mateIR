@@ -537,11 +537,14 @@ static int64_t parseTimeWithUnit(const std::string& token,
 // ============================================================================
 
 void Simulator::buildTimeline() {
-    // Determine which inputs are async (clocks and resets)
-    for (const auto& flop : module_.flops) {
-        async_inputs_.insert(flop.clock.name);
-        if (flop.reset.has_value()) {
-            async_inputs_.insert(flop.reset->name);
+    // Determine which inputs are async (clocks and resets) from resolved input types
+    for (const auto& input : module_.inputs) {
+        if (input.type.kind == ResolvedTypeKind::Clock ||
+            input.type.kind == ResolvedTypeKind::Reset) {
+            async_inputs_.insert(input.name);
+            if (input.type.kind == ResolvedTypeKind::Clock) {
+                clock_inputs_.insert(input.name);
+            }
         }
     }
 
@@ -564,6 +567,13 @@ void Simulator::buildTimeline() {
             if (!(iss >> time_token >> value)) {
                 throw CompilerError(std::format(
                     "Simulator: bad line in async file '{}': {}", path, line));
+            }
+            // Validate no extra tokens on the line
+            std::string extra;
+            if (iss >> extra) {
+                throw CompilerError(std::format(
+                    "Simulator: async file '{}' line has extra data "
+                    "(expected '<time> <value>'): {}", path, line));
             }
             int64_t time = parseTimeWithUnit(time_token, path, line);
             timeline_.push_back({time, name, value});
@@ -593,7 +603,20 @@ void Simulator::loadSyncInputs() {
         std::string line;
         while (std::getline(file, line)) {
             if (line.empty() || line[0] == '#') continue;
-            values.push_back(std::stoll(line));
+            std::istringstream iss(line);
+            int64_t val;
+            if (!(iss >> val)) {
+                throw CompilerError(std::format(
+                    "Simulator: sync file '{}' has unparseable line: {}", path, line));
+            }
+            std::string extra;
+            if (iss >> extra) {
+                throw CompilerError(std::format(
+                    "Simulator: sync file '{}' line has extra data "
+                    "(expected single integer per line, got '{}'). "
+                    "Is this an async (clock/reset) file?", path, line));
+            }
+            values.push_back(val);
         }
 
         if (values.empty()) {
@@ -1171,7 +1194,6 @@ void Simulator::run() {
         }
 
         bool any_clock_edge = false;
-        std::set<std::string> active_clock_edges;
 
         for (const auto& [name, new_val] : new_async) {
             int64_t old_val = async_prev[name];
@@ -1179,18 +1201,9 @@ void Simulator::run() {
             // Use setAsyncEvent on root for edge detection and d->q
             root_->setAsyncEvent(name, new_val);
 
-            // Also detect clock edges at top level for sync input advancement
-            bool posedge = (old_val == 0 && new_val == 1);
-            bool negedge = (old_val == 1 && new_val == 0);
-
-            if (root_->flops_by_clock.count(name)) {
-                for (const auto* flop : root_->flops_by_clock[name]) {
-                    if ((flop->clock.edge == POSEDGE && posedge) ||
-                        (flop->clock.edge == NEGEDGE && negedge)) {
-                        active_clock_edges.insert(name);
-                        any_clock_edge = true;
-                    }
-                }
+            // Detect any value change on a clock input
+            if (clock_inputs_.count(name) && old_val != new_val) {
+                any_clock_edge = true;
             }
 
             async_prev[name] = new_val;

@@ -280,4 +280,69 @@ void resolveFlops(ResolvedModule& resolved) {
     }
 }
 
+void propagatePortTypes(ResolvedModule& module) {
+    if (!module.dfg) return;
+
+    for (const auto& node : module.dfg->nodes) {
+        if (node->op != DFGOp::MODULE) continue;
+
+        // Find the matching submodule definition
+        const std::string& moduleType = std::get<std::string>(node->data);
+        const ResolvedModule* subDef = nullptr;
+        for (const auto& sub : module.hierarchyInstantiation) {
+            if (sub.name == moduleType) {
+                subDef = &sub;
+                break;
+            }
+        }
+        if (!subDef) continue;
+
+        // For each input port of the MODULE node, check if the submodule's
+        // corresponding input is tagged as Clock or Reset
+        for (size_t i = 0; i < node->input_names.size(); ++i) {
+            const std::string& subPortName = node->input_names[i];
+
+            // Find the submodule input with this name
+            const ResolvedSignal* subInput = nullptr;
+            for (const auto& inp : subDef->inputs) {
+                if (inp.name == subPortName) {
+                    subInput = &inp;
+                    break;
+                }
+            }
+            if (!subInput) continue;
+
+            if (subInput->type.kind != ResolvedTypeKind::Clock &&
+                subInput->type.kind != ResolvedTypeKind::Reset)
+                continue;
+
+            // The driver of this MODULE input must be a top-level INPUT node
+            DFGNode* driverNode = node->in[i].node;
+            if (driverNode->op != DFGOp::INPUT) {
+                throw CompilerError(std::format(
+                    "Submodule '{}' port '{}' is a {} but is driven by {} "
+                    "(must be driven by a top-level input port)",
+                    node->name, subPortName,
+                    subInput->type.kind == ResolvedTypeKind::Clock ? "clock" : "reset",
+                    driverNode->str()), node.get());
+            }
+
+            // Find the parent's ResolvedSignal for this input and tag it
+            bool found = false;
+            for (auto& parentInput : module.inputs) {
+                if (parentInput.name == driverNode->name) {
+                    parentInput.type.kind = subInput->type.kind;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                throw CompilerError(std::format(
+                    "Parent input '{}' not found in module.inputs",
+                    driverNode->name), driverNode);
+            }
+        }
+    }
+}
+
 } // namespace custom_hdl

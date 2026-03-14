@@ -362,7 +362,8 @@ int main(int argc, char** argv) {
             runPass(5, "dce", [&]{ eliminateDeadCode(*module.dfg); });
             module.dfg->validateNoOrphans();
             runPass(6, "flop_resolve", [&]{ resolveFlops(module); });
-            runPass(7, "domain_resolve", [&]{ resolveDomains(module); });
+            runPass(7, "port_type_propagation", [&]{ propagatePortTypes(module); });
+            runPass(8, "domain_resolve", [&]{ resolveDomains(module); });
             computeComboDepsBU(module);
             validateNoCombLoops(module);
 

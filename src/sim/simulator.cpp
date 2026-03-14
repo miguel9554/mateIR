@@ -548,6 +548,19 @@ void Simulator::buildTimeline() {
         }
     }
 
+    // Build per-clock active edge from flop info
+    for (const auto& flop : module_.flops) {
+        clock_active_edge_[flop.clock.name] = flop.clock.edge;
+    }
+
+    // Map each sync input to its clock domain
+    for (const auto& input : module_.inputs) {
+        if (async_inputs_.count(input.name)) continue;
+        if (input.clock_domain) {
+            sync_input_clock_[input.name] = input.clock_domain->name;
+        }
+    }
+
     // Parse async input files: "time value" format per line
     for (const auto& name : async_inputs_) {
         std::string path = config_.inputs_dir + "/" + name + ".txt";
@@ -633,8 +646,13 @@ void Simulator::loadSyncInputs() {
 // Sync input advancement
 // ============================================================================
 
-void Simulator::advanceSyncInputs() {
+void Simulator::advanceSyncInputs(const std::set<std::string>& active_clocks) {
     for (auto& [name, pos] : sync_input_pos_) {
+        // Only advance if this input's clock had its active edge
+        auto clk_it = sync_input_clock_.find(name);
+        if (clk_it == sync_input_clock_.end() || !active_clocks.count(clk_it->second))
+            continue;
+
         if (pos + 1 < sync_input_data_[name].size()) {
             pos++;
         }
@@ -1193,7 +1211,8 @@ void Simulator::run() {
             new_async[evt->signal_name] = evt->value;
         }
 
-        bool any_clock_edge = false;
+        // Track which clocks had their active edge in this batch
+        std::set<std::string> active_edge_clocks;
 
         for (const auto& [name, new_val] : new_async) {
             int64_t old_val = async_prev[name];
@@ -1201,17 +1220,25 @@ void Simulator::run() {
             // Use setAsyncEvent on root for edge detection and d->q
             root_->setAsyncEvent(name, new_val);
 
-            // Detect any value change on a clock input
+            // Detect active edge on clock inputs
             if (clock_inputs_.count(name) && old_val != new_val) {
-                any_clock_edge = true;
+                bool posedge = (old_val == 0 && new_val == 1);
+                bool negedge = (old_val == 1 && new_val == 0);
+                auto edge_it = clock_active_edge_.find(name);
+                if (edge_it != clock_active_edge_.end()) {
+                    if ((edge_it->second == POSEDGE && posedge) ||
+                        (edge_it->second == NEGEDGE && negedge)) {
+                        active_edge_clocks.insert(name);
+                    }
+                }
             }
 
             async_prev[name] = new_val;
         }
 
         // On clock active edge: advance sync inputs
-        if (any_clock_edge) {
-            advanceSyncInputs();
+        if (!active_edge_clocks.empty()) {
+            advanceSyncInputs(active_edge_clocks);
         }
 
         // Re-evaluate combinational logic (with fixpoint for hierarchy)
@@ -1221,8 +1248,8 @@ void Simulator::run() {
         updateVcdValues(vcd_out, batch_time, async_prev);
         updateVcdValuesFlat(vcd_flat_out, batch_time, async_prev);
 
-        // Record output values only on clock edges (for text output)
-        if (any_clock_edge) {
+        // Record output values only on active clock edges (for text output)
+        if (!active_edge_clocks.empty()) {
             recordOutputs();
         }
     }

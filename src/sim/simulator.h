@@ -102,6 +102,10 @@ private:
     std::vector<AsyncEvent> timeline_;
     std::set<std::string> async_inputs_;
     std::set<std::string> clock_inputs_;  // inputs with type Clock
+    // Per-clock active edge polarity (derived from flops)
+    std::map<std::string, edge_t> clock_active_edge_;
+    // Sync input -> clock name it belongs to
+    std::map<std::string, std::string> sync_input_clock_;
     std::map<std::string, std::vector<int64_t>> sync_input_data_;
     std::map<std::string, size_t> sync_input_pos_;
     std::map<std::string, std::vector<int64_t>> recorded_values_;
@@ -117,7 +121,7 @@ private:
     // Testbench methods
     void buildTimeline();
     void loadSyncInputs();
-    void advanceSyncInputs();
+    void advanceSyncInputs(const std::set<std::string>& active_clocks);
     void recordOutputs();
     void writeOutputFiles();
     void setupVcd(std::ofstream& vcd_out);

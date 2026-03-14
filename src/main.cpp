@@ -1,6 +1,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <set>
@@ -315,14 +316,18 @@ int main(int argc, char** argv) {
             return resolveModules(modules, tree->sourceManager());
         }();
 
-        // Optimization passes
-        for (auto& module : resolvedModules) {
-            if (!module.dfg) continue;
+        // Run the full pass pipeline on a module (and recursively on its submodules)
+        std::function<void(ResolvedModule&)> runPipeline = [&](ResolvedModule& module) {
+            if (!module.dfg) return;
+
+            // Run pipeline on submodules first (bottom-up, so combo_deps are ready)
+            for (auto& sub : module.hierarchyInstantiation) {
+                runPipeline(sub);
+            }
 
             std::cout << "========================================" << std::endl;
             std::cout << "Module: " << module.name << std::endl;
             std::cout << "========================================" << std::endl;
-
 
             auto runPass = [&](const int number, const std::string& passName, auto passFn) {
                 std::cout << "========================================" << std::endl;
@@ -380,6 +385,11 @@ int main(int argc, char** argv) {
                         << module.dfg->toJsonCone(node);
                 }
             }
+        };
+
+        // Optimization passes
+        for (auto& module : resolvedModules) {
+            runPipeline(module);
         }
 
         std::cout << "----------------------------------------" << std::endl;

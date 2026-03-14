@@ -28,11 +28,19 @@ void resolveDomains(ResolvedModule& module) {
         return;
     }
 
-    // Set clock_domain for all non-Clock, non-Reset signals
+    // Determine the clock's active edge from the flops
+    if (module.flops.empty()) {
+        throw CompilerError(std::format(
+            "Module '{}': has clock '{}' but no flops", module.name, clock->name));
+    }
+    edge_t clock_edge = module.flops.front().clock.edge;
+
+    // Set clock_domain and clock_edge for all non-Clock, non-Reset signals
     auto assign = [&](ResolvedSignal& sig) {
         if (sig.type.kind != ResolvedTypeKind::Clock &&
             sig.type.kind != ResolvedTypeKind::Reset) {
             sig.clock_domain = clock;
+            sig.clock_edge = clock_edge;
         }
     };
 

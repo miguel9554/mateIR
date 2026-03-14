@@ -548,16 +548,12 @@ void Simulator::buildTimeline() {
         }
     }
 
-    // Build per-clock active edge from flop info
-    for (const auto& flop : module_.flops) {
-        clock_active_edge_[flop.clock.name] = flop.clock.edge;
-    }
-
-    // Map each sync input to its clock domain
+    // Map each sync input to its clock domain and build per-clock active edge
     for (const auto& input : module_.inputs) {
         if (async_inputs_.count(input.name)) continue;
-        if (input.clock_domain) {
+        if (input.clock_domain && input.clock_edge.has_value()) {
             sync_input_clock_[input.name] = input.clock_domain->name;
+            clock_active_edge_[input.clock_domain->name] = *input.clock_edge;
         }
     }
 
@@ -1222,12 +1218,12 @@ void Simulator::run() {
 
             // Detect active edge on clock inputs
             if (clock_inputs_.count(name) && old_val != new_val) {
-                bool posedge = (old_val == 0 && new_val == 1);
-                bool negedge = (old_val == 1 && new_val == 0);
+                bool is_posedge = (old_val == 0 && new_val == 1);
+                bool is_negedge = (old_val == 1 && new_val == 0);
                 auto edge_it = clock_active_edge_.find(name);
                 if (edge_it != clock_active_edge_.end()) {
-                    if ((edge_it->second == POSEDGE && posedge) ||
-                        (edge_it->second == NEGEDGE && negedge)) {
+                    if ((edge_it->second == POSEDGE && is_posedge) ||
+                        (edge_it->second == NEGEDGE && is_negedge)) {
                         active_edge_clocks.insert(name);
                     }
                 }

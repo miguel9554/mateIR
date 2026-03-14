@@ -35,9 +35,13 @@ struct ResolvedSignalBase {
 
 struct ResolvedSignal : ResolvedSignalBase{
     ResolvedSignal* clock_domain = nullptr;
+    std::optional<edge_t> clock_edge;
     void print(std::ostream& os) const {
         ResolvedSignalBase::print(os);
         os << " domain=" << (clock_domain ? clock_domain->name : "UNRESOLVED");
+        if (clock_edge.has_value()) {
+            os << " edge=" << (*clock_edge == POSEDGE ? "posedge" : "negedge");
+        }
     }
 };
 

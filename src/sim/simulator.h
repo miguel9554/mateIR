@@ -102,9 +102,9 @@ private:
     std::vector<AsyncEvent> timeline_;
     std::set<std::string> async_inputs_;
     std::set<std::string> clock_inputs_;  // inputs with type Clock
-    // Per-clock active edge polarity (derived from flops)
+    // Clock name -> active edge (from sync input ResolvedSignals)
     std::map<std::string, edge_t> clock_active_edge_;
-    // Sync input -> clock name it belongs to
+    // Sync input -> clock name
     std::map<std::string, std::string> sync_input_clock_;
     std::map<std::string, std::vector<int64_t>> sync_input_data_;
     std::map<std::string, size_t> sync_input_pos_;

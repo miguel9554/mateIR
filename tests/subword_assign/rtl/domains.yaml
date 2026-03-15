@@ -1,7 +1,8 @@
-resets: []
 clock_domains:
   clk:
-    - subword_in
-    - subword_out_1
-    - subword_out_2
-    - word_out
+    polarity: posedge
+    inputs_outputs:
+      - subword_in
+      - subword_out_1
+      - subword_out_2
+      - word_out

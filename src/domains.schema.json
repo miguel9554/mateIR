@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RTL Interface Domain Configuration",
+  "description": "Describes clock domains, reset domains, and asynchronous interface inputs/outputs for an RTL module.",
+  "type": "object",
+
+  "properties": {
+
+    "clock_domains": {
+      "type": "object",
+      "description": "Mapping of clock domain names to their configuration.",
+
+      "additionalProperties": {
+        "type": "object",
+        "title": "Clock Domain",
+        "description": "Definition of a synchronous clock domain.",
+
+        "required": ["polarity", "inputs_outputs"],
+
+        "properties": {
+
+          "input_name": {
+            "type": "string",
+            "description": "Optional clock input port name in the RTL module interface. If omitted, the domain name is used.",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$"
+          },
+
+          "polarity": {
+            "type": "string",
+            "description": "Clock edge used by sequential logic in this domain.",
+            "enum": ["posedge", "negedge"]
+          },
+
+          "inputs_outputs": {
+            "type": "array",
+            "description": "List of module interface inputs/outputs belonging to this clock domain. Entries may be exact port names or wildcard groups such as 's_axis_*'.",
+            "minItems": 1,
+
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$",
+                  "description": "Exact interface port name."
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*\\*$",
+                  "description": "Wildcard prefix representing a group of ports."
+                }
+              ]
+            }
+          }
+        },
+
+        "additionalProperties": false
+      }
+    },
+
+    "resets": {
+      "type": "object",
+      "description": "Mapping of reset domain names to their configuration.",
+
+      "additionalProperties": {
+        "type": "object",
+        "title": "Reset Domain",
+        "description": "Definition of a reset interface signal.",
+
+        "required": ["polarity"],
+
+        "properties": {
+
+          "signal_name": {
+            "type": "string",
+            "description": "Optional reset input port name in the RTL module interface. If omitted, the reset domain name is used.",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$"
+          },
+
+          "polarity": {
+            "type": "string",
+            "description": "Reset polarity by level. 'positive' means active-high reset, 'negative' means active-low reset.",
+            "enum": ["positive", "negative"]
+          }
+        },
+
+        "additionalProperties": false
+      }
+    },
+
+    "async_domain": {
+      "type": "array",
+      "description": "List of module interface inputs/outputs that are asynchronous to all defined clock domains.",
+
+      "items": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$",
+            "description": "Exact interface port name."
+          },
+          {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*\\*$",
+            "description": "Wildcard prefix representing a group of ports."
+          }
+        ]
+      }
+    }
+
+  },
+
+  "additionalProperties": false
+}

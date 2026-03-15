@@ -1,9 +1,13 @@
 resets:
-  - rst_n
+  rst_n:
+    polarity: negative
+
 clock_domains:
   clk:
-    - start
-    - angle_in
-    - cos_out
-    - sin_out
-    - done
+    polarity: posedge
+    inputs_outputs:
+      - start
+      - angle_in
+      - cos_out
+      - sin_out
+      - done

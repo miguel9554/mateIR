@@ -1,0 +1,16 @@
+module_name: uart_tx
+
+resets:
+  rst:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - s_axis_tdata
+      - s_axis_tvalid
+      - s_axis_tready
+      - txd
+      - busy
+      - prescale

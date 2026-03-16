@@ -1,3 +1,5 @@
+module_name: subword_assign
+
 clock_domains:
   clk:
     polarity: posedge

@@ -354,7 +354,7 @@ def main():
     project_root = Path(__file__).resolve().parent.parent
 
     rtl_path = project_root / 'tests' / module_name / 'rtl' / f'{module_name}.v'
-    domains_path = project_root / 'tests' / module_name / 'rtl' / 'domains.yaml'
+    domains_path = project_root / 'tests' / module_name / 'rtl' / f'{module_name}.domains.yaml'
     output_dir = project_root / 'tests' / module_name / 'tb' / 'generated'
 
     if not rtl_path.exists():

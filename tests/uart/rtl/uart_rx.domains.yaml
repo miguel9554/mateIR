@@ -1,0 +1,20 @@
+module_name: uart_rx
+
+resets:
+  rst:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - m_axis_tdata
+      - m_axis_tvalid
+      - m_axis_tready
+      - busy
+      - overrun_error
+      - frame_error
+      - prescale
+
+async_domain:
+  - rxd

@@ -15,7 +15,7 @@ MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
 RTL_SRCS    = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
 TB_SRCS     = $(shell find -L $(TB_DIR) -path $(GEN_DIR) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print)
 GEN_SRCS    = $(shell find -L $(GEN_DIR) -type f \( -name "*.v" -o -name "*.sv" \) 2>/dev/null)
-DOMAINS_YAML = $(RTL_DIR)/domains.yaml
+DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 SRCS = $(RTL_SRCS) $(TB_SRCS) $(GEN_SRCS)
 TOP_MODULE = tb
 

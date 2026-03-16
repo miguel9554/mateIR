@@ -1,3 +1,5 @@
+module_name: uart
+
 resets:
   rst:
     polarity: negative

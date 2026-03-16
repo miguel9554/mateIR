@@ -1,3 +1,5 @@
+module_name: cordic
+
 resets:
   rst_n:
     polarity: negative

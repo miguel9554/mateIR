@@ -17,12 +17,13 @@
 #include "passes/dce.h"
 #include "passes/flop_resolve.h"
 #include "passes/combo_deps.h"
-#include "passes/domain_resolve.h"
+#include "passes/io_domains_set.h"
 #include "passes/type_propagation.h"
 #include "sim/simulator.h"
 #include "util/debug.h"
 #include "util/source_loc.h"
 
+#include "yaml-cpp/yaml.h"
 #include "slang/syntax/SyntaxTree.h"
 
 using namespace slang::syntax;
@@ -34,6 +35,7 @@ void printUsage(const char* progName) {
               << " --inputs-dir <dir> --output-dir <dir>" << std::endl;
     std::cerr << "           [--flops-initial <random|zeros|ones>] [--flops-seed <n>]" << std::endl;
     std::cerr << "           [--debug-nodes <n1,n2,...>] [--params <K=V,K=V,...>]" << std::endl;
+    std::cerr << "           [--domains <f1.yaml> [f2.yaml ...]]" << std::endl;
     std::cerr << "           <source1.v> [source2.v ...]" << std::endl;
     std::cerr << "\nOptions:" << std::endl;
     std::cerr << "  --passes <1|2>            Number of passes (default: 1)" << std::endl;
@@ -45,6 +47,7 @@ void printUsage(const char* progName) {
     std::cerr << "  --flops-seed <n>          Seed for random flop initialization" << std::endl;
     std::cerr << "  --debug-nodes <n1,n2,...> Comma-separated node names for debug DOTs" << std::endl;
     std::cerr << "  --params <K=V,K=V,...>    Comma-separated parameter overrides" << std::endl;
+    std::cerr << "  --domains <f1> [f2 ...]   Domain YAML files (one per module)" << std::endl;
 }
 
 // Split a comma-separated string into a vector of strings
@@ -69,6 +72,7 @@ int main(int argc, char** argv) {
     std::string flopsSeedStr;
     std::string debugNodesStr;
     std::string paramsStr;
+    std::vector<std::string> domainFiles;
     std::vector<std::string> sourceFiles;
 
     for (int i = 1; i < argc; ++i) {
@@ -136,6 +140,16 @@ int main(int argc, char** argv) {
                 return 1;
             }
             paramsStr = argv[++i];
+        } else if (std::strcmp(argv[i], "--domains") == 0) {
+            // Collect all following arguments until the next --flag or end
+            while (i + 1 < argc && argv[i + 1][0] != '-') {
+                domainFiles.push_back(argv[++i]);
+            }
+            if (domainFiles.empty()) {
+                std::cerr << "ERROR: --domains requires at least one file" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
         } else if (argv[i][0] == '-') {
             std::cerr << "ERROR: Unknown option: " << argv[i] << std::endl;
             printUsage(argv[0]);
@@ -316,6 +330,23 @@ int main(int argc, char** argv) {
             return resolveModules(modules, tree->sourceManager());
         }();
 
+        // Build module_name -> YAML path map from --domains files
+        std::map<std::string, std::string> domainPathsByModule;
+        for (const auto& path : domainFiles) {
+            YAML::Node cfg = YAML::LoadFile(path);
+            if (!cfg["module_name"]) {
+                throw CompilerError(std::format(
+                    "Domain file '{}' is missing 'module_name' key", path));
+            }
+            std::string modName = cfg["module_name"].as<std::string>();
+            if (domainPathsByModule.contains(modName)) {
+                throw CompilerError(std::format(
+                    "Duplicate domain file for module '{}': '{}' and '{}'",
+                    modName, domainPathsByModule[modName], path));
+            }
+            domainPathsByModule[modName] = path;
+        }
+
         // Run the full pass pipeline on a module (and recursively on its submodules)
         std::function<void(ResolvedModule&)> runPipeline = [&](ResolvedModule& module) {
             if (!module.dfg) return;
@@ -363,7 +394,15 @@ int main(int argc, char** argv) {
             module.dfg->validateNoOrphans();
             runPass(6, "flop_resolve", [&]{ resolveFlops(module); });
             runPass(7, "port_type_propagation", [&]{ propagatePortTypes(module); });
-            runPass(8, "domain_resolve", [&]{ resolveDomains(module); });
+            runPass(8, "io_domains_set", [&]{
+                auto it = domainPathsByModule.find(module.name);
+                if (it == domainPathsByModule.end()) {
+                    throw CompilerError(std::format(
+                        "No domains file provided for module '{}' "
+                        "(use --domains to specify)", module.name));
+                }
+                setIODomains(module, it->second);
+            });
             computeComboDepsBU(module);
             validateNoCombLoops(module);
 

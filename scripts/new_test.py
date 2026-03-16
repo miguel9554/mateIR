@@ -36,11 +36,17 @@ endmodule
 """)
 
     # Domains config
-    (base / "rtl" / "domains.yaml").write_text(
-f"""resets:
-  - rst_n
+    (base / "rtl" / f"{module}.domains.yaml").write_text(
+f"""module_name: {module}
+
+resets:
+  rst_n:
+    polarity: negative
+
 clock_domains:
-  clk: []
+  clk:
+    polarity: posedge
+    inputs_outputs: []
 """)
 
     # Testbench

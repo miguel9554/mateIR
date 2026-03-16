@@ -8,6 +8,7 @@ STIMULI_DIR = stimuli
 OUTPUT_DIR = output
 
 RTL_SRCS = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
+DOMAINS_YAMLS = $(shell find -L $(RTL_DIR) -name '*.domains.yaml')
 
 SIMULATOR = $(PROJECT_ROOT)/build/custom_hdl_compiler
 
@@ -20,6 +21,7 @@ simulate:
 	$(MAKE) -C $(PROJECT_ROOT) build
 	$(SIMULATOR) --simulate --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
+		--domains $(DOMAINS_YAMLS) \
 		$(EXTRA_ARGS) $(RTL_SRCS)
 
 svg:

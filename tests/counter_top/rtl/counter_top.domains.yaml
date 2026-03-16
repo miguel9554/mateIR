@@ -1,3 +1,5 @@
+module_name: counter_top
+
 resets:
   a_rst:
     polarity: positive

@@ -385,6 +385,24 @@ int main(int argc, char** argv) {
                 std::filesystem::create_directories(dir);
                 std::ofstream(std::format("{}/{}_{}.dot", dir, number, passName)) << module.dfg->toDot(passName);
                 std::ofstream(std::format("{}/{}_{}.json", dir, number, passName)) << module.dfg->toJson();
+
+                if (simConfig && !simConfig->debug_dfg_nodes.empty()) {
+                    for (const auto& nodeName : simConfig->debug_dfg_nodes) {
+                        const DFGNode* node = nullptr;
+                        if (auto it = module.dfg->signals.find(nodeName); it != module.dfg->signals.end())
+                            node = it->second;
+                        else if (auto it = module.dfg->outputs.find(nodeName); it != module.dfg->outputs.end())
+                            node = it->second;
+                        else
+                            throw CompilerError(std::format(
+                                "debug_dfg_nodes: node '{}' not found in signals or outputs", nodeName));
+
+                        std::ofstream(std::format("{}/{}_{}_cone_{}.dot", dir, number, passName, nodeName))
+                            << module.dfg->toDotCone(node, passName + "_cone_" + nodeName);
+                        std::ofstream(std::format("{}/{}_{}_cone_{}.json", dir, number, passName, nodeName))
+                            << module.dfg->toJsonCone(node);
+                    }
+                }
             };
 
             runPass(0, "elaboration", []{});
@@ -408,25 +426,6 @@ int main(int argc, char** argv) {
             computeComboDepsBU(module);
             validateNoCombLoops(module);
 
-            if (simConfig && !simConfig->debug_dfg_nodes.empty()) {
-                std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-                std::filesystem::create_directories(dir);
-                for (const auto& nodeName : simConfig->debug_dfg_nodes) {
-                    const DFGNode* node = nullptr;
-                    if (auto it = module.dfg->signals.find(nodeName); it != module.dfg->signals.end())
-                        node = it->second;
-                    else if (auto it = module.dfg->outputs.find(nodeName); it != module.dfg->outputs.end())
-                        node = it->second;
-                    else
-                        throw CompilerError(std::format(
-                            "debug_dfg_nodes: node '{}' not found in signals or outputs", nodeName));
-
-                    std::ofstream(std::format("{}/cone_{}.dot", dir, nodeName))
-                        << module.dfg->toDotCone(node, "cone_" + nodeName);
-                    std::ofstream(std::format("{}/cone_{}.json", dir, nodeName))
-                        << module.dfg->toJsonCone(node);
-                }
-            }
         };
 
         // Optimization passes

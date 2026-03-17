@@ -11,6 +11,11 @@ bool cleanupConcats(DFG& graph) {
     for (auto& nodePtr : graph.nodes) {
         if (nodePtr->op != DFGOp::CONCAT) continue;
 
+        // If no inputs are CONCAT_ALIGN, this is a direct RHS concat — already clean
+        bool hasAlign = std::any_of(nodePtr->in.begin(), nodePtr->in.end(),
+            [](const DFGOutput& e) { return e.node->op == DFGOp::CONCAT_ALIGN; });
+        if (!hasAlign) continue;
+
         // Collect CONCAT_ALIGN inputs with their positional info
         struct AlignInfo {
             int64_t high;

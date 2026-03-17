@@ -469,6 +469,17 @@ DFGNode* buildExprDFG(
             return buildExprDFG(paren.expression, ctx);
         }
 
+        case SyntaxKind::ConcatenationExpression: {
+            auto& concat = expr->as<ConcatenationExpressionSyntax>();
+            std::vector<DFGNode*> parts;
+            for (const auto* elemExpr : concat.expressions) {
+                parts.push_back(buildExprDFG(elemExpr, ctx));
+            }
+            auto* node = ctx.graph.concat(parts);
+            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            return node;
+        }
+
         // Unary operations
         case SyntaxKind::UnaryPlusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();

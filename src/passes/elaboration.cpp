@@ -621,6 +621,7 @@ DFGNode* buildExprDFG(
             return node;
         }
 
+        case SyntaxKind::LogicalShiftLeftExpression:
         case SyntaxKind::ArithmeticShiftLeftExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
             auto* node = ctx.graph.shl(buildExprDFG(binary.left, ctx),
@@ -678,6 +679,89 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
     // Build the Expr graph of the RHS
     auto* RHSexprNode = buildExprDFG(right, ctx);
+
+    // LHS concatenation: {elem_n, ..., elem_0} = RHS
+    // Decompose RHS into slices and assign each to the corresponding element.
+    if (left->kind == SyntaxKind::ConcatenationExpression) {
+        auto& lhsConcat = left->as<ConcatenationExpressionSyntax>();
+
+        // Collect elements MSB-first, resolving each name and width from the
+        // pre-populated DFG nodes (types are set during pre-population).
+        struct LHSElem { std::string baseName; int width; };
+        std::vector<LHSElem> elements;
+        int totalWidth = 0;
+
+        for (const auto* elemExpr : lhsConcat.expressions) {
+            if (elemExpr->kind != SyntaxKind::IdentifierName) {
+                throw CompilerError(
+                    "LHS concat elements must be plain identifiers, got: " +
+                    std::string(toString(elemExpr->kind)),
+                    resolveSourceLoc(assignExpr, ctx.sm));
+            }
+            std::string name(elemExpr->as<IdentifierNameSyntax>().identifier.valueText());
+
+            // Look up the pre-populated node to get declared width.
+            std::string lookupName = (ctx.is_sequential && ctx.flopNames.contains(name))
+                ? name + ".d" : name;
+            DFGNode* node = ctx.graph.signals.contains(lookupName)
+                ? ctx.graph.signals[lookupName]
+                : (ctx.graph.outputs.contains(lookupName) ? ctx.graph.outputs[lookupName] : nullptr);
+            if (!node || !node->hasType()) {
+                throw CompilerError(
+                    "Cannot determine width of LHS concat element: " + name,
+                    resolveSourceLoc(assignExpr, ctx.sm));
+            }
+            elements.push_back({name, node->type->width});
+            totalWidth += node->type->width;
+        }
+
+        // Assign each element its slice of the RHS (MSB-first iteration).
+        int bitOffset = totalWidth;
+        for (const auto& elem : elements) {
+            bitOffset -= elem.width;
+            int high = bitOffset + elem.width - 1;
+            int low  = bitOffset;
+
+            auto* highConst = ctx.graph.constant(high);
+            highConst->loc = resolveSourceLoc(assignExpr, ctx.sm);
+            auto* lowConst = ctx.graph.constant(low);
+            lowConst->loc = resolveSourceLoc(assignExpr, ctx.sm);
+            auto* sliceNode = ctx.graph.index(RHSexprNode, highConst, lowConst);
+            sliceNode->loc = resolveSourceLoc(assignExpr, ctx.sm);
+
+            std::string outputName;
+            if (ctx.is_sequential) {
+                if (!ctx.flopNames.contains(elem.baseName)) {
+                    throw CompilerError(
+                        std::format("{} NOT a flop and assigned on seq. block", elem.baseName),
+                        resolveSourceLoc(assignExpr, ctx.sm));
+                }
+                outputName = elem.baseName + ".d";
+            } else {
+                outputName = elem.baseName;
+            }
+
+            if (ctx.graph.outputs.contains(outputName)) {
+                ctx.graph.connectOutput(outputName, sliceNode);
+            } else if (ctx.graph.signals.contains(outputName)) {
+                ctx.graph.connectSignal(outputName, sliceNode);
+            } else {
+                throw CompilerError("Cannot assign to undeclared: " + outputName,
+                    resolveSourceLoc(assignExpr, ctx.sm));
+            }
+
+            if (!ctx.is_sequential) {
+                ctx.combDrivers[outputName] = sliceNode;
+            }
+        }
+
+        if (ctx.is_sequential) {
+            for (const auto& elem : elements) {
+                ctx.thisModule->flopsTriggers[elem.baseName] = ctx.triggers;
+            }
+        }
+        return;
+    }
 
     // Get the base name and selectors for LHS
     std::string baseName;

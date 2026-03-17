@@ -221,11 +221,21 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
     bool posedge = (oldValue == 0 && newValue == 1);
     bool negedge = (oldValue == 1 && newValue == 0);
 
-    // Clock edges -> d->q propagation
+    // Clock edges -> d->q propagation (skipped if async reset is currently asserted)
     if (auto it = flops_by_clock.find(signalName); it != flops_by_clock.end()) {
         for (const auto* flop : it->second) {
             if ((flop->clock.edge == POSEDGE && posedge) ||
                 (flop->clock.edge == NEGEDGE && negedge)) {
+                // Async reset has priority: skip d->q if reset is active
+                if (flop->reset.has_value()) {
+                    int64_t rst_val = 0;
+                    if (auto rit = async_values.find(flop->reset->name); rit != async_values.end()) {
+                        rst_val = rit->second;
+                    }
+                    bool rst_active = (flop->reset->edge == POSEDGE && rst_val == 1) ||
+                                      (flop->reset->edge == NEGEDGE && rst_val == 0);
+                    if (rst_active) continue;
+                }
                 auto qit = module_def.dfg->signals.find(flop->name + ".q");
                 auto dit = module_def.dfg->signals.find(flop->name + ".d");
                 if (qit != module_def.dfg->signals.end() &&

@@ -130,7 +130,7 @@ private:
     void setupVcdFlatForInstance(ModuleInstance& inst, vcd_tracer::module& parent);
     void updateVcdValues(std::ofstream& vcd_out, int64_t time_ns);
     void updateVcdValuesFlat(std::ofstream& vcd_out, int64_t time_ns);
-    void updateVcdForInstance(ModuleInstance& inst);
+    void updateVcdForInstance(ModuleInstance& inst, bool flat);
 };
 
 } // namespace custom_hdl

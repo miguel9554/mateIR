@@ -888,33 +888,36 @@ void Simulator::setupVcdFlatForInstance(ModuleInstance& inst, vcd_tracer::module
 // Update VCD values for a module instance (recursive)
 // ============================================================================
 
-void Simulator::updateVcdForInstance(ModuleInstance& inst) {
-    for (auto& [node, vcd_val] : inst.vcd_values) {
-        auto it = inst.values.find(node);
-        if (it != inst.values.end()) {
-            vcd_val->set(it->second);
+void Simulator::updateVcdForInstance(ModuleInstance& inst, bool flat) {
+    if (!flat) {
+        for (auto& [node, vcd_val] : inst.vcd_values) {
+            auto it = inst.values.find(node);
+            if (it != inst.values.end()) {
+                vcd_val->set(it->second);
+            }
         }
-    }
-    for (auto& [name, vcd_val] : inst.vcd_async_values) {
-        auto it = inst.async_values.find(name);
-        if (it != inst.async_values.end()) {
-            vcd_val->set(it->second);
+        for (auto& [name, vcd_val] : inst.vcd_async_values) {
+            auto it = inst.async_values.find(name);
+            if (it != inst.async_values.end()) {
+                vcd_val->set(it->second);
+            }
         }
-    }
-    for (auto& [node, vcd_val] : inst.vcd_flat_values) {
-        auto it = inst.values.find(node);
-        if (it != inst.values.end()) {
-            vcd_val->set(it->second);
+    } else {
+        for (auto& [node, vcd_val] : inst.vcd_flat_values) {
+            auto it = inst.values.find(node);
+            if (it != inst.values.end()) {
+                vcd_val->set(it->second);
+            }
         }
-    }
-    for (auto& [name, vcd_val] : inst.vcd_flat_async_values) {
-        auto it = inst.async_values.find(name);
-        if (it != inst.async_values.end()) {
-            vcd_val->set(it->second);
+        for (auto& [name, vcd_val] : inst.vcd_flat_async_values) {
+            auto it = inst.async_values.find(name);
+            if (it != inst.async_values.end()) {
+                vcd_val->set(it->second);
+            }
         }
     }
     for (auto& [moduleNode, child] : inst.children) {
-        updateVcdForInstance(*child);
+        updateVcdForInstance(*child, flat);
     }
 }
 
@@ -1082,12 +1085,12 @@ void Simulator::setupVcdFlat(std::ofstream& vcd_out) {
 
 void Simulator::updateVcdValuesFlat(std::ofstream& vcd_out, int64_t time_ns) {
     vcd_flat_top_->time_update_abs(vcd_out, std::chrono::nanoseconds{time_ns});
-    updateVcdForInstance(*root_);
+    updateVcdForInstance(*root_, /*flat=*/true);
 }
 
 void Simulator::updateVcdValues(std::ofstream& vcd_out, int64_t time_ns) {
     vcd_top_->time_update_abs(vcd_out, std::chrono::nanoseconds{time_ns});
-    updateVcdForInstance(*root_);
+    updateVcdForInstance(*root_, /*flat=*/false);
 }
 
 // ============================================================================

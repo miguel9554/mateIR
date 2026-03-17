@@ -30,7 +30,7 @@ using namespace slang::syntax;
 using namespace custom_hdl;
 
 void printUsage(const char* progName) {
-    std::cerr << "Usage: " << progName << " [--passes <1|2>] <verilog_file>" << std::endl;
+    std::cerr << "Usage: " << progName << " [--domains <f1.yaml> [f2.yaml ...]] <verilog_file>" << std::endl;
     std::cerr << "       " << progName << " --simulate --top <module>"
               << " --inputs-dir <dir> --output-dir <dir>" << std::endl;
     std::cerr << "           [--flops-initial <random|zeros|ones>] [--flops-seed <n>]" << std::endl;
@@ -38,7 +38,6 @@ void printUsage(const char* progName) {
     std::cerr << "           [--domains <f1.yaml> [f2.yaml ...]]" << std::endl;
     std::cerr << "           <source1.v> [source2.v ...]" << std::endl;
     std::cerr << "\nOptions:" << std::endl;
-    std::cerr << "  --passes <1|2>            Number of passes (default: 1)" << std::endl;
     std::cerr << "  --simulate                Run cycle-based simulation" << std::endl;
     std::cerr << "  --top <module>            Top module name (simulate mode)" << std::endl;
     std::cerr << "  --inputs-dir <dir>        Directory containing input stimuli files" << std::endl;
@@ -63,7 +62,6 @@ static std::vector<std::string> splitComma(const std::string& s) {
 
 int main(int argc, char** argv) {
     // Parse command line arguments
-    int numPasses = 1;
     bool simulateMode = false;
     std::string topModule;
     std::string inputsDir;
@@ -76,21 +74,8 @@ int main(int argc, char** argv) {
     std::vector<std::string> sourceFiles;
 
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--passes") == 0) {
-            if (i + 1 >= argc) {
-                std::cerr << "ERROR: --passes requires an argument" << std::endl;
-                printUsage(argv[0]);
-                return 1;
-            }
-            numPasses = std::atoi(argv[++i]);
-            if (numPasses < 1 || numPasses > 2) {
-                std::cerr << "ERROR: --passes must be 1 or 2" << std::endl;
-                printUsage(argv[0]);
-                return 1;
-            }
-        } else if (std::strcmp(argv[i], "--simulate") == 0) {
+        if (std::strcmp(argv[i], "--simulate") == 0) {
             simulateMode = true;
-            numPasses = 2;
         } else if (std::strcmp(argv[i], "--top") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "ERROR: --top requires an argument" << std::endl;
@@ -255,7 +240,6 @@ int main(int argc, char** argv) {
     } else {
         std::cout << "Parsing: " << filename << std::endl;
     }
-    std::cout << "Passes: " << numPasses << std::endl;
     std::cout << "----------------------------------------" << std::endl;
 
     // Parse the Verilog file(s) using Slang
@@ -297,174 +281,151 @@ int main(int argc, char** argv) {
 
     try {
 
-    // Pass 1: Build unresolved IR
-    std::cout << "\nPass 1: Building unresolved IR..." << std::endl;
     auto modules = buildIR(*tree);
 
+    // Build parameter context for top module if sim config provides parameters
+    auto resolvedModules = [&]() {
+        if (simConfig && !simConfig->parameters.empty()) {
+            ParameterContext topParams;
+            for (const auto& [name, value] : simConfig->parameters) {
+                topParams.values[name] = static_cast<int>(value);
+            }
+            return resolveModules(modules, tree->sourceManager(),
+                                  simConfig->top_module, topParams);
+        }
+        return resolveModules(modules, tree->sourceManager());
+    }();
+
+    // Build module_name -> YAML path map from --domains files
+    std::map<std::string, std::string> domainPathsByModule;
+    for (const auto& path : domainFiles) {
+        YAML::Node cfg = YAML::LoadFile(path);
+        if (!cfg["module_name"]) {
+            throw CompilerError(std::format(
+                "Domain file '{}' is missing 'module_name' key", path));
+        }
+        std::string modName = cfg["module_name"].as<std::string>();
+        if (domainPathsByModule.contains(modName)) {
+            throw CompilerError(std::format(
+                "Duplicate domain file for module '{}': '{}' and '{}'",
+                modName, domainPathsByModule[modName], path));
+        }
+        domainPathsByModule[modName] = path;
+    }
+
+    // Run the full pass pipeline on a module (and recursively on its submodules)
+    std::function<void(ResolvedModule&)> runPipeline = [&](ResolvedModule& module) {
+        if (!module.dfg) return;
+
+        // Run pipeline on submodules first (bottom-up, so combo_deps are ready)
+        for (auto& sub : module.hierarchyInstantiation) {
+            runPipeline(sub);
+        }
+
+        std::cout << "========================================" << std::endl;
+        std::cout << "Module: " << module.name << std::endl;
+        std::cout << "========================================" << std::endl;
+
+        auto runPass = [&](const int number, const std::string& passName, auto passFn) {
+            std::cout << "========================================" << std::endl;
+            std::cout << "Performing " << passName << "..." << std::endl;
+            std::cout << "========================================" << std::endl;
+            module.dfg->validate();
+
+            try {
+                passFn();
+                module.dfg->validate();
+            } catch (const CompilerError& e) {
+                std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
+                std::filesystem::create_directories(dir);
+                std::set<const DFGNode*> errorNodes;
+                if (e.errorNode) errorNodes.insert(e.errorNode);
+                std::ofstream(std::format("{}/{}_{}_ERROR.dot", dir, number, passName))
+                    << module.dfg->toDot(passName + "_ERROR", errorNodes);
+                throw;
+            }
+
+            std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
+            std::filesystem::create_directories(dir);
+            std::ofstream(std::format("{}/{}_{}.dot", dir, number, passName)) << module.dfg->toDot(passName);
+            std::ofstream(std::format("{}/{}_{}.json", dir, number, passName)) << module.dfg->toJson();
+
+            if (simConfig && !simConfig->debug_dfg_nodes.empty()) {
+                for (const auto& nodeName : simConfig->debug_dfg_nodes) {
+                    const DFGNode* node = nullptr;
+                    if (auto it = module.dfg->signals.find(nodeName); it != module.dfg->signals.end())
+                        node = it->second;
+                    else if (auto it = module.dfg->outputs.find(nodeName); it != module.dfg->outputs.end())
+                        node = it->second;
+                    else
+                        throw CompilerError(std::format(
+                            "debug_dfg_nodes: node '{}' not found in signals or outputs", nodeName));
+
+                    std::ofstream(std::format("{}/{}_{}_cone_{}.dot", dir, number, passName, nodeName))
+                        << module.dfg->toDotCone(node, passName + "_cone_" + nodeName);
+                    std::ofstream(std::format("{}/{}_{}_cone_{}.json", dir, number, passName, nodeName))
+                        << module.dfg->toJsonCone(node);
+                }
+            }
+        };
+
+        runPass(0, "elaboration", []{});
+        runPass(1, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
+        runPass(2, "type_propagation", [&]{ propagateTypes(*module.dfg); });
+        runPass(3, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(4, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(5, "dce", [&]{ eliminateDeadCode(*module.dfg); });
+        module.dfg->validateNoOrphans();
+        runPass(6, "flop_resolve", [&]{ resolveFlops(module); });
+        runPass(7, "port_type_propagation", [&]{ propagatePortTypes(module); });
+        runPass(8, "io_domains_set", [&]{
+            auto it = domainPathsByModule.find(module.name);
+            if (it == domainPathsByModule.end()) {
+                throw CompilerError(std::format(
+                    "No domains file provided for module '{}' "
+                    "(use --domains to specify)", module.name));
+            }
+            setIODomains(module, it->second);
+        });
+        computeComboDepsBU(module);
+        validateNoCombLoops(module);
+    };
+
+    for (auto& module : resolvedModules) {
+        runPipeline(module);
+    }
+
     std::cout << "----------------------------------------" << std::endl;
-    std::cout << "\nUnresolved IR (Pass 1):" << std::endl;
+    std::cout << "\nResolved IR:" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    for (const auto& module : modules) {
-        module->print();
+    for (const auto& module : resolvedModules) {
+        module.print();
         std::cout << std::endl;
     }
 
-    // Pass 2: Resolution (optional)
-    if (numPasses >= 2) {
+    // Run simulation if requested
+    if (simConfig) {
         std::cout << "========================================" << std::endl;
-        std::cout << "\nPass 2: Resolving types and expressions..." << std::endl;
-
-        std::cout << "========================================" << std::endl;
-        std::cout << "Performing elaboration..." << std::endl;
+        std::cout << "Running simulation..." << std::endl;
         std::cout << "========================================" << std::endl;
 
-        // Build parameter context for top module if sim config provides parameters
-        auto resolvedModules = [&]() {
-            if (simConfig && !simConfig->parameters.empty()) {
-                ParameterContext topParams;
-                for (const auto& [name, value] : simConfig->parameters) {
-                    topParams.values[name] = static_cast<int>(value);
-                }
-                return resolveModules(modules, tree->sourceManager(),
-                                      simConfig->top_module, topParams);
+        // Find the top module
+        const ResolvedModule* topModule = nullptr;
+        for (const auto& mod : resolvedModules) {
+            if (mod.name == simConfig->top_module) {
+                topModule = &mod;
+                break;
             }
-            return resolveModules(modules, tree->sourceManager());
-        }();
-
-        // Build module_name -> YAML path map from --domains files
-        std::map<std::string, std::string> domainPathsByModule;
-        for (const auto& path : domainFiles) {
-            YAML::Node cfg = YAML::LoadFile(path);
-            if (!cfg["module_name"]) {
-                throw CompilerError(std::format(
-                    "Domain file '{}' is missing 'module_name' key", path));
-            }
-            std::string modName = cfg["module_name"].as<std::string>();
-            if (domainPathsByModule.contains(modName)) {
-                throw CompilerError(std::format(
-                    "Duplicate domain file for module '{}': '{}' and '{}'",
-                    modName, domainPathsByModule[modName], path));
-            }
-            domainPathsByModule[modName] = path;
+        }
+        if (!topModule) {
+            throw CompilerError(std::format(
+                "Simulator: top module '{}' not found in resolved modules",
+                simConfig->top_module));
         }
 
-        // Run the full pass pipeline on a module (and recursively on its submodules)
-        std::function<void(ResolvedModule&)> runPipeline = [&](ResolvedModule& module) {
-            if (!module.dfg) return;
-
-            // Run pipeline on submodules first (bottom-up, so combo_deps are ready)
-            for (auto& sub : module.hierarchyInstantiation) {
-                runPipeline(sub);
-            }
-
-            std::cout << "========================================" << std::endl;
-            std::cout << "Module: " << module.name << std::endl;
-            std::cout << "========================================" << std::endl;
-
-            auto runPass = [&](const int number, const std::string& passName, auto passFn) {
-                std::cout << "========================================" << std::endl;
-                std::cout << "Performing " << passName << "..." << std::endl;
-                std::cout << "========================================" << std::endl;
-                module.dfg->validate();
-
-                try {
-                    passFn();
-                    module.dfg->validate();
-                } catch (const CompilerError& e) {
-                    std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-                    std::filesystem::create_directories(dir);
-                    std::set<const DFGNode*> errorNodes;
-                    if (e.errorNode) errorNodes.insert(e.errorNode);
-                    std::ofstream(std::format("{}/{}_{}_ERROR.dot", dir, number, passName))
-                        << module.dfg->toDot(passName + "_ERROR", errorNodes);
-                    throw;
-                }
-
-                std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-                std::filesystem::create_directories(dir);
-                std::ofstream(std::format("{}/{}_{}.dot", dir, number, passName)) << module.dfg->toDot(passName);
-                std::ofstream(std::format("{}/{}_{}.json", dir, number, passName)) << module.dfg->toJson();
-
-                if (simConfig && !simConfig->debug_dfg_nodes.empty()) {
-                    for (const auto& nodeName : simConfig->debug_dfg_nodes) {
-                        const DFGNode* node = nullptr;
-                        if (auto it = module.dfg->signals.find(nodeName); it != module.dfg->signals.end())
-                            node = it->second;
-                        else if (auto it = module.dfg->outputs.find(nodeName); it != module.dfg->outputs.end())
-                            node = it->second;
-                        else
-                            throw CompilerError(std::format(
-                                "debug_dfg_nodes: node '{}' not found in signals or outputs", nodeName));
-
-                        std::ofstream(std::format("{}/{}_{}_cone_{}.dot", dir, number, passName, nodeName))
-                            << module.dfg->toDotCone(node, passName + "_cone_" + nodeName);
-                        std::ofstream(std::format("{}/{}_{}_cone_{}.json", dir, number, passName, nodeName))
-                            << module.dfg->toJsonCone(node);
-                    }
-                }
-            };
-
-            runPass(0, "elaboration", []{});
-            runPass(1, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
-            runPass(2, "type_propagation", [&]{ propagateTypes(*module.dfg); });
-            runPass(3, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-            runPass(4, "constant_fold", [&]{ constantFold(*module.dfg); });
-            runPass(5, "dce", [&]{ eliminateDeadCode(*module.dfg); });
-            module.dfg->validateNoOrphans();
-            runPass(6, "flop_resolve", [&]{ resolveFlops(module); });
-            runPass(7, "port_type_propagation", [&]{ propagatePortTypes(module); });
-            runPass(8, "io_domains_set", [&]{
-                auto it = domainPathsByModule.find(module.name);
-                if (it == domainPathsByModule.end()) {
-                    throw CompilerError(std::format(
-                        "No domains file provided for module '{}' "
-                        "(use --domains to specify)", module.name));
-                }
-                setIODomains(module, it->second);
-            });
-            computeComboDepsBU(module);
-            validateNoCombLoops(module);
-
-        };
-
-        // Optimization passes
-        for (auto& module : resolvedModules) {
-            runPipeline(module);
-        }
-
-        std::cout << "----------------------------------------" << std::endl;
-        std::cout << "\nResolved IR (Pass 2):" << std::endl;
-        std::cout << "========================================" << std::endl;
-
-        for (const auto& module : resolvedModules) {
-            module.print();
-            std::cout << std::endl;
-        }
-
-        // Run simulation if requested
-        if (simConfig) {
-            std::cout << "========================================" << std::endl;
-            std::cout << "Running simulation..." << std::endl;
-            std::cout << "========================================" << std::endl;
-
-            // Find the top module
-            const ResolvedModule* topModule = nullptr;
-            for (const auto& mod : resolvedModules) {
-                if (mod.name == simConfig->top_module) {
-                    topModule = &mod;
-                    break;
-                }
-            }
-            if (!topModule) {
-                throw CompilerError(std::format(
-                    "Simulator: top module '{}' not found in resolved modules",
-                    simConfig->top_module));
-            }
-
-            Simulator sim(*topModule, *simConfig);
-            sim.run();
-        }
+        Simulator sim(*topModule, *simConfig);
+        sim.run();
     }
 
     std::cout << "========================================" << std::endl;

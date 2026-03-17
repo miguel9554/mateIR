@@ -3,9 +3,9 @@
 # Find all source files using wildcards
 CPP_SOURCES := $(shell find src -name '*.cpp')
 HEADER_SOURCES := $(shell find src -name '*.h')
-SOURCES := $(CPP_SOURCES) $(HEADER_SOURCES)
+EXTERNAL_SOURCES := $(shell find external/cpp-vcd-tracer/src -name '*.cpp' -o -name '*.hpp' -o -name '*.h')
+SOURCES := $(CPP_SOURCES) $(HEADER_SOURCES) $(EXTERNAL_SOURCES)
 BINARY := build/custom_hdl_compiler
-passes ?= 2
 source ?= tests/counter/rtl/counter.v
 
 all: $(BINARY) run
@@ -16,7 +16,7 @@ $(BINARY): $(SOURCES)
 build: $(BINARY)
 
 run: $(BINARY)
-	./$(BINARY) --passes $(passes) $(source)
+	./$(BINARY) $(source)
 
 sim: $(BINARY)
 	$(MAKE) -C tests/$(test)/work/custom-sim simulate
@@ -29,10 +29,10 @@ debug-build: debug-configure
 	cmake --build build -j$(shell nproc)
 
 debug: debug-build
-	./$(BINARY) --passes $(passes) $(source)
+	./$(BINARY) $(source)
 
 gdb: debug-build
-	gdb --args ./$(BINARY) --passes $(passes) $(source)
+	gdb --args ./$(BINARY) $(source)
 
 # Clean only project artifacts (preserves slang)
 clean_project:

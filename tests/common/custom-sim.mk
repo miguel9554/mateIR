@@ -22,6 +22,7 @@ simulate:
 	$(SIMULATOR) --simulate --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
 		--domains $(DOMAINS_YAMLS) \
+		--flops-initial zeros \
 		$(EXTRA_ARGS) $(RTL_SRCS)
 
 svg:

@@ -56,6 +56,13 @@ private:
                 flopNames.insert(std::string(select.identifier.valueText()));
                 break;
             }
+            case SyntaxKind::ConcatenationExpression: {
+              auto& concat = expr->as<ConcatenationExpressionSyntax>();
+              for (auto* part : concat.expressions) {
+                  extractLhsName(part);
+              }
+                  break;
+            }
             default:
                 throw CompilerError("Not supported in NB assign: " + std::string(toString(expr->kind)),
                                     resolveSourceLoc(*expr, sm));

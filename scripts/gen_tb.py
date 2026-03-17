@@ -106,16 +106,52 @@ def port_type_str(port: Port, use_resolved: bool = False) -> str:
 
 @dataclass
 class DomainConfig:
-    resets: list[str]
-    clock_domains: dict[str, list[str]]  # clock_name -> [signal_names]
+    module_name: str
+    resets: list[str]                    # actual reset port names
+    clock_domains: dict[str, list[str]]  # clock_port -> [signal_names] (wildcards expanded)
+    async_domain: list[str]              # async port names (wildcards expanded)
 
 
-def load_domains(filepath: Path) -> DomainConfig:
+def _expand_patterns(patterns: list[str], port_names: set[str]) -> list[str]:
+    """Expand a list of exact names and wildcard prefixes against known port names."""
+    result = []
+    for pattern in patterns:
+        if pattern.endswith('*'):
+            prefix = pattern[:-1]
+            result.extend(n for n in port_names if n.startswith(prefix))
+        else:
+            result.append(pattern)
+    return result
+
+
+def load_domains(filepath: Path, port_names: set[str]) -> DomainConfig:
     with open(filepath) as f:
         data = yaml.safe_load(f)
+
+    module_name = data['module_name']
+
+    # resets: object {name: {polarity, signal_name?}} — extract actual port name
+    resets = []
+    for reset_name, reset_cfg in (data.get('resets') or {}).items():
+        port = reset_cfg.get('signal_name', reset_name)
+        resets.append(port)
+
+    # clock_domains: object {name: {polarity, input_name?, inputs_outputs: [...]}}
+    clock_domains = {}
+    for domain_name, domain_cfg in (data.get('clock_domains') or {}).items():
+        clock_port = domain_cfg.get('input_name', domain_name)
+        raw_signals = domain_cfg.get('inputs_outputs') or []
+        clock_domains[clock_port] = _expand_patterns(raw_signals, port_names)
+
+    # async_domain: list of names/wildcards
+    raw_async = data.get('async_domain') or []
+    async_domain = _expand_patterns(raw_async, port_names)
+
     return DomainConfig(
-        resets=data.get('resets', []) or [],
-        clock_domains=data.get('clock_domains', {}),
+        module_name=module_name,
+        resets=resets,
+        clock_domains=clock_domains,
+        async_domain=async_domain,
     )
 
 
@@ -124,16 +160,17 @@ def validate(module: ModuleInfo, domains: DomainConfig):
     port_dirs = {p.name: p.direction for p in module.ports}
     all_clocks = set(domains.clock_domains.keys())
     all_resets = set(domains.resets)
-    async_signals = all_clocks | all_resets
+    all_async = set(domains.async_domain)
+    special_signals = all_clocks | all_resets | all_async
 
     # Clocks and resets must be input ports
-    for sig in async_signals:
+    for sig in all_clocks | all_resets:
         if sig not in port_names:
             raise ValueError(f"Async signal '{sig}' is not a port of module '{module.name}'")
         if port_dirs[sig] != 'input':
             raise ValueError(f"Async signal '{sig}' must be an input port")
 
-    # All non-async ports must appear in exactly one clock domain
+    # All non-special ports must appear in exactly one clock domain
     domain_signals = set()
     for clk, sigs in domains.clock_domains.items():
         for sig in sigs:
@@ -142,11 +179,10 @@ def validate(module: ModuleInfo, domains: DomainConfig):
             domain_signals.add(sig)
 
     for port in module.ports:
-        if port.name not in async_signals:
-            if port.name not in domain_signals:
-                raise ValueError(
-                    f"Port '{port.name}' is not in any clock domain and is not a clock/reset"
-                )
+        if port.name not in special_signals and port.name not in domain_signals:
+            raise ValueError(
+                f"Port '{port.name}' is not in any clock domain, reset, or async_domain"
+            )
 
     # All domain signals must be actual ports
     for clk, sigs in domains.clock_domains.items():
@@ -365,7 +401,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     module = parse_module(rtl_path)
-    domains = load_domains(domains_path)
+    port_names = {p.name for p in module.ports}
+    domains = load_domains(domains_path, port_names)
     validate(module, domains)
 
     (output_dir / 'uut_if.sv').write_text(gen_uut_if(module))

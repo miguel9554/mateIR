@@ -11,14 +11,19 @@ module uut_recorder(
     ) u_clk_recorder(
         .data(_if.clk)
     );
+    async_recorder#(
+        .filepath(path("rst.txt"))
+    ) u_rst_recorder(
+        .data(_if.rst)
+    );
 
     // Sync recorders
     sync_recorder#(
-        .filepath(path("rst.txt")),
+        .filepath(path("s_axis_tvalid.txt")),
         .TYPE(logic)
-    ) u_rst_recorder(
+    ) u_s_axis_tvalid_recorder(
         .clk(_if.clk),
-        .data(_if.rst)
+        .data(_if.s_axis_tvalid)
     );
     sync_recorder#(
         .filepath(path("s_axis_tdata.txt")),
@@ -28,25 +33,11 @@ module uut_recorder(
         .data(_if.s_axis_tdata)
     );
     sync_recorder#(
-        .filepath(path("s_axis_tvalid.txt")),
-        .TYPE(logic)
-    ) u_s_axis_tvalid_recorder(
-        .clk(_if.clk),
-        .data(_if.s_axis_tvalid)
-    );
-    sync_recorder#(
         .filepath(path("m_axis_tready.txt")),
         .TYPE(logic)
     ) u_m_axis_tready_recorder(
         .clk(_if.clk),
         .data(_if.m_axis_tready)
-    );
-    sync_recorder#(
-        .filepath(path("rxd.txt")),
-        .TYPE(logic)
-    ) u_rxd_recorder(
-        .clk(_if.clk),
-        .data(_if.rxd)
     );
     sync_recorder#(
         .filepath(path("prescale.txt")),

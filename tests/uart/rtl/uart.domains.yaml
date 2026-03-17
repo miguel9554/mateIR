@@ -7,7 +7,6 @@ resets:
 clock_domains:
   clk:
     polarity: posedge
-    input_name: clk_i
     inputs_outputs:
       - s_axis_*
       - m_axis_*

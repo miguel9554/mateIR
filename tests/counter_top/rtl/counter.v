@@ -15,8 +15,8 @@ module counter#(
 
     assign next_done = count == 2**WIDTH-1;
 
-    always @(posedge clk or negedge a_rst) begin
-        if (~a_rst) begin
+    always @(posedge clk or posedge a_rst) begin
+        if (a_rst) begin
             count <= RESET_VAL;
         end
         else begin

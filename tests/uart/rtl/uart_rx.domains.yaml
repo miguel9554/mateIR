@@ -1,13 +1,10 @@
 module_name: uart_rx
 
-resets:
-  rst:
-    polarity: negative
-
 clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
+      - rst
       - m_axis_tdata
       - m_axis_tvalid
       - m_axis_tready

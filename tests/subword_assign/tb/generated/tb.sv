@@ -8,7 +8,8 @@ module tb;
     // Outputs
     logic [4-1:0] subword_out_1;
     logic [4-1:0] subword_out_2;
-    logic [8-1:0] word_out;
+    logic [8-1:0] word_out_1;
+    logic [8-1:0] word_out_2;
 
     // Interface and connection to UUT
     uut_if _if();
@@ -18,7 +19,8 @@ module tb;
 
     assign _if.subword_out_1 = subword_out_1;
     assign _if.subword_out_2 = subword_out_2;
-    assign _if.word_out = word_out;
+    assign _if.word_out_1 = word_out_1;
+    assign _if.word_out_2 = word_out_2;
 
     // modules
     subword_assign uut(.*);

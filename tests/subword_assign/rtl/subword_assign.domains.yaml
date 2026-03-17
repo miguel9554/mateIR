@@ -7,4 +7,5 @@ clock_domains:
       - subword_in
       - subword_out_1
       - subword_out_2
-      - word_out
+      - word_out_1
+      - word_out_2

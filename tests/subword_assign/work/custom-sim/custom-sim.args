@@ -1,1 +1,3 @@
 --flops-initial zeros
+--debug-nodes word_out_1
+--debug-nodes word_out_2

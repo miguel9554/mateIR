@@ -141,12 +141,14 @@ int main(int argc, char** argv) {
             }
             paramsStr = argv[++i];
         } else if (std::strcmp(argv[i], "--domains") == 0) {
-            // Collect all following arguments until the next --flag or end
+            // Collect following .yaml/.yml arguments until a non-YAML arg
             while (i + 1 < argc && argv[i + 1][0] != '-') {
+                std::string_view arg(argv[i + 1]);
+                if (!arg.ends_with(".yaml") && !arg.ends_with(".yml")) break;
                 domainFiles.push_back(argv[++i]);
             }
             if (domainFiles.empty()) {
-                std::cerr << "ERROR: --domains requires at least one file" << std::endl;
+                std::cerr << "ERROR: --domains requires at least one .yaml file" << std::endl;
                 printUsage(argv[0]);
                 return 1;
             }

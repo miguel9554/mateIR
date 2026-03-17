@@ -127,8 +127,8 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
             // Classify the clock input itself
             if (portClassMap.contains(info.input_port)) {
                 throw CompilerError(std::format(
-                    "io_domains_set: port '{}' classified in multiple domains",
-                    info.input_port));
+                    "io_domains_set: module '{}': port '{}' classified in multiple domains",
+                    module.name, info.input_port));
             }
             portClassMap[info.input_port] = {PortClass::Clock, domainName};
 
@@ -147,8 +147,8 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                     for (const auto& name : matches) {
                         if (portClassMap.contains(name)) {
                             throw CompilerError(std::format(
-                                "io_domains_set: port '{}' classified in multiple domains",
-                                name));
+                                "io_domains_set: module '{}': port '{}' classified in multiple domains",
+                                module.name, name));
                         }
                         portClassMap[name] = {PortClass::Sync, domainName};
                         info.matched_ports.push_back(name);
@@ -180,8 +180,8 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
 
             if (portClassMap.contains(info.signal_name)) {
                 throw CompilerError(std::format(
-                    "io_domains_set: port '{}' classified in multiple domains",
-                    info.signal_name));
+                    "io_domains_set: module '{}': port '{}' classified in multiple domains",
+                    module.name, info.signal_name));
             }
             portClassMap[info.signal_name] = {PortClass::Reset, ""};
 
@@ -204,8 +204,8 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
             for (const auto& name : matches) {
                 if (portClassMap.contains(name)) {
                     throw CompilerError(std::format(
-                        "io_domains_set: port '{}' classified in multiple domains",
-                        name));
+                        "io_domains_set: module '{}': port '{}' classified in multiple domains",
+                        module.name, name));
                 }
                 portClassMap[name] = {PortClass::Async, ""};
                 asyncPorts.push_back(name);
@@ -232,8 +232,8 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         }
         if (!found) {
             throw CompilerError(std::format(
-                "io_domains_set: clock '{}' (port '{}') is not a module input",
-                domainName, info.input_port));
+                "io_domains_set: module '{}': clock '{}' (port '{}') is not a module input",
+                module.name, domainName, info.input_port));
         }
     }
 
@@ -245,8 +245,8 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         }
         if (!found) {
             throw CompilerError(std::format(
-                "io_domains_set: reset '{}' (port '{}') is not a module input",
-                resetName, info.signal_name));
+                "io_domains_set: module '{}': reset '{}' (port '{}') is not a module input",
+                module.name, resetName, info.signal_name));
         }
     }
 
@@ -266,9 +266,9 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         ResolvedSignal* clkSig = findSignal(module, info.input_port);
         if (clkSig && clkSig->type.kind != ResolvedTypeKind::Clock) {
             throw CompilerError(std::format(
-                "io_domains_set: clock port '{}' is not tagged as Clock type "
+                "io_domains_set: module '{}': clock port '{}' is not tagged as Clock type "
                 "(was flop_resolve run?)",
-                info.input_port));
+                module.name, info.input_port));
         }
     }
 
@@ -277,9 +277,9 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         ResolvedSignal* rstSig = findSignal(module, info.signal_name);
         if (rstSig && rstSig->type.kind != ResolvedTypeKind::Reset) {
             throw CompilerError(std::format(
-                "io_domains_set: reset port '{}' is not tagged as Reset type "
+                "io_domains_set: module '{}': reset port '{}' is not tagged as Reset type "
                 "(was flop_resolve run?)",
-                info.signal_name));
+                module.name, info.signal_name));
         }
     }
 
@@ -291,9 +291,9 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                 if (flop.clock.name == info.input_port) {
                     if (flop.clock.edge != expected) {
                         throw CompilerError(std::format(
-                            "io_domains_set: clock domain '{}' polarity '{}' "
+                            "io_domains_set: module '{}': clock domain '{}' polarity '{}' "
                             "does not match flop '{}' clock edge",
-                            domainName, info.polarity, flop.name));
+                            module.name, domainName, info.polarity, flop.name));
                     }
                 }
             }
@@ -306,9 +306,9 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                 if (flop.reset && flop.reset->name == info.signal_name) {
                     if (flop.reset->edge != expected) {
                         throw CompilerError(std::format(
-                            "io_domains_set: reset '{}' polarity '{}' "
+                            "io_domains_set: module '{}': reset '{}' polarity '{}' "
                             "does not match flop '{}' reset edge",
-                            resetName, info.polarity, flop.name));
+                            module.name, resetName, info.polarity, flop.name));
                     }
                 }
             }
@@ -436,9 +436,9 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
             for (const auto& [flopName, flopDomain] : reached) {
                 if (flopDomain != cls.clock_name) {
                     throw CompilerError(std::format(
-                        "io_domains_set: sync input '{}' (domain '{}') "
+                        "io_domains_set: module '{}': sync input '{}' (domain '{}') "
                         "feeds flop '{}' in domain '{}' — cross-domain violation",
-                        portName, cls.clock_name, flopName, flopDomain));
+                        module.name, portName, cls.clock_name, flopName, flopDomain));
                 }
             }
         }
@@ -458,9 +458,9 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
             auto reached = forwardTraversal(nodeIt->second);
             if (!reached.empty()) {
                 throw CompilerError(std::format(
-                    "io_domains_set: async input '{}' feeds flop '{}' "
+                    "io_domains_set: module '{}': async input '{}' feeds flop '{}' "
                     "without synchronizer",
-                    portName, reached.front().first));
+                    module.name, portName, reached.front().first));
             }
         }
     }

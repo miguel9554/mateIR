@@ -646,6 +646,14 @@ DFGNode* buildExprDFG(
             return node;
         }
 
+        case SyntaxKind::LogicalAndExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto* node = ctx.graph.logicalAnd(buildExprDFG(binary.left, ctx),
+                                              buildExprDFG(binary.right, ctx));
+            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            return node;
+        }
+
         case SyntaxKind::ConditionalExpression: {
             auto& cond = expr->as<ConditionalExpressionSyntax>();
             if (cond.predicate->conditions.size() != 1) {

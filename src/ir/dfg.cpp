@@ -82,6 +82,7 @@ std::string DFG::renderDot(const std::string& graphName,
             case DFGOp::UNARY_NEGATE: ss << "-"; break;
             case DFGOp::BITWISE_NOT: ss << "~"; break;
             case DFGOp::LOGICAL_NOT: ss << "!"; break;
+            case DFGOp::LOGICAL_AND: ss << "&&"; break;
             case DFGOp::REDUCTION_AND: ss << "&"; break;
             case DFGOp::REDUCTION_NAND: ss << "~&"; break;
             case DFGOp::REDUCTION_OR: ss << "|"; break;

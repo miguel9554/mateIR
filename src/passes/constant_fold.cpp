@@ -195,6 +195,9 @@ static bool tryConstantFold(DFGNode* node) {
         case DFGOp::LOGICAL_NOT:
             result = (getConst(node->in[0].node) == 0) ? 1 : 0;
             break;
+        case DFGOp::LOGICAL_AND:
+            result = (getConst(node->in[0].node) != 0 && getConst(node->in[1].node) != 0) ? 1 : 0;
+            break;
         case DFGOp::REDUCTION_AND:
             // For constant folding, treat as: result is 1 if all bits are 1 (value == -1 for signed), else 0
             // Without bit-width info, we check if value is non-zero and all bits set

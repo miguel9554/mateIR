@@ -197,6 +197,17 @@ static bool tryInferType(DFGNode* node) {
             return true;
         }
 
+        // Logical AND: 1-bit unsigned (both inputs must be typed)
+        case DFGOp::LOGICAL_AND: {
+            if (node->in.size() < 2) {
+                throw CompilerError(std::format(
+                    "Type propagation: LOGICAL_AND {} has fewer than 2 inputs", node->str()), node->loc);
+            }
+            if (!node->in[0].node->hasType() || !node->in[1].node->hasType()) return false;
+            node->type = makeOneBitUnsigned();
+            return true;
+        }
+
         // Reduction ops: 1-bit unsigned
         case DFGOp::REDUCTION_AND:
         case DFGOp::REDUCTION_NAND:

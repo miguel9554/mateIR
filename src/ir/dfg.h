@@ -44,6 +44,7 @@ enum class DFGOp {
     UNARY_NEGATE,
     BITWISE_NOT,
     LOGICAL_NOT,
+    LOGICAL_AND,
     REDUCTION_AND,
     REDUCTION_NAND,
     REDUCTION_OR,
@@ -80,6 +81,7 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::UNARY_NEGATE: return "UNARY_NEGATE";
         case DFGOp::BITWISE_NOT: return "BITWISE_NOT";
         case DFGOp::LOGICAL_NOT: return "LOGICAL_NOT";
+        case DFGOp::LOGICAL_AND: return "LOGICAL_AND";
         case DFGOp::REDUCTION_AND: return "REDUCTION_AND";
         case DFGOp::REDUCTION_NAND: return "REDUCTION_NAND";
         case DFGOp::REDUCTION_OR: return "REDUCTION_OR";
@@ -126,6 +128,7 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::UNARY_NEGATE:    return 1;
         case DFGOp::BITWISE_NOT:     return 1;
         case DFGOp::LOGICAL_NOT:     return 1;
+        case DFGOp::LOGICAL_AND:     return 2;
         case DFGOp::REDUCTION_AND:   return 1;
         case DFGOp::REDUCTION_NAND:  return 1;
         case DFGOp::REDUCTION_OR:    return 1;
@@ -586,6 +589,16 @@ struct DFG {
 
     DFGNode* logicalNot(DFGNode* a, const std::string& name = "") {
         return unaryOp(DFGOp::LOGICAL_NOT, a, name);
+    }
+
+    DFGNode* logicalAnd(DFGNode* a, DFGNode* b, const std::string& name = "") {
+        auto n = name.empty()
+            ? std::make_unique<DFGNode>(DFGOp::LOGICAL_AND)
+            : std::make_unique<DFGNode>(DFGOp::LOGICAL_AND, name);
+        n->in = {a, b};
+        nodes.push_back(std::move(n));
+        if (!name.empty()) signals[name] = nodes.back().get();
+        return nodes.back().get();
     }
 
     DFGNode* reductionAnd(DFGNode* a, const std::string& name = "") {

@@ -54,9 +54,11 @@ struct ModuleInstance {
     // Children: MODULE DFG node pointer -> child instance
     std::map<const DFGNode*, std::unique_ptr<ModuleInstance>> children;
 
-    // VCD tracking
+    // VCD tracking: sync signals keyed by DFG node, async signals keyed by name
     std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_values;
     std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_flat_values;
+    std::map<std::string, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_async_values;
+    std::map<std::string, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_flat_async_values;
 
     ModuleInstance(const std::string& name, const ResolvedModule& mod);
 
@@ -113,8 +115,6 @@ private:
     // VCD (top-level files, scopes built recursively from root_)
     std::unique_ptr<vcd_tracer::top> vcd_top_;
     std::unique_ptr<vcd_tracer::top> vcd_flat_top_;
-    std::map<std::string, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_async_values_;
-    std::map<std::string, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_flat_async_values_;
     std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_params_;
     std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_flat_params_;
 
@@ -128,10 +128,8 @@ private:
     void setupVcdFlat(std::ofstream& vcd_out);
     void setupVcdHierForInstance(ModuleInstance& inst, vcd_tracer::module& parent);
     void setupVcdFlatForInstance(ModuleInstance& inst, vcd_tracer::module& parent);
-    void updateVcdValues(std::ofstream& vcd_out, int64_t time_ns,
-                         const std::map<std::string, int64_t>& async_values);
-    void updateVcdValuesFlat(std::ofstream& vcd_out, int64_t time_ns,
-                              const std::map<std::string, int64_t>& async_values);
+    void updateVcdValues(std::ofstream& vcd_out, int64_t time_ns);
+    void updateVcdValuesFlat(std::ofstream& vcd_out, int64_t time_ns);
     void updateVcdForInstance(ModuleInstance& inst);
 };
 

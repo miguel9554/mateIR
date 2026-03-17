@@ -371,14 +371,15 @@ int main(int argc, char** argv) {
 
         runPass(0, "elaboration", []{});
         runPass(1, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
-        runPass(2, "type_propagation", [&]{ propagateTypes(*module.dfg); });
-        runPass(3, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(4, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(5, "dce", [&]{ eliminateDeadCode(*module.dfg); });
+        runPass(2, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(3, "type_propagation", [&]{ propagateTypes(*module.dfg); });
+        runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(5, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(6, "dce", [&]{ eliminateDeadCode(*module.dfg); });
         module.dfg->validateNoOrphans();
-        runPass(6, "flop_resolve", [&]{ resolveFlops(module); });
-        runPass(7, "port_type_propagation", [&]{ propagatePortTypes(module); });
-        runPass(8, "io_domains_set", [&]{
+        runPass(7, "flop_resolve", [&]{ resolveFlops(module); });
+        runPass(8, "port_type_propagation", [&]{ propagatePortTypes(module); });
+        runPass(9, "io_domains_set", [&]{
             auto it = domainPathsByModule.find(module.name);
             if (it == domainPathsByModule.end()) {
                 throw CompilerError(std::format(

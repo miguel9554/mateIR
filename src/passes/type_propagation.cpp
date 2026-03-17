@@ -60,7 +60,7 @@ static ResolvedType widenTypes(const ResolvedType& a, const ResolvedType& b) {
 // Per-node type inference
 // ---------------------------------------------------------------------------
 
-static bool tryInferType(DFGNode* node) {
+bool inferNodeType(DFGNode* node) {
     if (node->hasType()) return false;
 
     switch (node->op) {
@@ -354,7 +354,7 @@ bool propagateTypes(DFG& graph) {
         changed = false;
         auto order = buildPostOrder(graph);
         for (DFGNode* node : order) {
-            if (tryInferType(node)) {
+            if (inferNodeType(node)) {
                 changed = true;
             }
         }

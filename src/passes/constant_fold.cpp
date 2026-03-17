@@ -1,4 +1,5 @@
 #include "passes/constant_fold.h"
+#include "passes/type_propagation.h"
 
 #include "util/source_loc.h"
 
@@ -21,6 +22,10 @@ static int64_t getConst(const DFGNode* n) {
 }
 
 static void makeConst(DFGNode* n, int64_t value) {
+    // If the node has no type yet (e.g. early fold before type_propagation),
+    // infer it from the inputs now, before they are cleared.
+    if (!n->type.has_value())
+        inferNodeType(n);
     n->op = DFGOp::CONST;
     n->data = value;
     n->in.clear();

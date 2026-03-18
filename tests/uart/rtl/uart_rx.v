@@ -83,18 +83,23 @@ assign busy = busy_reg;
 assign overrun_error = overrun_error_reg;
 assign frame_error = frame_error_reg;
 
+synchronizer_1bit rxd_sync (
+    .clk(clk),
+    .rst(rst),
+    .in_signal(rxd),
+    .out_signal(rxd_reg)
+);
+
 always @(posedge clk) begin
     if (rst) begin
         m_axis_tdata_reg <= 0;
         m_axis_tvalid_reg <= 0;
-        rxd_reg <= 1;
         prescale_reg <= 0;
         bit_cnt <= 0;
         busy_reg <= 0;
         overrun_error_reg <= 0;
         frame_error_reg <= 0;
     end else begin
-        rxd_reg <= rxd;
         overrun_error_reg <= 0;
         frame_error_reg <= 0;
 

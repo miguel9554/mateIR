@@ -157,6 +157,8 @@ FlopInfo extractFlopClockAndReset(
 
 void check_logic_no_clock_reset(
     DFGNode* root,
+    const std::string& rootName,
+    const std::string& moduleName,
     const std::vector<std::string>& clocks,
     const std::vector<std::string>& resets)
 {
@@ -173,16 +175,19 @@ void check_logic_no_clock_reset(
         visited.insert(current);
 
         if (current->op == DFGOp::INPUT) {
+            auto loc = current->loc ? current->loc : root->loc;
             for (const auto& clk : clocks) {
                 if (current->name == clk) {
-                    throw CompilerError(
-                        "Logic uses clock signal: " + clk, current->loc);
+                    throw CompilerError(std::format(
+                        "module '{}': logic for '{}' uses clock signal '{}'",
+                        moduleName, rootName, clk), loc);
                 }
             }
             for (const auto& rst : resets) {
                 if (current->name == rst) {
-                    throw CompilerError(
-                        "Logic uses reset signal: " + rst, current->loc);
+                    throw CompilerError(std::format(
+                        "module '{}': logic for '{}' uses reset signal '{}'",
+                        moduleName, rootName, rst), loc);
                 }
             }
         }
@@ -273,10 +278,10 @@ void resolveFlops(ResolvedModule& resolved) {
 
     // Check that no signal or output logic depends on clock/reset
     for (const auto& [name, node] : graph.signals) {
-        check_logic_no_clock_reset(node, clocks, resets);
+        check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
     for (const auto& [name, node] : graph.outputs) {
-        check_logic_no_clock_reset(node, clocks, resets);
+        check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
 }
 

@@ -6,6 +6,55 @@
 
   "required": ["module_name", "clock_domains"],
 
+  "$defs": {
+    "signal_name": {
+      "type": "string",
+      "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$",
+      "description": "Exact interface port name."
+    },
+
+    "signal_wildcard": {
+      "type": "string",
+      "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*\\*$",
+      "description": "Wildcard prefix representing a group of ports."
+    },
+
+    "signal_ref": {
+      "anyOf": [
+        { "$ref": "#/$defs/signal_name" },
+        { "$ref": "#/$defs/signal_wildcard" }
+      ]
+    },
+
+    "signal_with_attrs": {
+      "description": "Signal reference with optional attributes.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/signal_ref"
+        },
+        {
+          "type": "object",
+          "description": "Signal with additional attributes (e.g., synchronization target).",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "propertyNames": {
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "synchronized_into": {
+                "type": "string",
+                "description": "Clock domain into which this signal is synchronized."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  },
+
   "properties": {
 
     "module_name": {
@@ -28,9 +77,8 @@
         "properties": {
 
           "input_name": {
-            "type": "string",
-            "description": "Optional clock input port name in the RTL module interface. If omitted, the domain name is used.",
-            "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$"
+            "$ref": "#/$defs/signal_name",
+            "description": "Optional clock input port name in the RTL module interface. If omitted, the domain name is used."
           },
 
           "polarity": {
@@ -41,22 +89,10 @@
 
           "inputs_outputs": {
             "type": "array",
-            "description": "List of module interface inputs/outputs belonging to this clock domain. Entries may be exact port names or wildcard groups such as 's_axis_*'.",
+            "description": "List of module interface inputs/outputs belonging to this clock domain.",
             "minItems": 1,
-
             "items": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$",
-                  "description": "Exact interface port name."
-                },
-                {
-                  "type": "string",
-                  "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*\\*$",
-                  "description": "Wildcard prefix representing a group of ports."
-                }
-              ]
+              "$ref": "#/$defs/signal_with_attrs"
             }
           }
         },
@@ -79,9 +115,8 @@
         "properties": {
 
           "signal_name": {
-            "type": "string",
-            "description": "Optional reset input port name in the RTL module interface. If omitted, the reset domain name is used.",
-            "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$"
+            "$ref": "#/$defs/signal_name",
+            "description": "Optional reset input port name in the RTL module interface. If omitted, the reset domain name is used."
           },
 
           "polarity": {
@@ -98,20 +133,8 @@
     "async_domain": {
       "type": "array",
       "description": "List of module interface inputs/outputs that are asynchronous to all defined clock domains.",
-
       "items": {
-        "anyOf": [
-          {
-            "type": "string",
-            "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$",
-            "description": "Exact interface port name."
-          },
-          {
-            "type": "string",
-            "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*\\*$",
-            "description": "Wildcard prefix representing a group of ports."
-          }
-        ]
+        "$ref": "#/$defs/signal_with_attrs"
       }
     }
 

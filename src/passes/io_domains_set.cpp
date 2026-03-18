@@ -17,8 +17,33 @@ enum class PortClass { Clock, Reset, Sync, Async };
 
 struct PortClassification {
     PortClass cls;
-    std::string clock_name; // only for Sync
+    std::string clock_name;        // only for Sync
+    std::string synchronized_into; // optional: declared target domain for cross-domain crossing
 };
+
+// Parse a signal_with_attrs YAML entry.
+// Either a plain string or a single-key map: { signal_name: { synchronized_into: domain } }
+struct SignalRef {
+    std::string name;
+    std::string synchronized_into; // empty if not specified
+};
+
+SignalRef parseSignalRef(const YAML::Node& entry) {
+    if (entry.IsScalar()) {
+        return {entry.as<std::string>(), ""};
+    }
+    if (entry.IsMap() && entry.size() == 1) {
+        auto it = entry.begin();
+        SignalRef ref;
+        ref.name = it->first.as<std::string>();
+        auto attrs = it->second;
+        if (attrs["synchronized_into"]) {
+            ref.synchronized_into = attrs["synchronized_into"].as<std::string>();
+        }
+        return ref;
+    }
+    throw CompilerError("io_domains_set: invalid signal entry format (expected string or single-key map)");
+}
 
 // Expand a wildcard pattern (e.g. "s_axis_*") against a set of port names.
 // Returns matched names. Pattern without '*' is an exact match.
@@ -130,19 +155,19 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                     "io_domains_set: module '{}': port '{}' classified in multiple domains",
                     module.name, info.input_port));
             }
-            portClassMap[info.input_port] = {PortClass::Clock, domainName};
+            portClassMap[info.input_port] = {PortClass::Clock, domainName, ""};
 
             // Expand inputs_outputs entries
             auto ioList = domainNode["inputs_outputs"];
             if (ioList && ioList.IsSequence()) {
                 for (const auto& entry : ioList) {
-                    std::string pattern = entry.as<std::string>();
-                    auto matches = expandPattern(pattern, allPortNames);
+                    auto ref = parseSignalRef(entry);
+                    auto matches = expandPattern(ref.name, allPortNames);
                     if (matches.empty()) {
                         throw CompilerError(std::format(
                             "io_domains_set: wildcard '{}' in clock domain '{}' "
                             "matches no ports in module '{}'",
-                            pattern, domainName, module.name));
+                            ref.name, domainName, module.name));
                     }
                     for (const auto& name : matches) {
                         if (portClassMap.contains(name)) {
@@ -150,7 +175,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                                 "io_domains_set: module '{}': port '{}' classified in multiple domains",
                                 module.name, name));
                         }
-                        portClassMap[name] = {PortClass::Sync, domainName};
+                        portClassMap[name] = {PortClass::Sync, domainName, ref.synchronized_into};
                         info.matched_ports.push_back(name);
                     }
                 }
@@ -183,7 +208,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                     "io_domains_set: module '{}': port '{}' classified in multiple domains",
                     module.name, info.signal_name));
             }
-            portClassMap[info.signal_name] = {PortClass::Reset, ""};
+            portClassMap[info.signal_name] = {PortClass::Reset, "", ""};
 
             resets[resetName] = std::move(info);
         }
@@ -193,13 +218,13 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
     std::vector<std::string> asyncPorts;
     if (asyncNode && asyncNode.IsSequence()) {
         for (const auto& entry : asyncNode) {
-            std::string pattern = entry.as<std::string>();
-            auto matches = expandPattern(pattern, allPortNames);
+            auto ref = parseSignalRef(entry);
+            auto matches = expandPattern(ref.name, allPortNames);
             if (matches.empty()) {
                 throw CompilerError(std::format(
                     "io_domains_set: wildcard '{}' in async_domain "
                     "matches no ports in module '{}'",
-                    pattern, module.name));
+                    ref.name, module.name));
             }
             for (const auto& name : matches) {
                 if (portClassMap.contains(name)) {
@@ -207,7 +232,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                         "io_domains_set: module '{}': port '{}' classified in multiple domains",
                         module.name, name));
                 }
-                portClassMap[name] = {PortClass::Async, ""};
+                portClassMap[name] = {PortClass::Async, "", ref.synchronized_into};
                 asyncPorts.push_back(name);
             }
         }
@@ -434,12 +459,14 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
 
             auto reached = forwardTraversal(nodeIt->second);
             for (const auto& [flopName, flopDomain] : reached) {
-                if (flopDomain != cls.clock_name) {
-                    throw CompilerError(std::format(
-                        "io_domains_set: module '{}': sync input '{}' (domain '{}') "
-                        "feeds flop '{}' in domain '{}' — cross-domain violation",
-                        module.name, portName, cls.clock_name, flopName, flopDomain));
-                }
+                // Same domain: always allowed
+                if (flopDomain == cls.clock_name) continue;
+                // Declared crossing: allowed only into the specified domain
+                if (!cls.synchronized_into.empty() && flopDomain == cls.synchronized_into) continue;
+                throw CompilerError(std::format(
+                    "io_domains_set: module '{}': sync input '{}' (domain '{}') "
+                    "feeds flop '{}' in domain '{}' — cross-domain violation",
+                    module.name, portName, cls.clock_name, flopName, flopDomain));
             }
         }
 
@@ -455,12 +482,20 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
             auto nodeIt = module.dfg->inputs.find(portName);
             if (nodeIt == module.dfg->inputs.end()) continue;
 
+            const auto& cls = portClassMap.at(portName);
+
             auto reached = forwardTraversal(nodeIt->second);
-            if (!reached.empty()) {
+            for (const auto& [flopName, flopDomain] : reached) {
+                // Declared crossing: allowed only into the specified domain
+                if (!cls.synchronized_into.empty() && flopDomain == cls.synchronized_into) continue;
                 throw CompilerError(std::format(
-                    "io_domains_set: module '{}': async input '{}' feeds flop '{}' "
-                    "without synchronizer",
-                    module.name, portName, reached.front().first));
+                    "io_domains_set: module '{}': async input '{}' feeds flop '{}' in domain '{}'"
+                    "{}",
+                    module.name, portName, flopName, flopDomain,
+                    cls.synchronized_into.empty()
+                        ? " without synchronizer"
+                        : std::format(" — declared synchronized_into '{}' but crosses into '{}'",
+                                      cls.synchronized_into, flopDomain)));
             }
         }
     }

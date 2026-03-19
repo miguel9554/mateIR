@@ -435,15 +435,16 @@ int main(int argc, char** argv) {
         // Inline all submodule DFGs into this module's flat DFG
         runPass(1, "dfg_inline", [&]{ inlineDFGs(module); });
         runPass(2, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
-        runPass(3, "type_propagation", [&]{ propagateTypes(*module.dfg); });
-        runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(5, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(6, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(7, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(8, "flop_resolve", [&]{ resolveFlops(module); });
-        runPass(9, "dce", [&]{ eliminateDeadCode(*module.dfg); });
+        runPass(3, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(4, "type_propagation", [&]{ propagateTypes(*module.dfg); });
+        runPass(5, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(6, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(7, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(8, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(9, "flop_resolve", [&]{ resolveFlops(module); });
+        runPass(10, "dce", [&]{ eliminateDeadCode(*module.dfg); });
         module.dfg->validateNoOrphans();
-        runPass(10, "io_domains_set", [&]{
+        runPass(11, "io_domains_set", [&]{
             // Call setIODomains for this module and all submodules recursively
             std::function<void(ResolvedModule&)> setDomains = [&](ResolvedModule& mod) {
                 auto it = domainPathsByModule.find(mod.name);

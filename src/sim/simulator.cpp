@@ -194,7 +194,7 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
                     if (rst_active) continue;
                 }
                 if (flop->q_node && flop->d_node) {
-                    values[flop->q_node] = values.at(flop->d_node);
+                    values[flop->q_node] = checkedGet(flop->d_node);
                 }
             }
         }
@@ -217,19 +217,32 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
 // Node evaluation
 // ============================================================================
 
+int64_t ModuleInstance::checkedGet(const DFGNode* node, const DFGNode* context) const {
+    auto it = values.find(node);
+    if (it == values.end())
+        throw CompilerError(std::format(
+            "Simulator: node {} has no computed value{}",
+            node->str(),
+            context && context != node
+                ? std::format(" (while evaluating {})", context->str())
+                : ""),
+            context ? context : node);
+    return it->second;
+}
+
 int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
     auto getVal = [&](int idx) -> int64_t {
-        return values.at(node->in[idx].node);
+        return checkedGet(node->in[idx].node, node);
     };
 
     switch (node->op) {
         case DFGOp::INPUT:
         case DFGOp::CONST:
-            return values.at(node);
+            return checkedGet(node);
 
         case DFGOp::SIGNAL:
         case DFGOp::OUTPUT:
-            if (node->in.empty()) return values.at(node);
+            if (node->in.empty()) return checkedGet(node);
             return getVal(0);
 
         case DFGOp::ADD:   return getVal(0) + getVal(1);
@@ -265,11 +278,11 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::MUX_N: {
             int n = static_cast<int>(node->in.size()) / 2;
             for (int i = 0; i < n; i++) {
-                if (values.at(node->in[i].node) != 0) {
-                    return values.at(node->in[n + i].node);
+                if (checkedGet(node->in[i].node, node) != 0) {
+                    return checkedGet(node->in[n + i].node, node);
                 }
             }
-            return values.at(node->in[2 * n - 1].node);
+            return checkedGet(node->in[2 * n - 1].node, node);
         }
 
         case DFGOp::UNARY_PLUS:    return getVal(0);
@@ -312,7 +325,7 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
                 int64_t index = getVal(1);
                 int64_t n = static_cast<int64_t>(source_node->in.size());
                 index = ((index % n) + n) % n;
-                return values.at(source_node->in[index].node);
+                return checkedGet(source_node->in[index].node, node);
             }
 
             int64_t high = getVal(1);
@@ -342,7 +355,7 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
                 const DFGNode* inputNode = node->in[i].node;
                 int w = inputNode->type.has_value() ? inputNode->type->width : 64;
                 uint64_t mask = (w >= 64) ? ~0ULL : (1ULL << w) - 1;
-                result = (result << w) | (static_cast<uint64_t>(values.at(inputNode)) & mask);
+                result = (result << w) | (static_cast<uint64_t>(checkedGet(inputNode, node)) & mask);
             }
             return static_cast<int64_t>(result);
         }
@@ -554,7 +567,7 @@ void Simulator::advanceSyncInputs(const std::set<std::string>& active_clocks) {
 
 void Simulator::recordOutputs() {
     for (const auto& [name, node] : module_.dfg->getOutputsMap()) {
-        recorded_values_[name].push_back(root_->values.at(node));
+        recorded_values_[name].push_back(root_->checkedGet(node));
     }
 }
 

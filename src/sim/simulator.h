@@ -83,6 +83,9 @@ struct ModuleInstance {
 
     // Mask value to node's bit width
     static int64_t maskToWidth(int64_t val, const DFGNode* node);
+
+    // values.at() with a useful error message naming the missing node
+    int64_t checkedGet(const DFGNode* node, const DFGNode* context = nullptr) const;
 };
 
 class Simulator {

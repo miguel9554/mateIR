@@ -21,7 +21,7 @@ std::string DFG::renderDot(const std::string& graphName,
     ss << "digraph " << safeName << " {\n";
     ss << "  rankdir=LR;\n";
     ss << "  splines=polyline;\n";
-    ss << "  node [shape=record];\n\n";
+    ss << "  node [shape=box];\n\n";
 
     // Build node index map
     std::map<const DFGNode*, size_t> nodeIndex;
@@ -47,7 +47,9 @@ std::string DFG::renderDot(const std::string& graphName,
                 ss << "SIGNAL\\n" << node->name;
                 break;
             case DFGOp::CONST:
-                ss << "CONST\\n" << std::get<int64_t>(node->data);
+                ss << "CONST\\n";
+                if (!node->name.empty()) ss << node->name << "\\n";
+                ss << std::get<int64_t>(node->data);
                 break;
             case DFGOp::ADD: ss << "+"; break;
             case DFGOp::SUB: ss << "-"; break;

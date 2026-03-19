@@ -118,7 +118,7 @@ FlopInfo extractFlopClockAndReset(
 {
     auto flop = flopIn;
     const std::string dName = flop_name + ".d";
-    const auto& dNode = graph.signals.at(dName);
+    DFGNode* dNode = flopIn.d_node ? flopIn.d_node : graph.getSignalNode(dName);
     auto* dNodeDriver = dNode->in[0].node;
     const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
 
@@ -208,20 +208,20 @@ void resolveFlops(ResolvedModule& resolved) {
     DFG& graph = *resolved.dfg;
 
     // Connect flop outputs to their .q signals
-    for (const auto& output : resolved.outputs) {
-        if (resolved.flopsTriggers.contains(output.name)) {
+    for (const auto& [outName, output] : resolved.outputs) {
+        if (resolved.flopsTriggers.contains(outName)) {
             if (output.type.unpacked_dims.empty()) {
-                std::string qName = output.name + ".q";
+                std::string qName = outName + ".q";
                 DFGNode* qNode = graph.lookupSignal(qName);
                 if (qNode) {
-                    graph.connectOutput(output.name, qNode);
+                    graph.connectOutput(outName, qNode);
                 }
             } else {
                 for (const auto& suffix : generateIndexSuffixes(output.type.unpacked_dims)) {
-                    std::string elemOutput = output.name + suffix;
-                    std::string elemQ = output.name + suffix + ".q";
+                    std::string elemOutput = outName + suffix;
+                    std::string elemQ = outName + suffix + ".q";
                     DFGNode* qNode = graph.lookupSignal(elemQ);
-                    if (qNode && graph.outputs.contains(elemOutput)) {
+                    if (qNode && graph.hasOutput(elemOutput)) {
                         graph.connectOutput(elemOutput, qNode);
                     }
                 }
@@ -236,20 +236,23 @@ void resolveFlops(ResolvedModule& resolved) {
             DFGNode* functional_logic;
             resolved_flops.push_back(
                 extractFlopClockAndReset(graph, resolved, name, flop, functional_logic));
-            auto& output = graph.signals.at(name + ".d");
+            // Set per-element d_node/q_node (the copy from flopIn may be null for vectorized)
+            {
+                const std::string dname = name + ".d";
+                const std::string qname = name + ".q";
+                resolved_flops.back().d_node = graph.getSignalNode(dname);
+                resolved_flops.back().q_node = graph.getSignalNode(qname);
+            }
+            DFGNode* output = resolved_flops.back().d_node;
             const asyncTrigger_t clock = resolved_flops.back().clock;
             const std::optional<asyncTrigger_t> reset = resolved_flops.back().reset;
 
             // Helper to find exactly one signal
-            auto find_unique_input = [&](const std::string& name) -> auto& {
-                auto it = std::find_if(resolved.inputs.begin(), resolved.inputs.end(),
-                    [&](const auto& input) { return input.name == name; });
+            auto find_unique_input = [&](const std::string& name) -> ResolvedSignal& {
+                auto it = resolved.inputs.find(name);
                 if (it == resolved.inputs.end())
                     throw std::logic_error("No input found matching: " + name);
-                if (std::find_if(std::next(it), resolved.inputs.end(),
-                        [&](const auto& input) { return input.name == name; }) != resolved.inputs.end())
-                    throw std::logic_error("Multiple inputs found matching: " + name);
-                return *it;
+                return it->second;
             };
 
             // Set clock and reset types
@@ -268,19 +271,19 @@ void resolveFlops(ResolvedModule& resolved) {
     // Build clock/reset name lists from inputs that were tagged
     std::vector<std::string> clocks;
     std::vector<std::string> resets;
-    for (const auto& input : resolved.inputs) {
+    for (const auto& [name, input] : resolved.inputs) {
         if (input.type.kind == ResolvedTypeKind::Clock) {
-            clocks.push_back(input.name);
+            clocks.push_back(name);
         } else if (input.type.kind == ResolvedTypeKind::Reset) {
-            resets.push_back(input.name);
+            resets.push_back(name);
         }
     }
 
     // Check that no signal or output logic depends on clock/reset
-    for (const auto& [name, node] : graph.signals) {
+    for (const auto& [name, node] : graph.getSignalsMap()) {
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
-    for (const auto& [name, node] : graph.outputs) {
+    for (const auto& [name, node] : graph.getOutputsMap()) {
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
 }
@@ -309,12 +312,8 @@ void propagatePortTypes(ResolvedModule& module) {
 
             // Find the submodule input with this name
             const ResolvedSignal* subInput = nullptr;
-            for (const auto& inp : subDef->inputs) {
-                if (inp.name == subPortName) {
-                    subInput = &inp;
-                    break;
-                }
-            }
+            if (auto it = subDef->inputs.find(subPortName); it != subDef->inputs.end())
+                subInput = &it->second;
             if (!subInput) continue;
 
             if (subInput->type.kind != ResolvedTypeKind::Clock &&
@@ -334,12 +333,9 @@ void propagatePortTypes(ResolvedModule& module) {
 
             // Find the parent's ResolvedSignal for this input and tag it
             bool found = false;
-            for (auto& parentInput : module.inputs) {
-                if (parentInput.name == driverNode->name) {
-                    parentInput.type.kind = subInput->type.kind;
-                    found = true;
-                    break;
-                }
+            if (auto it = module.inputs.find(driverNode->name); it != module.inputs.end()) {
+                it->second.type.kind = subInput->type.kind;
+                found = true;
             }
             if (!found) {
                 throw CompilerError(std::format(

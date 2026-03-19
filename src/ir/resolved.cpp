@@ -99,21 +99,21 @@ void ResolvedModule::print(int indent) const {
     }
 
     std::cout << indent_str(indent + 1) << "Inputs:" << std::endl;
-    for (const auto& in : this->inputs) {
+    for (const auto& [name, in] : this->inputs) {
         std::cout << indent_str(indent + 2);
         in.print(std::cout);
         std::cout << std::endl;
     }
 
     std::cout << indent_str(indent + 1) << "Outputs:" << std::endl;
-    for (const auto& out : this->outputs) {
+    for (const auto& [name, out] : this->outputs) {
         std::cout << indent_str(indent + 2);
         out.print(std::cout);
         std::cout << std::endl;
     }
 
     std::cout << indent_str(indent + 1) << "Signals:" << std::endl;
-    for (const auto& signal : this->signals) {
+    for (const auto& [name, signal] : this->signals) {
         std::cout << indent_str(indent + 2);
         signal.print(std::cout);
         std::cout << std::endl;

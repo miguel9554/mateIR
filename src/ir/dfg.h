@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <unordered_set>
 #include <vector>
 #include <string>
 #include <variant>
@@ -248,11 +249,60 @@ namespace custom_hdl {
 struct DFG {
     std::vector<std::unique_ptr<DFGNode>> nodes;
 
-    // Quick access named nodes
+    // Named-node lookup (nullptr if absent)
+    DFGNode* getInputNode(const std::string& name) const {
+        auto it = inputs.find(name); return it != inputs.end() ? it->second : nullptr;
+    }
+    DFGNode* getOutputNode(const std::string& name) const {
+        auto it = outputs.find(name); return it != outputs.end() ? it->second : nullptr;
+    }
+    DFGNode* getSignalNode(const std::string& name) const {
+        auto it = signals.find(name); return it != signals.end() ? it->second : nullptr;
+    }
+    bool hasOutput(const std::string& name) const { return outputs.count(name) > 0; }
+    bool hasSignal(const std::string& name) const { return signals.count(name) > 0; }
+
+    // Read-only iteration for passes
+    const std::map<std::string, DFGNode*>& getInputsMap()    const { return inputs; }
+    const std::map<std::string, DFGNode*>& getOutputsMap()   const { return outputs; }
+    const std::map<std::string, DFGNode*>& getSignalsMap()   const { return signals; }
+    const std::map<std::string, DFGNode*>& getConstantsMap() const { return constants; }
+
+    // Create an OUTPUT placeholder node with no driver yet
+    DFGNode* outputPlaceholder(const std::string& name) {
+        auto n = std::make_unique<DFGNode>(DFGOp::OUTPUT, name);
+        nodes.push_back(std::move(n));
+        auto result = outputs.insert({name, nodes.back().get()});
+        if (!result.second) {
+            throw CompilerError(std::format("Output {} already exists", name));
+        }
+        return nodes.back().get();
+    }
+
+    // Update all internal map pointers from oldNode to newNode (used by constant_fold / condition_normalization)
+    void replaceNodeInMaps(DFGNode* oldNode, DFGNode* newNode) {
+        for (auto& [k, v] : constants) if (v == oldNode) v = newNode;
+        for (auto& [k, v] : inputs)    if (v == oldNode) v = newNode;
+        for (auto& [k, v] : outputs)   if (v == oldNode) v = newNode;
+        for (auto& [k, v] : signals)   if (v == oldNode) v = newNode;
+    }
+
+    // Remove map entries whose node is not in the alive set (used by DCE)
+    void pruneByAliveSet(const std::unordered_set<DFGNode*>& alive) {
+        std::erase_if(constants, [&alive](const auto& kv) { return !alive.count(kv.second); });
+        std::erase_if(inputs,    [&alive](const auto& kv) { return !alive.count(kv.second); });
+        std::erase_if(outputs,   [&alive](const auto& kv) { return !alive.count(kv.second); });
+        std::erase_if(signals,   [&alive](const auto& kv) { return !alive.count(kv.second); });
+    }
+
+private:
+    // Quick access named nodes — use accessor methods from outside this class
     std::map<std::string, DFGNode*> constants;
     std::map<std::string, DFGNode*> inputs;
     std::map<std::string, DFGNode*> outputs;
     std::map<std::string, DFGNode*> signals;
+
+public:
 
     // INPUT nodes, they have no inputs.
 

@@ -36,6 +36,7 @@ struct ResolvedSignalBase {
 struct ResolvedSignal : ResolvedSignalBase{
     ResolvedSignal* clock_domain = nullptr;
     std::optional<edge_t> clock_edge;
+    DFGNode* dfg_node = nullptr;  // direct pointer to the corresponding DFG node
     void print(std::ostream& os) const {
         ResolvedSignalBase::print(os);
         os << " domain=" << (clock_domain ? clock_domain->name : "UNRESOLVED");
@@ -64,6 +65,8 @@ struct FlopInfo {
     asyncTrigger_t clock;
     std::optional<asyncTrigger_t> reset;
     std::optional<int> reset_value;
+    DFGNode* d_node = nullptr;  // pointer to .d signal node
+    DFGNode* q_node = nullptr;  // pointer to .q signal node
 
     void print(std::ostream& os, int indent = 0) const;
 };
@@ -91,9 +94,9 @@ struct ResolvedModule {
     std::string name;
     std::vector<ResolvedTypes::Param> parameters;
     std::vector<ResolvedTypes::Param> localparams;
-    std::vector<ResolvedTypes::Signal> inputs;
-    std::vector<ResolvedTypes::Signal> outputs;
-    std::vector<ResolvedTypes::Signal> signals;
+    std::map<std::string, ResolvedTypes::Signal> inputs;
+    std::map<std::string, ResolvedTypes::Signal> outputs;
+    std::map<std::string, ResolvedTypes::Signal> signals;
     std::vector<FlopInfo> flops;
 
     // TODO a list of instantiated modules.

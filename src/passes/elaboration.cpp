@@ -711,9 +711,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             // Look up the pre-populated node to get declared width.
             std::string lookupName = (ctx.is_sequential && ctx.flopNames.contains(name))
                 ? name + ".d" : name;
-            DFGNode* node = ctx.graph.signals.contains(lookupName)
-                ? ctx.graph.signals[lookupName]
-                : (ctx.graph.outputs.contains(lookupName) ? ctx.graph.outputs[lookupName] : nullptr);
+            DFGNode* node = ctx.graph.getSignalNode(lookupName)
+                ? ctx.graph.getSignalNode(lookupName)
+                : ctx.graph.getOutputNode(lookupName);
             if (!node || !node->hasType()) {
                 throw CompilerError(
                     "Cannot determine width of LHS concat element: " + name,
@@ -749,9 +749,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 outputName = elem.baseName;
             }
 
-            if (ctx.graph.outputs.contains(outputName)) {
+            if (ctx.graph.hasOutput(outputName)) {
                 ctx.graph.connectOutput(outputName, sliceNode);
-            } else if (ctx.graph.signals.contains(outputName)) {
+            } else if (ctx.graph.hasSignal(outputName)) {
                 ctx.graph.connectSignal(outputName, sliceNode);
             } else {
                 throw CompilerError("Cannot assign to undeclared: " + outputName,
@@ -860,10 +860,10 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
         // Find the target node
         DFGNode* targetNode = nullptr;
-        if (ctx.graph.outputs.contains(outputName)) {
-            targetNode = ctx.graph.outputs[outputName];
-        } else if (ctx.graph.signals.contains(outputName)) {
-            targetNode = ctx.graph.signals[outputName];
+        if (auto* n = ctx.graph.getOutputNode(outputName)) {
+            targetNode = n;
+        } else if (auto* n = ctx.graph.getSignalNode(outputName)) {
+            targetNode = n;
         } else {
             throw CompilerError("Cannot assign to undeclared: " + outputName,
                                 resolveSourceLoc(assignExpr, ctx.sm));
@@ -879,7 +879,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             concatNode->loc = resolveSourceLoc(assignExpr, ctx.sm);
 
             // Connect CONCAT to target
-            if (ctx.graph.outputs.contains(outputName)) {
+            if (ctx.graph.hasOutput(outputName)) {
                 ctx.graph.connectOutput(outputName, concatNode);
             } else {
                 ctx.graph.connectSignal(outputName, concatNode);
@@ -909,9 +909,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
 
         // Connect driver to existing output or signal node
-        if (ctx.graph.outputs.contains(outputName)) {
+        if (ctx.graph.hasOutput(outputName)) {
             ctx.graph.connectOutput(outputName, RHSexprNode);
-        } else if (ctx.graph.signals.contains(outputName)) {
+        } else if (ctx.graph.hasSignal(outputName)) {
             ctx.graph.connectSignal(outputName, RHSexprNode);
         } else {
             throw CompilerError("Cannot assign to undeclared: " + outputName,
@@ -993,12 +993,12 @@ void resolveConditionalStatementInPlace(
     // Skip aggregate nodes (in.size() > 1) which represent structural decomposition, not driven signals
     auto getDrivers = [](const DFG& g) {
         std::unordered_map<std::string, DFGNode*> drivers;
-        for (const auto& [outName, outNode] : g.outputs) {
+        for (const auto& [outName, outNode] : g.getOutputsMap()) {
             if (outNode->in.size() == 1) {
                 drivers[outName] = outNode->in[0].node;
             }
         }
-        for (const auto& [sigName, sigNode] : g.signals) {
+        for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
             if (sigNode->in.size() == 1) {
                 drivers[sigName] = sigNode->in[0].node;
             }
@@ -1020,9 +1020,9 @@ void resolveConditionalStatementInPlace(
 
     // Helper to connect a signal (output or signal type)
     auto connectSignalOrOutput = [&ctx](const std::string& name, DFGNode* driver) {
-        if (ctx.graph.outputs.contains(name)) {
+        if (ctx.graph.hasOutput(name)) {
             ctx.graph.connectOutput(name, driver);
-        } else if (ctx.graph.signals.contains(name)) {
+        } else if (ctx.graph.hasSignal(name)) {
             ctx.graph.connectSignal(name, driver);
         }
     };
@@ -1030,23 +1030,23 @@ void resolveConditionalStatementInPlace(
     // Helper to get current driver for a signal
     // Skip aggregate nodes (in.size() > 1) which represent structural decomposition
     auto getCurrentDriver = [&ctx](const std::string& name) -> DFGNode* {
-        if (auto it = ctx.graph.outputs.find(name); it != ctx.graph.outputs.end()) {
-            return it->second->in.size() == 1 ? it->second->in[0].node : nullptr;
+        if (auto* n = ctx.graph.getOutputNode(name)) {
+            return n->in.size() == 1 ? n->in[0].node : nullptr;
         }
-        if (auto it = ctx.graph.signals.find(name); it != ctx.graph.signals.end()) {
-            return it->second->in.size() == 1 ? it->second->in[0].node : nullptr;
+        if (auto* n = ctx.graph.getSignalNode(name)) {
+            return n->in.size() == 1 ? n->in[0].node : nullptr;
         }
         return nullptr;
     };
 
     // Collect all signals that were assigned
     std::set<std::string> assignedSignals;
-    for (const auto& [name, _] : ctx.graph.outputs) {
+    for (const auto& [name, _] : ctx.graph.getOutputsMap()) {
         if (getCurrentDriver(name) != nullptr) {
             assignedSignals.insert(name);
         }
     }
-    for (const auto& [name, _] : ctx.graph.signals) {
+    for (const auto& [name, _] : ctx.graph.getSignalsMap()) {
         if (getCurrentDriver(name) != nullptr) {
             assignedSignals.insert(name);
         }
@@ -1171,9 +1171,9 @@ void resolveCaseStatementInPlace(
 
     // Helper to connect a signal (output or signal type)
     auto connectSignalOrOutput = [&ctx](const std::string& name, DFGNode* driver) {
-        if (ctx.graph.outputs.contains(name)) {
+        if (ctx.graph.hasOutput(name)) {
             ctx.graph.connectOutput(name, driver);
-        } else if (ctx.graph.signals.contains(name)) {
+        } else if (ctx.graph.hasSignal(name)) {
             ctx.graph.connectSignal(name, driver);
         }
     };
@@ -1181,12 +1181,12 @@ void resolveCaseStatementInPlace(
     // Snapshot current drivers (only signals with exactly one driver)
     auto getDrivers = [](const DFG& g) {
         std::unordered_map<std::string, DFGNode*> drivers;
-        for (const auto& [outName, outNode] : g.outputs) {
+        for (const auto& [outName, outNode] : g.getOutputsMap()) {
             if (outNode->in.size() == 1) {
                 drivers[outName] = outNode->in[0].node;
             }
         }
-        for (const auto& [sigName, sigNode] : g.signals) {
+        for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
             if (sigNode->in.size() == 1) {
                 drivers[sigName] = sigNode->in[0].node;
             }
@@ -1198,7 +1198,7 @@ void resolveCaseStatementInPlace(
     auto getModifiedDrivers = [](const DFG& g,
             const std::unordered_map<std::string, DFGNode*>& baseline) {
         std::unordered_map<std::string, DFGNode*> modified;
-        for (const auto& [outName, outNode] : g.outputs) {
+        for (const auto& [outName, outNode] : g.getOutputsMap()) {
             if (outNode->in.size() == 1) {
                 auto it = baseline.find(outName);
                 if (it == baseline.end() || it->second != outNode->in[0].node) {
@@ -1206,7 +1206,7 @@ void resolveCaseStatementInPlace(
                 }
             }
         }
-        for (const auto& [sigName, sigNode] : g.signals) {
+        for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
             if (sigNode->in.size() == 1) {
                 auto it = baseline.find(sigName);
                 if (it == baseline.end() || it->second != sigNode->in[0].node) {
@@ -1223,12 +1223,12 @@ void resolveCaseStatementInPlace(
         for (const auto& [name, driver] : drivers) {
             connectSignalOrOutput(name, driver);
         }
-        for (const auto& [name, node] : ctx.graph.outputs) {
+        for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
             if (node->in.size() == 1 && !drivers.contains(name)) {
                 node->in.clear();
             }
         }
-        for (const auto& [name, node] : ctx.graph.signals) {
+        for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
             if (node->in.size() == 1 && !drivers.contains(name)) {
                 node->in.clear();
             }
@@ -1578,23 +1578,15 @@ void prePopulateInput(DFG& graph, const ResolvedSignal& sig) {
 // For vector outputs, creates base node + individual element nodes
 void prePopulateOutput(DFG& graph, const ResolvedSignal& sig) {
     if (sig.type.unpacked_dims.empty()) {
-        auto n = std::make_unique<DFGNode>(DFGOp::OUTPUT, sig.name);
-        n->type = sig.type;
-        graph.nodes.push_back(std::move(n));
-        graph.outputs[sig.name] = graph.nodes.back().get();
+        graph.outputPlaceholder(sig.name)->type = sig.type;
     } else {
         // Create base node for dynamic read access
-        auto n = std::make_unique<DFGNode>(DFGOp::OUTPUT, sig.name);
-        n->type = sig.type;
-        graph.nodes.push_back(std::move(n));
-        graph.outputs[sig.name] = graph.nodes.back().get();
+        graph.outputPlaceholder(sig.name)->type = sig.type;
         // Create individual element nodes (no unpacked dims on elements)
         for (const auto& suffix : generateIndexSuffixes(sig.type.unpacked_dims)) {
-            auto elemNode = std::make_unique<DFGNode>(DFGOp::OUTPUT, sig.name + suffix);
-            elemNode->type = sig.type;
-            elemNode->type->unpacked_dims = {};
-            graph.nodes.push_back(std::move(elemNode));
-            graph.outputs[sig.name + suffix] = graph.nodes.back().get();
+            auto elemType = sig.type;
+            elemType.unpacked_dims = {};
+            graph.outputPlaceholder(sig.name + suffix)->type = elemType;
         }
     }
 }
@@ -1679,9 +1671,9 @@ const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr) {
 void connectModuleOutput(DFG& graph, DFGNode* moduleNode,
                          const std::string& parentSignalName, size_t outputIdx) {
     DFGOutput modOut(moduleNode, static_cast<int>(outputIdx));
-    if (graph.outputs.contains(parentSignalName)) {
+    if (graph.hasOutput(parentSignalName)) {
         graph.connectOutput(parentSignalName, modOut);
-    } else if (graph.signals.contains(parentSignalName)) {
+    } else if (graph.hasSignal(parentSignalName)) {
         graph.connectSignal(parentSignalName, modOut);
     }
 }
@@ -1733,16 +1725,16 @@ void resolveNamedPortConnection(
 void resolveWildcardPortConnection(
         DFG& graph, DFGNode* moduleNode,
         const ResolvedModule& resolvedSub) {
-    for (const auto& inp : resolvedSub.inputs) {
-        auto* driver = graph.lookupSignal(inp.name);
+    for (const auto& [name, inp] : resolvedSub.inputs) {
+        auto* driver = graph.lookupSignal(name);
         if (driver) {
             moduleNode->in.push_back(driver);
-            moduleNode->input_names.push_back(inp.name);
+            moduleNode->input_names.push_back(name);
         }
     }
-    for (size_t oi = 0; oi < resolvedSub.outputs.size(); ++oi) {
-        connectModuleOutput(graph, moduleNode,
-                            resolvedSub.outputs[oi].name, oi);
+    size_t oi = 0;
+    for (const auto& [name, out] : resolvedSub.outputs) {
+        connectModuleOutput(graph, moduleNode, name, oi++);
     }
 }
 
@@ -1795,17 +1787,20 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
-        resolved.inputs.push_back(resolveSignal(input, *mergedCtx));
+        auto sig = resolveSignal(input, *mergedCtx);
+        resolved.inputs[sig.name] = sig;
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
-        resolved.outputs.push_back(resolveSignal(output, *mergedCtx));
+        auto sig = resolveSignal(output, *mergedCtx);
+        resolved.outputs[sig.name] = sig;
     }
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
-        resolved.signals.push_back(resolveSignal(signal, *mergedCtx));
+        auto sig = resolveSignal(signal, *mergedCtx);
+        resolved.signals[sig.name] = sig;
     }
 
     // Resolve flops and build flopNames set
@@ -1838,18 +1833,30 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     }
 
     // Pre-populate module INPUTS (ports only)
-    for (const auto& input : resolved.inputs) {
+    for (const auto& [name, input] : resolved.inputs) {
         prePopulateInput(graph, input);
     }
 
     // Pre-populate module OUTPUTS (ports only, no driver yet)
-    for (const auto& output : resolved.outputs) {
+    for (const auto& [name, output] : resolved.outputs) {
         prePopulateOutput(graph, output);
     }
 
     // Pre-populate internal SIGNALS (not ports)
-    for (const auto& signal : resolved.signals) {
+    for (const auto& [name, signal] : resolved.signals) {
         prePopulateSignal(graph, signal);
+    }
+
+    // Back-patch DFG node pointers into ResolvedSignal and FlopInfo
+    for (auto& [name, input] : resolved.inputs)
+        input.dfg_node = graph.lookupSignal(name);
+    for (auto& [name, output] : resolved.outputs)
+        output.dfg_node = graph.getOutputNode(name);
+    for (auto& [name, sig] : resolved.signals)
+        sig.dfg_node = graph.lookupSignal(name);
+    for (auto& flop : resolved.flops) {
+        flop.d_node = graph.getSignalNode(flop.name + ".d");
+        flop.q_node = graph.getSignalNode(flop.name + ".q");
     }
 
     // === Resolve all blocks into the shared graph ===
@@ -1888,10 +1895,11 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
         // Build sets of input/output port names for the submodule
         std::set<std::string> subInputNames, subOutputNames;
         std::map<std::string, size_t> subOutputIndex;
-        for (const auto& inp : resolvedSub.inputs) subInputNames.insert(inp.name);
-        for (size_t oi = 0; oi < resolvedSub.outputs.size(); ++oi) {
-            subOutputNames.insert(resolvedSub.outputs[oi].name);
-            subOutputIndex[resolvedSub.outputs[oi].name] = oi;
+        for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
+        size_t oi = 0;
+        for (const auto& [name, out] : resolvedSub.outputs) {
+            subOutputNames.insert(name);
+            subOutputIndex[name] = oi++;
         }
 
         // Process each instance in the instantiation
@@ -1903,8 +1911,8 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
             // Create MODULE node in the DFG with output port names
             std::vector<std::string> outputPortNames;
-            for (const auto& out : resolvedSub.outputs) {
-                outputPortNames.push_back(out.name);
+            for (const auto& [name, out] : resolvedSub.outputs) {
+                outputPortNames.push_back(name);
             }
             auto* moduleNode = graph.module(submoduleName, instanceName, outputPortNames);
 

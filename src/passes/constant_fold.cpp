@@ -44,18 +44,7 @@ static void redirectConsumers(DFG& graph, DFGNode* oldNode, DFGNode* newNode) {
         }
     }
     // Update named maps
-    for (auto& [k, v] : graph.constants) {
-        if (v == oldNode) v = newNode;
-    }
-    for (auto& [k, v] : graph.inputs) {
-        if (v == oldNode) v = newNode;
-    }
-    for (auto& [k, v] : graph.outputs) {
-        if (v == oldNode) v = newNode;
-    }
-    for (auto& [k, v] : graph.signals) {
-        if (v == oldNode) v = newNode;
-    }
+    graph.replaceNodeInMaps(oldNode, newNode);
 }
 
 // ---------------------------------------------------------------------------
@@ -77,10 +66,10 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
     std::unordered_set<DFGNode*> visited;
     std::vector<DFGNode*> order;
     // Start from outputs and signals (root nodes)
-    for (auto& [name, node] : graph.outputs) {
+    for (auto& [name, node] : graph.getOutputsMap()) {
         postOrderVisit(node, visited, order);
     }
-    for (auto& [name, node] : graph.signals) {
+    for (auto& [name, node] : graph.getSignalsMap()) {
         postOrderVisit(node, visited, order);
     }
     // Also visit any remaining nodes not reachable from outputs/signals

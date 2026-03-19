@@ -68,12 +68,8 @@ std::vector<std::string> expandPattern(
 
 // Find a ResolvedSignal by name in inputs or outputs
 ResolvedSignal* findSignal(ResolvedModule& module, const std::string& name) {
-    for (auto& sig : module.inputs) {
-        if (sig.name == name) return &sig;
-    }
-    for (auto& sig : module.outputs) {
-        if (sig.name == name) return &sig;
-    }
+    if (auto it = module.inputs.find(name); it != module.inputs.end()) return &it->second;
+    if (auto it = module.outputs.find(name); it != module.outputs.end()) return &it->second;
     return nullptr;
 }
 
@@ -124,8 +120,8 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
 
     // Collect all port names
     std::set<std::string> allPortNames;
-    for (const auto& sig : module.inputs) allPortNames.insert(sig.name);
-    for (const auto& sig : module.outputs) allPortNames.insert(sig.name);
+    for (const auto& [name, sig] : module.inputs) allPortNames.insert(name);
+    for (const auto& [name, sig] : module.outputs) allPortNames.insert(name);
 
     // 3c. Build port classification
     std::map<std::string, PortClassification> portClassMap;
@@ -251,11 +247,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
 
     // Clock input ports must be inputs
     for (const auto& [domainName, info] : clockDomains) {
-        bool found = false;
-        for (const auto& sig : module.inputs) {
-            if (sig.name == info.input_port) { found = true; break; }
-        }
-        if (!found) {
+        if (!module.inputs.contains(info.input_port)) {
             throw CompilerError(std::format(
                 "io_domains_set: module '{}': clock '{}' (port '{}') is not a module input",
                 module.name, domainName, info.input_port));
@@ -264,11 +256,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
 
     // Reset input ports must be inputs
     for (const auto& [resetName, info] : resets) {
-        bool found = false;
-        for (const auto& sig : module.inputs) {
-            if (sig.name == info.signal_name) { found = true; break; }
-        }
-        if (!found) {
+        if (!module.inputs.contains(info.signal_name)) {
             throw CompilerError(std::format(
                 "io_domains_set: module '{}': reset '{}' (port '{}') is not a module input",
                 module.name, resetName, info.signal_name));
@@ -360,7 +348,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
     // (they are already default-initialized that way)
 
     // Also set domains on internal signals and flop types (same as old domain_resolve)
-    for (auto& sig : module.signals) {
+    for (auto& [name, sig] : module.signals) {
         if (sig.type.kind != ResolvedTypeKind::Clock &&
             sig.type.kind != ResolvedTypeKind::Reset) {
             // Internal signals belong to whatever domain their driving logic is in.
@@ -447,17 +435,10 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
             if (cls.cls != PortClass::Sync) continue;
 
             // Only validate inputs (outputs don't feed into flops from outside)
-            bool isInput = false;
-            for (const auto& sig : module.inputs) {
-                if (sig.name == portName) { isInput = true; break; }
-            }
-            if (!isInput) continue;
+            auto inputIt = module.inputs.find(portName);
+            if (inputIt == module.inputs.end() || !inputIt->second.dfg_node) continue;
 
-            // Find the INPUT node in the DFG
-            auto nodeIt = module.dfg->inputs.find(portName);
-            if (nodeIt == module.dfg->inputs.end()) continue;
-
-            auto reached = forwardTraversal(nodeIt->second);
+            auto reached = forwardTraversal(inputIt->second.dfg_node);
             for (const auto& [flopName, flopDomain] : reached) {
                 // Same domain: always allowed
                 if (flopDomain == cls.clock_name) continue;
@@ -473,18 +454,12 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         // Validate async domain inputs
         for (const auto& portName : asyncPorts) {
             // Only validate inputs
-            bool isInput = false;
-            for (const auto& sig : module.inputs) {
-                if (sig.name == portName) { isInput = true; break; }
-            }
-            if (!isInput) continue;
-
-            auto nodeIt = module.dfg->inputs.find(portName);
-            if (nodeIt == module.dfg->inputs.end()) continue;
+            auto inputIt2 = module.inputs.find(portName);
+            if (inputIt2 == module.inputs.end() || !inputIt2->second.dfg_node) continue;
 
             const auto& cls = portClassMap.at(portName);
 
-            auto reached = forwardTraversal(nodeIt->second);
+            auto reached = forwardTraversal(inputIt2->second.dfg_node);
             for (const auto& [flopName, flopDomain] : reached) {
                 // Declared crossing: allowed only into the specified domain
                 if (!cls.synchronized_into.empty() && flopDomain == cls.synchronized_into) continue;

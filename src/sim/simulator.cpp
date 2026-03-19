@@ -133,9 +133,8 @@ void ModuleInstance::buildTopology() {
 void ModuleInstance::buildFlopMaps() {
     for (const auto& flop : module_def.flops) {
         // Build flop .q node -> FlopInfo map
-        std::string qname = flop.name + ".q";
-        if (auto it = module_def.dfg->signals.find(qname); it != module_def.dfg->signals.end()) {
-            flop_q_nodes[it->second] = &flop;
+        if (flop.q_node) {
+            flop_q_nodes[flop.q_node] = &flop;
         }
 
         flops_by_clock[flop.clock.name].push_back(&flop);
@@ -212,9 +211,8 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
 
     // Update stored value and INPUT node
     async_values[signalName] = newValue;
-    auto inputIt = module_def.dfg->inputs.find(signalName);
-    if (inputIt != module_def.dfg->inputs.end()) {
-        values[inputIt->second] = newValue;
+    if (auto* inputNode = module_def.dfg->getInputNode(signalName)) {
+        values[inputNode] = newValue;
     }
 
     // Detect edges
@@ -236,11 +234,8 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
                                       (flop->reset->edge == NEGEDGE && rst_val == 0);
                     if (rst_active) continue;
                 }
-                auto qit = module_def.dfg->signals.find(flop->name + ".q");
-                auto dit = module_def.dfg->signals.find(flop->name + ".d");
-                if (qit != module_def.dfg->signals.end() &&
-                    dit != module_def.dfg->signals.end()) {
-                    values[qit->second] = values.at(dit->second);
+                if (flop->q_node && flop->d_node) {
+                    values[flop->q_node] = values.at(flop->d_node);
                 }
             }
         }
@@ -251,11 +246,8 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
         for (const auto* flop : it->second) {
             if ((flop->reset->edge == POSEDGE && posedge) ||
                 (flop->reset->edge == NEGEDGE && negedge)) {
-                if (flop->reset_value.has_value()) {
-                    auto qit = module_def.dfg->signals.find(flop->name + ".q");
-                    if (qit != module_def.dfg->signals.end()) {
-                        values[qit->second] = flop->reset_value.value();
-                    }
+                if (flop->reset_value.has_value() && flop->q_node) {
+                    values[flop->q_node] = flop->reset_value.value();
                 }
             }
         }
@@ -427,13 +419,11 @@ bool ModuleInstance::evaluateModuleNode(const DFGNode* moduleNode) {
         int64_t parentVal = getInputValue(moduleNode->in[i]);
 
         // Find port in child's ResolvedModule to determine its kind
-        auto portIt = std::find_if(child.module_def.inputs.begin(),
-                                   child.module_def.inputs.end(),
-                                   [&](const ResolvedSignal& s) { return s.name == portName; });
+        auto portIt = child.module_def.inputs.find(portName);
         if (portIt == child.module_def.inputs.end()) continue;
 
-        bool is_async = (portIt->type.kind == ResolvedTypeKind::Clock ||
-                         portIt->type.kind == ResolvedTypeKind::Reset);
+        bool is_async = (portIt->second.type.kind == ResolvedTypeKind::Clock ||
+                         portIt->second.type.kind == ResolvedTypeKind::Reset);
 
         if (is_async) {
             // Async: use edge-detection path regardless of DFG membership
@@ -444,12 +434,12 @@ bool ModuleInstance::evaluateModuleNode(const DFGNode* moduleNode) {
             }
         } else {
             // Sync: update DFG INPUT node value
-            auto inputIt = child.module_def.dfg->inputs.find(portName);
-            if (inputIt == child.module_def.dfg->inputs.end()) continue;
-            auto oldIt = child.values.find(inputIt->second);
+            auto* inputNode = child.module_def.dfg->getInputNode(portName);
+            if (!inputNode) continue;
+            auto oldIt = child.values.find(inputNode);
             if (oldIt == child.values.end() || oldIt->second != parentVal) {
                 inputs_changed = true;
-                child.values[inputIt->second] = parentVal;
+                child.values[inputNode] = parentVal;
             }
         }
     }
@@ -461,9 +451,8 @@ bool ModuleInstance::evaluateModuleNode(const DFGNode* moduleNode) {
         // Pull child OUTPUT values into parent's module_output_values
         for (int p = 0; p < static_cast<int>(moduleNode->output_names.size()); ++p) {
             const std::string& outName = moduleNode->output_names[p];
-            auto outIt = child.module_def.dfg->outputs.find(outName);
-            if (outIt != child.module_def.dfg->outputs.end()) {
-                module_output_values[{moduleNode, p}] = child.values.at(outIt->second);
+            if (auto* outNode = child.module_def.dfg->getOutputNode(outName)) {
+                module_output_values[{moduleNode, p}] = child.values.at(outNode);
             }
         }
     }
@@ -560,21 +549,21 @@ static int64_t parseTimeWithUnit(const std::string& token,
 
 void Simulator::buildTimeline() {
     // Determine which inputs are async (clocks and resets) from resolved input types
-    for (const auto& input : module_.inputs) {
+    for (const auto& [name, input] : module_.inputs) {
         if (input.type.kind == ResolvedTypeKind::Clock ||
             input.type.kind == ResolvedTypeKind::Reset) {
-            async_inputs_.insert(input.name);
+            async_inputs_.insert(name);
             if (input.type.kind == ResolvedTypeKind::Clock) {
-                clock_inputs_.insert(input.name);
+                clock_inputs_.insert(name);
             }
         }
     }
 
     // Map each sync input to its clock domain and build per-clock active edge
-    for (const auto& input : module_.inputs) {
-        if (async_inputs_.count(input.name)) continue;
+    for (const auto& [name, input] : module_.inputs) {
+        if (async_inputs_.count(name)) continue;
         if (input.clock_domain && input.clock_edge.has_value()) {
-            sync_input_clock_[input.name] = input.clock_domain->name;
+            sync_input_clock_[name] = input.clock_domain->name;
             clock_active_edge_[input.clock_domain->name] = *input.clock_edge;
         }
     }
@@ -620,10 +609,9 @@ void Simulator::buildTimeline() {
 // ============================================================================
 
 void Simulator::loadSyncInputs() {
-    for (const auto& input : module_.inputs) {
+    for (const auto& [name, input] : module_.inputs) {
         if (input.type.kind == ResolvedTypeKind::Clock ||
             input.type.kind == ResolvedTypeKind::Reset) continue;
-        const std::string& name = input.name;
         // (variable 'name' used by the rest of the loop body below)
 
         std::string path = config_.inputs_dir + "/" + name + ".txt";
@@ -677,9 +665,8 @@ void Simulator::advanceSyncInputs(const std::set<std::string>& active_clocks) {
         if (pos + 1 < sync_input_data_[name].size()) {
             pos++;
         }
-        auto it = module_.dfg->inputs.find(name);
-        if (it != module_.dfg->inputs.end()) {
-            root_->values[it->second] = sync_input_data_[name][pos];
+        if (auto* inputNode = module_.dfg->getInputNode(name)) {
+            root_->values[inputNode] = sync_input_data_[name][pos];
         }
     }
 }
@@ -689,7 +676,7 @@ void Simulator::advanceSyncInputs(const std::set<std::string>& active_clocks) {
 // ============================================================================
 
 void Simulator::recordOutputs() {
-    for (const auto& [name, node] : module_.dfg->outputs) {
+    for (const auto& [name, node] : module_.dfg->getOutputsMap()) {
         recorded_values_[name].push_back(root_->values.at(node));
     }
 }
@@ -736,14 +723,13 @@ static void elaborateWithWidth(vcd_tracer::module& mod, vcd_tracer::value_base& 
 static void detectFlopPairs(const DFG& dfg,
                             std::set<std::string>& flop_signal_names,
                             std::map<std::string, const DFGNode*>& flop_q_entries) {
-    for (const auto& [name, node] : dfg.signals) {
+    for (const auto& [name, node] : dfg.getSignalsMap()) {
         if (name.size() > 2 && name.substr(name.size() - 2) == ".d") {
             std::string base = name.substr(0, name.size() - 2);
-            auto qit = dfg.signals.find(base + ".q");
-            if (qit != dfg.signals.end()) {
+            if (auto* qnode = dfg.getSignalNode(base + ".q")) {
                 flop_signal_names.insert(name);
                 flop_signal_names.insert(base + ".q");
-                flop_q_entries[base] = qit->second;
+                flop_q_entries[base] = qnode;
             }
         }
     }
@@ -779,23 +765,22 @@ void Simulator::setupVcdHierForInstance(ModuleInstance& inst, vcd_tracer::module
         vcd_tracer::module flops_mod(instScope, "flops");
         vcd_tracer::module outputs_mod(instScope, "outputs");
 
-        for (const auto& input : inst.module_def.inputs) {
+        for (const auto& [name, input] : inst.module_def.inputs) {
             unsigned int w = input.type.width > 0 ? static_cast<unsigned int>(input.type.width) : 1;
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(inputs_mod, *v, input.name, w);
+            elaborateWithWidth(inputs_mod, *v, name, w);
             v->set_runtime_bit_size(w);
             if (input.type.kind == ResolvedTypeKind::Clock ||
                 input.type.kind == ResolvedTypeKind::Reset) {
-                inst.vcd_async_values[input.name] = std::move(v);
+                inst.vcd_async_values[name] = std::move(v);
             } else {
-                auto it = dfg.inputs.find(input.name);
-                if (it != dfg.inputs.end()) {
-                    inst.vcd_values[it->second] = std::move(v);
+                if (auto* inputNode = dfg.getInputNode(name)) {
+                    inst.vcd_values[inputNode] = std::move(v);
                 }
             }
         }
 
-        for (const auto& [name, node] : dfg.signals) {
+        for (const auto& [name, node] : dfg.getSignalsMap()) {
             if (flop_signal_names.count(name)) continue;
             unsigned int w = getWidth(node);
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
@@ -812,7 +797,7 @@ void Simulator::setupVcdHierForInstance(ModuleInstance& inst, vcd_tracer::module
             inst.vcd_values[qnode] = std::move(v);
         }
 
-        for (const auto& [name, node] : dfg.outputs) {
+        for (const auto& [name, node] : dfg.getOutputsMap()) {
             unsigned int w = getWidth(node);
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
             elaborateWithWidth(outputs_mod, *v, name, w);
@@ -839,23 +824,22 @@ void Simulator::setupVcdFlatForInstance(ModuleInstance& inst, vcd_tracer::module
     std::map<std::string, const DFGNode*> flop_q_entries;
     detectFlopPairs(dfg, flop_signal_names, flop_q_entries);
 
-    for (const auto& input : inst.module_def.inputs) {
+    for (const auto& [name, input] : inst.module_def.inputs) {
         unsigned int w = input.type.width > 0 ? static_cast<unsigned int>(input.type.width) : 1;
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(instScope, *v, input.name, w);
+        elaborateWithWidth(instScope, *v, name, w);
         v->set_runtime_bit_size(w);
         if (input.type.kind == ResolvedTypeKind::Clock ||
             input.type.kind == ResolvedTypeKind::Reset) {
-            inst.vcd_flat_async_values[input.name] = std::move(v);
+            inst.vcd_flat_async_values[name] = std::move(v);
         } else {
-            auto it = dfg.inputs.find(input.name);
-            if (it != dfg.inputs.end()) {
-                inst.vcd_flat_values[it->second] = std::move(v);
+            if (auto* inputNode = dfg.getInputNode(name)) {
+                inst.vcd_flat_values[inputNode] = std::move(v);
             }
         }
     }
 
-    for (const auto& [name, node] : dfg.signals) {
+    for (const auto& [name, node] : dfg.getSignalsMap()) {
         if (flop_signal_names.count(name)) continue;
         unsigned int w = getWidth(node);
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
@@ -872,7 +856,7 @@ void Simulator::setupVcdFlatForInstance(ModuleInstance& inst, vcd_tracer::module
         inst.vcd_flat_values[qnode] = std::move(v);
     }
 
-    for (const auto& [name, node] : dfg.outputs) {
+    for (const auto& [name, node] : dfg.getOutputsMap()) {
         unsigned int w = getWidth(node);
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
         elaborateWithWidth(instScope, *v, name, w);
@@ -961,23 +945,22 @@ void Simulator::setupVcd(std::ofstream& vcd_out) {
         vcd_tracer::module outputs_mod(vcd_top_->root, "outputs");
         vcd_tracer::module params_mod(vcd_top_->root, "params");
 
-        for (const auto& input : module_.inputs) {
+        for (const auto& [name, input] : module_.inputs) {
             unsigned int w = input.type.width > 0 ? static_cast<unsigned int>(input.type.width) : 1;
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(inputs_mod, *v, input.name, w);
+            elaborateWithWidth(inputs_mod, *v, name, w);
             v->set_runtime_bit_size(w);
             if (input.type.kind == ResolvedTypeKind::Clock ||
                 input.type.kind == ResolvedTypeKind::Reset) {
-                root_->vcd_async_values[input.name] = std::move(v);
+                root_->vcd_async_values[name] = std::move(v);
             } else {
-                auto it = module_.dfg->inputs.find(input.name);
-                if (it != module_.dfg->inputs.end()) {
-                    root_->vcd_values[it->second] = std::move(v);
+                if (auto* inputNode = module_.dfg->getInputNode(name)) {
+                    root_->vcd_values[inputNode] = std::move(v);
                 }
             }
         }
 
-        for (const auto& [name, node] : module_.dfg->signals) {
+        for (const auto& [name, node] : module_.dfg->getSignalsMap()) {
             if (flop_signal_names.count(name)) continue;
             unsigned int w = getWidth(node);
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
@@ -994,7 +977,7 @@ void Simulator::setupVcd(std::ofstream& vcd_out) {
             root_->vcd_values[qnode] = std::move(v);
         }
 
-        for (const auto& [name, node] : module_.dfg->outputs) {
+        for (const auto& [name, node] : module_.dfg->getOutputsMap()) {
             unsigned int w = getWidth(node);
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
             elaborateWithWidth(outputs_mod, *v, name, w);
@@ -1022,23 +1005,22 @@ void Simulator::setupVcdFlat(std::ofstream& vcd_out) {
     detectFlopPairs(*module_.dfg, flop_signal_names, flop_q_entries);
 
     // All signals go directly into the root module (no sub-scopes)
-    for (const auto& input : module_.inputs) {
+    for (const auto& [name, input] : module_.inputs) {
         unsigned int w = input.type.width > 0 ? static_cast<unsigned int>(input.type.width) : 1;
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(vcd_flat_top_->root, *v, input.name, w);
+        elaborateWithWidth(vcd_flat_top_->root, *v, name, w);
         v->set_runtime_bit_size(w);
         if (input.type.kind == ResolvedTypeKind::Clock ||
             input.type.kind == ResolvedTypeKind::Reset) {
-            root_->vcd_flat_async_values[input.name] = std::move(v);
+            root_->vcd_flat_async_values[name] = std::move(v);
         } else {
-            auto it = module_.dfg->inputs.find(input.name);
-            if (it != module_.dfg->inputs.end()) {
-                root_->vcd_flat_values[it->second] = std::move(v);
+            if (auto* inputNode = module_.dfg->getInputNode(name)) {
+                root_->vcd_flat_values[inputNode] = std::move(v);
             }
         }
     }
 
-    for (const auto& [name, node] : module_.dfg->signals) {
+    for (const auto& [name, node] : module_.dfg->getSignalsMap()) {
         if (flop_signal_names.count(name)) continue;
         unsigned int w = getWidth(node);
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
@@ -1055,7 +1037,7 @@ void Simulator::setupVcdFlat(std::ofstream& vcd_out) {
         root_->vcd_flat_values[qnode] = std::move(v);
     }
 
-    for (const auto& [name, node] : module_.dfg->outputs) {
+    for (const auto& [name, node] : module_.dfg->getOutputsMap()) {
         unsigned int w = getWidth(node);
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
         elaborateWithWidth(vcd_flat_top_->root, *v, name, w);
@@ -1162,9 +1144,8 @@ void Simulator::run() {
                         name, evt.time));
                 }
                 async_prev[name] = evt.value;
-                auto it = module_.dfg->inputs.find(name);
-                if (it != module_.dfg->inputs.end()) {
-                    root_->values[it->second] = evt.value;
+                if (auto* inputNode = module_.dfg->getInputNode(name)) {
+                    root_->values[inputNode] = evt.value;
                 }
                 // Also initialize the root's async_values for edge detection
                 root_->async_values[name] = evt.value;
@@ -1180,9 +1161,8 @@ void Simulator::run() {
 
     // 3. Set sync input values from first line of their files
     for (const auto& [name, data] : sync_input_data_) {
-        auto it = module_.dfg->inputs.find(name);
-        if (it != module_.dfg->inputs.end()) {
-            root_->values[it->second] = data[0];
+        if (auto* inputNode = module_.dfg->getInputNode(name)) {
+            root_->values[inputNode] = data[0];
         }
     }
 
@@ -1192,12 +1172,8 @@ void Simulator::run() {
         for (const auto* flop : flops) {
             bool asserted = (flop->reset->edge == POSEDGE && rst_val == 1) ||
                             (flop->reset->edge == NEGEDGE && rst_val == 0);
-            if (asserted && flop->reset_value.has_value()) {
-                std::string qname = flop->name + ".q";
-                auto qit = module_.dfg->signals.find(qname);
-                if (qit != module_.dfg->signals.end()) {
-                    root_->values[qit->second] = flop->reset_value.value();
-                }
+            if (asserted && flop->reset_value.has_value() && flop->q_node) {
+                root_->values[flop->q_node] = flop->reset_value.value();
             }
         }
     }

@@ -89,7 +89,7 @@ void computeComboDeps(ResolvedModule& module) {
     module.combo_deps.clear();
 
     // For each OUTPUT node, backward-DFS to find reachable INPUT nodes
-    for (const auto& [outName, outNode] : module.dfg->outputs) {
+    for (const auto& [outName, outNode] : module.dfg->getOutputsMap()) {
         std::set<std::string> reachableInputs;
         std::set<const DFGNode*> visited;
 

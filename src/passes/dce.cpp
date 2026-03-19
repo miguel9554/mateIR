@@ -11,10 +11,10 @@ bool eliminateDeadCode(DFG& graph) {
     std::vector<DFGNode*> worklist;
 
     // Roots: outputs, signals, MODULE nodes
-    for (auto& [name, node] : graph.outputs) {
+    for (auto& [name, node] : graph.getOutputsMap()) {
         if (alive.insert(node).second) worklist.push_back(node);
     }
-    for (auto& [name, node] : graph.signals) {
+    for (auto& [name, node] : graph.getSignalsMap()) {
         if (alive.insert(node).second) worklist.push_back(node);
     }
     for (auto& node : graph.nodes) {
@@ -42,18 +42,7 @@ bool eliminateDeadCode(DFG& graph) {
     });
 
     // Clean up named maps
-    std::erase_if(graph.constants, [&alive](const auto& kv) {
-        return !alive.count(kv.second);
-    });
-    std::erase_if(graph.inputs, [&alive](const auto& kv) {
-        return !alive.count(kv.second);
-    });
-    std::erase_if(graph.outputs, [&alive](const auto& kv) {
-        return !alive.count(kv.second);
-    });
-    std::erase_if(graph.signals, [&alive](const auto& kv) {
-        return !alive.count(kv.second);
-    });
+    graph.pruneByAliveSet(alive);
 
     return graph.nodes.size() < before;
 }

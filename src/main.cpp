@@ -337,8 +337,8 @@ int main(int argc, char** argv) {
                     !currentPath.ends_with("." + spec.module_path))
                     continue;
 
-                bool found = module.dfg->signals.contains(spec.node_name) ||
-                             module.dfg->outputs.contains(spec.node_name);
+                bool found = module.dfg->hasSignal(spec.node_name) ||
+                             module.dfg->hasOutput(spec.node_name);
 
                 if (!found && !spec.module_path.empty())
                     throw CompilerError(std::format(
@@ -411,10 +411,10 @@ int main(int argc, char** argv) {
                         continue;
 
                     const DFGNode* node = nullptr;
-                    if (auto it = module.dfg->signals.find(spec.node_name); it != module.dfg->signals.end())
-                        node = it->second;
-                    else if (auto it = module.dfg->outputs.find(spec.node_name); it != module.dfg->outputs.end())
-                        node = it->second;
+                    if (auto* n = module.dfg->getSignalNode(spec.node_name))
+                        node = n;
+                    else if (auto* n = module.dfg->getOutputNode(spec.node_name))
+                        node = n;
 
                     if (!node) {
                         if (!spec.module_path.empty())

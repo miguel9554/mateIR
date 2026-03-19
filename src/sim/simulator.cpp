@@ -640,6 +640,20 @@ void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
                                       const std::unordered_set<const DFGNode*>& alive) {
     vcd_tracer::module modScope(parent, mod.name);
 
+    if (!mod.parameters.empty() || !mod.localparams.empty()) {
+        vcd_tracer::module params_mod(modScope, "params");
+        for (const auto* params : {&mod.parameters, &mod.localparams}) {
+            for (const auto& param : *params) {
+                unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
+                auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+                elaborateWithWidth(params_mod, *v, param.name, w);
+                v->set_runtime_bit_size(w);
+                v->set(static_cast<int64_t>(param.value));
+                vcd_params_.push_back(std::move(v));
+            }
+        }
+    }
+
     vcd_tracer::module inputs_mod(modScope, "inputs");
     vcd_tracer::module signals_mod(modScope, "signals");
     vcd_tracer::module flops_mod(modScope, "flops");
@@ -690,6 +704,17 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
                                       vcd_tracer::module& parent,
                                       const std::unordered_set<const DFGNode*>& alive) {
     vcd_tracer::module modScope(parent, mod.name);
+
+    for (const auto* params : {&mod.parameters, &mod.localparams}) {
+        for (const auto& param : *params) {
+            unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
+            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+            elaborateWithWidth(modScope, *v, param.name, w);
+            v->set_runtime_bit_size(w);
+            v->set(static_cast<int64_t>(param.value));
+            vcd_flat_params_.push_back(std::move(v));
+        }
+    }
 
     for (const auto& [name, sig] : mod.inputs) {
         if (name.ends_with(".q")) continue;
@@ -768,21 +793,6 @@ void Simulator::setupVcd(std::ofstream& vcd_out) {
     std::unordered_set<const DFGNode*> alive;
     for (const auto& node : module_.dfg->nodes) alive.insert(node.get());
 
-    // Params scope
-    {
-        vcd_tracer::module params_mod(vcd_top_->root, "params");
-        for (const auto* params : {&module_.parameters, &module_.localparams}) {
-            for (const auto& param : *params) {
-                unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
-                auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-                elaborateWithWidth(params_mod, *v, param.name, w);
-                v->set_runtime_bit_size(w);
-                v->set(static_cast<int64_t>(param.value));
-                vcd_params_.push_back(std::move(v));
-            }
-        }
-    }
-
     // Populate hierarchical VCD structure (recurses into hierarchyInstantiation)
     setupVcdHierForModule(module_, vcd_top_->root, alive);
 
@@ -795,18 +805,6 @@ void Simulator::setupVcdFlat(std::ofstream& vcd_out) {
     // Build alive set
     std::unordered_set<const DFGNode*> alive;
     for (const auto& node : module_.dfg->nodes) alive.insert(node.get());
-
-    // Params: all in one flat scope
-    for (const auto* params : {&module_.parameters, &module_.localparams}) {
-        for (const auto& param : *params) {
-            unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(vcd_flat_top_->root, *v, param.name, w);
-            v->set_runtime_bit_size(w);
-            v->set(static_cast<int64_t>(param.value));
-            vcd_flat_params_.push_back(std::move(v));
-        }
-    }
 
     // Populate flat VCD structure (recurses into hierarchyInstantiation)
     setupVcdFlatForModule(module_, vcd_flat_top_->root, alive);

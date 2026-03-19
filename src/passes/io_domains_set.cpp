@@ -90,11 +90,6 @@ std::map<const DFGNode*, std::vector<FwdEdge>> buildForwardMap(const DFG& dfg) {
     return fwd;
 }
 
-// Check if a signal name is a flop .d input
-bool isFlopD(const std::string& name) {
-    return name.ends_with(".d");
-}
-
 // Get the flop base name from a .d signal name
 std::string flopBaseName(const std::string& dName) {
     return dName.substr(0, dName.size() - 2);
@@ -406,7 +401,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                 if (!visited.insert(current).second) continue;
 
                 // If this is a .d signal, record it
-                if (current->op == DFGOp::SIGNAL && isFlopD(current->name)) {
+                if (current->op == DFGOp::OUTPUT && current->name.ends_with(".d")) {
                     std::string base = flopBaseName(current->name);
                     auto it = flopClockDomain.find(base);
                     if (it != flopClockDomain.end()) {
@@ -416,7 +411,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                 }
 
                 // Stop at .q signals (flop outputs don't propagate the input domain)
-                if (current->op == DFGOp::SIGNAL && current->name.ends_with(".q")) {
+                if (current->op == DFGOp::INPUT && current->name.ends_with(".q")) {
                     continue;
                 }
 

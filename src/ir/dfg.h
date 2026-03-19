@@ -165,6 +165,10 @@ struct DFGNode {
 
     std::string name;  // Optional name (empty = anonymous)
 
+    // Hierarchical path set during DFG inlining (empty = top-level node).
+    // For inlined sub-module nodes: "inst" or "inst.subinst"
+    std::string instance_path;
+
     // Metadata depending on op type:
     // - monostate: no extra data
     // - int64_t: constant value (CONST)
@@ -215,6 +219,7 @@ struct DFGNode {
 
     std::string str() const {
         std::string result = to_string(op);
+        if (!instance_path.empty()) result += "@" + instance_path;
         if (!name.empty()) result += "(" + name + ")";
         if (std::holds_alternative<int64_t>(data)) result += "[" + std::to_string(std::get<int64_t>(data)) + "]";
         if (std::holds_alternative<std::string>(data)) result += "{" + std::get<std::string>(data) + "}";
@@ -285,6 +290,18 @@ struct DFG {
         for (auto& [k, v] : inputs)    if (v == oldNode) v = newNode;
         for (auto& [k, v] : outputs)   if (v == oldNode) v = newNode;
         for (auto& [k, v] : signals)   if (v == oldNode) v = newNode;
+    }
+
+    // Adopt an existing node into the inputs map (for DFG inlining).
+    // The node must already be in this DFG's nodes vector.
+    void adoptInput(DFGNode* node) {
+        inputs[node->name] = node;
+    }
+
+    // Adopt an existing node into the outputs map (for DFG inlining).
+    // The node must already be in this DFG's nodes vector.
+    void adoptOutput(DFGNode* node) {
+        outputs[node->name] = node;
     }
 
     // Remove map entries whose node is not in the alive set (used by DCE)

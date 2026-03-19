@@ -96,10 +96,10 @@ bool extract_reset(
     if (expectedResetAssign->op == DFGOp::CONST) {
         reset_value = std::get<int64_t>(expectedResetAssign->data);
         has_reset = true;
-    } else if (expectedResetAssign->op == DFGOp::SIGNAL) {
-        // Check the assignment is the .q value
+    } else if (expectedResetAssign->op == DFGOp::INPUT) {
+        // Check the assignment is the .q value (now an INPUT node after .q promotion)
         if (expectedResetAssign->name != flop_name + ".q") {
-            throw CompilerError("Unsupported SIGNAL for reset MUX TRUE: " + expectedResetAssign->name, dNodeDriver->loc);
+            throw CompilerError("Unsupported INPUT for reset MUX TRUE: " + expectedResetAssign->name, dNodeDriver->loc);
         }
         has_reset = false;
     } else {
@@ -118,7 +118,7 @@ FlopInfo extractFlopClockAndReset(
 {
     auto flop = flopIn;
     const std::string dName = flop_name + ".d";
-    DFGNode* dNode = flopIn.d_node ? flopIn.d_node : graph.getSignalNode(dName);
+    DFGNode* dNode = flopIn.d_node ? flopIn.d_node : graph.getOutputNode(dName);
     auto* dNodeDriver = dNode->in[0].node;
     const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
 
@@ -200,30 +200,65 @@ void check_logic_no_clock_reset(
 
 } // anonymous namespace
 
-void resolveFlops(ResolvedModule& resolved) {
-    if (!resolved.dfg || resolved.flops.empty()) {
+// Forward declaration
+static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph);
+
+// After DFG inlining there are no MODULE nodes, so propagatePortTypes can't work.
+// Propagate Clock/Reset type from submodule inputs to parent inputs by name matching.
+// (Works for wildcard .* and any same-name port connections; explicit different-name
+// connections would require additional port mapping info.)
+static void propagateHierarchyPortTypes(ResolvedModule& module) {
+    for (const auto& sub : module.hierarchyInstantiation) {
+        for (const auto& [portName, subInput] : sub.inputs) {
+            if (subInput.type.kind != ResolvedTypeKind::Clock &&
+                subInput.type.kind != ResolvedTypeKind::Reset) continue;
+            if (auto it = module.inputs.find(portName); it != module.inputs.end()) {
+                it->second.type.kind = subInput.type.kind;
+            }
+        }
+    }
+}
+
+void resolveFlops(ResolvedModule& module) {
+    if (!module.dfg) return;
+    // Recurse bottom-up so sub-module clock/reset types are tagged first
+    for (auto& sub : module.hierarchyInstantiation)
+        resolveFlopsForModule(sub, *module.dfg);
+    resolveFlopsForModule(module, *module.dfg);
+    // Propagate Clock/Reset types from submodule inputs to parent inputs
+    propagateHierarchyPortTypes(module);
+}
+
+static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph) {
+    if (resolved.flops.empty()) {
         return;
     }
 
-    DFG& graph = *resolved.dfg;
-
-    // Connect flop outputs to their .q signals
-    for (const auto& [outName, output] : resolved.outputs) {
-        if (resolved.flopsTriggers.contains(outName)) {
-            if (output.type.unpacked_dims.empty()) {
-                std::string qName = outName + ".q";
-                DFGNode* qNode = graph.lookupSignal(qName);
-                if (qNode) {
-                    graph.connectOutput(outName, qNode);
+    // Connect flop output port nodes to their .q INPUT nodes.
+    // Uses dfg_node pointer directly since after DFG inlining, submodule output ports
+    // may not be in the flat top DFG's outputs map (only .d nodes are adopted).
+    for (auto& [outName, output] : resolved.outputs) {
+        if (!resolved.flopsTriggers.contains(outName)) continue;
+        if (output.type.unpacked_dims.empty()) {
+            std::string qName = outName + ".q";
+            DFGNode* qNode = graph.getInputNode(qName);
+            if (qNode && output.dfg_node) {
+                output.dfg_node->in = {{qNode, 0}};
+            }
+        } else {
+            for (const auto& suffix : generateIndexSuffixes(output.type.unpacked_dims)) {
+                std::string elemQ = outName + suffix + ".q";
+                DFGNode* qNode = graph.getInputNode(elemQ);
+                // Individual element output nodes may also be in dfg outputs map
+                // or just exist as nodes in the flat DFG; use the map if available.
+                DFGNode* outNode = graph.getOutputNode(outName + suffix);
+                if (!outNode) {
+                    // For submodule outputs not in flat DFG outputs map,
+                    // there's no per-element dfg_node stored; skip.
+                    continue;
                 }
-            } else {
-                for (const auto& suffix : generateIndexSuffixes(output.type.unpacked_dims)) {
-                    std::string elemOutput = outName + suffix;
-                    std::string elemQ = outName + suffix + ".q";
-                    DFGNode* qNode = graph.lookupSignal(elemQ);
-                    if (qNode && graph.hasOutput(elemOutput)) {
-                        graph.connectOutput(elemOutput, qNode);
-                    }
+                if (qNode) {
+                    outNode->in = {{qNode, 0}};
                 }
             }
         }
@@ -240,8 +275,8 @@ void resolveFlops(ResolvedModule& resolved) {
             {
                 const std::string dname = name + ".d";
                 const std::string qname = name + ".q";
-                resolved_flops.back().d_node = graph.getSignalNode(dname);
-                resolved_flops.back().q_node = graph.getSignalNode(qname);
+                resolved_flops.back().d_node = graph.getOutputNode(dname);
+                resolved_flops.back().q_node = graph.getInputNode(qname);
             }
             DFGNode* output = resolved_flops.back().d_node;
             const asyncTrigger_t clock = resolved_flops.back().clock;
@@ -288,62 +323,5 @@ void resolveFlops(ResolvedModule& resolved) {
     }
 }
 
-void propagatePortTypes(ResolvedModule& module) {
-    if (!module.dfg) return;
-
-    for (const auto& node : module.dfg->nodes) {
-        if (node->op != DFGOp::MODULE) continue;
-
-        // Find the matching submodule definition
-        const std::string& moduleType = std::get<std::string>(node->data);
-        const ResolvedModule* subDef = nullptr;
-        for (const auto& sub : module.hierarchyInstantiation) {
-            if (sub.name == moduleType) {
-                subDef = &sub;
-                break;
-            }
-        }
-        if (!subDef) continue;
-
-        // For each input port of the MODULE node, check if the submodule's
-        // corresponding input is tagged as Clock or Reset
-        for (size_t i = 0; i < node->input_names.size(); ++i) {
-            const std::string& subPortName = node->input_names[i];
-
-            // Find the submodule input with this name
-            const ResolvedSignal* subInput = nullptr;
-            if (auto it = subDef->inputs.find(subPortName); it != subDef->inputs.end())
-                subInput = &it->second;
-            if (!subInput) continue;
-
-            if (subInput->type.kind != ResolvedTypeKind::Clock &&
-                subInput->type.kind != ResolvedTypeKind::Reset)
-                continue;
-
-            // The driver of this MODULE input must be a top-level INPUT node
-            DFGNode* driverNode = node->in[i].node;
-            if (driverNode->op != DFGOp::INPUT) {
-                throw CompilerError(std::format(
-                    "Submodule '{}' port '{}' is a {} but is driven by {} "
-                    "(must be driven by a top-level input port)",
-                    node->name, subPortName,
-                    subInput->type.kind == ResolvedTypeKind::Clock ? "clock" : "reset",
-                    driverNode->str()), node.get());
-            }
-
-            // Find the parent's ResolvedSignal for this input and tag it
-            bool found = false;
-            if (auto it = module.inputs.find(driverNode->name); it != module.inputs.end()) {
-                it->second.type.kind = subInput->type.kind;
-                found = true;
-            }
-            if (!found) {
-                throw CompilerError(std::format(
-                    "Parent input '{}' not found in module.inputs",
-                    driverNode->name), driverNode);
-            }
-        }
-    }
-}
 
 } // namespace custom_hdl

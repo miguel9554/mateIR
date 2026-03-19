@@ -103,7 +103,7 @@ static int64_t intPow(int64_t base, int64_t exp,
 static bool tryConstantFold(DFGNode* node) {
     // Skip nodes that are already constants or have no inputs
     if (node->op == DFGOp::CONST || node->op == DFGOp::INPUT ||
-        node->op == DFGOp::MODULE || node->op == DFGOp::INDEX ||
+        node->op == DFGOp::INDEX ||
         node->op == DFGOp::CONCAT || node->op == DFGOp::CONCAT_ALIGN)
         return false;
 

@@ -8,6 +8,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace custom_hdl {
@@ -36,28 +37,25 @@ struct AsyncEvent {
     int64_t value;
 };
 
-// A single module instance in the hierarchy.
-// Holds per-instance runtime state and all evaluation logic.
+// Runtime state for the flat (inlined) design.
+// After DFG inlining, there is a single ModuleInstance for the entire design.
+// All nodes from all submodules are in module_def.dfg (the flat top DFG).
 struct ModuleInstance {
     std::string instance_name;
     const ResolvedModule& module_def;
 
-    // Per-instance runtime state
+    // Runtime values for all DFG nodes (flat — covers entire design hierarchy)
     std::map<const DFGNode*, int64_t> values;
-    std::map<std::pair<const DFGNode*, int>, int64_t> module_output_values;
 
     // Async signal state for edge detection (port_name -> current value)
     std::map<std::string, int64_t> async_values;
 
-    // Per-instance topology and flop maps
+    // Flat topology and flop maps (cover all submodules after inlining)
     std::vector<const DFGNode*> topo_order;
     std::map<const DFGNode*, const FlopInfo*> flop_q_nodes;
     std::map<std::string, std::vector<const FlopInfo*>> flops_by_clock;
     std::map<std::string, std::vector<const FlopInfo*>> flops_by_reset;
     std::set<std::string> async_input_names;  // input ports used as clock/reset
-
-    // Children: MODULE DFG node pointer -> child instance
-    std::map<const DFGNode*, std::unique_ptr<ModuleInstance>> children;
 
     // VCD tracking: sync signals keyed by DFG node, async signals keyed by name
     std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_values;
@@ -69,28 +67,21 @@ struct ModuleInstance {
 
     // Construction helpers
     void buildTopology();
-    void buildFlopMaps();
+    void buildFlopMaps();  // recurses over hierarchyInstantiation
     void initConsts();
     void initFlops(FlopsInitial mode, std::mt19937_64& rng);
 
     // Stateful: processes an async event, detects edges, does d->q / reset
     void setAsyncEvent(const std::string& signalName, int64_t newValue);
 
-    // Pure combo evaluation with fixpoint (recurses into children)
+    // Single-pass combinational evaluation (no fixpoint — flat DAG has no cycles)
     void evaluateCombinational();
 
-    // Evaluate a single non-MODULE node
+    // Evaluate a single node
     int64_t evaluateNode(const DFGNode* node);
-
-    // Evaluate a MODULE node: push inputs, setAsyncEvent if needed,
-    // call child.evaluateCombinational(), pull outputs. Returns true if inputs changed.
-    bool evaluateModuleNode(const DFGNode* moduleNode);
 
     // Mask value to node's bit width
     static int64_t maskToWidth(int64_t val, const DFGNode* node);
-
-    // Get input value, handling MODULE multi-output sources
-    int64_t getInputValue(const DFGOutput& input) const;
 };
 
 class Simulator {
@@ -131,11 +122,13 @@ private:
     void writeOutputFiles();
     void setupVcd(std::ofstream& vcd_out);
     void setupVcdFlat(std::ofstream& vcd_out);
-    void setupVcdHierForInstance(ModuleInstance& inst, vcd_tracer::module& parent);
-    void setupVcdFlatForInstance(ModuleInstance& inst, vcd_tracer::module& parent);
+    void setupVcdHierForModule(const ResolvedModule& mod, vcd_tracer::module& parent,
+                               const std::unordered_set<const DFGNode*>& alive);
+    void setupVcdFlatForModule(const ResolvedModule& mod, vcd_tracer::module& parent,
+                               const std::unordered_set<const DFGNode*>& alive);
     void updateVcdValues(std::ofstream& vcd_out, int64_t time_ns);
     void updateVcdValuesFlat(std::ofstream& vcd_out, int64_t time_ns);
-    void updateVcdForInstance(ModuleInstance& inst, bool flat);
+    void updateVcdForRoot(bool flat);
 };
 
 } // namespace custom_hdl

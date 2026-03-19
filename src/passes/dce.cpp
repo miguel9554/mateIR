@@ -10,17 +10,13 @@ bool eliminateDeadCode(DFG& graph) {
     std::unordered_set<DFGNode*> alive;
     std::vector<DFGNode*> worklist;
 
-    // Roots: outputs, signals, MODULE nodes
+    // Roots: outputs and signals
+    // .d OUTPUT nodes are in the outputs map → automatically roots
     for (auto& [name, node] : graph.getOutputsMap()) {
         if (alive.insert(node).second) worklist.push_back(node);
     }
     for (auto& [name, node] : graph.getSignalsMap()) {
         if (alive.insert(node).second) worklist.push_back(node);
-    }
-    for (auto& node : graph.nodes) {
-        if (node->op == DFGOp::MODULE) {
-            if (alive.insert(node.get()).second) worklist.push_back(node.get());
-        }
     }
 
     // BFS/DFS through in edges

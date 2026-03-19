@@ -165,132 +165,48 @@ void validateNoCombLoops(const ResolvedModule& module) {
 
     const auto& nodes = module.dfg->nodes;
 
-    // Virtual node: {DFGNode*, port}.
-    // Non-MODULE nodes get one virtual node {node, -1}.
-    // MODULE nodes get one virtual node per output port: {node, 0}, {node, 1}, ...
-    using VNode = std::pair<const DFGNode*, int>;
+    // Standard Kahn's topo sort on the flat DFG.
+    // INPUT and CONST nodes have in-degree 0 and are natural sources.
+    // .q INPUT nodes break combinational paths (they are loop-cut points).
+    std::map<const DFGNode*, int> in_degree;
+    std::map<const DFGNode*, std::vector<const DFGNode*>> successors;
 
-    std::map<VNode, int> in_degree;
-    std::map<VNode, std::vector<VNode>> successors;
-
-    // Helper: find combo_deps for a module type via hierarchyInstantiation
-    auto findSubComboDeps = [&](const std::string& typeName) -> const ComboDeps* {
-        for (const auto& sub : module.hierarchyInstantiation) {
-            if (sub.name == typeName) return &sub.combo_deps;
-        }
-        return nullptr;
-    };
-
-    // 1. Create all virtual nodes
     for (const auto& node : nodes) {
-        if (node->op == DFGOp::MODULE) {
-            int nOutputs = node->num_outputs();
-            for (int p = 0; p < nOutputs; p++) {
-                in_degree[{node.get(), p}] = 0;
-            }
-        } else {
-            in_degree[{node.get(), -1}] = 0;
-        }
+        in_degree[node.get()] = 0;
     }
 
-    // 2. Build edges
     for (const auto& node : nodes) {
-        if (node->op == DFGOp::MODULE) continue; // MODULE edges handled below
-
-        VNode dst = {node.get(), -1};
-
         for (const auto& input : node->in) {
-            VNode src;
-            if (input.node->op == DFGOp::MODULE) {
-                src = {input.node, input.port};
-            } else {
-                src = {input.node, -1};
-            }
-            in_degree[dst]++;
-            successors[src].push_back(dst);
+            in_degree[node.get()]++;
+            successors[input.node].push_back(node.get());
         }
     }
 
-    // MODULE internal edges: for each output vnode, add edges from input drivers
-    for (const auto& node : nodes) {
-        if (node->op != DFGOp::MODULE) continue;
-
-        const std::string& moduleType = std::get<std::string>(node->data);
-        const ComboDeps* deps = findSubComboDeps(moduleType);
-
-        int nOutputs = node->num_outputs();
-        for (int p = 0; p < nOutputs; p++) {
-            VNode dst = {node.get(), p};
-
-            if (deps && !deps->empty() &&
-                p < static_cast<int>(node->output_names.size())) {
-                // Use combo_deps: only edges from input ports this output depends on
-                const std::string& outPortName = node->output_names[p];
-                auto it = deps->find(outPortName);
-                if (it != deps->end()) {
-                    for (const auto& inputPort : it->second) {
-                        int idx = node->input_index(inputPort);
-                        if (idx >= 0 && idx < static_cast<int>(node->in.size())) {
-                            VNode src;
-                            if (node->in[idx].node->op == DFGOp::MODULE) {
-                                src = {node->in[idx].node, node->in[idx].port};
-                            } else {
-                                src = {node->in[idx].node, -1};
-                            }
-                            in_degree[dst]++;
-                            successors[src].push_back(dst);
-                        }
-                    }
-                }
-                // If output not in combo_deps, it has no combinational deps — no edges
-            } else {
-                // Conservative fallback: all inputs feed all outputs
-                for (const auto& input : node->in) {
-                    VNode src;
-                    if (input.node->op == DFGOp::MODULE) {
-                        src = {input.node, input.port};
-                    } else {
-                        src = {input.node, -1};
-                    }
-                    in_degree[dst]++;
-                    successors[src].push_back(dst);
-                }
-            }
-        }
+    std::queue<const DFGNode*> q;
+    for (const auto& [node, deg] : in_degree) {
+        if (deg == 0) q.push(node);
     }
 
-    // 3. Kahn's algorithm
-    std::queue<VNode> q;
-    for (const auto& [vn, deg] : in_degree) {
-        if (deg == 0) q.push(vn);
-    }
-
-    std::set<VNode> sorted;
+    std::set<const DFGNode*> sorted;
     while (!q.empty()) {
-        VNode curr = q.front();
+        const DFGNode* curr = q.front();
         q.pop();
         sorted.insert(curr);
 
-        for (const VNode& succ : successors[curr]) {
+        for (const DFGNode* succ : successors[curr]) {
             if (--in_degree[succ] == 0) {
                 q.push(succ);
             }
         }
     }
 
-    size_t totalVNodes = 0;
-    for (const auto& [vn, deg] : in_degree) {
-        (void)deg;
-        totalVNodes++;
-    }
+    if (sorted.size() == nodes.size()) return;  // no cycles
 
-    if (sorted.size() == totalVNodes) return;  // no cycles
-
-    // Collect cycle DFGNodes (map virtual nodes back)
+    // Collect cycle nodes
     std::set<const DFGNode*> cycleNodes;
-    for (const auto& [vn, deg] : in_degree) {
-        if (!sorted.count(vn)) {
-            cycleNodes.insert(vn.first);
+    for (const auto& node : nodes) {
+        if (!sorted.count(node.get())) {
+            cycleNodes.insert(node.get());
         }
     }
 

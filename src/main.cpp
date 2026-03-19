@@ -15,6 +15,7 @@
 #include "passes/constant_fold.h"
 #include "passes/condition_normalization.h"
 #include "passes/dce.h"
+#include "passes/dfg_inline.h"
 #include "passes/flop_resolve.h"
 #include "passes/combo_deps.h"
 #include "passes/io_domains_set.h"
@@ -362,15 +363,12 @@ int main(int argc, char** argv) {
     // Tracks which debug_dfg_nodes specs were satisfied (by index) across all modules/passes
     std::set<size_t> satisfiedDebugSpecs;
 
-    // Run the full pass pipeline on a module (and recursively on its submodules)
+    // Run the full pass pipeline on a module.
+    // After elaboration, inlines all submodule DFGs, then runs all passes once
+    // on the flat top-level DFG.
     std::function<void(ResolvedModule&, const std::string&)> runPipeline =
             [&](ResolvedModule& module, const std::string& currentPath) {
         if (!module.dfg) return;
-
-        // Run pipeline on submodules first (bottom-up, so combo_deps are ready)
-        for (auto& sub : module.hierarchyInstantiation) {
-            runPipeline(sub, currentPath + "." + sub.name);
-        }
 
         std::cout << "========================================" << std::endl;
         std::cout << "Module: " << module.name << std::endl;
@@ -434,25 +432,33 @@ int main(int argc, char** argv) {
         };
 
         runPass(0, "elaboration", []{});
-        runPass(1, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
-        runPass(2, "constant_fold", [&]{ constantFold(*module.dfg); });
+        // Inline all submodule DFGs into this module's flat DFG
+        runPass(1, "dfg_inline", [&]{ inlineDFGs(module); });
+        runPass(2, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
         runPass(3, "type_propagation", [&]{ propagateTypes(*module.dfg); });
         runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
         runPass(5, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(6, "dce", [&]{ eliminateDeadCode(*module.dfg); });
+        runPass(6, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(7, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(8, "flop_resolve", [&]{ resolveFlops(module); });
+        runPass(9, "dce", [&]{ eliminateDeadCode(*module.dfg); });
         module.dfg->validateNoOrphans();
-        runPass(7, "flop_resolve", [&]{ resolveFlops(module); });
-        runPass(8, "port_type_propagation", [&]{ propagatePortTypes(module); });
-        runPass(9, "io_domains_set", [&]{
-            auto it = domainPathsByModule.find(module.name);
-            if (it == domainPathsByModule.end()) {
-                throw CompilerError(std::format(
-                    "No domains file provided for module '{}' "
-                    "(use --domains to specify)", module.name));
-            }
-            setIODomains(module, it->second);
+        runPass(10, "io_domains_set", [&]{
+            // Call setIODomains for this module and all submodules recursively
+            std::function<void(ResolvedModule&)> setDomains = [&](ResolvedModule& mod) {
+                auto it = domainPathsByModule.find(mod.name);
+                if (it == domainPathsByModule.end()) {
+                    throw CompilerError(std::format(
+                        "No domains file provided for module '{}' "
+                        "(use --domains to specify)", mod.name));
+                }
+                setIODomains(mod, it->second);
+                for (auto& sub : mod.hierarchyInstantiation)
+                    setDomains(sub);
+            };
+            setDomains(module);
         });
-        computeComboDepsBU(module);
+        computeComboDeps(module);
         validateNoCombLoops(module);
     };
 

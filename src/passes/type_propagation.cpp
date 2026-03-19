@@ -73,9 +73,10 @@ bool inferNodeType(DFGNode* node) {
             throw CompilerError(std::format(
                 "Type propagation: CONST node '{}' has no type", node->str()), node->loc);
 
-        // MODULE outputs need submodule type info — deferred
         case DFGOp::MODULE:
-            return false;
+            throw CompilerError(std::format(
+                "Type propagation: MODULE node '{}' encountered (should have been inlined)",
+                node->name), node->loc);
 
         // SUB: result is always signed (subtraction can produce negative values)
         case DFGOp::SUB: {
@@ -361,9 +362,8 @@ bool propagateTypes(DFG& graph) {
         anyChanged |= changed;
     } while (changed);
 
-    // Verify all nodes have types (except MODULE)
+    // Verify all nodes have types
     for (const auto& node : graph.nodes) {
-        if (node->op == DFGOp::MODULE) continue;
         if (!node->hasType()) {
             throw CompilerError(std::format(
                 "Type propagation: node {} still untyped after fixed-point",

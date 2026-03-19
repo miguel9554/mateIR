@@ -1593,10 +1593,21 @@ void prePopulateOutput(DFG& graph, const ResolvedSignal& sig) {
 
 // Pre-populate internal signal with all bit indices
 // For vector signals, creates individual element nodes
-// For flop .d/.q signals, handles special naming (my_flop[idx].d)
+// For flop .d/.q signals: .q → INPUT nodes, .d → OUTPUT placeholder nodes
 void prePopulateSignal(DFG& graph, const ResolvedSignal& sig) {
+    const bool is_d = sig.name.ends_with(".d");
+    const bool is_q = sig.name.ends_with(".q");
+
     if (sig.type.unpacked_dims.empty()) {
-        auto* node = graph.signal(sig.name);
+        // Scalar case
+        DFGNode* node;
+        if (is_d) {
+            node = graph.outputPlaceholder(sig.name);
+        } else if (is_q) {
+            node = graph.input(sig.name);
+        } else {
+            node = graph.signal(sig.name);
+        }
         node->type = sig.type;
         return;
     }
@@ -1605,22 +1616,32 @@ void prePopulateSignal(DFG& graph, const ResolvedSignal& sig) {
     std::string baseName = sig.name;
     std::string typeSuffix;
 
-    if (sig.name.ends_with(".d") || sig.name.ends_with(".q")) {
+    if (is_d || is_q) {
         baseName = sig.name.substr(0, sig.name.length() - 2);
         typeSuffix = sig.name.substr(sig.name.length() - 2);
     }
 
-    // Create aggregate node for dynamic access
+    // Create aggregate node for dynamic access (always SIGNAL for aggregates)
     auto* aggregate = graph.signal(sig.name);
     aggregate->type = sig.type;
 
     // Create individual element nodes (no unpacked dims on elements)
     for (const auto& idxSuffix : generateIndexSuffixes(sig.type.unpacked_dims)) {
         std::string elemName = baseName + idxSuffix + typeSuffix;
-        auto* individual = graph.signal(elemName);
+        DFGNode* individual;
+        if (is_d) {
+            individual = graph.outputPlaceholder(elemName);
+        } else if (is_q) {
+            individual = graph.input(elemName);
+        } else {
+            individual = graph.signal(elemName);
+        }
         individual->type = sig.type;
         individual->type->unpacked_dims = {};
-        aggregate->in.push_back(individual);
+        if (!is_d) {
+            // .d elements are OUTPUT nodes — don't add them as inputs to aggregate
+            aggregate->in.push_back(individual);
+        }
     }
 }
 
@@ -1855,8 +1876,8 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     for (auto& [name, sig] : resolved.signals)
         sig.dfg_node = graph.lookupSignal(name);
     for (auto& flop : resolved.flops) {
-        flop.d_node = graph.getSignalNode(flop.name + ".d");
-        flop.q_node = graph.getSignalNode(flop.name + ".q");
+        flop.d_node = graph.getOutputNode(flop.name + ".d");
+        flop.q_node = graph.getInputNode(flop.name + ".q");
     }
 
     // === Resolve all blocks into the shared graph ===

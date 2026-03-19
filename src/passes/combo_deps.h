@@ -4,12 +4,8 @@
 
 namespace custom_hdl {
 
-// Compute combinational dependency map for a single module.
-// Assumes child modules' combo_deps are already computed.
+// Compute combinational dependency map for the module's flat DFG.
+// After inlining, the DFG is flat so this only needs to run once on the top module.
 void computeComboDeps(ResolvedModule& module);
-
-// Compute combo_deps bottom-up: processes hierarchyInstantiation children
-// first (recursively), then the module itself.
-void computeComboDepsBU(ResolvedModule& module);
 
 } // namespace custom_hdl

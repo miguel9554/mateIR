@@ -25,31 +25,8 @@ ModuleInstance::ModuleInstance(const std::string& name, const ResolvedModule& mo
     buildTopology();
     initConsts();
 
-    // Recursively create child instances for MODULE nodes in DFG
+    // Width check on all nodes
     for (const auto& node : module_def.dfg->nodes) {
-        if (node->op == DFGOp::MODULE) {
-            const std::string& moduleType = std::get<std::string>(node->data);
-            const std::string& instName = node->name;
-
-            // Find the resolved submodule definition
-            const ResolvedModule* subDef = nullptr;
-            for (const auto& sub : module_def.hierarchyInstantiation) {
-                if (sub.name == moduleType) {
-                    subDef = &sub;
-                    break;
-                }
-            }
-            if (!subDef) {
-                throw CompilerError(std::format(
-                    "Simulator: MODULE node '{}' references type '{}' "
-                    "not found in hierarchyInstantiation",
-                    instName, moduleType), node.get());
-            }
-
-            children[node.get()] = std::make_unique<ModuleInstance>(instName, *subDef);
-        }
-
-        // Width check
         if (node->type.has_value() && node->type->width > 64) {
             throw CompilerError(std::format(
                 "Simulator: node '{}' has width {} (max 64 supported)",
@@ -92,10 +69,6 @@ void ModuleInstance::buildTopology() {
 
     for (const auto& node : nodes) {
         for (const auto& input : node->in) {
-            // Skip edges from MODULE source nodes — MODULE nodes are multi-output
-            // and can create false cycles in the topo sort. The fixpoint loop in
-            // evaluateCombinational handles convergence across MODULE boundaries.
-            if (input.node->op == DFGOp::MODULE) continue;
             in_degree[node.get()]++;
             successors[input.node].push_back(node.get());
         }
@@ -131,20 +104,27 @@ void ModuleInstance::buildTopology() {
 // ============================================================================
 
 void ModuleInstance::buildFlopMaps() {
-    for (const auto& flop : module_def.flops) {
-        // Build flop .q node -> FlopInfo map
-        if (flop.q_node) {
-            flop_q_nodes[flop.q_node] = &flop;
+    // Collect flops from the entire hierarchy (all submodules, bottom-up).
+    // After DFG inlining, d_node/q_node pointers are valid in the flat top DFG.
+    std::function<void(const ResolvedModule&)> collect = [&](const ResolvedModule& mod) {
+        for (const auto& flop : mod.flops) {
+            if (flop.q_node) {
+                flop_q_nodes[flop.q_node] = &flop;
+            }
+            if (!flop.clock.name.empty()) {
+                flops_by_clock[flop.clock.name].push_back(&flop);
+                async_input_names.insert(flop.clock.name);
+            }
+            if (flop.reset.has_value()) {
+                flops_by_reset[flop.reset->name].push_back(&flop);
+                async_input_names.insert(flop.reset->name);
+            }
         }
-
-        flops_by_clock[flop.clock.name].push_back(&flop);
-        async_input_names.insert(flop.clock.name);
-
-        if (flop.reset.has_value()) {
-            flops_by_reset[flop.reset->name].push_back(&flop);
-            async_input_names.insert(flop.reset->name);
+        for (const auto& sub : mod.hierarchyInstantiation) {
+            collect(sub);
         }
-    }
+    };
+    collect(module_def);
 }
 
 // ============================================================================
@@ -156,13 +136,6 @@ void ModuleInstance::initConsts() {
         if (node->op == DFGOp::CONST) {
             values[node.get()] = std::get<int64_t>(node->data);
         }
-        // Initialize MODULE output values to 0 so consumers evaluated before
-        // the MODULE node in the first fixpoint iteration don't crash.
-        if (node->op == DFGOp::MODULE) {
-            for (int p = 0; p < node->num_outputs(); ++p) {
-                module_output_values[{node.get(), p}] = 0;
-            }
-        }
     }
 }
 
@@ -171,6 +144,7 @@ void ModuleInstance::initConsts() {
 // ============================================================================
 
 void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
+    // flop_q_nodes already covers all flops from all submodules (built by buildFlopMaps)
     for (const auto& [qnode, flop] : flop_q_nodes) {
         int w = flop->type.type.width;
         uint64_t mask = (w == 64) ? ~0ULL : (1ULL << w) - 1;
@@ -182,21 +156,6 @@ void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
             values[qnode] = 0;
         }
     }
-
-    for (auto& [moduleNode, child] : children) {
-        child->initFlops(mode, rng);
-    }
-}
-
-// ============================================================================
-// Get input value (handles MODULE multi-output sources)
-// ============================================================================
-
-int64_t ModuleInstance::getInputValue(const DFGOutput& input) const {
-    if (input.node->op == DFGOp::MODULE) {
-        return module_output_values.at({input.node, input.port});
-    }
-    return values.at(input.node);
 }
 
 // ============================================================================
@@ -260,7 +219,7 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
 
 int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
     auto getVal = [&](int idx) -> int64_t {
-        return getInputValue(node->in[idx]);
+        return values.at(node->in[idx].node);
     };
 
     switch (node->op) {
@@ -306,11 +265,11 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::MUX_N: {
             int n = static_cast<int>(node->in.size()) / 2;
             for (int i = 0; i < n; i++) {
-                if (getInputValue(node->in[i]) != 0) {
-                    return getInputValue(node->in[n + i]);
+                if (values.at(node->in[i].node) != 0) {
+                    return values.at(node->in[n + i].node);
                 }
             }
-            return getInputValue(node->in[2 * n - 1]);
+            return values.at(node->in[2 * n - 1].node);
         }
 
         case DFGOp::UNARY_PLUS:    return getVal(0);
@@ -353,7 +312,7 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
                 int64_t index = getVal(1);
                 int64_t n = static_cast<int64_t>(source_node->in.size());
                 index = ((index % n) + n) % n;
-                return getInputValue(source_node->in[index]);
+                return values.at(source_node->in[index].node);
             }
 
             int64_t high = getVal(1);
@@ -383,7 +342,7 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
                 const DFGNode* inputNode = node->in[i].node;
                 int w = inputNode->type.has_value() ? inputNode->type->width : 64;
                 uint64_t mask = (w >= 64) ? ~0ULL : (1ULL << w) - 1;
-                result = (result << w) | (static_cast<uint64_t>(getInputValue(node->in[i])) & mask);
+                result = (result << w) | (static_cast<uint64_t>(values.at(inputNode)) & mask);
             }
             return static_cast<int64_t>(result);
         }
@@ -392,104 +351,22 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
             throw CompilerError("Simulator: CONCAT_ALIGN should have been cleaned up by concat_cleanup pass", node);
 
         case DFGOp::MODULE:
-            throw CompilerError("Simulator: MODULE nodes should be handled by evaluateModuleNode, not evaluateNode", node);
+            throw CompilerError("Simulator: MODULE nodes should not exist after dfg_inline pass", node);
     }
 
     throw CompilerError(std::format("Simulator: unhandled op {}", to_string(node->op)), node);
 }
 
 // ============================================================================
-// Evaluate a MODULE node: push inputs, handle async, evaluate child, pull outputs
-// ============================================================================
-
-bool ModuleInstance::evaluateModuleNode(const DFGNode* moduleNode) {
-    auto childIt = children.find(moduleNode);
-    if (childIt == children.end()) {
-        throw CompilerError(std::format(
-            "Simulator: no child instance for MODULE node '{}'",
-            moduleNode->name), moduleNode);
-    }
-    ModuleInstance& child = *childIt->second;
-
-    bool inputs_changed = false;
-
-    // Push parent values into child's inputs, routing by signal kind
-    for (size_t i = 0; i < moduleNode->in.size(); ++i) {
-        const std::string& portName = moduleNode->input_names[i];
-        int64_t parentVal = getInputValue(moduleNode->in[i]);
-
-        // Find port in child's ResolvedModule to determine its kind
-        auto portIt = child.module_def.inputs.find(portName);
-        if (portIt == child.module_def.inputs.end()) continue;
-
-        bool is_async = (portIt->second.type.kind == ResolvedTypeKind::Clock ||
-                         portIt->second.type.kind == ResolvedTypeKind::Reset);
-
-        if (is_async) {
-            // Async: use edge-detection path regardless of DFG membership
-            auto oldIt = child.async_values.find(portName);
-            if (oldIt == child.async_values.end() || oldIt->second != parentVal) {
-                inputs_changed = true;
-                child.setAsyncEvent(portName, parentVal);
-            }
-        } else {
-            // Sync: update DFG INPUT node value
-            auto* inputNode = child.module_def.dfg->getInputNode(portName);
-            if (!inputNode) continue;
-            auto oldIt = child.values.find(inputNode);
-            if (oldIt == child.values.end() || oldIt->second != parentVal) {
-                inputs_changed = true;
-                child.values[inputNode] = parentVal;
-            }
-        }
-    }
-
-    if (inputs_changed) {
-        // Evaluate child's combinational logic
-        child.evaluateCombinational();
-
-        // Pull child OUTPUT values into parent's module_output_values
-        for (int p = 0; p < static_cast<int>(moduleNode->output_names.size()); ++p) {
-            const std::string& outName = moduleNode->output_names[p];
-            if (auto* outNode = child.module_def.dfg->getOutputNode(outName)) {
-                module_output_values[{moduleNode, p}] = child.values.at(outNode);
-            }
-        }
-    }
-
-    return inputs_changed;
-}
-
-// ============================================================================
-// Combinational evaluation with fixpoint
+// Combinational evaluation — single topo-ordered pass (flat DAG, no cycles)
 // ============================================================================
 
 void ModuleInstance::evaluateCombinational() {
-    constexpr int MAX_ITER = 100;
-
-    for (int iter = 0; iter < MAX_ITER; ++iter) {
-        bool any_inputs_changed = false;
-
-        for (const DFGNode* node : topo_order) {
-            if (node->op == DFGOp::INPUT || node->op == DFGOp::CONST) continue;
-            if (flop_q_nodes.count(node)) continue;
-
-            if (node->op == DFGOp::MODULE) {
-                any_inputs_changed |= evaluateModuleNode(node);
-                continue;
-            }
-
-            int64_t val = maskToWidth(evaluateNode(node), node);
-            values[node] = val;
-        }
-
-        if (!any_inputs_changed) break;
-
-        if (iter == MAX_ITER - 1) {
-            throw CompilerError(std::format(
-                "Simulator: fixpoint did not converge after {} iterations in module '{}'",
-                MAX_ITER, instance_name));
-        }
+    for (const DFGNode* node : topo_order) {
+        if (node->op == DFGOp::INPUT || node->op == DFGOp::CONST) continue;
+        if (flop_q_nodes.count(node)) continue;
+        int64_t val = maskToWidth(evaluateNode(node), node);
+        values[node] = val;
     }
 }
 
@@ -719,190 +596,140 @@ static void elaborateWithWidth(vcd_tracer::module& mod, vcd_tracer::value_base& 
     var.elaborate(override_fn, name);
 }
 
-// Helper: detect flop .d/.q pairs, returning signal names to exclude and .q entries to trace
-static void detectFlopPairs(const DFG& dfg,
-                            std::set<std::string>& flop_signal_names,
-                            std::map<std::string, const DFGNode*>& flop_q_entries) {
-    for (const auto& [name, node] : dfg.getSignalsMap()) {
-        if (name.size() > 2 && name.substr(name.size() - 2) == ".d") {
-            std::string base = name.substr(0, name.size() - 2);
-            if (auto* qnode = dfg.getSignalNode(base + ".q")) {
-                flop_signal_names.insert(name);
-                flop_signal_names.insert(base + ".q");
-                flop_q_entries[base] = qnode;
-            }
+// ============================================================================
+// Hierarchical VCD setup — recurses over hierarchyInstantiation
+// ============================================================================
+
+// Add one VCD entry for a DFG node if the node is alive (still in flat DFG).
+// Stores the VCD value object in dest, keyed by node pointer.
+static void addVcdEntry(vcd_tracer::module& scope, const std::string& name,
+                        const DFGNode* node,
+                        const std::unordered_set<const DFGNode*>& alive,
+                        std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>>& dest) {
+    if (!node || !alive.count(node)) return;
+    unsigned int w = getWidth(node);
+    auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+    elaborateWithWidth(scope, *v, name, w);
+    v->set_runtime_bit_size(w);
+    dest[node] = std::move(v);
+}
+
+void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
+                                      vcd_tracer::module& parent,
+                                      const std::unordered_set<const DFGNode*>& alive) {
+    vcd_tracer::module modScope(parent, mod.name);
+
+    vcd_tracer::module inputs_mod(modScope, "inputs");
+    vcd_tracer::module signals_mod(modScope, "signals");
+    vcd_tracer::module flops_mod(modScope, "flops");
+    vcd_tracer::module outputs_mod(modScope, "outputs");
+
+    for (const auto& [name, sig] : mod.inputs) {
+        if (name.ends_with(".q")) continue;  // shown in flops section
+        unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
+        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+        elaborateWithWidth(inputs_mod, *v, name, w);
+        v->set_runtime_bit_size(w);
+        if (sig.type.kind == ResolvedTypeKind::Clock ||
+            sig.type.kind == ResolvedTypeKind::Reset) {
+            root_->vcd_async_values[name] = std::move(v);
+        } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
+            root_->vcd_values[sig.dfg_node] = std::move(v);
         }
     }
 
-    // Remove vector parent entries that have indexed children
-    std::vector<std::string> parents_to_remove;
-    for (const auto& [base, _] : flop_q_entries) {
-        if (flop_q_entries.count(base + "[0]")) {
-            parents_to_remove.push_back(base);
-        }
+    for (const auto& [name, sig] : mod.signals) {
+        addVcdEntry(signals_mod, name, sig.dfg_node, alive, root_->vcd_values);
     }
-    for (const auto& p : parents_to_remove) {
-        flop_q_entries.erase(p);
+
+    for (const auto& flop : mod.flops) {
+        if (!flop.q_node || !alive.count(flop.q_node)) continue;
+        unsigned int w = getWidth(flop.q_node);
+        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+        elaborateWithWidth(flops_mod, *v, flop.name, w);
+        v->set_runtime_bit_size(w);
+        root_->vcd_values[flop.q_node] = std::move(v);
+    }
+
+    for (const auto& [name, sig] : mod.outputs) {
+        if (name.ends_with(".d")) continue;  // flop inputs, not module outputs
+        addVcdEntry(outputs_mod, name, sig.dfg_node, alive, root_->vcd_values);
+    }
+
+    for (const auto& sub : mod.hierarchyInstantiation) {
+        setupVcdHierForModule(sub, modScope, alive);
     }
 }
 
 // ============================================================================
-// Hierarchical VCD setup for a module instance (recursive)
+// Flat VCD setup — recurses over hierarchyInstantiation
 // ============================================================================
 
-void Simulator::setupVcdHierForInstance(ModuleInstance& inst, vcd_tracer::module& parent) {
-    vcd_tracer::module instScope(parent, inst.instance_name);
+void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
+                                      vcd_tracer::module& parent,
+                                      const std::unordered_set<const DFGNode*>& alive) {
+    vcd_tracer::module modScope(parent, mod.name);
 
-    const auto& dfg = *inst.module_def.dfg;
-
-    std::set<std::string> flop_signal_names;
-    std::map<std::string, const DFGNode*> flop_q_entries;
-    detectFlopPairs(dfg, flop_signal_names, flop_q_entries);
-
-    {
-        vcd_tracer::module inputs_mod(instScope, "inputs");
-        vcd_tracer::module signals_mod(instScope, "signals");
-        vcd_tracer::module flops_mod(instScope, "flops");
-        vcd_tracer::module outputs_mod(instScope, "outputs");
-
-        for (const auto& [name, input] : inst.module_def.inputs) {
-            unsigned int w = input.type.width > 0 ? static_cast<unsigned int>(input.type.width) : 1;
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(inputs_mod, *v, name, w);
-            v->set_runtime_bit_size(w);
-            if (input.type.kind == ResolvedTypeKind::Clock ||
-                input.type.kind == ResolvedTypeKind::Reset) {
-                inst.vcd_async_values[name] = std::move(v);
-            } else {
-                if (auto* inputNode = dfg.getInputNode(name)) {
-                    inst.vcd_values[inputNode] = std::move(v);
-                }
-            }
-        }
-
-        for (const auto& [name, node] : dfg.getSignalsMap()) {
-            if (flop_signal_names.count(name)) continue;
-            unsigned int w = getWidth(node);
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(signals_mod, *v, name, w);
-            v->set_runtime_bit_size(w);
-            inst.vcd_values[node] = std::move(v);
-        }
-
-        for (const auto& [base_name, qnode] : flop_q_entries) {
-            unsigned int w = getWidth(qnode);
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(flops_mod, *v, base_name, w);
-            v->set_runtime_bit_size(w);
-            inst.vcd_values[qnode] = std::move(v);
-        }
-
-        for (const auto& [name, node] : dfg.getOutputsMap()) {
-            unsigned int w = getWidth(node);
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(outputs_mod, *v, name, w);
-            v->set_runtime_bit_size(w);
-            inst.vcd_values[node] = std::move(v);
+    for (const auto& [name, sig] : mod.inputs) {
+        if (name.ends_with(".q")) continue;
+        unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
+        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+        elaborateWithWidth(modScope, *v, name, w);
+        v->set_runtime_bit_size(w);
+        if (sig.type.kind == ResolvedTypeKind::Clock ||
+            sig.type.kind == ResolvedTypeKind::Reset) {
+            root_->vcd_flat_async_values[name] = std::move(v);
+        } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
+            root_->vcd_flat_values[sig.dfg_node] = std::move(v);
         }
     }
 
-    for (auto& [moduleNode, child] : inst.children) {
-        setupVcdHierForInstance(*child, instScope);
+    for (const auto& [name, sig] : mod.signals) {
+        addVcdEntry(modScope, name, sig.dfg_node, alive, root_->vcd_flat_values);
+    }
+
+    for (const auto& flop : mod.flops) {
+        if (!flop.q_node || !alive.count(flop.q_node)) continue;
+        unsigned int w = getWidth(flop.q_node);
+        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+        elaborateWithWidth(modScope, *v, flop.name, w);
+        v->set_runtime_bit_size(w);
+        root_->vcd_flat_values[flop.q_node] = std::move(v);
+    }
+
+    for (const auto& [name, sig] : mod.outputs) {
+        if (name.ends_with(".d")) continue;
+        addVcdEntry(modScope, name, sig.dfg_node, alive, root_->vcd_flat_values);
+    }
+
+    for (const auto& sub : mod.hierarchyInstantiation) {
+        setupVcdFlatForModule(sub, modScope, alive);
     }
 }
 
 // ============================================================================
-// Flat VCD setup for a module instance (recursive)
+// Update VCD values from the single flat root instance
 // ============================================================================
 
-void Simulator::setupVcdFlatForInstance(ModuleInstance& inst, vcd_tracer::module& parent) {
-    vcd_tracer::module instScope(parent, inst.instance_name);
-
-    const auto& dfg = *inst.module_def.dfg;
-
-    std::set<std::string> flop_signal_names;
-    std::map<std::string, const DFGNode*> flop_q_entries;
-    detectFlopPairs(dfg, flop_signal_names, flop_q_entries);
-
-    for (const auto& [name, input] : inst.module_def.inputs) {
-        unsigned int w = input.type.width > 0 ? static_cast<unsigned int>(input.type.width) : 1;
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(instScope, *v, name, w);
-        v->set_runtime_bit_size(w);
-        if (input.type.kind == ResolvedTypeKind::Clock ||
-            input.type.kind == ResolvedTypeKind::Reset) {
-            inst.vcd_flat_async_values[name] = std::move(v);
-        } else {
-            if (auto* inputNode = dfg.getInputNode(name)) {
-                inst.vcd_flat_values[inputNode] = std::move(v);
-            }
-        }
-    }
-
-    for (const auto& [name, node] : dfg.getSignalsMap()) {
-        if (flop_signal_names.count(name)) continue;
-        unsigned int w = getWidth(node);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(instScope, *v, name, w);
-        v->set_runtime_bit_size(w);
-        inst.vcd_flat_values[node] = std::move(v);
-    }
-
-    for (const auto& [base_name, qnode] : flop_q_entries) {
-        unsigned int w = getWidth(qnode);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(instScope, *v, base_name, w);
-        v->set_runtime_bit_size(w);
-        inst.vcd_flat_values[qnode] = std::move(v);
-    }
-
-    for (const auto& [name, node] : dfg.getOutputsMap()) {
-        unsigned int w = getWidth(node);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(instScope, *v, name, w);
-        v->set_runtime_bit_size(w);
-        inst.vcd_flat_values[node] = std::move(v);
-    }
-
-    for (auto& [moduleNode, child] : inst.children) {
-        setupVcdFlatForInstance(*child, instScope);
-    }
-}
-
-// ============================================================================
-// Update VCD values for a module instance (recursive)
-// ============================================================================
-
-void Simulator::updateVcdForInstance(ModuleInstance& inst, bool flat) {
+void Simulator::updateVcdForRoot(bool flat) {
     if (!flat) {
-        for (auto& [node, vcd_val] : inst.vcd_values) {
-            auto it = inst.values.find(node);
-            if (it != inst.values.end()) {
-                vcd_val->set(it->second);
-            }
+        for (auto& [node, vcd_val] : root_->vcd_values) {
+            auto it = root_->values.find(node);
+            if (it != root_->values.end()) vcd_val->set(it->second);
         }
-        for (auto& [name, vcd_val] : inst.vcd_async_values) {
-            auto it = inst.async_values.find(name);
-            if (it != inst.async_values.end()) {
-                vcd_val->set(it->second);
-            }
+        for (auto& [name, vcd_val] : root_->vcd_async_values) {
+            auto it = root_->async_values.find(name);
+            if (it != root_->async_values.end()) vcd_val->set(it->second);
         }
     } else {
-        for (auto& [node, vcd_val] : inst.vcd_flat_values) {
-            auto it = inst.values.find(node);
-            if (it != inst.values.end()) {
-                vcd_val->set(it->second);
-            }
+        for (auto& [node, vcd_val] : root_->vcd_flat_values) {
+            auto it = root_->values.find(node);
+            if (it != root_->values.end()) vcd_val->set(it->second);
         }
-        for (auto& [name, vcd_val] : inst.vcd_flat_async_values) {
-            auto it = inst.async_values.find(name);
-            if (it != inst.async_values.end()) {
-                vcd_val->set(it->second);
-            }
+        for (auto& [name, vcd_val] : root_->vcd_flat_async_values) {
+            auto it = root_->async_values.find(name);
+            if (it != root_->async_values.end()) vcd_val->set(it->second);
         }
-    }
-    for (auto& [moduleNode, child] : inst.children) {
-        updateVcdForInstance(*child, flat);
     }
 }
 
@@ -913,139 +740,39 @@ void Simulator::updateVcdForInstance(ModuleInstance& inst, bool flat) {
 void Simulator::setupVcd(std::ofstream& vcd_out) {
     vcd_top_ = std::make_unique<vcd_tracer::top>(module_.name);
 
-    std::set<std::string> flop_signal_names;
-    std::map<std::string, const DFGNode*> flop_q_entries;
-    detectFlopPairs(*module_.dfg, flop_signal_names, flop_q_entries);
+    // Build alive set: nodes still in the flat DFG after DCE
+    std::unordered_set<const DFGNode*> alive;
+    for (const auto& node : module_.dfg->nodes) alive.insert(node.get());
 
-    // Helper: elaborate params into a scope and set their constant values
-    auto elaborateParams = [&](vcd_tracer::module& mod,
-                               std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>& dest) {
-        for (const auto& param : module_.parameters) {
-            unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(mod, *v, param.name, w);
-            v->set_runtime_bit_size(w);
-            v->set(static_cast<int64_t>(param.value));
-            dest.push_back(std::move(v));
-        }
-        for (const auto& param : module_.localparams) {
-            unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(mod, *v, param.name, w);
-            v->set_runtime_bit_size(w);
-            v->set(static_cast<int64_t>(param.value));
-            dest.push_back(std::move(v));
-        }
-    };
-
+    // Params scope
     {
-        vcd_tracer::module inputs_mod(vcd_top_->root, "inputs");
-        vcd_tracer::module signals_mod(vcd_top_->root, "signals");
-        vcd_tracer::module flops_mod(vcd_top_->root, "flops");
-        vcd_tracer::module outputs_mod(vcd_top_->root, "outputs");
         vcd_tracer::module params_mod(vcd_top_->root, "params");
-
-        for (const auto& [name, input] : module_.inputs) {
-            unsigned int w = input.type.width > 0 ? static_cast<unsigned int>(input.type.width) : 1;
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(inputs_mod, *v, name, w);
-            v->set_runtime_bit_size(w);
-            if (input.type.kind == ResolvedTypeKind::Clock ||
-                input.type.kind == ResolvedTypeKind::Reset) {
-                root_->vcd_async_values[name] = std::move(v);
-            } else {
-                if (auto* inputNode = module_.dfg->getInputNode(name)) {
-                    root_->vcd_values[inputNode] = std::move(v);
-                }
+        for (const auto* params : {&module_.parameters, &module_.localparams}) {
+            for (const auto& param : *params) {
+                unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
+                auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+                elaborateWithWidth(params_mod, *v, param.name, w);
+                v->set_runtime_bit_size(w);
+                v->set(static_cast<int64_t>(param.value));
+                vcd_params_.push_back(std::move(v));
             }
-        }
-
-        for (const auto& [name, node] : module_.dfg->getSignalsMap()) {
-            if (flop_signal_names.count(name)) continue;
-            unsigned int w = getWidth(node);
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(signals_mod, *v, name, w);
-            v->set_runtime_bit_size(w);
-            root_->vcd_values[node] = std::move(v);
-        }
-
-        for (const auto& [base_name, qnode] : flop_q_entries) {
-            unsigned int w = getWidth(qnode);
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(flops_mod, *v, base_name, w);
-            v->set_runtime_bit_size(w);
-            root_->vcd_values[qnode] = std::move(v);
-        }
-
-        for (const auto& [name, node] : module_.dfg->getOutputsMap()) {
-            unsigned int w = getWidth(node);
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(outputs_mod, *v, name, w);
-            v->set_runtime_bit_size(w);
-            root_->vcd_values[node] = std::move(v);
-        }
-
-        elaborateParams(params_mod, vcd_params_);
-
-        // Setup hierarchical VCD for child instances
-        for (auto& [moduleNode, child] : root_->children) {
-            setupVcdHierForInstance(*child, vcd_top_->root);
         }
     }
 
-    vcd_top_->finalize_header(vcd_out,
-                              std::chrono::system_clock::from_time_t(0));
+    // Populate hierarchical VCD structure (recurses into hierarchyInstantiation)
+    setupVcdHierForModule(module_, vcd_top_->root, alive);
+
+    vcd_top_->finalize_header(vcd_out, std::chrono::system_clock::from_time_t(0));
 }
 
 void Simulator::setupVcdFlat(std::ofstream& vcd_out) {
     vcd_flat_top_ = std::make_unique<vcd_tracer::top>(module_.name);
 
-    std::set<std::string> flop_signal_names;
-    std::map<std::string, const DFGNode*> flop_q_entries;
-    detectFlopPairs(*module_.dfg, flop_signal_names, flop_q_entries);
+    // Build alive set
+    std::unordered_set<const DFGNode*> alive;
+    for (const auto& node : module_.dfg->nodes) alive.insert(node.get());
 
-    // All signals go directly into the root module (no sub-scopes)
-    for (const auto& [name, input] : module_.inputs) {
-        unsigned int w = input.type.width > 0 ? static_cast<unsigned int>(input.type.width) : 1;
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(vcd_flat_top_->root, *v, name, w);
-        v->set_runtime_bit_size(w);
-        if (input.type.kind == ResolvedTypeKind::Clock ||
-            input.type.kind == ResolvedTypeKind::Reset) {
-            root_->vcd_flat_async_values[name] = std::move(v);
-        } else {
-            if (auto* inputNode = module_.dfg->getInputNode(name)) {
-                root_->vcd_flat_values[inputNode] = std::move(v);
-            }
-        }
-    }
-
-    for (const auto& [name, node] : module_.dfg->getSignalsMap()) {
-        if (flop_signal_names.count(name)) continue;
-        unsigned int w = getWidth(node);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(vcd_flat_top_->root, *v, name, w);
-        v->set_runtime_bit_size(w);
-        root_->vcd_flat_values[node] = std::move(v);
-    }
-
-    for (const auto& [base_name, qnode] : flop_q_entries) {
-        unsigned int w = getWidth(qnode);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(vcd_flat_top_->root, *v, base_name, w);
-        v->set_runtime_bit_size(w);
-        root_->vcd_flat_values[qnode] = std::move(v);
-    }
-
-    for (const auto& [name, node] : module_.dfg->getOutputsMap()) {
-        unsigned int w = getWidth(node);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(vcd_flat_top_->root, *v, name, w);
-        v->set_runtime_bit_size(w);
-        root_->vcd_flat_values[node] = std::move(v);
-    }
-
-    // Params: set constant values at elaboration time
+    // Params: all in one flat scope
     for (const auto* params : {&module_.parameters, &module_.localparams}) {
         for (const auto& param : *params) {
             unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
@@ -1057,23 +784,20 @@ void Simulator::setupVcdFlat(std::ofstream& vcd_out) {
         }
     }
 
-    // Setup flat VCD for child instances
-    for (auto& [moduleNode, child] : root_->children) {
-        setupVcdFlatForInstance(*child, vcd_flat_top_->root);
-    }
+    // Populate flat VCD structure (recurses into hierarchyInstantiation)
+    setupVcdFlatForModule(module_, vcd_flat_top_->root, alive);
 
-    vcd_flat_top_->finalize_header(vcd_out,
-                                   std::chrono::system_clock::from_time_t(0));
+    vcd_flat_top_->finalize_header(vcd_out, std::chrono::system_clock::from_time_t(0));
 }
 
 void Simulator::updateVcdValuesFlat(std::ofstream& vcd_out, int64_t time_ns) {
     vcd_flat_top_->time_update_abs(vcd_out, std::chrono::nanoseconds{time_ns});
-    updateVcdForInstance(*root_, /*flat=*/true);
+    updateVcdForRoot(/*flat=*/true);
 }
 
 void Simulator::updateVcdValues(std::ofstream& vcd_out, int64_t time_ns) {
     vcd_top_->time_update_abs(vcd_out, std::chrono::nanoseconds{time_ns});
-    updateVcdForInstance(*root_, /*flat=*/false);
+    updateVcdForRoot(/*flat=*/false);
 }
 
 // ============================================================================

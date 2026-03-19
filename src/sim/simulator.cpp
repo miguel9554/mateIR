@@ -607,6 +607,27 @@ static void addVcdEntry(vcd_tracer::module& scope, const std::string& name,
                         const std::unordered_set<const DFGNode*>& alive,
                         std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>>& dest) {
     if (!node || !alive.count(node)) return;
+
+    // Unpacked array: node->in[i] are the individual element nodes.
+    // Register each element separately as name[idx] using the Verilog dimension indices.
+    if (node->type.has_value() && !node->type->unpacked_dims.empty() && !node->in.empty()) {
+        const auto& dim = node->type->unpacked_dims[0];
+        for (size_t i = 0; i < node->in.size(); ++i) {
+            const DFGNode* elem = node->in[i].node;
+            if (!elem || !alive.count(elem)) continue;
+            int64_t idx = (dim.left <= dim.right)
+                ? dim.left + static_cast<int64_t>(i)
+                : dim.left - static_cast<int64_t>(i);
+            std::string elem_name = name + "[" + std::to_string(idx) + "]";
+            unsigned int w = getWidth(elem);
+            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+            elaborateWithWidth(scope, *v, elem_name, w);
+            v->set_runtime_bit_size(w);
+            dest[elem] = std::move(v);
+        }
+        return;
+    }
+
     unsigned int w = getWidth(node);
     auto v = std::make_unique<vcd_tracer::value<int64_t>>();
     elaborateWithWidth(scope, *v, name, w);
@@ -685,6 +706,7 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
     }
 
     for (const auto& [name, sig] : mod.signals) {
+        if (name.ends_with(".q") || name.ends_with(".d")) continue;
         addVcdEntry(modScope, name, sig.dfg_node, alive, root_->vcd_flat_values);
     }
 
@@ -692,7 +714,9 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
         if (!flop.q_node || !alive.count(flop.q_node)) continue;
         unsigned int w = getWidth(flop.q_node);
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(modScope, *v, flop.name, w);
+        std::string vcd_name = flop.name;
+        if (vcd_name.ends_with(".q")) vcd_name.resize(vcd_name.size() - 2);
+        elaborateWithWidth(modScope, *v, vcd_name, w);
         v->set_runtime_bit_size(w);
         root_->vcd_flat_values[flop.q_node] = std::move(v);
     }

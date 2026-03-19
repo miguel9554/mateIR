@@ -222,12 +222,18 @@ int main(int argc, char *argv[]) {
     }
 
     if (!only1.empty()) {
-        std::printf("\nSignals only in file 1 (%zu):\n", only1.size());
-        for (auto &n : only1) std::printf("  %s\n", n.c_str());
+        std::fprintf(stderr, "\n\033[31mError: signals only in file 1 (%zu):\033[0m\n", only1.size());
+        for (auto &n : only1) std::fprintf(stderr, "\033[31m  %s\033[0m\n", n.c_str());
     }
     if (!only2.empty()) {
-        std::printf("\nSignals only in file 2 (%zu):\n", only2.size());
-        for (auto &n : only2) std::printf("  %s\n", n.c_str());
+        std::fprintf(stderr, "\n\033[31mError: signals only in file 2 (%zu):\033[0m\n", only2.size());
+        for (auto &n : only2) std::fprintf(stderr, "\033[31m  %s\033[0m\n", n.c_str());
+    }
+    if (!only1.empty() || !only2.empty()) {
+        std::fprintf(stderr, "\n\033[31mSignal sets do not match — aborting.\033[0m\n");
+        delete f1;
+        delete f2;
+        return 1;
     }
 
     std::printf("\nMatched signals: %zu\n", matched.size());

@@ -388,15 +388,15 @@ int main(int argc, char** argv) {
                 std::filesystem::create_directories(dir);
                 std::set<const DFGNode*> errorNodes;
                 if (e.errorNode) errorNodes.insert(e.errorNode);
-                std::ofstream(std::format("{}/{}_{}_ERROR.dot", dir, number, passName))
+                std::ofstream(std::format("{}/{:02}_{}_ERROR.dot", dir, number, passName))
                     << module.dfg->toDot(passName + "_ERROR", errorNodes);
                 throw;
             }
 
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::filesystem::create_directories(dir);
-            std::ofstream(std::format("{}/{}_{}.dot", dir, number, passName)) << module.dfg->toDot(passName);
-            std::ofstream(std::format("{}/{}_{}.json", dir, number, passName)) << module.dfg->toJson();
+            std::ofstream(std::format("{}/{:02}_{}.dot", dir, number, passName)) << module.dfg->toDot(passName);
+            std::ofstream(std::format("{}/{:02}_{}.json", dir, number, passName)) << module.dfg->toJson();
 
             if (simConfig && !simConfig->debug_dfg_nodes.empty()) {
                 for (size_t specIdx = 0; specIdx < simConfig->debug_dfg_nodes.size(); specIdx++) {
@@ -423,9 +423,9 @@ int main(int argc, char** argv) {
                     }
 
                     satisfiedDebugSpecs.insert(specIdx);
-                    std::ofstream(std::format("{}/{}_{}_cone_{}.dot", dir, number, passName, spec.node_name))
+                    std::ofstream(std::format("{}/{:02}_{}_cone_{}.dot", dir, number, passName, spec.node_name))
                         << module.dfg->toDotCone(node, passName + "_cone_" + spec.node_name);
-                    std::ofstream(std::format("{}/{}_{}_cone_{}.json", dir, number, passName, spec.node_name))
+                    std::ofstream(std::format("{}/{:02}_{}_cone_{}.json", dir, number, passName, spec.node_name))
                         << module.dfg->toJsonCone(node);
                 }
             }
@@ -442,6 +442,12 @@ int main(int argc, char** argv) {
         runPass(7, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
         runPass(8, "constant_fold", [&]{ constantFold(*module.dfg); });
         runPass(9, "flop_resolve", [&]{ resolveFlops(module); });
+        {
+            std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
+            std::ofstream f(std::format("{}/09_flop_resolve_flops.txt", dir));
+            for (const auto& flop : module.flops)
+                flop.print(f);
+        }
         runPass(10, "dce", [&]{ eliminateDeadCode(*module.dfg); });
         module.dfg->validateNoOrphans();
         runPass(11, "io_domains_set", [&]{
@@ -459,6 +465,12 @@ int main(int argc, char** argv) {
             };
             setDomains(module);
         });
+        {
+            std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
+            std::ofstream f(std::format("{}/11_io_domains_set_flops.txt", dir));
+            for (const auto& flop : module.flops)
+                flop.print(f);
+        }
         computeComboDeps(module);
         validateNoCombLoops(module);
     };

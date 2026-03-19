@@ -303,6 +303,15 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph) {
     }
     resolved.flops = resolved_flops;
 
+    // Set clock_domain/clock_edge on each flop's type signal
+    for (auto& flop : resolved.flops) {
+        auto it = resolved.inputs.find(flop.clock.name);
+        if (it != resolved.inputs.end()) {
+            flop.type.clock_domain = &it->second;
+            flop.type.clock_edge = flop.clock.edge;
+        }
+    }
+
     // Build clock/reset name lists from inputs that were tagged
     std::vector<std::string> clocks;
     std::vector<std::string> resets;

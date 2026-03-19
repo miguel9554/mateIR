@@ -223,6 +223,8 @@ struct GlobalStats {
     int scopes_compared = 0;
     int scopes_failed   = 0;
     std::vector<std::string> failed_scopes;
+    // scope_path -> list of failed signal names (value diffs or missing)
+    std::vector<std::pair<std::string, std::vector<std::string>>> failed_signals_by_scope;
 };
 
 static void compare_scopes_recursive(
@@ -301,6 +303,12 @@ static void compare_scopes_recursive(
         if (scope_failed) {
             stats.scopes_failed++;
             stats.failed_scopes.push_back(scope_path);
+
+            std::vector<std::string> failed_names;
+            for (auto &n : result.only_in_1) failed_names.push_back("(missing in f2) " + n);
+            for (auto &n : result.only_in_2) failed_names.push_back("(missing in f1) " + n);
+            for (auto &n : result.signals_with_diffs) failed_names.push_back(n);
+            stats.failed_signals_by_scope.emplace_back(scope_path, std::move(failed_names));
         }
     }
 
@@ -403,9 +411,15 @@ int main(int argc, char *argv[]) {
     std::printf("Value comparisons: %d  (matching: %d  different: %d)\n",
                 stats.total_match + stats.total_diff,
                 stats.total_match, stats.total_diff);
-    std::printf("Scopes failed:     %d\n", stats.scopes_failed);
-    for (auto &s : stats.failed_scopes)
-        std::printf("  - %s\n", s.c_str());
+
+    if (!stats.failed_signals_by_scope.empty()) {
+        std::printf("\nFailed signals by scope:\n");
+        for (auto &[scope, signals] : stats.failed_signals_by_scope) {
+            std::printf("  \033[1;31m%s\033[0m\n", scope.c_str());
+            for (auto &sig : signals)
+                std::printf("    \033[31m%s\033[0m\n", sig.c_str());
+        }
+    }
 
     if (stats.scopes_failed == 0 && stats.total_diff == 0)
         std::printf("\n  \033[1;32m========== ALL SCOPES PASS ==========\033[0m\n\n");

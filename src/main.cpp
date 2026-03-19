@@ -197,7 +197,13 @@ int main(int argc, char** argv) {
         }
 
         if (!debugNodesStr.empty()) {
-            cfg.debug_dfg_nodes = splitComma(debugNodesStr);
+            for (const auto& entry : splitComma(debugNodesStr)) {
+                auto colon = entry.find(':');
+                if (colon == std::string::npos)
+                    cfg.debug_dfg_nodes.push_back({"", entry});
+                else
+                    cfg.debug_dfg_nodes.push_back({entry.substr(0, colon), entry.substr(colon + 1)});
+            }
         }
 
         if (!paramsStr.empty()) {
@@ -313,13 +319,57 @@ int main(int argc, char** argv) {
         domainPathsByModule[modName] = path;
     }
 
+    // Pre-flight: validate debug node specs against the initial DFGs (before any passes run).
+    // This catches wrong node names regardless of whether the pipeline later fails.
+    if (simConfig && !simConfig->debug_dfg_nodes.empty()) {
+        std::set<size_t> foundSpecs;
+
+        std::function<void(const ResolvedModule&, const std::string&)> validateDebugSpecs =
+                [&](const ResolvedModule& module, const std::string& currentPath) {
+            if (!module.dfg) return;
+            for (const auto& sub : module.hierarchyInstantiation)
+                validateDebugSpecs(sub, currentPath + "." + sub.name);
+
+            for (size_t i = 0; i < simConfig->debug_dfg_nodes.size(); i++) {
+                const auto& spec = simConfig->debug_dfg_nodes[i];
+                if (!spec.module_path.empty() &&
+                    currentPath != spec.module_path &&
+                    !currentPath.ends_with("." + spec.module_path))
+                    continue;
+
+                bool found = module.dfg->signals.contains(spec.node_name) ||
+                             module.dfg->outputs.contains(spec.node_name);
+
+                if (!found && !spec.module_path.empty())
+                    throw CompilerError(std::format(
+                        "debug_dfg_nodes: node '{}' not found in module '{}' signals or outputs",
+                        spec.node_name, module.name));
+
+                if (found) foundSpecs.insert(i);
+            }
+        };
+        for (const auto& module : resolvedModules)
+            validateDebugSpecs(module, module.name);
+
+        for (size_t i = 0; i < simConfig->debug_dfg_nodes.size(); i++) {
+            if (!foundSpecs.contains(i))
+                throw CompilerError(std::format(
+                    "debug_dfg_nodes: node '{}' not found in any module signals or outputs",
+                    simConfig->debug_dfg_nodes[i].node_name));
+        }
+    }
+
+    // Tracks which debug_dfg_nodes specs were satisfied (by index) across all modules/passes
+    std::set<size_t> satisfiedDebugSpecs;
+
     // Run the full pass pipeline on a module (and recursively on its submodules)
-    std::function<void(ResolvedModule&)> runPipeline = [&](ResolvedModule& module) {
+    std::function<void(ResolvedModule&, const std::string&)> runPipeline =
+            [&](ResolvedModule& module, const std::string& currentPath) {
         if (!module.dfg) return;
 
         // Run pipeline on submodules first (bottom-up, so combo_deps are ready)
         for (auto& sub : module.hierarchyInstantiation) {
-            runPipeline(sub);
+            runPipeline(sub, currentPath + "." + sub.name);
         }
 
         std::cout << "========================================" << std::endl;
@@ -351,19 +401,33 @@ int main(int argc, char** argv) {
             std::ofstream(std::format("{}/{}_{}.json", dir, number, passName)) << module.dfg->toJson();
 
             if (simConfig && !simConfig->debug_dfg_nodes.empty()) {
-                for (const auto& nodeName : simConfig->debug_dfg_nodes) {
-                    const DFGNode* node = nullptr;
-                    if (auto it = module.dfg->signals.find(nodeName); it != module.dfg->signals.end())
-                        node = it->second;
-                    else if (auto it = module.dfg->outputs.find(nodeName); it != module.dfg->outputs.end())
-                        node = it->second;
-                    else
-                        throw CompilerError(std::format(
-                            "debug_dfg_nodes: node '{}' not found in signals or outputs", nodeName));
+                for (size_t specIdx = 0; specIdx < simConfig->debug_dfg_nodes.size(); specIdx++) {
+                    const auto& spec = simConfig->debug_dfg_nodes[specIdx];
 
-                    std::ofstream(std::format("{}/{}_{}_cone_{}.dot", dir, number, passName, nodeName))
-                        << module.dfg->toDotCone(node, passName + "_cone_" + nodeName);
-                    std::ofstream(std::format("{}/{}_{}_cone_{}.json", dir, number, passName, nodeName))
+                    // Check if this spec targets the current module (suffix match on hierarchy path)
+                    if (!spec.module_path.empty() &&
+                        currentPath != spec.module_path &&
+                        !currentPath.ends_with("." + spec.module_path))
+                        continue;
+
+                    const DFGNode* node = nullptr;
+                    if (auto it = module.dfg->signals.find(spec.node_name); it != module.dfg->signals.end())
+                        node = it->second;
+                    else if (auto it = module.dfg->outputs.find(spec.node_name); it != module.dfg->outputs.end())
+                        node = it->second;
+
+                    if (!node) {
+                        if (!spec.module_path.empty())
+                            throw CompilerError(std::format(
+                                "debug_dfg_nodes: node '{}' not found in module '{}' signals or outputs",
+                                spec.node_name, module.name));
+                        continue; // no module_path — will be validated after pipeline
+                    }
+
+                    satisfiedDebugSpecs.insert(specIdx);
+                    std::ofstream(std::format("{}/{}_{}_cone_{}.dot", dir, number, passName, spec.node_name))
+                        << module.dfg->toDotCone(node, passName + "_cone_" + spec.node_name);
+                    std::ofstream(std::format("{}/{}_{}_cone_{}.json", dir, number, passName, spec.node_name))
                         << module.dfg->toJsonCone(node);
                 }
             }
@@ -393,7 +457,7 @@ int main(int argc, char** argv) {
     };
 
     for (auto& module : resolvedModules) {
-        runPipeline(module);
+        runPipeline(module, module.name);
     }
 
     std::cout << "----------------------------------------" << std::endl;

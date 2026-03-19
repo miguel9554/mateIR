@@ -14,13 +14,18 @@ namespace custom_hdl {
 
 enum class FlopsInitial { Random, AllZeros, AllOnes };
 
+struct DebugNodeSpec {
+    std::string module_path; // empty = match any module; otherwise suffix-matched against hierarchy path
+    std::string node_name;
+};
+
 struct SimConfig {
     std::vector<std::string> source_files;
     std::string top_module;
     std::string inputs_dir;
     std::string output_dir;
     std::map<std::string, int64_t> parameters;
-    std::vector<std::string> debug_dfg_nodes;
+    std::vector<DebugNodeSpec> debug_dfg_nodes;
     FlopsInitial flops_initial = FlopsInitial::Random;
     std::optional<uint64_t> flops_initial_seed;
 };

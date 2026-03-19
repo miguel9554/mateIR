@@ -127,9 +127,9 @@ private:
     void writeOutputFiles();
     void setupVcd(std::ofstream& vcd_out);
     void setupVcdFlat(std::ofstream& vcd_out);
-    void setupVcdHierForModule(const ResolvedModule& mod, vcd_tracer::module& parent,
+    void setupVcdHierForModule(const ResolvedModule& mod, vcd_tracer::module& scope,
                                const std::unordered_set<const DFGNode*>& alive);
-    void setupVcdFlatForModule(const ResolvedModule& mod, vcd_tracer::module& parent,
+    void setupVcdFlatForModule(const ResolvedModule& mod, vcd_tracer::module& scope,
                                const std::unordered_set<const DFGNode*>& alive);
     void updateVcdValues(std::ofstream& vcd_out, int64_t time_ns);
     void updateVcdValuesFlat(std::ofstream& vcd_out, int64_t time_ns);

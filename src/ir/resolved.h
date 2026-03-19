@@ -91,7 +91,8 @@ using ComboDeps = std::map<std::string, std::set<std::string>>;
 // ============================================================================
 
 struct ResolvedModule {
-    std::string name;
+    std::string name;           // module type name
+    std::string instance_name;  // instance name (empty for the top module)
     std::vector<ResolvedTypes::Param> parameters;
     std::vector<ResolvedTypes::Param> localparams;
     std::map<std::string, ResolvedTypes::Signal> inputs;

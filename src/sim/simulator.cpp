@@ -649,12 +649,10 @@ static void addVcdEntry(vcd_tracer::module& scope, const std::string& name,
 }
 
 void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
-                                      vcd_tracer::module& parent,
+                                      vcd_tracer::module& scope,
                                       const std::unordered_set<const DFGNode*>& alive) {
-    vcd_tracer::module modScope(parent, mod.name);
-
     if (!mod.parameters.empty() || !mod.localparams.empty()) {
-        vcd_tracer::module params_mod(modScope, "params");
+        vcd_tracer::module params_mod(scope, "params");
         for (const auto* params : {&mod.parameters, &mod.localparams}) {
             for (const auto& param : *params) {
                 unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
@@ -667,10 +665,10 @@ void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
         }
     }
 
-    vcd_tracer::module inputs_mod(modScope, "inputs");
-    vcd_tracer::module signals_mod(modScope, "signals");
-    vcd_tracer::module flops_mod(modScope, "flops");
-    vcd_tracer::module outputs_mod(modScope, "outputs");
+    vcd_tracer::module inputs_mod(scope, "inputs");
+    vcd_tracer::module signals_mod(scope, "signals");
+    vcd_tracer::module flops_mod(scope, "flops");
+    vcd_tracer::module outputs_mod(scope, "outputs");
 
     for (const auto& [name, sig] : mod.inputs) {
         if (name.ends_with(".q")) continue;  // shown in flops section
@@ -705,7 +703,9 @@ void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
     }
 
     for (const auto& sub : mod.hierarchyInstantiation) {
-        setupVcdHierForModule(sub, modScope, alive);
+        const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
+        vcd_tracer::module childScope(scope, child_name);
+        setupVcdHierForModule(sub, childScope, alive);
     }
 }
 
@@ -714,15 +714,13 @@ void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
 // ============================================================================
 
 void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
-                                      vcd_tracer::module& parent,
+                                      vcd_tracer::module& scope,
                                       const std::unordered_set<const DFGNode*>& alive) {
-    vcd_tracer::module modScope(parent, mod.name);
-
     for (const auto* params : {&mod.parameters, &mod.localparams}) {
         for (const auto& param : *params) {
             unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(modScope, *v, param.name, w);
+            elaborateWithWidth(scope, *v, param.name, w);
             v->set_runtime_bit_size(w);
             v->set(static_cast<int64_t>(param.value));
             vcd_flat_params_.push_back(std::move(v));
@@ -733,7 +731,7 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
         if (name.ends_with(".q")) continue;
         unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(modScope, *v, name, w);
+        elaborateWithWidth(scope, *v, name, w);
         v->set_runtime_bit_size(w);
         if (sig.type.kind == ResolvedTypeKind::Clock ||
             sig.type.kind == ResolvedTypeKind::Reset) {
@@ -745,7 +743,7 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
 
     for (const auto& [name, sig] : mod.signals) {
         if (name.ends_with(".q") || name.ends_with(".d")) continue;
-        addVcdEntry(modScope, name, sig.dfg_node, alive, root_->vcd_flat_values);
+        addVcdEntry(scope, name, sig.dfg_node, alive, root_->vcd_flat_values);
     }
 
     for (const auto& flop : mod.flops) {
@@ -754,18 +752,20 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
         std::string vcd_name = flop.name;
         if (vcd_name.ends_with(".q")) vcd_name.resize(vcd_name.size() - 2);
-        elaborateWithWidth(modScope, *v, vcd_name, w);
+        elaborateWithWidth(scope, *v, vcd_name, w);
         v->set_runtime_bit_size(w);
         root_->vcd_flat_values[flop.q_node].push_back(std::move(v));
     }
 
     for (const auto& [name, sig] : mod.outputs) {
         if (name.ends_with(".d")) continue;
-        addVcdEntry(modScope, name, sig.dfg_node, alive, root_->vcd_flat_values);
+        addVcdEntry(scope, name, sig.dfg_node, alive, root_->vcd_flat_values);
     }
 
     for (const auto& sub : mod.hierarchyInstantiation) {
-        setupVcdFlatForModule(sub, modScope, alive);
+        const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
+        vcd_tracer::module childScope(scope, child_name);
+        setupVcdFlatForModule(sub, childScope, alive);
     }
 }
 

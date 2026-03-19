@@ -1924,11 +1924,13 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
         }
 
         // Process each instance in the instantiation
+        std::string lastInstanceName;
         for (const auto* inst : moduleInst->instances) {
             std::string instanceName;
             if (inst->decl) {
                 instanceName = std::string(inst->decl->name.valueText());
             }
+            lastInstanceName = instanceName;
 
             // Create MODULE node in the DFG with output port names
             std::vector<std::string> outputPortNames;
@@ -1944,6 +1946,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
             }
         }
 
+        resolvedSub.instance_name = lastInstanceName;
         resolved.hierarchyInstantiation.push_back(std::move(resolvedSub));
     }
 

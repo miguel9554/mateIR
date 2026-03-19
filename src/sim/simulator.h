@@ -60,8 +60,9 @@ struct ModuleInstance {
     // VCD tracking: sync signals keyed by DFG node, async signals keyed by name
     std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_values;
     std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_flat_values;
-    std::map<std::string, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_async_values;
-    std::map<std::string, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_flat_async_values;
+    // Async signals may appear in multiple scopes (top + submodules); all entries get updated.
+    std::map<std::string, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_async_values;
+    std::map<std::string, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_flat_async_values;
 
     ModuleInstance(const std::string& name, const ResolvedModule& mod);
 

@@ -56,6 +56,12 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
                 }
             }
         }
+
+        // Update sig.dfg_node to the driver: subInputNode will be dead after rewiring
+        // and will be removed by DCE, leaving the old pointer dangling.
+        if (auto it = sub->inputs.find(portName); it != sub->inputs.end()) {
+            it->second.dfg_node = driver.node;
+        }
     }
 
     // Step 2: Rewire outputs — replace {moduleNode, portIdx} references in parent

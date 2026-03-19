@@ -667,7 +667,7 @@ void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
         v->set_runtime_bit_size(w);
         if (sig.type.kind == ResolvedTypeKind::Clock ||
             sig.type.kind == ResolvedTypeKind::Reset) {
-            root_->vcd_async_values[name] = std::move(v);
+            root_->vcd_async_values[name].push_back(std::move(v));
         } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
             root_->vcd_values[sig.dfg_node] = std::move(v);
         }
@@ -724,7 +724,7 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
         v->set_runtime_bit_size(w);
         if (sig.type.kind == ResolvedTypeKind::Clock ||
             sig.type.kind == ResolvedTypeKind::Reset) {
-            root_->vcd_flat_async_values[name] = std::move(v);
+            root_->vcd_flat_async_values[name].push_back(std::move(v));
         } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
             root_->vcd_flat_values[sig.dfg_node] = std::move(v);
         }
@@ -766,18 +766,20 @@ void Simulator::updateVcdForRoot(bool flat) {
             auto it = root_->values.find(node);
             if (it != root_->values.end()) vcd_val->set(it->second);
         }
-        for (auto& [name, vcd_val] : root_->vcd_async_values) {
+        for (auto& [name, vcd_vals] : root_->vcd_async_values) {
             auto it = root_->async_values.find(name);
-            if (it != root_->async_values.end()) vcd_val->set(it->second);
+            if (it != root_->async_values.end())
+                for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
         }
     } else {
         for (auto& [node, vcd_val] : root_->vcd_flat_values) {
             auto it = root_->values.find(node);
             if (it != root_->values.end()) vcd_val->set(it->second);
         }
-        for (auto& [name, vcd_val] : root_->vcd_flat_async_values) {
+        for (auto& [name, vcd_vals] : root_->vcd_flat_async_values) {
             auto it = root_->async_values.find(name);
-            if (it != root_->async_values.end()) vcd_val->set(it->second);
+            if (it != root_->async_values.end())
+                for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
         }
     }
 }

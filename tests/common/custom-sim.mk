@@ -17,12 +17,15 @@ EXTRA_ARGS = $(shell cat custom-sim.args 2>/dev/null)
 
 all: simulate
 
+DEBUG_NODES_ARG = $(if $(DEBUG_NODES),--debug-nodes $(DEBUG_NODES),)
+
 simulate:
 	$(MAKE) -C $(PROJECT_ROOT) build
 	$(SIMULATOR) --simulate --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
 		--domains $(DOMAINS_YAMLS) \
 		--flops-initial zeros \
+		$(DEBUG_NODES_ARG) \
 		$(EXTRA_ARGS) $(RTL_SRCS)
 
 svg:

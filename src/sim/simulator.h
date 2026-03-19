@@ -57,10 +57,11 @@ struct ModuleInstance {
     std::map<std::string, std::vector<const FlopInfo*>> flops_by_reset;
     std::set<std::string> async_input_names;  // input ports used as clock/reset
 
-    // VCD tracking: sync signals keyed by DFG node, async signals keyed by name
-    std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_values;
-    std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_flat_values;
-    // Async signals may appear in multiple scopes (top + submodules); all entries get updated.
+    // VCD tracking: sync signals keyed by DFG node, async signals keyed by name.
+    // Vectors because the same DFG node may appear in multiple scopes (e.g. a top-level
+    // input and all submodule inputs that were inlined to point to the same driver node).
+    std::map<const DFGNode*, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_values;
+    std::map<const DFGNode*, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_flat_values;
     std::map<std::string, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_async_values;
     std::map<std::string, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_flat_async_values;
 

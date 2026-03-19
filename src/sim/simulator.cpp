@@ -614,11 +614,11 @@ static void elaborateWithWidth(vcd_tracer::module& mod, vcd_tracer::value_base& 
 // ============================================================================
 
 // Add one VCD entry for a DFG node if the node is alive (still in flat DFG).
-// Stores the VCD value object in dest, keyed by node pointer.
+// Appends the VCD value object to dest[node] (vector, supports multiple scopes per node).
 static void addVcdEntry(vcd_tracer::module& scope, const std::string& name,
                         const DFGNode* node,
                         const std::unordered_set<const DFGNode*>& alive,
-                        std::map<const DFGNode*, std::unique_ptr<vcd_tracer::value<int64_t>>>& dest) {
+                        std::map<const DFGNode*, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>>& dest) {
     if (!node || !alive.count(node)) return;
 
     // Unpacked array: node->in[i] are the individual element nodes.
@@ -636,7 +636,7 @@ static void addVcdEntry(vcd_tracer::module& scope, const std::string& name,
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
             elaborateWithWidth(scope, *v, elem_name, w);
             v->set_runtime_bit_size(w);
-            dest[elem] = std::move(v);
+            dest[elem].push_back(std::move(v));
         }
         return;
     }
@@ -645,7 +645,7 @@ static void addVcdEntry(vcd_tracer::module& scope, const std::string& name,
     auto v = std::make_unique<vcd_tracer::value<int64_t>>();
     elaborateWithWidth(scope, *v, name, w);
     v->set_runtime_bit_size(w);
-    dest[node] = std::move(v);
+    dest[node].push_back(std::move(v));
 }
 
 void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
@@ -682,7 +682,7 @@ void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
             sig.type.kind == ResolvedTypeKind::Reset) {
             root_->vcd_async_values[name].push_back(std::move(v));
         } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
-            root_->vcd_values[sig.dfg_node] = std::move(v);
+            root_->vcd_values[sig.dfg_node].push_back(std::move(v));
         }
     }
 
@@ -696,7 +696,7 @@ void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
         elaborateWithWidth(flops_mod, *v, flop.name, w);
         v->set_runtime_bit_size(w);
-        root_->vcd_values[flop.q_node] = std::move(v);
+        root_->vcd_values[flop.q_node].push_back(std::move(v));
     }
 
     for (const auto& [name, sig] : mod.outputs) {
@@ -739,7 +739,7 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
             sig.type.kind == ResolvedTypeKind::Reset) {
             root_->vcd_flat_async_values[name].push_back(std::move(v));
         } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
-            root_->vcd_flat_values[sig.dfg_node] = std::move(v);
+            root_->vcd_flat_values[sig.dfg_node].push_back(std::move(v));
         }
     }
 
@@ -756,7 +756,7 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
         if (vcd_name.ends_with(".q")) vcd_name.resize(vcd_name.size() - 2);
         elaborateWithWidth(modScope, *v, vcd_name, w);
         v->set_runtime_bit_size(w);
-        root_->vcd_flat_values[flop.q_node] = std::move(v);
+        root_->vcd_flat_values[flop.q_node].push_back(std::move(v));
     }
 
     for (const auto& [name, sig] : mod.outputs) {
@@ -775,9 +775,10 @@ void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
 
 void Simulator::updateVcdForRoot(bool flat) {
     if (!flat) {
-        for (auto& [node, vcd_val] : root_->vcd_values) {
+        for (auto& [node, vcd_vals] : root_->vcd_values) {
             auto it = root_->values.find(node);
-            if (it != root_->values.end()) vcd_val->set(it->second);
+            if (it != root_->values.end())
+                for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
         }
         for (auto& [name, vcd_vals] : root_->vcd_async_values) {
             auto it = root_->async_values.find(name);
@@ -785,9 +786,10 @@ void Simulator::updateVcdForRoot(bool flat) {
                 for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
         }
     } else {
-        for (auto& [node, vcd_val] : root_->vcd_flat_values) {
+        for (auto& [node, vcd_vals] : root_->vcd_flat_values) {
             auto it = root_->values.find(node);
-            if (it != root_->values.end()) vcd_val->set(it->second);
+            if (it != root_->values.end())
+                for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
         }
         for (auto& [name, vcd_vals] : root_->vcd_flat_async_values) {
             auto it = root_->async_values.find(name);

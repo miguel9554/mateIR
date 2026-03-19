@@ -200,8 +200,9 @@ void check_logic_no_clock_reset(
 
 } // anonymous namespace
 
-// Forward declaration
+// Forward declarations
 static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph);
+static void resolveFlopsRecursive(ResolvedModule& resolved, DFG& topGraph);
 
 // After DFG inlining there are no MODULE nodes, so propagatePortTypes can't work.
 // Propagate Clock/Reset type from submodule inputs to parent inputs by name matching.
@@ -219,11 +220,18 @@ static void propagateHierarchyPortTypes(ResolvedModule& module) {
     }
 }
 
+// Recursively process all submodule levels bottom-up, all using the flat top-level DFG.
+static void resolveFlopsRecursive(ResolvedModule& resolved, DFG& topGraph) {
+    for (auto& sub : resolved.hierarchyInstantiation)
+        resolveFlopsRecursive(sub, topGraph);
+    resolveFlopsForModule(resolved, topGraph);
+}
+
 void resolveFlops(ResolvedModule& module) {
     if (!module.dfg) return;
     // Recurse bottom-up so sub-module clock/reset types are tagged first
     for (auto& sub : module.hierarchyInstantiation)
-        resolveFlopsForModule(sub, *module.dfg);
+        resolveFlopsRecursive(sub, *module.dfg);
     resolveFlopsForModule(module, *module.dfg);
     // Propagate Clock/Reset types from submodule inputs to parent inputs
     propagateHierarchyPortTypes(module);

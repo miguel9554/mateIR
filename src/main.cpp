@@ -431,23 +431,36 @@ int main(int argc, char** argv) {
             }
         };
 
+        // Helper: dump flops from all modules in the hierarchy into a stream
+        std::function<void(const ResolvedModule&, std::ostream&)> dumpFlopsRecursive =
+            [&](const ResolvedModule& mod, std::ostream& f) {
+                if (!mod.flops.empty()) {
+                    f << "=== " << mod.name << " ===\n";
+                    for (const auto& flop : mod.flops)
+                        flop.print(f);
+                }
+                for (const auto& sub : mod.hierarchyInstantiation)
+                    dumpFlopsRecursive(sub, f);
+            };
+
         runPass(0, "elaboration", []{});
-        // Inline all submodule DFGs into this module's flat DFG
-        runPass(1, "dfg_inline", [&]{ inlineDFGs(module); });
-        runPass(2, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
-        runPass(3, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(4, "type_propagation", [&]{ propagateTypes(*module.dfg); });
-        runPass(5, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(6, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(7, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(8, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(9, "flop_resolve", [&]{ resolveFlops(module); });
+        // Resolve flops before inlining so each module uses its own DFG.
+        // This avoids name collisions when two submodules have same-named flops.
+        runPass(1, "flop_resolve", [&]{ resolveFlops(module); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/09_flop_resolve_flops.txt", dir));
-            for (const auto& flop : module.flops)
-                flop.print(f);
+            std::ofstream f(std::format("{}/01_flop_resolve_flops.txt", dir));
+            dumpFlopsRecursive(module, f);
         }
+        // Inline all submodule DFGs into this module's flat DFG
+        runPass(2, "dfg_inline", [&]{ inlineDFGs(module); });
+        runPass(3, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
+        runPass(4, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(5, "type_propagation", [&]{ propagateTypes(*module.dfg); });
+        runPass(6, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(7, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(8, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(9, "constant_fold", [&]{ constantFold(*module.dfg); });
         runPass(10, "dce", [&]{ eliminateDeadCode(*module.dfg); });
         module.dfg->validateNoOrphans();
         runPass(11, "io_domains_set", [&]{
@@ -468,8 +481,7 @@ int main(int argc, char** argv) {
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::ofstream f(std::format("{}/11_io_domains_set_flops.txt", dir));
-            for (const auto& flop : module.flops)
-                flop.print(f);
+            dumpFlopsRecursive(module, f);
         }
         computeComboDeps(module);
         validateNoCombLoops(module);

@@ -80,14 +80,18 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
         }
     }
 
-    // Step 3: Adopt sub .d OUTPUT and .q INPUT nodes into parent's named maps
+    // Step 3: Adopt sub .d OUTPUT and .q INPUT nodes into parent's named maps.
+    // Qualify names with instanceName to avoid collision when multiple instances
+    // of different modules have same-named flops (e.g., both have bit_cnt).
     for (const auto& [name, node] : sub->dfg->getOutputsMap()) {
         if (name.ends_with(".d")) {
+            node->name = instanceName + "." + name;
             parent.dfg->adoptOutput(node);
         }
     }
     for (const auto& [name, node] : sub->dfg->getInputsMap()) {
         if (name.ends_with(".q")) {
+            node->name = instanceName + "." + name;
             parent.dfg->adoptInput(node);
         }
     }

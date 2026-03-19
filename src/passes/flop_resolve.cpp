@@ -174,6 +174,10 @@ void check_logic_no_clock_reset(
         }
         visited.insert(current);
 
+        // Don't traverse into submodule inputs — clocks/resets driving a MODULE node
+        // are valid (used inside the submodule for clocking, not as combinational inputs).
+        if (current->op == DFGOp::MODULE) continue;
+
         if (current->op == DFGOp::INPUT) {
             auto loc = current->loc ? current->loc : root->loc;
             for (const auto& clk : clocks) {
@@ -200,14 +204,10 @@ void check_logic_no_clock_reset(
 
 } // anonymous namespace
 
-// Forward declarations
+// Forward declaration
 static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph);
-static void resolveFlopsRecursive(ResolvedModule& resolved, DFG& topGraph);
 
-// After DFG inlining there are no MODULE nodes, so propagatePortTypes can't work.
 // Propagate Clock/Reset type from submodule inputs to parent inputs by name matching.
-// (Works for wildcard .* and any same-name port connections; explicit different-name
-// connections would require additional port mapping info.)
 static void propagateHierarchyPortTypes(ResolvedModule& module) {
     for (const auto& sub : module.hierarchyInstantiation) {
         for (const auto& [portName, subInput] : sub.inputs) {
@@ -220,18 +220,14 @@ static void propagateHierarchyPortTypes(ResolvedModule& module) {
     }
 }
 
-// Recursively process all submodule levels bottom-up, all using the flat top-level DFG.
-static void resolveFlopsRecursive(ResolvedModule& resolved, DFG& topGraph) {
-    for (auto& sub : resolved.hierarchyInstantiation)
-        resolveFlopsRecursive(sub, topGraph);
-    resolveFlopsForModule(resolved, topGraph);
-}
-
+// Each module resolves its flops using its own DFG (before DFG inlining).
+// This avoids name collisions: two submodules may have same-named flops (e.g., bit_cnt),
+// but each module's DFG is independent at this point.
 void resolveFlops(ResolvedModule& module) {
     if (!module.dfg) return;
-    // Recurse bottom-up so sub-module clock/reset types are tagged first
+    // Bottom-up: resolve submodules first so their clock/reset types are tagged first
     for (auto& sub : module.hierarchyInstantiation)
-        resolveFlopsRecursive(sub, *module.dfg);
+        resolveFlops(sub);
     resolveFlopsForModule(module, *module.dfg);
     // Propagate Clock/Reset types from submodule inputs to parent inputs
     propagateHierarchyPortTypes(module);

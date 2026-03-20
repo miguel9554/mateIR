@@ -54,10 +54,17 @@ std::vector<std::string> allElements(const ResolvedSignal& signal) {
     return current;
 }
 
+// Prefix a module-local name with the instance path for DFG node lookups.
+// Empty instance_path means top module — no prefix needed.
+std::string inDFG(const std::string& instance_path, const std::string& name) {
+    return instance_path.empty() ? name : instance_path + "." + name;
+}
+
 bool extract_reset(
     const DFGNode* dNodeDriver,
     const std::vector<asyncTrigger_t>& triggers,
     const std::string& flop_name,
+    const std::string& dfg_flop_name,
     asyncTrigger_t& reset,
     asyncTrigger_t& clock,
     int& reset_value,
@@ -102,7 +109,8 @@ bool extract_reset(
         has_reset = true;
     } else if (expectedResetAssign->op == DFGOp::INPUT) {
         // Check the assignment is the .q value (now an INPUT node after .q promotion)
-        if (expectedResetAssign->name != flop_name + ".q") {
+        // Use dfg_flop_name since the node name in the DFG carries the instance path prefix.
+        if (expectedResetAssign->name != dfg_flop_name + ".q") {
             throw CompilerError("Unsupported INPUT for reset MUX TRUE: " + expectedResetAssign->name, dNodeDriver->loc);
         }
         has_reset = false;
@@ -117,11 +125,12 @@ FlopInfo extractFlopClockAndReset(
     DFG& graph,
     ResolvedModule& resolved,
     const std::string& flop_name,
+    const std::string& dfg_flop_name,
     const FlopInfo& flopIn,
     DFGNode*& functionalLogic)
 {
     auto flop = flopIn;
-    const std::string dName = flop_name + ".d";
+    const std::string dName = dfg_flop_name + ".d";
     DFGNode* dNode = flopIn.d_node ? flopIn.d_node : graph.getOutputNode(dName);
     auto* dNodeDriver = dNode->in[0].node;
     const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
@@ -142,7 +151,7 @@ FlopInfo extractFlopClockAndReset(
         has_reset = false;
     } else if (triggers.size() == 2) {
         has_reset = extract_reset(
-            dNodeDriver, triggers, flopIn.name,
+            dNodeDriver, triggers, flop_name, dfg_flop_name,
             reset, clock, reset_value, functionalLogic);
     } else {
         throw CompilerError(std::format(
@@ -208,8 +217,9 @@ void check_logic_no_clock_reset(
 
 } // anonymous namespace
 
-// Forward declaration
-static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph);
+// Forward declarations
+static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const std::string& instance_path);
+static void resolveFlopsRecursive(ResolvedModule& module, DFG& topDFG, const std::string& instance_path);
 
 // Propagate Clock/Reset type from submodule inputs to parent inputs by name matching.
 static void propagateHierarchyPortTypes(ResolvedModule& module) {
@@ -230,20 +240,20 @@ static void propagateHierarchyPortTypes(ResolvedModule& module) {
     }
 }
 
-// Each module resolves its flops using its own DFG (before DFG inlining).
-// This avoids name collisions: two submodules may have same-named flops (e.g., bit_cnt),
-// but each module's DFG is independent at this point.
 void resolveFlops(ResolvedModule& module) {
     if (!module.dfg) return;
+    resolveFlopsRecursive(module, *module.dfg, "");
+}
+
+static void resolveFlopsRecursive(ResolvedModule& module, DFG& topDFG, const std::string& instance_path) {
     // Bottom-up: resolve submodules first so their clock/reset types are tagged first
     for (auto& sub : module.hierarchyInstantiation)
-        resolveFlops(sub);
-    resolveFlopsForModule(module, *module.dfg);
-    // Propagate Clock/Reset types from submodule inputs to parent inputs
+        resolveFlopsRecursive(sub, topDFG, inDFG(instance_path, sub.instance_name));
+    resolveFlopsForModule(module, topDFG, instance_path);
     propagateHierarchyPortTypes(module);
 }
 
-static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph) {
+static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const std::string& instance_path) {
     if (resolved.flops.empty()) {
         return;
     }
@@ -254,18 +264,18 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph) {
     for (auto& [outName, output] : resolved.outputs) {
         if (!resolved.flopsTriggers.contains(outName)) continue;
         if (output.type.unpacked_dims.empty()) {
-            std::string qName = outName + ".q";
+            std::string qName = inDFG(instance_path, outName) + ".q";
             DFGNode* qNode = graph.getInputNode(qName);
             if (qNode && output.dfg_node) {
                 output.dfg_node->in = {{qNode, 0}};
             }
         } else {
             for (const auto& suffix : generateIndexSuffixes(output.type.unpacked_dims)) {
-                std::string elemQ = outName + suffix + ".q";
+                std::string elemQ = inDFG(instance_path, outName + suffix) + ".q";
                 DFGNode* qNode = graph.getInputNode(elemQ);
                 // Individual element output nodes may also be in dfg outputs map
                 // or just exist as nodes in the flat DFG; use the map if available.
-                DFGNode* outNode = graph.getOutputNode(outName + suffix);
+                DFGNode* outNode = graph.getOutputNode(inDFG(instance_path, outName + suffix));
                 if (!outNode) {
                     // For submodule outputs not in flat DFG outputs map,
                     // there's no per-element dfg_node stored; skip.
@@ -282,15 +292,14 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph) {
     std::vector<FlopInfo> resolved_flops;
     for (const auto& flop : resolved.flops) {
         for (const auto& name : allElements(flop.type)) {
+            const std::string dfg_name = inDFG(instance_path, name);
             DFGNode* functional_logic;
             resolved_flops.push_back(
-                extractFlopClockAndReset(graph, resolved, name, flop, functional_logic));
+                extractFlopClockAndReset(graph, resolved, name, dfg_name, flop, functional_logic));
             // Set per-element d_node/q_node (the copy from flopIn may be null for vectorized)
             {
-                const std::string dname = name + ".d";
-                const std::string qname = name + ".q";
-                resolved_flops.back().d_node = graph.getOutputNode(dname);
-                resolved_flops.back().q_node = graph.getInputNode(qname);
+                resolved_flops.back().d_node = graph.getOutputNode(dfg_name + ".d");
+                resolved_flops.back().q_node = graph.getInputNode(dfg_name + ".q");
             }
             DFGNode* output = resolved_flops.back().d_node;
             const asyncTrigger_t clock = resolved_flops.back().clock;

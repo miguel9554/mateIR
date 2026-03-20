@@ -287,17 +287,20 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph) {
             const std::optional<asyncTrigger_t> reset = resolved_flops.back().reset;
 
             // Helper to find exactly one signal
-            auto find_unique_input = [&](const std::string& name) -> ResolvedSignal& {
-                auto it = resolved.inputs.find(name);
+            auto find_unique_input = [&](const std::string& sig_name, const char* role) -> ResolvedSignal& {
+                auto it = resolved.inputs.find(sig_name);
                 if (it == resolved.inputs.end())
-                    throw std::logic_error("No input found matching: " + name);
+                    throw CompilerError(std::format(
+                        "flop_resolve: flop '{}' in module '{}' references {} signal '{}' "
+                        "which is not an input port",
+                        name, resolved.name, role, sig_name));
                 return it->second;
             };
 
             // Set clock and reset types
-            find_unique_input(clock.name).type.kind = ResolvedTypeKind::Clock;
+            find_unique_input(clock.name, "clock").type.kind = ResolvedTypeKind::Clock;
             if (reset) {
-                find_unique_input(reset->name).type.kind = ResolvedTypeKind::Reset;
+                find_unique_input(reset->name, "reset").type.kind = ResolvedTypeKind::Reset;
             }
 
             // Connect functional logic to the flop's .d signal

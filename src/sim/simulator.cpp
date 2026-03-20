@@ -587,257 +587,6 @@ void Simulator::writeOutputFiles() {
     }
 }
 
-// ============================================================================
-// VCD tracing helpers
-// ============================================================================
-
-static unsigned int getWidth(const DFGNode* node) {
-    if (node->type.has_value() && node->type->width > 0)
-        return static_cast<unsigned int>(node->type->width);
-    return 64;
-}
-
-static void elaborateWithWidth(vcd_tracer::module& mod, vcd_tracer::value_base& var,
-                               std::string_view name, unsigned int width) {
-    auto original_add_fn = mod.get_add_fn();
-    auto override_fn = [original_add_fn, width](
-            std::string_view var_name, std::string_view var_type,
-            unsigned int /*bit_size*/, vcd_tracer::scope_fn::dumper_fn fn)
-            -> vcd_tracer::value_context {
-        return original_add_fn(var_name, var_type, width, fn);
-    };
-    var.elaborate(override_fn, name);
-}
-
-// ============================================================================
-// Hierarchical VCD setup — recurses over hierarchyInstantiation
-// ============================================================================
-
-// Add one VCD entry for a DFG node if the node is alive (still in flat DFG).
-// Appends the VCD value object to dest[node] (vector, supports multiple scopes per node).
-static void addVcdEntry(vcd_tracer::module& scope, const std::string& name,
-                        const DFGNode* node,
-                        const std::unordered_set<const DFGNode*>& alive,
-                        std::map<const DFGNode*, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>>& dest) {
-    if (!node || !alive.count(node)) return;
-
-    // Unpacked array: node->in[i] are the individual element nodes.
-    // Register each element separately as name[idx] using the Verilog dimension indices.
-    if (node->type.has_value() && !node->type->unpacked_dims.empty() && !node->in.empty()) {
-        const auto& dim = node->type->unpacked_dims[0];
-        for (size_t i = 0; i < node->in.size(); ++i) {
-            const DFGNode* elem = node->in[i].node;
-            if (!elem || !alive.count(elem)) continue;
-            int64_t idx = (dim.left <= dim.right)
-                ? dim.left + static_cast<int64_t>(i)
-                : dim.left - static_cast<int64_t>(i);
-            std::string elem_name = name + "[" + std::to_string(idx) + "]";
-            unsigned int w = getWidth(elem);
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(scope, *v, elem_name, w);
-            v->set_runtime_bit_size(w);
-            dest[elem].push_back(std::move(v));
-        }
-        return;
-    }
-
-    unsigned int w = getWidth(node);
-    auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-    elaborateWithWidth(scope, *v, name, w);
-    v->set_runtime_bit_size(w);
-    dest[node].push_back(std::move(v));
-}
-
-void Simulator::setupVcdHierForModule(const ResolvedModule& mod,
-                                      vcd_tracer::module& scope,
-                                      const std::unordered_set<const DFGNode*>& alive) {
-    if (!mod.parameters.empty() || !mod.localparams.empty()) {
-        vcd_tracer::module params_mod(scope, "params");
-        for (const auto* params : {&mod.parameters, &mod.localparams}) {
-            for (const auto& param : *params) {
-                unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
-                auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-                elaborateWithWidth(params_mod, *v, param.name, w);
-                v->set_runtime_bit_size(w);
-                v->set(static_cast<int64_t>(param.value));
-                vcd_params_.push_back(std::move(v));
-            }
-        }
-    }
-
-    vcd_tracer::module inputs_mod(scope, "inputs");
-    vcd_tracer::module signals_mod(scope, "signals");
-    vcd_tracer::module flops_mod(scope, "flops");
-    vcd_tracer::module outputs_mod(scope, "outputs");
-
-    for (const auto& [name, sig] : mod.inputs) {
-        if (name.ends_with(".q")) continue;  // shown in flops section
-        unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(inputs_mod, *v, name, w);
-        v->set_runtime_bit_size(w);
-        if (sig.type.kind == ResolvedTypeKind::Clock ||
-            sig.type.kind == ResolvedTypeKind::Reset) {
-            root_->vcd_async_values[name].push_back(std::move(v));
-        } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
-            root_->vcd_values[sig.dfg_node].push_back(std::move(v));
-        }
-    }
-
-    for (const auto& [name, sig] : mod.signals) {
-        addVcdEntry(signals_mod, name, sig.dfg_node, alive, root_->vcd_values);
-    }
-
-    for (const auto& flop : mod.flops) {
-        if (!flop.q_node || !alive.count(flop.q_node)) continue;
-        unsigned int w = getWidth(flop.q_node);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(flops_mod, *v, flop.name, w);
-        v->set_runtime_bit_size(w);
-        root_->vcd_values[flop.q_node].push_back(std::move(v));
-    }
-
-    for (const auto& [name, sig] : mod.outputs) {
-        if (name.ends_with(".d")) continue;  // flop inputs, not module outputs
-        addVcdEntry(outputs_mod, name, sig.dfg_node, alive, root_->vcd_values);
-    }
-
-    for (const auto& sub : mod.hierarchyInstantiation) {
-        const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
-        vcd_tracer::module childScope(scope, child_name);
-        setupVcdHierForModule(sub, childScope, alive);
-    }
-}
-
-// ============================================================================
-// Flat VCD setup — recurses over hierarchyInstantiation
-// ============================================================================
-
-void Simulator::setupVcdFlatForModule(const ResolvedModule& mod,
-                                      vcd_tracer::module& scope,
-                                      const std::unordered_set<const DFGNode*>& alive) {
-    for (const auto* params : {&mod.parameters, &mod.localparams}) {
-        for (const auto& param : *params) {
-            unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(scope, *v, param.name, w);
-            v->set_runtime_bit_size(w);
-            v->set(static_cast<int64_t>(param.value));
-            vcd_flat_params_.push_back(std::move(v));
-        }
-    }
-
-    for (const auto& [name, sig] : mod.inputs) {
-        if (name.ends_with(".q")) continue;
-        unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(scope, *v, name, w);
-        v->set_runtime_bit_size(w);
-        if (sig.type.kind == ResolvedTypeKind::Clock ||
-            sig.type.kind == ResolvedTypeKind::Reset) {
-            root_->vcd_flat_async_values[name].push_back(std::move(v));
-        } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
-            root_->vcd_flat_values[sig.dfg_node].push_back(std::move(v));
-        }
-    }
-
-    for (const auto& [name, sig] : mod.signals) {
-        if (name.ends_with(".q") || name.ends_with(".d")) continue;
-        addVcdEntry(scope, name, sig.dfg_node, alive, root_->vcd_flat_values);
-    }
-
-    for (const auto& flop : mod.flops) {
-        if (!flop.q_node || !alive.count(flop.q_node)) continue;
-        unsigned int w = getWidth(flop.q_node);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        std::string vcd_name = flop.name;
-        if (vcd_name.ends_with(".q")) vcd_name.resize(vcd_name.size() - 2);
-        elaborateWithWidth(scope, *v, vcd_name, w);
-        v->set_runtime_bit_size(w);
-        root_->vcd_flat_values[flop.q_node].push_back(std::move(v));
-    }
-
-    for (const auto& [name, sig] : mod.outputs) {
-        if (name.ends_with(".d")) continue;
-        addVcdEntry(scope, name, sig.dfg_node, alive, root_->vcd_flat_values);
-    }
-
-    for (const auto& sub : mod.hierarchyInstantiation) {
-        const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
-        vcd_tracer::module childScope(scope, child_name);
-        setupVcdFlatForModule(sub, childScope, alive);
-    }
-}
-
-// ============================================================================
-// Update VCD values from the single flat root instance
-// ============================================================================
-
-void Simulator::updateVcdForRoot(bool flat) {
-    if (!flat) {
-        for (auto& [node, vcd_vals] : root_->vcd_values) {
-            auto it = root_->values.find(node);
-            if (it != root_->values.end())
-                for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
-        }
-        for (auto& [name, vcd_vals] : root_->vcd_async_values) {
-            auto it = root_->async_values.find(name);
-            if (it != root_->async_values.end())
-                for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
-        }
-    } else {
-        for (auto& [node, vcd_vals] : root_->vcd_flat_values) {
-            auto it = root_->values.find(node);
-            if (it != root_->values.end())
-                for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
-        }
-        for (auto& [name, vcd_vals] : root_->vcd_flat_async_values) {
-            auto it = root_->async_values.find(name);
-            if (it != root_->async_values.end())
-                for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
-        }
-    }
-}
-
-// ============================================================================
-// VCD setup (top-level)
-// ============================================================================
-
-void Simulator::setupVcd(std::ofstream& vcd_out) {
-    vcd_top_ = std::make_unique<vcd_tracer::top>(module_.name);
-
-    // Build alive set: nodes still in the flat DFG after DCE
-    std::unordered_set<const DFGNode*> alive;
-    for (const auto& node : module_.dfg->nodes) alive.insert(node.get());
-
-    // Populate hierarchical VCD structure (recurses into hierarchyInstantiation)
-    setupVcdHierForModule(module_, vcd_top_->root, alive);
-
-    vcd_top_->finalize_header(vcd_out, std::chrono::system_clock::from_time_t(0));
-}
-
-void Simulator::setupVcdFlat(std::ofstream& vcd_out) {
-    vcd_flat_top_ = std::make_unique<vcd_tracer::top>(module_.name);
-
-    // Build alive set
-    std::unordered_set<const DFGNode*> alive;
-    for (const auto& node : module_.dfg->nodes) alive.insert(node.get());
-
-    // Populate flat VCD structure (recurses into hierarchyInstantiation)
-    setupVcdFlatForModule(module_, vcd_flat_top_->root, alive);
-
-    vcd_flat_top_->finalize_header(vcd_out, std::chrono::system_clock::from_time_t(0));
-}
-
-void Simulator::updateVcdValuesFlat(std::ofstream& vcd_out, int64_t time_ns) {
-    vcd_flat_top_->time_update_abs(vcd_out, std::chrono::nanoseconds{time_ns});
-    updateVcdForRoot(/*flat=*/true);
-}
-
-void Simulator::updateVcdValues(std::ofstream& vcd_out, int64_t time_ns) {
-    vcd_top_->time_update_abs(vcd_out, std::chrono::nanoseconds{time_ns});
-    updateVcdForRoot(/*flat=*/false);
-}
 
 // ============================================================================
 // Constructor
@@ -865,23 +614,7 @@ void Simulator::run() {
     std::cout << "Simulator: starting simulation for module '" << module_.name << "'" << std::endl;
 
     // === VCD Setup ===
-    std::filesystem::create_directories(config_.output_dir);
-
-    std::string vcd_path = config_.output_dir + "/" + module_.name + ".vcd";
-    std::ofstream vcd_out(vcd_path);
-    if (!vcd_out.is_open()) {
-        throw CompilerError(std::format(
-            "Simulator: cannot open VCD output file '{}'", vcd_path));
-    }
-    setupVcd(vcd_out);
-
-    std::string vcd_flat_path = config_.output_dir + "/" + module_.name + "-flatten.vcd";
-    std::ofstream vcd_flat_out(vcd_flat_path);
-    if (!vcd_flat_out.is_open()) {
-        throw CompilerError(std::format(
-            "Simulator: cannot open flat VCD output file '{}'", vcd_flat_path));
-    }
-    setupVcdFlat(vcd_flat_out);
+    vcd_ = std::make_unique<VcdWriter>(module_, config_.output_dir);
 
     // === Initialization (time 0) ===
 
@@ -945,8 +678,7 @@ void Simulator::run() {
     root_->evaluateCombinational();
 
     // VCD: trace initial state at time 0
-    updateVcdValues(vcd_out, 0);
-    updateVcdValuesFlat(vcd_flat_out, 0);
+    vcd_->update(*root_, 0);
 
     std::cout << "Simulator: initialization complete, processing "
               << timeline_.size() << " async events" << std::endl;
@@ -1006,8 +738,7 @@ void Simulator::run() {
         root_->evaluateCombinational();
 
         // VCD: trace all values at every time step
-        updateVcdValues(vcd_out, batch_time);
-        updateVcdValuesFlat(vcd_flat_out, batch_time);
+        vcd_->update(*root_, batch_time);
 
         // Record output values only on active clock edges (for text output)
         if (!active_edge_clocks.empty()) {
@@ -1015,13 +746,7 @@ void Simulator::run() {
         }
     }
 
-    // Flush last pending VCD values
-    if (!timeline_.empty()) {
-        vcd_top_->time_update_abs(vcd_out, std::chrono::nanoseconds{timeline_.back().time});
-        vcd_flat_top_->time_update_abs(vcd_flat_out, std::chrono::nanoseconds{timeline_.back().time});
-    }
-    vcd_out.close();
-    vcd_flat_out.close();
+    vcd_->close(timeline_.empty() ? 0 : timeline_.back().time);
 
     writeOutputFiles();
 
@@ -1032,8 +757,8 @@ void Simulator::run() {
         std::cout << "Simulator: flops-initial seed = " << rng_seed << std::endl;
     }
     std::cout << "Simulator: output written to '" << config_.output_dir << "/'" << std::endl;
-    std::cout << "Simulator: VCD trace written to '" << vcd_path << "'" << std::endl;
-    std::cout << "Simulator: flat VCD trace written to '" << vcd_flat_path << "'" << std::endl;
+    std::cout << "Simulator: VCD trace written to '" << vcd_->hier_path() << "'" << std::endl;
+    std::cout << "Simulator: flat VCD trace written to '" << vcd_->flat_path() << "'" << std::endl;
 }
 
 } // namespace custom_hdl

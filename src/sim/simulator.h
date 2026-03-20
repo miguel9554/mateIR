@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ir/resolved.h"
-#include "vcd_tracer.hpp"
+#include "sim/vcd_writer.h"
 
 #include <map>
 #include <memory>
@@ -57,14 +57,6 @@ struct ModuleInstance {
     std::map<std::string, std::vector<const FlopInfo*>> flops_by_reset;
     std::set<std::string> async_input_names;  // input ports used as clock/reset
 
-    // VCD tracking: sync signals keyed by DFG node, async signals keyed by name.
-    // Vectors because the same DFG node may appear in multiple scopes (e.g. a top-level
-    // input and all submodule inputs that were inlined to point to the same driver node).
-    std::map<const DFGNode*, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_values;
-    std::map<const DFGNode*, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_flat_values;
-    std::map<std::string, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_async_values;
-    std::map<std::string, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> vcd_flat_async_values;
-
     ModuleInstance(const std::string& name, const ResolvedModule& mod);
 
     // Construction helpers
@@ -113,11 +105,7 @@ private:
     std::map<std::string, size_t> sync_input_pos_;
     std::map<std::string, std::vector<int64_t>> recorded_values_;
 
-    // VCD (top-level files, scopes built recursively from root_)
-    std::unique_ptr<vcd_tracer::top> vcd_top_;
-    std::unique_ptr<vcd_tracer::top> vcd_flat_top_;
-    std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_params_;
-    std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>> vcd_flat_params_;
+    std::unique_ptr<VcdWriter> vcd_;
 
     // Testbench methods
     void buildTimeline();
@@ -125,15 +113,6 @@ private:
     void advanceSyncInputs(const std::set<std::string>& active_clocks);
     void recordOutputs();
     void writeOutputFiles();
-    void setupVcd(std::ofstream& vcd_out);
-    void setupVcdFlat(std::ofstream& vcd_out);
-    void setupVcdHierForModule(const ResolvedModule& mod, vcd_tracer::module& scope,
-                               const std::unordered_set<const DFGNode*>& alive);
-    void setupVcdFlatForModule(const ResolvedModule& mod, vcd_tracer::module& scope,
-                               const std::unordered_set<const DFGNode*>& alive);
-    void updateVcdValues(std::ofstream& vcd_out, int64_t time_ns);
-    void updateVcdValuesFlat(std::ofstream& vcd_out, int64_t time_ns);
-    void updateVcdForRoot(bool flat);
 };
 
 } // namespace custom_hdl

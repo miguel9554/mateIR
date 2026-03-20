@@ -23,7 +23,9 @@ sim: $(BINARY)
 
 # Debug targets
 debug-configure:
-	cmake -B build -DCMAKE_BUILD_TYPE=Debug
+	@if ! grep -q 'CMAKE_BUILD_TYPE:STRING=Debug' build/CMakeCache.txt 2>/dev/null; then \
+		cmake -B build -DCMAKE_BUILD_TYPE=Debug; \
+	fi
 
 debug-build: debug-configure
 	cmake --build build -j$(shell nproc)

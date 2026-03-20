@@ -11,18 +11,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -pedantic)
 endif()
 
-# Check if slang submodule is initialized
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/slang/CMakeLists.txt")
+# Find pre-built slang from our local install
+set(SLANG_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/slang-install")
+if(NOT EXISTS "${SLANG_INSTALL_DIR}/lib/cmake/slang/slangConfig.cmake")
     message(FATAL_ERROR
-        "Slang submodule not found. Please run:\n"
-        "  git submodule update --init --recursive"
+        "slang not found. Please build it first:\n"
+        "  bash scripts/build_slang.sh"
     )
 endif()
-
-# Add slang as a subdirectory
-# This builds slang as part of your project
-message(STATUS "Adding slang from external/slang")
-add_subdirectory(external/slang)
+list(APPEND CMAKE_PREFIX_PATH "${SLANG_INSTALL_DIR}")
+find_package(slang REQUIRED CONFIG)
 
 # Check if yaml-cpp submodule is initialized
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/yaml-cpp/CMakeLists.txt")
@@ -53,17 +51,13 @@ endif()
 
 # Link against slang
 target_link_libraries(custom_hdl_compiler PRIVATE
-    slang_slang
-    boost_unordered
+    slang::slang
     yaml-cpp
 )
 
 # Include directories
 target_include_directories(custom_hdl_compiler PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/slang/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/slang/external
-    ${CMAKE_CURRENT_BINARY_DIR}/external/slang/source
     ${CMAKE_CURRENT_SOURCE_DIR}/external/yaml-cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-vcd-tracer/src
 )

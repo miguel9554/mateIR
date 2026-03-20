@@ -217,9 +217,15 @@ static void propagateHierarchyPortTypes(ResolvedModule& module) {
         for (const auto& [portName, subInput] : sub.inputs) {
             if (subInput.type.kind != ResolvedTypeKind::Clock &&
                 subInput.type.kind != ResolvedTypeKind::Reset) continue;
-            if (auto it = module.inputs.find(portName); it != module.inputs.end()) {
-                it->second.type.kind = subInput.type.kind;
+            const char* role = subInput.type.kind == ResolvedTypeKind::Clock ? "clock" : "reset";
+            auto it = module.inputs.find(portName);
+            if (it == module.inputs.end()) {
+                throw CompilerError(std::format(
+                    "module '{}': submodule '{}' (instance '{}') has {} port '{}' "
+                    "but no input with that name exists in the parent module",
+                    module.name, sub.name, sub.instance_name, role, portName));
             }
+            it->second.type.kind = subInput.type.kind;
         }
     }
 }

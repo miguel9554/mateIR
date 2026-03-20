@@ -217,14 +217,19 @@ static ScopeResult compare_scope_signals(
 // Recursive hierarchy walk
 // ============================================================================
 
+struct ScopeSummary {
+    std::string scope_path;
+    std::vector<std::string> passed_signals;
+    std::vector<std::string> failed_signals;  // value diffs or missing
+};
+
 struct GlobalStats {
     int total_match = 0;
     int total_diff  = 0;
     int scopes_compared = 0;
     int scopes_failed   = 0;
     std::vector<std::string> failed_scopes;
-    // scope_path -> list of failed signal names (value diffs or missing)
-    std::vector<std::pair<std::string, std::vector<std::string>>> failed_signals_by_scope;
+    std::vector<ScopeSummary> scopes_summary;  // all compared scopes, ordered by traversal
 };
 
 static void compare_scopes_recursive(
@@ -300,15 +305,25 @@ static void compare_scopes_recursive(
     stats.total_diff  += result.total_diff;
     if (!result.matched_signals.empty() || result.signal_set_mismatch) {
         stats.scopes_compared++;
+
+        ScopeSummary summary;
+        summary.scope_path = scope_path;
+
+        // Passed = matched and no diffs
+        for (auto &n : result.matched_signals) {
+            bool failed = false;
+            for (auto &d : result.signals_with_diffs)
+                if (d == n) { failed = true; break; }
+            if (!failed) summary.passed_signals.push_back(n);
+        }
+        for (auto &n : result.only_in_1) summary.failed_signals.push_back("(missing in f2) " + n);
+        for (auto &n : result.only_in_2) summary.failed_signals.push_back("(missing in f1) " + n);
+        for (auto &n : result.signals_with_diffs) summary.failed_signals.push_back(n);
+        stats.scopes_summary.push_back(std::move(summary));
+
         if (scope_failed) {
             stats.scopes_failed++;
             stats.failed_scopes.push_back(scope_path);
-
-            std::vector<std::string> failed_names;
-            for (auto &n : result.only_in_1) failed_names.push_back("(missing in f2) " + n);
-            for (auto &n : result.only_in_2) failed_names.push_back("(missing in f1) " + n);
-            for (auto &n : result.signals_with_diffs) failed_names.push_back(n);
-            stats.failed_signals_by_scope.emplace_back(scope_path, std::move(failed_names));
         }
     }
 
@@ -412,12 +427,38 @@ int main(int argc, char *argv[]) {
                 stats.total_match + stats.total_diff,
                 stats.total_match, stats.total_diff);
 
-    if (!stats.failed_signals_by_scope.empty()) {
-        std::printf("\nFailed signals by scope:\n");
-        for (auto &[scope, signals] : stats.failed_signals_by_scope) {
-            std::printf("  \033[1;31m%s\033[0m\n", scope.c_str());
-            for (auto &sig : signals)
-                std::printf("    \033[31m%s\033[0m\n", sig.c_str());
+    // Summary: signals by scope (passed + failed)
+    if (!stats.scopes_summary.empty()) {
+        std::printf("\nSignals by scope:\n");
+        for (auto &s : stats.scopes_summary) {
+            std::printf("  %s\n", s.scope_path.c_str());
+            for (auto &sig : s.passed_signals)
+                std::printf("    \033[32mpass\033[0m  %s\n", sig.c_str());
+            for (auto &sig : s.failed_signals)
+                std::printf("    \033[31mFAIL\033[0m  %s\n", sig.c_str());
+        }
+    }
+
+    // Table: per-hierarchy passed/failed counts
+    {
+        // Compute column widths
+        size_t max_scope = std::strlen("Hierarchy");
+        for (auto &s : stats.scopes_summary)
+            if (s.scope_path.size() > max_scope) max_scope = s.scope_path.size();
+
+        std::printf("\n%-*s  %6s  %6s  %s\n",
+                    (int)max_scope, "Hierarchy", "Passed", "Failed", "% Failed");
+        std::printf("%s  %6s  %6s  %s\n",
+                    std::string(max_scope, '-').c_str(), "------", "------", "--------");
+        for (auto &s : stats.scopes_summary) {
+            int passed = (int)s.passed_signals.size();
+            int failed = (int)s.failed_signals.size();
+            int total  = passed + failed;
+            double pct = total > 0 ? 100.0 * failed / total : 0.0;
+            const char *color = failed > 0 ? "\033[31m" : "\033[32m";
+            std::printf("%s%-*s\033[0m  %6d  %6d  %s%.1f%%\033[0m\n",
+                        color, (int)max_scope, s.scope_path.c_str(),
+                        passed, failed, color, pct);
         }
     }
 

@@ -1,4 +1,4 @@
-.PHONY: simulate clean svg
+.PHONY: simulate gdb clean svg
 
 ROOT_DIR = ../..
 PROJECT_ROOT = $(ROOT_DIR)/../..
@@ -22,6 +22,15 @@ DEBUG_NODES_ARG = $(if $(DEBUG_NODES),--debug-nodes $(DEBUG_NODES),)
 simulate:
 	$(MAKE) -C $(PROJECT_ROOT) build
 	$(SIMULATOR) --simulate --top $(MODULE_NAME) \
+		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
+		--domains $(DOMAINS_YAMLS) \
+		--flops-initial zeros \
+		$(DEBUG_NODES_ARG) \
+		$(EXTRA_ARGS) $(RTL_SRCS)
+
+gdb:
+	$(MAKE) -C $(PROJECT_ROOT) debug-build
+	gdb --args $(SIMULATOR) --simulate --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
 		--domains $(DOMAINS_YAMLS) \
 		--flops-initial zeros \

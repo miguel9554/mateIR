@@ -291,7 +291,7 @@ int main(int argc, char** argv) {
     auto modules = buildIR(*tree);
 
     // Build parameter context for top module if sim config provides parameters
-    auto resolvedModules = [&]() {
+    auto topModule = [&]() {
         if (simConfig && !simConfig->parameters.empty()) {
             ParameterContext topParams;
             for (const auto& [name, value] : simConfig->parameters) {
@@ -299,6 +299,11 @@ int main(int argc, char** argv) {
             }
             return resolveModules(modules, tree->sourceManager(),
                                   simConfig->top_module, topParams);
+        }
+        if (simConfig) {
+            ParameterContext emptyCtx;
+            return resolveModules(modules, tree->sourceManager(),
+                                  simConfig->top_module, emptyCtx);
         }
         return resolveModules(modules, tree->sourceManager());
     }();
@@ -349,8 +354,7 @@ int main(int argc, char** argv) {
                 if (found) foundSpecs.insert(i);
             }
         };
-        for (const auto& module : resolvedModules)
-            validateDebugSpecs(module, module.name);
+        validateDebugSpecs(topModule, topModule.name);
 
         for (size_t i = 0; i < simConfig->debug_dfg_nodes.size(); i++) {
             if (!foundSpecs.contains(i))
@@ -485,18 +489,14 @@ int main(int argc, char** argv) {
         validateNoCombLoops(module);
     };
 
-    for (auto& module : resolvedModules) {
-        runPipeline(module, module.name);
-    }
+    runPipeline(topModule, topModule.name);
 
     std::cout << "----------------------------------------" << std::endl;
     std::cout << "\nResolved IR:" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    for (const auto& module : resolvedModules) {
-        module.print();
-        std::cout << std::endl;
-    }
+    topModule.print();
+    std::cout << std::endl;
 
     // Run simulation if requested
     if (simConfig) {
@@ -504,21 +504,7 @@ int main(int argc, char** argv) {
         std::cout << "Running simulation..." << std::endl;
         std::cout << "========================================" << std::endl;
 
-        // Find the top module
-        const ResolvedModule* topModule = nullptr;
-        for (const auto& mod : resolvedModules) {
-            if (mod.name == simConfig->top_module) {
-                topModule = &mod;
-                break;
-            }
-        }
-        if (!topModule) {
-            throw CompilerError(std::format(
-                "Simulator: top module '{}' not found in resolved modules",
-                simConfig->top_module));
-        }
-
-        Simulator sim(*topModule, *simConfig);
+        Simulator sim(topModule, *simConfig);
         sim.run();
     }
 

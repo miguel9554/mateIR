@@ -1953,27 +1953,26 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     return resolved;
 }
 
-std::vector<ResolvedModule> resolveModules(
+ResolvedModule resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const slang::SourceManager& sourceManager) {
 
-    // Build lookup table so resolveModule can find submodules by name
+    if (modules.size() != 1) {
+        throw CompilerError(std::format(
+            "Multiple modules found ({}); use --top to specify the top module",
+            modules.size()));
+    }
+
     ModuleLookup moduleLookup;
     for (const auto& module : modules) {
         moduleLookup[module->name] = module.get();
     }
 
-    std::vector<ResolvedModule> resolved;
-    ParameterContext emptyCtx;  // Use default/empty context for now
-
-    for (const auto& module : modules) {
-        resolved.push_back(resolveModule(*module, emptyCtx, moduleLookup, sourceManager));
-    }
-
-    return resolved;
+    ParameterContext emptyCtx;
+    return resolveModule(*modules[0], emptyCtx, moduleLookup, sourceManager);
 }
 
-std::vector<ResolvedModule> resolveModules(
+ResolvedModule resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const slang::SourceManager& sourceManager,
     const std::string& topModuleName,
@@ -1984,15 +1983,13 @@ std::vector<ResolvedModule> resolveModules(
         moduleLookup[module->name] = module.get();
     }
 
-    std::vector<ResolvedModule> resolved;
-    ParameterContext emptyCtx;
-
-    for (const auto& module : modules) {
-        const auto& ctx = (module->name == topModuleName) ? topParams : emptyCtx;
-        resolved.push_back(resolveModule(*module, ctx, moduleLookup, sourceManager));
+    auto it = moduleLookup.find(topModuleName);
+    if (it == moduleLookup.end()) {
+        throw CompilerError(std::format(
+            "Top module '{}' not found in input files", topModuleName));
     }
 
-    return resolved;
+    return resolveModule(*it->second, topParams, moduleLookup, sourceManager);
 }
 
 } // namespace custom_hdl

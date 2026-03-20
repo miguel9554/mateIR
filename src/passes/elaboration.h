@@ -24,13 +24,13 @@ ResolvedModule resolveModule(const UnresolvedModule& module, const ParameterCont
                              const ModuleLookup& moduleLookup,
                              const slang::SourceManager& sourceManager);
 
-// Resolve all modules (using default parameter values)
-std::vector<ResolvedModule> resolveModules(
+// Resolve the single module in the input (errors if there are multiple — use --top)
+ResolvedModule resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const slang::SourceManager& sourceManager);
 
-// Resolve all modules, applying parameter overrides to a specific top module
-std::vector<ResolvedModule> resolveModules(
+// Resolve only the named top module, embedding submodules in its hierarchy
+ResolvedModule resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const slang::SourceManager& sourceManager,
     const std::string& topModuleName,

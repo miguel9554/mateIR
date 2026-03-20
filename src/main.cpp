@@ -444,23 +444,21 @@ int main(int argc, char** argv) {
             };
 
         runPass(0, "elaboration", []{});
-        // Resolve flops before inlining so each module uses its own DFG.
-        // This avoids name collisions when two submodules have same-named flops.
-        runPass(1, "flop_resolve", [&]{ resolveFlops(module); });
+        // Inline all submodule DFGs into this module's flat DFG
+        runPass(1, "dfg_inline", [&]{ inlineDFGs(module); });
+        runPass(2, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
+        runPass(3, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(4, "type_propagation", [&]{ propagateTypes(*module.dfg); });
+        runPass(5, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(6, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(7, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(8, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(9, "flop_resolve", [&]{ resolveFlops(module); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/01_flop_resolve_flops.txt", dir));
+            std::ofstream f(std::format("{}/09_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        // Inline all submodule DFGs into this module's flat DFG
-        runPass(2, "dfg_inline", [&]{ inlineDFGs(module); });
-        runPass(3, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
-        runPass(4, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(5, "type_propagation", [&]{ propagateTypes(*module.dfg); });
-        runPass(6, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(7, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(8, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(9, "constant_fold", [&]{ constantFold(*module.dfg); });
         runPass(10, "dce", [&]{ eliminateDeadCode(*module.dfg); });
         module.dfg->validateNoOrphans();
         runPass(11, "io_domains_set", [&]{

@@ -63,9 +63,11 @@ bool extract_reset(
     int& reset_value,
     DFGNode*& functionalLogic)
 {
-    // Check if MUX, if not, no reset
+    // With 2 triggers the driver must be a reset MUX — anything else is a compiler bug.
     if (dNodeDriver->op != DFGOp::MUX) {
-        return false;
+        throw CompilerError(std::format(
+            "flop '{}' has 2 triggers but its .d driver is not a MUX (op={})",
+            flop_name, to_string(dNodeDriver->op)), dNodeDriver->loc);
     }
 
     auto* mux_sel = dNodeDriver->in[0].node;
@@ -84,7 +86,9 @@ bool extract_reset(
         reset = triggers[1];
         clock = triggers[0];
     } else {
-        return false;
+        throw CompilerError(std::format(
+            "flop '{}' has 2 triggers but MUX selector '{}' matches neither trigger ('{}', '{}')",
+            flop_name, reset_name, triggers[0].name, triggers[1].name), dNodeDriver->loc);
     }
 
     // Assign the expected reset and functional branches

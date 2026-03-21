@@ -69,7 +69,8 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
 // ============================================================================
 
 void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
-                          const std::unordered_set<const DFGNode*>& alive) {
+                          const std::unordered_set<const DFGNode*>& alive,
+                          const NameMap& translation) {
     if (!mod.parameters.empty() || !mod.localparams.empty()) {
         vcd_tracer::module params_mod(scope, "params");
         for (const auto* params : {&mod.parameters, &mod.localparams}) {
@@ -97,7 +98,9 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
         v->set_runtime_bit_size(w);
         if (sig.type.kind == ResolvedTypeKind::Clock ||
             sig.type.kind == ResolvedTypeKind::Reset) {
-            async_values_[name].push_back(std::move(v));
+            auto it = translation.find(name);
+            const std::string& key = it != translation.end() ? it->second : name;
+            async_values_[key].push_back(std::move(v));
         } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
             values_[sig.dfg_node].push_back(std::move(v));
         }
@@ -124,7 +127,12 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
     for (const auto& sub : mod.hierarchyInstantiation) {
         const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
         vcd_tracer::module childScope(scope, child_name);
-        setupHier(sub, childScope, alive);
+        NameMap composed;
+        for (const auto& [port, parent_sig] : sub.asyncPortConnections) {
+            auto it = translation.find(parent_sig);
+            composed[port] = it != translation.end() ? it->second : parent_sig;
+        }
+        setupHier(sub, childScope, alive, composed);
     }
 }
 
@@ -133,7 +141,8 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
 // ============================================================================
 
 void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
-                          const std::unordered_set<const DFGNode*>& alive) {
+                          const std::unordered_set<const DFGNode*>& alive,
+                          const NameMap& translation) {
     for (const auto* params : {&mod.parameters, &mod.localparams}) {
         for (const auto& param : *params) {
             unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
@@ -153,7 +162,9 @@ void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
         v->set_runtime_bit_size(w);
         if (sig.type.kind == ResolvedTypeKind::Clock ||
             sig.type.kind == ResolvedTypeKind::Reset) {
-            async_values_[name].push_back(std::move(v));
+            auto it = translation.find(name);
+            const std::string& key = it != translation.end() ? it->second : name;
+            async_values_[key].push_back(std::move(v));
         } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
             values_[sig.dfg_node].push_back(std::move(v));
         }
@@ -183,7 +194,12 @@ void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
     for (const auto& sub : mod.hierarchyInstantiation) {
         const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
         vcd_tracer::module childScope(scope, child_name);
-        setupFlat(sub, childScope, alive);
+        NameMap composed;
+        for (const auto& [port, parent_sig] : sub.asyncPortConnections) {
+            auto it = translation.find(parent_sig);
+            composed[port] = it != translation.end() ? it->second : parent_sig;
+        }
+        setupFlat(sub, childScope, alive, composed);
     }
 }
 

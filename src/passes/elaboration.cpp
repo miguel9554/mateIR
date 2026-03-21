@@ -1725,7 +1725,7 @@ void resolveNamedPortConnection(
         auto* driver = graph.lookupSignal(name);
         moduleNode->in.push_back(driver);
         moduleNode->input_names.push_back(portName);
-        resolvedSub.input_port_connections[portName] = name;
+        resolvedSub.asyncPortConnections[portName] = name;
     } else if (subOutputNames.contains(portName)) {
         if (!named.expr) {
             throw CompilerError(
@@ -1753,7 +1753,7 @@ void resolveWildcardPortConnection(
         if (driver) {
             moduleNode->in.push_back(driver);
             moduleNode->input_names.push_back(name);
-            resolvedSub.input_port_connections[name] = name;
+            resolvedSub.asyncPortConnections[name] = name;
         }
     }
     size_t oi = 0;

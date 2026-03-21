@@ -46,10 +46,14 @@ private:
     std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>> params_;
 
     // Recursive setup helpers — both push into values_ / async_values_ / params_.
+    // translation maps this module's async port names -> top-level signal names.
+    using NameMap = std::map<std::string, std::string>;
     void setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
-                   const std::unordered_set<const DFGNode*>& alive);
+                   const std::unordered_set<const DFGNode*>& alive,
+                   const NameMap& translation = {});
     void setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
-                   const std::unordered_set<const DFGNode*>& alive);
+                   const std::unordered_set<const DFGNode*>& alive,
+                   const NameMap& translation = {});
 
     // Shared helper: adds a VCD entry for node into values_.
     void addEntry(vcd_tracer::module& scope, const std::string& name,

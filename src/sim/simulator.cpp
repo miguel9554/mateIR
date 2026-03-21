@@ -106,25 +106,43 @@ void ModuleInstance::buildTopology() {
 void ModuleInstance::buildFlopMaps() {
     // Collect flops from the entire hierarchy (all submodules, bottom-up).
     // After DFG inlining, d_node/q_node pointers are valid in the flat top DFG.
-    std::function<void(const ResolvedModule&)> collect = [&](const ResolvedModule& mod) {
+    //
+    // translation: maps this module's async port names -> top-level signal names.
+    // At the top level it is empty (identity). For each submodule it is composed
+    // from the parent's translation and the submodule's asyncPortConnections.
+    using NameMap = std::map<std::string, std::string>;
+    auto translate = [](const std::string& name, const NameMap& map) -> const std::string& {
+        auto it = map.find(name);
+        return it != map.end() ? it->second : name;
+    };
+
+    std::function<void(const ResolvedModule&, const NameMap&)> collect =
+        [&](const ResolvedModule& mod, const NameMap& translation) {
         for (const auto& flop : mod.flops) {
             if (flop.q_node) {
                 flop_q_nodes[flop.q_node] = &flop;
             }
             if (!flop.clock.name.empty()) {
-                flops_by_clock[flop.clock.name].push_back(&flop);
-                async_input_names.insert(flop.clock.name);
+                const std::string& clk = translate(flop.clock.name, translation);
+                flops_by_clock[clk].push_back(&flop);
+                async_input_names.insert(clk);
             }
             if (flop.reset.has_value()) {
-                flops_by_reset[flop.reset->name].push_back(&flop);
-                async_input_names.insert(flop.reset->name);
+                const std::string& rst = translate(flop.reset->name, translation);
+                flops_by_reset[rst].push_back(&flop);
+                async_input_names.insert(rst);
             }
         }
         for (const auto& sub : mod.hierarchyInstantiation) {
-            collect(sub);
+            // Compose: sub port name -> top-level name
+            NameMap composed;
+            for (const auto& [port, parent_sig] : sub.asyncPortConnections) {
+                composed[port] = translate(parent_sig, translation);
+            }
+            collect(sub, composed);
         }
     };
-    collect(module_def);
+    collect(module_def, {});
 }
 
 // ============================================================================

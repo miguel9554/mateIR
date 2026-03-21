@@ -227,8 +227,8 @@ static void propagateHierarchyPortTypes(ResolvedModule& module) {
         for (const auto& [portName, subInput] : sub.inputs) {
             if (subInput.type.kind != ResolvedTypeKind::Clock &&
                 subInput.type.kind != ResolvedTypeKind::Reset) continue;
-            auto conn_it = sub.input_port_connections.find(portName);
-            if (conn_it == sub.input_port_connections.end()) continue;
+            auto conn_it = sub.asyncPortConnections.find(portName);
+            if (conn_it == sub.asyncPortConnections.end()) continue;
             auto it = module.inputs.find(conn_it->second);
             if (it == module.inputs.end()) continue;
             it->second.type.kind = subInput.type.kind;
@@ -351,6 +351,18 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
     }
     for (const auto& [name, node] : graph.getOutputsMap()) {
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
+    }
+
+    // Trim asyncPortConnections to only Clock/Reset ports now that tagging is done
+    for (auto it = resolved.asyncPortConnections.begin(); it != resolved.asyncPortConnections.end(); ) {
+        auto inp_it = resolved.inputs.find(it->first);
+        if (inp_it == resolved.inputs.end() ||
+            (inp_it->second.type.kind != ResolvedTypeKind::Clock &&
+             inp_it->second.type.kind != ResolvedTypeKind::Reset)) {
+            it = resolved.asyncPortConnections.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

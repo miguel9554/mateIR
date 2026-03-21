@@ -329,9 +329,9 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
     input_ports = {p.name: p for p in module.ports if p.direction == 'input'}
     all_clocks = list(domains.clock_domains.keys())
     all_resets = list(domains.resets)
-    async_signals = set(all_clocks) | set(all_resets)
+    async_signals = set(all_clocks) | set(all_resets) | set(domains.async_domain)
 
-    # Async recorders (clocks first, then resets)
+    # Async recorders (clocks first, then resets, then async_domain)
     async_ports = []
     for clk in all_clocks:
         if clk in input_ports:
@@ -339,6 +339,9 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
     for rst in all_resets:
         if rst in input_ports:
             async_ports.append(rst)
+    for sig in domains.async_domain:
+        if sig in input_ports:
+            async_ports.append(sig)
 
     if async_ports:
         lines.append('')

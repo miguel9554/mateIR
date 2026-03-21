@@ -9,7 +9,7 @@ module counter_top(
     logic next_done;
     logic done;
 
-    counter#(.WIDTH(8), .RESET_VAL(0)) u_counter(.*);
+    counter#(.WIDTH(8), .RESET_VAL(0)) u_counter(.clock(clk), .*);
 
     assign reset = next_done;
 

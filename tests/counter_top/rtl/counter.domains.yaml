@@ -5,7 +5,7 @@ resets:
     polarity: positive
 
 clock_domains:
-  clk:
+  clock:
     polarity: posedge
     inputs_outputs:
       - reset

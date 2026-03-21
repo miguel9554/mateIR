@@ -1702,6 +1702,7 @@ void connectModuleOutput(DFG& graph, DFGNode* moduleNode,
 void resolveNamedPortConnection(
         const NamedPortConnectionSyntax& named,
         DFG& graph, DFGNode* moduleNode,
+        ResolvedModule& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
         const std::map<std::string, size_t>& subOutputIndex) {
@@ -1724,6 +1725,7 @@ void resolveNamedPortConnection(
         auto* driver = graph.lookupSignal(name);
         moduleNode->in.push_back(driver);
         moduleNode->input_names.push_back(portName);
+        resolvedSub.input_port_connections[portName] = name;
     } else if (subOutputNames.contains(portName)) {
         if (!named.expr) {
             throw CompilerError(
@@ -1745,12 +1747,13 @@ void resolveNamedPortConnection(
 
 void resolveWildcardPortConnection(
         DFG& graph, DFGNode* moduleNode,
-        const ResolvedModule& resolvedSub) {
+        ResolvedModule& resolvedSub) {
     for (const auto& [name, inp] : resolvedSub.inputs) {
         auto* driver = graph.lookupSignal(name);
         if (driver) {
             moduleNode->in.push_back(driver);
             moduleNode->input_names.push_back(name);
+            resolvedSub.input_port_connections[name] = name;
         }
     }
     size_t oi = 0;
@@ -1762,14 +1765,14 @@ void resolveWildcardPortConnection(
 void resolvePortConnection(
         const PortConnectionSyntax* conn,
         DFG& graph, DFGNode* moduleNode,
-        const ResolvedModule& resolvedSub,
+        ResolvedModule& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
         const std::map<std::string, size_t>& subOutputIndex) {
     switch (conn->kind) {
         case SyntaxKind::NamedPortConnection:
             resolveNamedPortConnection(conn->as<NamedPortConnectionSyntax>(),
-                                       graph, moduleNode,
+                                       graph, moduleNode, resolvedSub,
                                        subInputNames, subOutputNames,
                                        subOutputIndex);
             break;

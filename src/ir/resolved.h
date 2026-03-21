@@ -111,6 +111,10 @@ struct ResolvedModule {
     // Combinational dependency map: output_port -> {input_ports}
     ComboDeps combo_deps;
 
+    // Port connection map: submodule_input_port_name -> parent_signal_name
+    // Populated during elaboration; used by flop_resolve to propagate Clock/Reset types.
+    std::map<std::string, std::string> input_port_connections;
+
     void print(int indent = 0) const;
 };
 

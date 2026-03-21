@@ -456,12 +456,13 @@ static int64_t parseTimeWithUnit(const std::string& token,
 // ============================================================================
 
 void Simulator::buildTimeline() {
-    // Determine which inputs are async (clocks and resets) from resolved input types
+    // Determine which inputs are async (clocks, resets, and async data) from resolved input types
     for (const auto& [name, input] : module_.inputs) {
-        if (input.type.kind == ResolvedTypeKind::Clock ||
-            input.type.kind == ResolvedTypeKind::Reset) {
+        if (input.sync_kind == SyncKind::Clock ||
+            input.sync_kind == SyncKind::Reset ||
+            input.sync_kind == SyncKind::Async) {
             async_inputs_.insert(name);
-            if (input.type.kind == ResolvedTypeKind::Clock) {
+            if (input.sync_kind == SyncKind::Clock) {
                 clock_inputs_.insert(name);
             }
         }
@@ -518,8 +519,9 @@ void Simulator::buildTimeline() {
 
 void Simulator::loadSyncInputs() {
     for (const auto& [name, input] : module_.inputs) {
-        if (input.type.kind == ResolvedTypeKind::Clock ||
-            input.type.kind == ResolvedTypeKind::Reset) continue;
+        if (input.sync_kind == SyncKind::Clock ||
+            input.sync_kind == SyncKind::Reset ||
+            input.sync_kind == SyncKind::Async) continue;
         // (variable 'name' used by the rest of the loop body below)
 
         std::string path = config_.inputs_dir + "/" + name + ".txt";

@@ -96,8 +96,8 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
         elaborateWithWidth(inputs_mod, *v, name, w);
         v->set_runtime_bit_size(w);
-        if (sig.type.kind == ResolvedTypeKind::Clock ||
-            sig.type.kind == ResolvedTypeKind::Reset) {
+        if (sig.sync_kind == SyncKind::Clock ||
+            sig.sync_kind == SyncKind::Reset) {
             auto it = translation.find(name);
             const std::string& key = it != translation.end() ? it->second : name;
             async_values_[key].push_back(std::move(v));
@@ -160,8 +160,8 @@ void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
         elaborateWithWidth(scope, *v, name, w);
         v->set_runtime_bit_size(w);
-        if (sig.type.kind == ResolvedTypeKind::Clock ||
-            sig.type.kind == ResolvedTypeKind::Reset) {
+        if (sig.sync_kind == SyncKind::Clock ||
+            sig.sync_kind == SyncKind::Reset) {
             auto it = translation.find(name);
             const std::string& key = it != translation.end() ? it->second : name;
             async_values_[key].push_back(std::move(v));

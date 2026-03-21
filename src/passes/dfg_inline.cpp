@@ -41,13 +41,6 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
         DFGNode* subInputNode = sub->dfg->getInputNode(portName);
         if (!subInputNode) continue;
 
-        // Propagate Clock/Reset type to parent driver node
-        if (subInputNode->type.has_value() && driver.node->type.has_value() &&
-            (subInputNode->type->kind == ResolvedTypeKind::Clock ||
-             subInputNode->type->kind == ResolvedTypeKind::Reset)) {
-            driver.node->type->kind = subInputNode->type->kind;
-        }
-
         // Replace all uses of subInputNode in sub.dfg with the parent driver
         for (auto& node : sub->dfg->nodes) {
             for (auto& inp : node->in) {

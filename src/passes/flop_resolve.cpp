@@ -225,13 +225,13 @@ static void resolveFlopsRecursive(ResolvedModule& module, DFG& topDFG, const std
 static void propagateHierarchyPortTypes(ResolvedModule& module) {
     for (const auto& sub : module.hierarchyInstantiation) {
         for (const auto& [portName, subInput] : sub.inputs) {
-            if (subInput.type.kind != ResolvedTypeKind::Clock &&
-                subInput.type.kind != ResolvedTypeKind::Reset) continue;
+            if (subInput.sync_kind != SyncKind::Clock &&
+                subInput.sync_kind != SyncKind::Reset) continue;
             auto conn_it = sub.asyncPortConnections.find(portName);
             if (conn_it == sub.asyncPortConnections.end()) continue;
             auto it = module.inputs.find(conn_it->second);
             if (it == module.inputs.end()) continue;
-            it->second.type.kind = subInput.type.kind;
+            it->second.sync_kind = subInput.sync_kind;
         }
     }
 }
@@ -313,9 +313,9 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
             };
 
             // Set clock and reset types
-            find_unique_input(clock.name, "clock").type.kind = ResolvedTypeKind::Clock;
+            find_unique_input(clock.name, "clock").sync_kind = SyncKind::Clock;
             if (reset) {
-                find_unique_input(reset->name, "reset").type.kind = ResolvedTypeKind::Reset;
+                find_unique_input(reset->name, "reset").sync_kind = SyncKind::Reset;
             }
 
             // Connect functional logic to the flop's .d signal
@@ -338,9 +338,9 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
     std::vector<std::string> clocks;
     std::vector<std::string> resets;
     for (const auto& [name, input] : resolved.inputs) {
-        if (input.type.kind == ResolvedTypeKind::Clock) {
+        if (input.sync_kind == SyncKind::Clock) {
             clocks.push_back(name);
-        } else if (input.type.kind == ResolvedTypeKind::Reset) {
+        } else if (input.sync_kind == SyncKind::Reset) {
             resets.push_back(name);
         }
     }
@@ -357,8 +357,8 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
     for (auto it = resolved.asyncPortConnections.begin(); it != resolved.asyncPortConnections.end(); ) {
         auto inp_it = resolved.inputs.find(it->first);
         if (inp_it == resolved.inputs.end() ||
-            (inp_it->second.type.kind != ResolvedTypeKind::Clock &&
-             inp_it->second.type.kind != ResolvedTypeKind::Reset)) {
+            (inp_it->second.sync_kind != SyncKind::Clock &&
+             inp_it->second.sync_kind != SyncKind::Reset)) {
             it = resolved.asyncPortConnections.erase(it);
         } else {
             ++it;

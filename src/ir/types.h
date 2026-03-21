@@ -16,9 +16,14 @@ struct ResolvedDimension {
 
 enum class ResolvedTypeKind {
     Integer,
-    Clock,
-    Reset,
     // Future: Real, Struct, Enum, etc.
+};
+
+enum class SyncKind {
+    Sync,   // belongs to a clock domain, advances on clock edges
+    Clock,  // is itself a clock signal (async)
+    Reset,  // is itself a reset signal (async)
+    Async,  // purely async data, no clock domain (e.g. UART rxd)
 };
 
 struct ResolvedIntegerInfo {

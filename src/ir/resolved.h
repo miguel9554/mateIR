@@ -34,15 +34,19 @@ struct ResolvedSignalBase {
 };
 
 struct ResolvedSignal : ResolvedSignalBase{
+    SyncKind sync_kind = SyncKind::Sync;
     ResolvedSignal* clock_domain = nullptr;
     std::optional<edge_t> clock_edge;
     DFGNode* dfg_node = nullptr;  // direct pointer to the corresponding DFG node
     void print(std::ostream& os) const {
         ResolvedSignalBase::print(os);
-        os << " domain=" << (clock_domain ? clock_domain->name : "UNRESOLVED");
-        if (clock_edge.has_value()) {
+        const char* sk = sync_kind == SyncKind::Sync  ? "Sync"  :
+                         sync_kind == SyncKind::Clock ? "Clock" :
+                         sync_kind == SyncKind::Reset ? "Reset" : "Async";
+        os << " sync_kind=" << sk;
+        if (clock_domain) os << " domain=" << clock_domain->name;
+        if (clock_edge.has_value())
             os << " edge=" << (*clock_edge == POSEDGE ? "posedge" : "negedge");
-        }
     }
 };
 

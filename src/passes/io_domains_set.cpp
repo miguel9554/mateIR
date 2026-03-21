@@ -272,7 +272,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
     // Clock inputs must be tagged Clock
     for (const auto& [domainName, info] : clockDomains) {
         ResolvedSignal* clkSig = findSignal(module, info.input_port);
-        if (clkSig && clkSig->type.kind != ResolvedTypeKind::Clock) {
+        if (clkSig && clkSig->sync_kind != SyncKind::Clock) {
             throw CompilerError(std::format(
                 "io_domains_set: module '{}': clock port '{}' is not tagged as Clock type "
                 "(was flop_resolve run?)",
@@ -283,7 +283,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
     // Reset inputs must be tagged Reset
     for (const auto& [resetName, info] : resets) {
         ResolvedSignal* rstSig = findSignal(module, info.signal_name);
-        if (rstSig && rstSig->type.kind != ResolvedTypeKind::Reset) {
+        if (rstSig && rstSig->sync_kind != SyncKind::Reset) {
             throw CompilerError(std::format(
                 "io_domains_set: module '{}': reset port '{}' is not tagged as Reset type "
                 "(was flop_resolve run?)",
@@ -323,7 +323,19 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         }
     }
 
-    // 3f. Set domains on IO signals
+    // 3f. Set sync_kind on all classified IO ports
+    for (const auto& [portName, cls] : portClassMap) {
+        ResolvedSignal* sig = findSignal(module, portName);
+        if (!sig) continue;
+        switch (cls.cls) {
+            case PortClass::Clock: sig->sync_kind = SyncKind::Clock; break;
+            case PortClass::Reset: sig->sync_kind = SyncKind::Reset; break;
+            case PortClass::Async: sig->sync_kind = SyncKind::Async; break;
+            case PortClass::Sync:  sig->sync_kind = SyncKind::Sync;  break;
+        }
+    }
+
+    // Set domains on IO signals
     for (const auto& [domainName, info] : clockDomains) {
         ResolvedSignal* clockSig = findSignal(module, info.input_port);
         if (!clockSig) continue;
@@ -344,8 +356,8 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
 
     // Also set domains on internal signals and flop types (same as old domain_resolve)
     for (auto& [name, sig] : module.signals) {
-        if (sig.type.kind != ResolvedTypeKind::Clock &&
-            sig.type.kind != ResolvedTypeKind::Reset) {
+        if (sig.sync_kind != SyncKind::Clock &&
+            sig.sync_kind != SyncKind::Reset) {
             // Internal signals belong to whatever domain their driving logic is in.
             // For single-clock modules this is straightforward; for multi-clock
             // we just find the first clock domain (multi-clock support is future work).

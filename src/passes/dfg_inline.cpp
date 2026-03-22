@@ -55,6 +55,18 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
         if (auto it = sub->inputs.find(portName); it != sub->inputs.end()) {
             it->second.dfg_node = driver.node;
         }
+
+        // Recursively fix dfg_node in deeper descendants that were wired to subInputNode
+        // during a prior (inner) inlining pass. Without this, grandchild input dfg_nodes
+        // remain pointing to the now-dead subInputNode after DCE removes it.
+        std::function<void(ResolvedModule&)> fixDescendants = [&](ResolvedModule& mod) {
+            for (auto& [name, inp] : mod.inputs)
+                if (inp.dfg_node == subInputNode) inp.dfg_node = driver.node;
+            for (auto& child : mod.hierarchyInstantiation)
+                fixDescendants(child);
+        };
+        for (auto& child : sub->hierarchyInstantiation)
+            fixDescendants(child);
     }
 
     // Step 2: Rewire outputs — replace {moduleNode, portIdx} references in parent

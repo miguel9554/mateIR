@@ -64,7 +64,6 @@ bool extract_reset(
     const DFGNode* dNodeDriver,
     const std::vector<asyncTrigger_t>& triggers,
     const std::string& flop_name,
-    const std::string& dfg_flop_name,
     asyncTrigger_t& reset,
     asyncTrigger_t& clock,
     int& reset_value,
@@ -109,8 +108,7 @@ bool extract_reset(
         has_reset = true;
     } else if (expectedResetAssign->op == DFGOp::INPUT) {
         // Check the assignment is the .q value (now an INPUT node after .q promotion)
-        // Use dfg_flop_name since the node name in the DFG carries the instance path prefix.
-        if (expectedResetAssign->name != dfg_flop_name + ".q") {
+        if (expectedResetAssign->name != flop_name + ".q") {
             throw CompilerError("Unsupported INPUT for reset MUX TRUE: " + expectedResetAssign->name, dNodeDriver->loc);
         }
         has_reset = false;
@@ -125,19 +123,18 @@ FlopInfo extractFlopClockAndReset(
     DFG& graph,
     ResolvedModule& resolved,
     const std::string& flop_name,
-    const std::string& dfg_flop_name,
+    const std::string& instance_path,
     const FlopInfo& flopIn,
     DFGNode*& functionalLogic)
 {
     auto flop = flopIn;
-    const std::string dName = dfg_flop_name + ".d";
-    DFGNode* dNode = flopIn.d_node ? flopIn.d_node : graph.getOutputNode(dName);
+    DFGNode* dNode = flopIn.d_node ? flopIn.d_node : graph.getOutputNode(instance_path, flop_name + ".d");
     auto* dNodeDriver = dNode->in[0].node;
     const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
 
     if (dNode->in.size() != 1) {
         throw CompilerError(std::format(
-            "Flop must have single driver: {} has {}", dName, dNode->in.size()), dNode->loc);
+            "Flop must have single driver: {} has {}", instance_path.empty() ? flop_name : instance_path + "." + flop_name + ".d", dNode->in.size()), dNode->loc);
     }
 
     asyncTrigger_t clock;
@@ -151,7 +148,7 @@ FlopInfo extractFlopClockAndReset(
         has_reset = false;
     } else if (triggers.size() == 2) {
         has_reset = extract_reset(
-            dNodeDriver, triggers, flop_name, dfg_flop_name,
+            dNodeDriver, triggers, flop_name,
             reset, clock, reset_value, functionalLogic);
     } else {
         throw CompilerError(std::format(
@@ -260,18 +257,16 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
     for (auto& [outName, output] : resolved.outputs) {
         if (!resolved.flopsTriggers.contains(outName)) continue;
         if (output.type.unpacked_dims.empty()) {
-            std::string qName = inDFG(instance_path, outName) + ".q";
-            DFGNode* qNode = graph.getInputNode(qName);
+            DFGNode* qNode = graph.getInputNode(instance_path, outName + ".q");
             if (qNode && output.dfg_node) {
                 output.dfg_node->in = {{qNode, 0}};
             }
         } else {
             for (const auto& suffix : generateIndexSuffixes(output.type.unpacked_dims)) {
-                std::string elemQ = inDFG(instance_path, outName + suffix) + ".q";
-                DFGNode* qNode = graph.getInputNode(elemQ);
+                DFGNode* qNode = graph.getInputNode(instance_path, outName + suffix + ".q");
                 // Individual element output nodes may also be in dfg outputs map
                 // or just exist as nodes in the flat DFG; use the map if available.
-                DFGNode* outNode = graph.getOutputNode(inDFG(instance_path, outName + suffix));
+                DFGNode* outNode = graph.getOutputNode(instance_path, outName + suffix);
                 if (!outNode) {
                     // For submodule outputs not in flat DFG outputs map,
                     // there's no per-element dfg_node stored; skip.
@@ -288,14 +283,13 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
     std::vector<FlopInfo> resolved_flops;
     for (const auto& flop : resolved.flops) {
         for (const auto& name : allElements(flop.type)) {
-            const std::string dfg_name = inDFG(instance_path, name);
             DFGNode* functional_logic;
             resolved_flops.push_back(
-                extractFlopClockAndReset(graph, resolved, name, dfg_name, flop, functional_logic));
+                extractFlopClockAndReset(graph, resolved, name, instance_path, flop, functional_logic));
             // Set per-element d_node/q_node (the copy from flopIn may be null for vectorized)
             {
-                resolved_flops.back().d_node = graph.getOutputNode(dfg_name + ".d");
-                resolved_flops.back().q_node = graph.getInputNode(dfg_name + ".q");
+                resolved_flops.back().d_node = graph.getOutputNode(instance_path, name + ".d");
+                resolved_flops.back().q_node = graph.getInputNode(instance_path, name + ".q");
             }
             DFGNode* output = resolved_flops.back().d_node;
             const asyncTrigger_t clock = resolved_flops.back().clock;

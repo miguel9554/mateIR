@@ -343,8 +343,8 @@ int main(int argc, char** argv) {
                     !currentPath.ends_with("." + spec.module_path))
                     continue;
 
-                bool found = module.dfg->hasSignal(spec.node_name) ||
-                             module.dfg->hasOutput(spec.node_name);
+                bool found = module.dfg->hasSignal("", spec.node_name) ||
+                             module.dfg->hasOutput("", spec.node_name);
 
                 if (!found && !spec.module_path.empty())
                     throw CompilerError(std::format(
@@ -387,9 +387,8 @@ int main(int argc, char** argv) {
                         std::string subPath = prefix.empty() ? sub.instance_name
                                                              : prefix + "." + sub.instance_name;
                         if (sub.name == modulePath) {
-                            std::string fullName = subPath + "." + nodeName;
-                            if (auto* n = module.dfg->getSignalNode(fullName)) return n;
-                            if (auto* n = module.dfg->getOutputNode(fullName)) return n;
+                            if (auto* n = module.dfg->getSignalNode(subPath, nodeName)) return n;
+                            if (auto* n = module.dfg->getOutputNode(subPath, nodeName)) return n;
                         }
                         if (auto* n = recurse(sub, subPath)) return n;
                     }
@@ -433,9 +432,9 @@ int main(int argc, char** argv) {
 
                     if (pathMatches) {
                         // Direct lookup in this module's DFG
-                        if (auto* n = module.dfg->getSignalNode(spec.node_name))
+                        if (auto* n = module.dfg->getSignalNode("", spec.node_name))
                             node = n;
-                        else if (auto* n = module.dfg->getOutputNode(spec.node_name))
+                        else if (auto* n = module.dfg->getOutputNode("", spec.node_name))
                             node = n;
 
                         if (!node) {
@@ -520,8 +519,8 @@ int main(int argc, char** argv) {
                                    currentPath == spec.module_path ||
                                    currentPath.ends_with("." + spec.module_path);
                 if (pathMatches) {
-                    if (auto* n = module.dfg->getSignalNode(spec.node_name)) node = n;
-                    else if (auto* n = module.dfg->getOutputNode(spec.node_name)) node = n;
+                    if (auto* n = module.dfg->getSignalNode("", spec.node_name)) node = n;
+                    else if (auto* n = module.dfg->getOutputNode("", spec.node_name)) node = n;
                 } else {
                     node = findInlinedNode(spec.module_path, spec.node_name);
                 }

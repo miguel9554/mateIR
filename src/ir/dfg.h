@@ -255,17 +255,17 @@ struct DFG {
     std::vector<std::unique_ptr<DFGNode>> nodes;
 
     // Named-node lookup (nullptr if absent)
-    DFGNode* getInputNode(const std::string& name) const {
-        auto it = inputs.find(name); return it != inputs.end() ? it->second : nullptr;
+    DFGNode* getInputNode(const std::string& instance_path, const std::string& name) const {
+        auto it = inputs.find(nodeKey(instance_path, name)); return it != inputs.end() ? it->second : nullptr;
     }
-    DFGNode* getOutputNode(const std::string& name) const {
-        auto it = outputs.find(name); return it != outputs.end() ? it->second : nullptr;
+    DFGNode* getOutputNode(const std::string& instance_path, const std::string& name) const {
+        auto it = outputs.find(nodeKey(instance_path, name)); return it != outputs.end() ? it->second : nullptr;
     }
-    DFGNode* getSignalNode(const std::string& name) const {
-        auto it = signals.find(name); return it != signals.end() ? it->second : nullptr;
+    DFGNode* getSignalNode(const std::string& instance_path, const std::string& name) const {
+        auto it = signals.find(nodeKey(instance_path, name)); return it != signals.end() ? it->second : nullptr;
     }
-    bool hasOutput(const std::string& name) const { return outputs.count(name) > 0; }
-    bool hasSignal(const std::string& name) const { return signals.count(name) > 0; }
+    bool hasOutput(const std::string& instance_path, const std::string& name) const { return outputs.count(nodeKey(instance_path, name)) > 0; }
+    bool hasSignal(const std::string& instance_path, const std::string& name) const { return signals.count(nodeKey(instance_path, name)) > 0; }
 
     // Read-only iteration for passes
     const std::map<std::string, DFGNode*>& getInputsMap()    const { return inputs; }
@@ -274,10 +274,11 @@ struct DFG {
     const std::map<std::string, DFGNode*>& getConstantsMap() const { return constants; }
 
     // Create an OUTPUT placeholder node with no driver yet
-    DFGNode* outputPlaceholder(const std::string& name) {
+    DFGNode* outputPlaceholder(const std::string& instance_path, const std::string& name) {
         auto n = std::make_unique<DFGNode>(DFGOp::OUTPUT, name);
+        n->instance_path = instance_path;
         nodes.push_back(std::move(n));
-        auto result = outputs.insert({name, nodes.back().get()});
+        auto result = outputs.insert({nodeKey(instance_path, name), nodes.back().get()});
         if (!result.second) {
             throw CompilerError(std::format("Output {} already exists", name));
         }
@@ -294,14 +295,16 @@ struct DFG {
 
     // Adopt an existing node into the inputs map (for DFG inlining).
     // The node must already be in this DFG's nodes vector.
+    // Map key is computed from node->instance_path + node->name.
     void adoptInput(DFGNode* node) {
-        inputs[node->name] = node;
+        inputs[nodeKey(node->instance_path, node->name)] = node;
     }
 
     // Adopt an existing node into the outputs map (for DFG inlining).
     // The node must already be in this DFG's nodes vector.
+    // Map key is computed from node->instance_path + node->name.
     void adoptOutput(DFGNode* node) {
-        outputs[node->name] = node;
+        outputs[nodeKey(node->instance_path, node->name)] = node;
     }
 
     // Remove map entries whose node is not in the alive set (used by DCE)
@@ -313,6 +316,10 @@ struct DFG {
     }
 
 private:
+    static std::string nodeKey(const std::string& ip, const std::string& name) {
+        return ip.empty() ? name : ip + "." + name;
+    }
+
     // Quick access named nodes — use accessor methods from outside this class
     std::map<std::string, DFGNode*> constants;
     std::map<std::string, DFGNode*> inputs;
@@ -323,9 +330,10 @@ public:
 
     // INPUT nodes, they have no inputs.
 
-    DFGNode* input(const std::string& name) {
+    DFGNode* input(const std::string& instance_path, const std::string& name) {
         nodes.push_back(std::make_unique<DFGNode>(DFGOp::INPUT, name));
-        auto result = inputs.insert({name, nodes.back().get()});
+        nodes.back()->instance_path = instance_path;
+        auto result = inputs.insert({nodeKey(instance_path, name), nodes.back().get()});
         if (!result.second) {
             // Key already exists - insertion failed
             throw CompilerError(std::format("Input {} already exists", name));
@@ -333,10 +341,11 @@ public:
         return nodes.back().get();
     }
 
-    DFGNode* named_constant(int64_t v, const std::string& name) {
+    DFGNode* named_constant(int64_t v, const std::string& instance_path, const std::string& name) {
         nodes.push_back(std::make_unique<DFGNode>(DFGOp::CONST, name, v));
+        nodes.back()->instance_path = instance_path;
         nodes.back()->type = ResolvedType::makeInteger(32, false);
-        constants[name] = nodes.back().get();
+        constants[nodeKey(instance_path, name)] = nodes.back().get();
         return nodes.back().get();
     }
 
@@ -347,9 +356,10 @@ public:
     }
 
     // Create a named signal placeholder (for internal signals, not ports)
-    DFGNode* signal(const std::string& name) {
+    DFGNode* signal(const std::string& instance_path, const std::string& name) {
         nodes.push_back(std::make_unique<DFGNode>(DFGOp::SIGNAL, name));
-        auto result = signals.insert({name, nodes.back().get()});
+        nodes.back()->instance_path = instance_path;
+        auto result = signals.insert({nodeKey(instance_path, name), nodes.back().get()});
         if (!result.second) {
             throw CompilerError(std::format("Signal {} already exists", name));
         }
@@ -397,11 +407,12 @@ public:
 
     // Lookup signal for READING in expressions
     // Returns the node representing the signal's value
-    DFGNode* lookupSignal(const std::string& name) const {
-        if (auto it = inputs.find(name); it != inputs.end()) return it->second;
-        if (auto it = signals.find(name); it != signals.end()) return it->second;
-        if (auto it = constants.find(name); it != constants.end()) return it->second;
-        if (auto it = outputs.find(name); it != outputs.end()) {
+    DFGNode* lookupSignal(const std::string& instance_path, const std::string& name) const {
+        std::string key = nodeKey(instance_path, name);
+        if (auto it = inputs.find(key); it != inputs.end()) return it->second;
+        if (auto it = signals.find(key); it != signals.end()) return it->second;
+        if (auto it = constants.find(key); it != constants.end()) return it->second;
+        if (auto it = outputs.find(key); it != outputs.end()) {
             // For outputs, return the driver if connected (reading output value)
             auto* outNode = it->second;
             return outNode->in.empty() ? outNode : outNode->in[0].node;
@@ -410,8 +421,8 @@ public:
     }
 
     // Connect a driver to an existing output node
-    void connectOutput(const std::string& name, DFGOutput driver) {
-        auto it = outputs.find(name);
+    void connectOutput(const std::string& instance_path, const std::string& name, DFGOutput driver) {
+        auto it = outputs.find(nodeKey(instance_path, name));
         if (it == outputs.end()) {
             throw CompilerError(std::format("Output {} not found", name));
         }
@@ -419,8 +430,8 @@ public:
     }
 
     // Connect a driver to an existing signal node
-    void connectSignal(const std::string& name, DFGOutput driver) {
-        auto it = signals.find(name);
+    void connectSignal(const std::string& instance_path, const std::string& name, DFGOutput driver) {
+        auto it = signals.find(nodeKey(instance_path, name));
         if (it == signals.end()) {
             throw CompilerError(std::format("Signal {} not found", name));
         }
@@ -428,15 +439,17 @@ public:
     }
 
     // An output can be recreated, if it's assigned again.
-    DFGNode* output(DFGNode* a, const std::string& name, bool rename) {
+    DFGNode* output(DFGNode* a, const std::string& instance_path, const std::string& name, bool rename) {
         auto n = std::make_unique<DFGNode>(DFGOp::OUTPUT, name);
+        n->instance_path = instance_path;
         n->in = {a};
         nodes.push_back(std::move(n));
-        auto result = outputs.insert({name, nodes.back().get()});
+        std::string key = nodeKey(instance_path, name);
+        auto result = outputs.insert({key, nodes.back().get()});
         if (!result.second) {
             if (!rename) throw CompilerError(std::format("Output {} already exists", name));
             // Remove old output node from the nodes vector
-            auto oldNode = outputs[name];
+            auto oldNode = outputs[key];
             auto it = std::find_if(nodes.begin(), nodes.end(),
                 [oldNode](const std::unique_ptr<DFGNode>& n) {
                     return n.get() == oldNode;
@@ -444,7 +457,7 @@ public:
             if (it != nodes.end()) {
                 nodes.erase(it);
             }
-            outputs[name] = nodes.back().get();
+            outputs[key] = nodes.back().get();
         }
         return nodes.back().get();
     }

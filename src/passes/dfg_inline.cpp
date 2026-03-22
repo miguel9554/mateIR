@@ -38,7 +38,7 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
         const std::string& portName = moduleNode->input_names[i];
         DFGOutput driver = moduleNode->in[i];
 
-        DFGNode* subInputNode = sub->dfg->getInputNode(portName);
+        DFGNode* subInputNode = sub->dfg->getInputNode("", portName);
         if (!subInputNode) continue;
 
         // Replace all uses of subInputNode in sub.dfg with the parent driver
@@ -76,7 +76,7 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
                 int portIdx = inp.port;
                 if (portIdx < static_cast<int>(moduleNode->output_names.size())) {
                     const std::string& outName = moduleNode->output_names[portIdx];
-                    DFGNode* subOutputNode = sub->dfg->getOutputNode(outName);
+                    DFGNode* subOutputNode = sub->dfg->getOutputNode("", outName);
                     if (subOutputNode) {
                         inp = DFGOutput{subOutputNode, 0};
                     }
@@ -85,28 +85,26 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
         }
     }
 
-    // Step 3: Adopt sub .d OUTPUT and .q INPUT nodes into parent's named maps.
-    // Qualify names with instanceName to avoid collision when multiple instances
-    // of different modules have same-named flops (e.g., both have bit_cnt).
-    for (const auto& [name, node] : sub->dfg->getOutputsMap()) {
-        if (name.ends_with(".d")) {
-            node->name = instanceName + "." + name;
-            parent.dfg->adoptOutput(node);
-        }
-    }
-    for (const auto& [name, node] : sub->dfg->getInputsMap()) {
-        if (name.ends_with(".q")) {
-            node->name = instanceName + "." + name;
-            parent.dfg->adoptInput(node);
-        }
-    }
-
-    // Step 4: Set instance_path on all sub nodes
+    // Step 3: Set instance_path on all sub nodes (must happen before adopt so
+    // adoptOutput/adoptInput can compute the correct map key).
     for (auto& node : sub->dfg->nodes) {
         if (node->instance_path.empty()) {
             node->instance_path = instanceName;
         } else {
             node->instance_path = instanceName + "." + node->instance_path;
+        }
+    }
+
+    // Step 4: Adopt sub .d OUTPUT and .q INPUT nodes into parent's named maps.
+    // Map key is computed from node->instance_path + node->name by adoptOutput/adoptInput.
+    for (const auto& [name, node] : sub->dfg->getOutputsMap()) {
+        if (name.ends_with(".d")) {
+            parent.dfg->adoptOutput(node);
+        }
+    }
+    for (const auto& [name, node] : sub->dfg->getInputsMap()) {
+        if (name.ends_with(".q")) {
+            parent.dfg->adoptInput(node);
         }
     }
 

@@ -188,7 +188,7 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
 
     // Update stored value and INPUT node
     async_values[signalName] = newValue;
-    if (auto* inputNode = module_def.dfg->getInputNode(signalName)) {
+    if (auto* inputNode = module_def.dfg->getInputNode("", signalName)) {
         values[inputNode] = newValue;
     }
 
@@ -575,7 +575,7 @@ void Simulator::advanceSyncInputs(const std::set<std::string>& active_clocks) {
         if (pos + 1 < sync_input_data_[name].size()) {
             pos++;
         }
-        if (auto* inputNode = module_.dfg->getInputNode(name)) {
+        if (auto* inputNode = module_.dfg->getInputNode("", name)) {
             root_->values[inputNode] = sync_input_data_[name][pos];
         }
     }
@@ -660,7 +660,7 @@ void Simulator::run() {
                         name, evt.time));
                 }
                 async_prev[name] = evt.value;
-                if (auto* inputNode = module_.dfg->getInputNode(name)) {
+                if (auto* inputNode = module_.dfg->getInputNode("", name)) {
                     root_->values[inputNode] = evt.value;
                 }
                 // Also initialize the root's async_values for edge detection
@@ -677,7 +677,7 @@ void Simulator::run() {
 
     // 3. Set sync input values from first line of their files
     for (const auto& [name, data] : sync_input_data_) {
-        if (auto* inputNode = module_.dfg->getInputNode(name)) {
+        if (auto* inputNode = module_.dfg->getInputNode("", name)) {
             root_->values[inputNode] = data[0];
         }
     }

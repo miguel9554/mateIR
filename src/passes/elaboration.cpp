@@ -51,7 +51,13 @@ struct ResolutionContext {
 namespace {
 
 // TODO should be double? or parametrized by type.
-int64_t parseIntegerVectorExpression(const IntegerVectorExpressionSyntax& vecExpr){
+struct IntegerVectorLiteral {
+    int64_t value;
+    int width;
+    bool is_signed;
+};
+
+IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionSyntax& vecExpr){
     std::string sizeText(vecExpr.size.rawText());
     std::string baseText(vecExpr.base.rawText());
     std::string valueText(vecExpr.value.rawText());
@@ -72,8 +78,12 @@ int64_t parseIntegerVectorExpression(const IntegerVectorExpressionSyntax& vecExp
     }
 
     int64_t value = std::stoll(valueText, nullptr, base);
-    std::cout << "IntegerVectorExpression: " << literal << " -> " << value << std::endl;
-    return value;
+    int width = std::stoi(sizeText);
+    bool is_signed = baseText.find('s') != std::string::npos ||
+                     baseText.find('S') != std::string::npos;
+    std::cout << "IntegerVectorExpression: " << literal << " -> " << value
+              << " (width=" << width << ", signed=" << is_signed << ")" << std::endl;
+    return {value, width, is_signed};
 }
 
 // Forward declaration - in-place statement resolver
@@ -155,7 +165,7 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 
         case SyntaxKind::IntegerVectorExpression: {
             auto& vecExpr = expr->as<IntegerVectorExpressionSyntax>();
-            return parseIntegerVectorExpression(vecExpr);
+            return parseIntegerVectorExpression(vecExpr).value;
         }
 
         default:
@@ -387,8 +397,9 @@ DFGNode* buildExprDFG(
 
         case SyntaxKind::IntegerVectorExpression: {
             auto& vecExpr = expr->as<IntegerVectorExpressionSyntax>();
-            const auto value = parseIntegerVectorExpression(vecExpr);
-            auto* node = ctx.graph.constant(value);
+            const auto lit = parseIntegerVectorExpression(vecExpr);
+            auto* node = ctx.graph.constant(lit.value);
+            node->type = ResolvedType::makeInteger(lit.width, lit.is_signed);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }

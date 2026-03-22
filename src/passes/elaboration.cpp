@@ -42,6 +42,16 @@ struct ResolutionContext {
     //   x = 42 + count;
     //   x = 43 + x;   // RHS `x` must resolve to ADD(42, count), not SIGNAL(x)
     std::map<std::string, DFGNode*> combDrivers;
+
+    // Generate-scope fields:
+    // instance_path: the generate scope path (e.g. "g_lane[0]") — empty for top-level
+    std::string instance_path;
+    // local_signals: baseName → DFG node for signals/flops declared in this generate scope
+    // Flops: "name" → q_node, "name.d" → d_node, "name.q" → q_node
+    // Wires: "name" → signal_node, "name[i]" → element_node (for arrays)
+    std::map<std::string, DFGNode*> local_signals;
+    // local_flop_names: base names of flops declared in this generate scope
+    std::set<std::string> local_flop_names;
 };
 
 // ============================================================================
@@ -448,6 +458,20 @@ DFGNode* buildExprDFG(
                     return it->second;
                 }
             }
+            // Check generate-scope local signals/flops first
+            {
+                auto it = ctx.local_signals.find(baseName);
+                if (it != ctx.local_signals.end()) return it->second;
+            }
+            // Check if baseName is a genvar: in params but not in the DFG
+            if (ctx.graph.lookupSignal("", baseName) == nullptr) {
+                auto paramIt = ctx.params.values.find(baseName);
+                if (paramIt != ctx.params.values.end()) {
+                    auto* n = ctx.graph.constant(paramIt->second);
+                    n->loc = resolveSourceLoc(*expr, ctx.sm);
+                    return n;
+                }
+            }
             const auto node = resolveIdentifier(
                     baseName,
                     ctx.graph,
@@ -468,12 +492,18 @@ DFGNode* buildExprDFG(
                 }
             }
             if (!node) {
-                node = resolveIdentifier(
-                        baseName,
-                        ctx.graph,
-                        true,
-                        ctx.flopNames
-                );
+                // Check generate-scope local signals first
+                auto localIt = ctx.local_signals.find(baseName);
+                if (localIt != ctx.local_signals.end()) {
+                    node = localIt->second;
+                } else {
+                    node = resolveIdentifier(
+                            baseName,
+                            ctx.graph,
+                            true,
+                            ctx.flopNames
+                    );
+                }
             }
             const auto selectors = &name.selectors;
             auto indexedSignalNode = node;
@@ -487,6 +517,20 @@ DFGNode* buildExprDFG(
                     }
                     if (elemSelect->selector->kind == SyntaxKind::BitSelect){
                         const auto& bitSelect = elemSelect->selector->as<BitSelectSyntax>();
+                        // If the selector is a constant, try a direct element lookup in
+                        // local_signals (e.g. or_tree[0] inside a generate block).
+                        // This avoids INDEX(aggregate) which would create a combinational loop.
+                        try {
+                            int64_t idx = evaluateConstantExpr(bitSelect.expr, ctx.params);
+                            std::string elemKey = baseName + "[" + std::to_string(idx) + "]";
+                            auto elemIt = ctx.local_signals.find(elemKey);
+                            if (elemIt != ctx.local_signals.end()) {
+                                indexedSignalNode = elemIt->second;
+                                continue;
+                            }
+                        } catch (const std::runtime_error&) {
+                            // not constant — fall through to INDEX
+                        }
                         auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
                         indexedSignalNode = ctx.graph.index(indexedSignalNode, selectorExprNode, selectorExprNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
@@ -496,9 +540,20 @@ DFGNode* buildExprDFG(
                         auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
                         indexedSignalNode = ctx.graph.index(indexedSignalNode, leftNode, rightNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                    } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
+                        // [base +: width] → [base+width-1 : base]
+                        const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
+                        auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
+                        auto* widthNode = buildExprDFG(rangeSelect.right, ctx);
+                        auto* one  = ctx.graph.constant(1);
+                        auto* sum  = ctx.graph.add(baseNode, widthNode);
+                        auto* high = ctx.graph.sub(sum, one);
+                        high->loc = resolveSourceLoc(*expr, ctx.sm);
+                        indexedSignalNode = ctx.graph.index(indexedSignalNode, high, baseNode);
+                        indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
                     } else {
                         throw CompilerError(
-                            "Only BitSelect and SimpleRangeSelect supported, got: " +
+                            "Only BitSelect and RangeSelect supported, got: " +
                             std::string(toString(elemSelect->selector->kind)),
                             resolveSourceLoc(*expr, ctx.sm));
                     }
@@ -519,6 +574,25 @@ DFGNode* buildExprDFG(
             for (const auto* elemExpr : concat.expressions) {
                 parts.push_back(buildExprDFG(elemExpr, ctx));
             }
+            auto* node = ctx.graph.concat(parts);
+            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            return node;
+        }
+
+        case SyntaxKind::MultipleConcatenationExpression: {
+            // {N{expr}} — repeat expr N times, concatenated MSB-first
+            auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
+            int64_t N = evaluateConstantExpr(multiConcat.expression, ctx.params);
+            std::vector<DFGNode*> parts;
+            parts.reserve(static_cast<size_t>(N) * multiConcat.concatenation->expressions.size());
+            for (int64_t i = 0; i < N; i++) {
+                for (const auto* elemExpr : multiConcat.concatenation->expressions) {
+                    parts.push_back(buildExprDFG(elemExpr, ctx));
+                }
+            }
+            if (parts.empty())
+                throw CompilerError("Empty multiple concatenation", resolveSourceLoc(*expr, ctx.sm));
+            if (parts.size() == 1) return parts[0];
             auto* node = ctx.graph.concat(parts);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
@@ -698,6 +772,46 @@ DFGNode* buildExprDFG(
             return node;
         }
 
+        case SyntaxKind::LogicalOrExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto* node = ctx.graph.logicalOr(buildExprDFG(binary.left, ctx),
+                                             buildExprDFG(binary.right, ctx));
+            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            return node;
+        }
+
+        case SyntaxKind::BinaryAndExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto* node = ctx.graph.bitwiseAnd(buildExprDFG(binary.left, ctx),
+                                              buildExprDFG(binary.right, ctx));
+            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            return node;
+        }
+
+        case SyntaxKind::BinaryOrExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto* node = ctx.graph.bitwiseOr(buildExprDFG(binary.left, ctx),
+                                             buildExprDFG(binary.right, ctx));
+            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            return node;
+        }
+
+        case SyntaxKind::BinaryXorExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto* node = ctx.graph.bitwiseXor(buildExprDFG(binary.left, ctx),
+                                              buildExprDFG(binary.right, ctx));
+            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            return node;
+        }
+
+        case SyntaxKind::BinaryXnorExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto* node = ctx.graph.bitwiseXnor(buildExprDFG(binary.left, ctx),
+                                               buildExprDFG(binary.right, ctx));
+            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            return node;
+        }
+
         case SyntaxKind::ConditionalExpression: {
             auto& cond = expr->as<ConditionalExpressionSyntax>();
             if (cond.predicate->conditions.size() != 1) {
@@ -729,6 +843,35 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     const auto& left = assignExpr.left;
     const auto& right = assignExpr.right;
 
+    // Helper: is this name a flop (module-level or generate-scope)?
+    auto isFlopName = [&](const std::string& name) -> bool {
+        return ctx.flopNames.contains(name) || ctx.local_flop_names.count(name) > 0;
+    };
+
+    // Helper: key used in flopsTriggers map for a flop
+    auto flopTriggersKey = [&](const std::string& base) -> std::string {
+        if (ctx.local_flop_names.count(base))
+            return ctx.instance_path.empty() ? base : ctx.instance_path + "." + base;
+        return base;
+    };
+
+    // Helper: connect a driver to an output/signal node, checking local_signals first
+    auto connectNode = [&](const std::string& outputName, DFGOutput driver) {
+        auto localIt = ctx.local_signals.find(outputName);
+        if (localIt != ctx.local_signals.end()) {
+            localIt->second->in = {driver};
+            return;
+        }
+        if (ctx.graph.hasOutput("", outputName)) {
+            ctx.graph.connectOutput("", outputName, driver);
+        } else if (ctx.graph.hasSignal("", outputName)) {
+            ctx.graph.connectSignal("", outputName, driver);
+        } else {
+            throw CompilerError("Cannot assign to undeclared: " + outputName,
+                                resolveSourceLoc(assignExpr, ctx.sm));
+        }
+    };
+
     // Build the Expr graph of the RHS
     auto* RHSexprNode = buildExprDFG(right, ctx);
 
@@ -753,11 +896,19 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             std::string name(elemExpr->as<IdentifierNameSyntax>().identifier.valueText());
 
             // Look up the pre-populated node to get declared width.
-            std::string lookupName = (ctx.is_sequential && ctx.flopNames.contains(name))
+            std::string lookupName = (ctx.is_sequential && isFlopName(name))
                 ? name + ".d" : name;
-            DFGNode* node = ctx.graph.getSignalNode("", lookupName)
-                ? ctx.graph.getSignalNode("", lookupName)
-                : ctx.graph.getOutputNode("", lookupName);
+            // Check local_signals first, then module-level DFG
+            DFGNode* node = nullptr;
+            {
+                auto localIt = ctx.local_signals.find(lookupName);
+                if (localIt != ctx.local_signals.end()) node = localIt->second;
+            }
+            if (!node) {
+                node = ctx.graph.getSignalNode("", lookupName)
+                    ? ctx.graph.getSignalNode("", lookupName)
+                    : ctx.graph.getOutputNode("", lookupName);
+            }
             if (!node || !node->hasType()) {
                 throw CompilerError(
                     "Cannot determine width of LHS concat element: " + name,
@@ -783,7 +934,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
             std::string outputName;
             if (ctx.is_sequential) {
-                if (!ctx.flopNames.contains(elem.baseName)) {
+                if (!isFlopName(elem.baseName)) {
                     throw CompilerError(
                         std::format("{} NOT a flop and assigned on seq. block", elem.baseName),
                         resolveSourceLoc(assignExpr, ctx.sm));
@@ -793,14 +944,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 outputName = elem.baseName;
             }
 
-            if (ctx.graph.hasOutput("", outputName)) {
-                ctx.graph.connectOutput("", outputName, sliceNode);
-            } else if (ctx.graph.hasSignal("", outputName)) {
-                ctx.graph.connectSignal("", outputName, sliceNode);
-            } else {
-                throw CompilerError("Cannot assign to undeclared: " + outputName,
-                    resolveSourceLoc(assignExpr, ctx.sm));
-            }
+            connectNode(outputName, sliceNode);
 
             if (!ctx.is_sequential) {
                 ctx.combDrivers[outputName] = sliceNode;
@@ -809,7 +953,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
         if (ctx.is_sequential) {
             for (const auto& elem : elements) {
-                ctx.thisModule->flopsTriggers[elem.baseName] = ctx.triggers;
+                ctx.thisModule->flopsTriggers[flopTriggersKey(elem.baseName)] = ctx.triggers;
             }
         }
         return;
@@ -850,7 +994,32 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 // Try to evaluate the index statically
                 try {
                     int64_t idx = evaluateConstantExpr(selectorExpr, ctx.params);
-                    indexSuffix += "[" + std::to_string(idx) + "]";
+
+                    // Check if the base (with any prior indexSuffix) is a flat packed scalar.
+                    // If so, this bit-select is a partial packed assignment (e.g. sat[i] where
+                    // sat is wire [N-1:0]) → treat as a 1-bit range select for CONCAT_ALIGN.
+                    bool isFlatPackedBitSelect = false;
+                    {
+                        std::string lookupKey = baseName + indexSuffix;
+                        DFGNode* baseNode = nullptr;
+                        auto localIt = ctx.local_signals.find(lookupKey);
+                        if (localIt != ctx.local_signals.end()) {
+                            baseNode = localIt->second;
+                        } else {
+                            baseNode = ctx.graph.getSignalNode("", lookupKey);
+                            if (!baseNode) baseNode = ctx.graph.getOutputNode("", lookupKey);
+                        }
+                        if (baseNode && baseNode->hasType() && baseNode->type->unpacked_dims.empty()) {
+                            isFlatPackedBitSelect = true;
+                        }
+                    }
+                    if (isFlatPackedBitSelect) {
+                        rangeHigh = idx;
+                        rangeLow = idx;
+                        hasRangeSelect = true;
+                    } else {
+                        indexSuffix += "[" + std::to_string(idx) + "]";
+                    }
                 } catch (const std::runtime_error&) {
                     throw CompilerError(
                         "Dynamic index on LHS not supported for: " + baseName,
@@ -864,6 +1033,20 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 } catch (const std::runtime_error&) {
                     throw CompilerError(
                         "Dynamic range on LHS not supported for: " + baseName,
+                        resolveSourceLoc(assignExpr, ctx.sm));
+                }
+                hasRangeSelect = true;
+            } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
+                // base +: width → high = base + width - 1, low = base
+                const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
+                try {
+                    int64_t base  = evaluateConstantExpr(rangeSelect.left, ctx.params);
+                    int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params);
+                    rangeLow  = base;
+                    rangeHigh = base + width - 1;
+                } catch (const std::runtime_error&) {
+                    throw CompilerError(
+                        "Dynamic ascending range on LHS not supported for: " + baseName,
                         resolveSourceLoc(assignExpr, ctx.sm));
                 }
                 hasRangeSelect = true;
@@ -881,7 +1064,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         // Build the target name (no index suffix for range assigns)
         std::string outputName;
         if (ctx.is_sequential) {
-            if (ctx.flopNames.contains(baseName)) {
+            if (isFlopName(baseName)) {
                 outputName = baseName + indexSuffix + ".d";
             } else {
                 throw CompilerError(
@@ -902,15 +1085,21 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         auto* alignNode = ctx.graph.concatAlign(RHSexprNode, highConst, lowConst);
         alignNode->loc = resolveSourceLoc(assignExpr, ctx.sm);
 
-        // Find the target node
+        // Find the target node (check local_signals first)
         DFGNode* targetNode = nullptr;
-        if (auto* n = ctx.graph.getOutputNode("", outputName)) {
-            targetNode = n;
-        } else if (auto* n = ctx.graph.getSignalNode("", outputName)) {
-            targetNode = n;
-        } else {
-            throw CompilerError("Cannot assign to undeclared: " + outputName,
-                                resolveSourceLoc(assignExpr, ctx.sm));
+        {
+            auto localIt = ctx.local_signals.find(outputName);
+            if (localIt != ctx.local_signals.end()) targetNode = localIt->second;
+        }
+        if (!targetNode) {
+            if (auto* n = ctx.graph.getOutputNode("", outputName)) {
+                targetNode = n;
+            } else if (auto* n = ctx.graph.getSignalNode("", outputName)) {
+                targetNode = n;
+            } else {
+                throw CompilerError("Cannot assign to undeclared: " + outputName,
+                                    resolveSourceLoc(assignExpr, ctx.sm));
+            }
         }
 
         // Check if the target already has a CONCAT driver
@@ -921,13 +1110,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             // Create new CONCAT with this CONCAT_ALIGN as first input
             auto* concatNode = ctx.graph.concat({alignNode});
             concatNode->loc = resolveSourceLoc(assignExpr, ctx.sm);
-
-            // Connect CONCAT to target
-            if (ctx.graph.hasOutput("", outputName)) {
-                ctx.graph.connectOutput("", outputName, concatNode);
-            } else {
-                ctx.graph.connectSignal("", outputName, concatNode);
-            }
+            connectNode(outputName, concatNode);
         }
 
         if (!ctx.is_sequential) {
@@ -941,7 +1124,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         // For combinational: base[idx] or just base
         std::string outputName;
         if (ctx.is_sequential) {
-            if (ctx.flopNames.contains(baseName)) {
+            if (isFlopName(baseName)) {
                 outputName = baseName + indexSuffix + ".d";
             } else {
                 throw CompilerError(
@@ -952,15 +1135,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             outputName = baseName + indexSuffix;
         }
 
-        // Connect driver to existing output or signal node
-        if (ctx.graph.hasOutput("", outputName)) {
-            ctx.graph.connectOutput("", outputName, RHSexprNode);
-        } else if (ctx.graph.hasSignal("", outputName)) {
-            ctx.graph.connectSignal("", outputName, RHSexprNode);
-        } else {
-            throw CompilerError("Cannot assign to undeclared: " + outputName,
-                                resolveSourceLoc(assignExpr, ctx.sm));
-        }
+        // Connect driver to existing output or signal node (checks local_signals first)
+        connectNode(outputName, RHSexprNode);
 
         // Track the current driver so subsequent reads in this block see it
         if (!ctx.is_sequential) {
@@ -970,7 +1146,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
     // If the assign is sequential, set the triggers of the signal
     if (ctx.is_sequential) {
-        ctx.thisModule->flopsTriggers[baseName] = ctx.triggers;
+        ctx.thisModule->flopsTriggers[flopTriggersKey(baseName)] = ctx.triggers;
     }
 }
 
@@ -1860,15 +2036,206 @@ int64_t evaluateGenvarStep(
     }
 }
 
+// ============================================================================
+// Generate-scope helpers: NBA scan + declaration pre-population
+// ============================================================================
+
+// Recursively collect LHS names of non-blocking assignments from a statement
+static void collectNBAFromStatement(const StatementSyntax* stmt, std::set<std::string>& out) {
+    if (!stmt) return;
+    switch (stmt->kind) {
+        case SyntaxKind::TimingControlStatement: {
+            auto& t = stmt->as<TimingControlStatementSyntax>();
+            collectNBAFromStatement(t.statement.get(), out);
+            break;
+        }
+        case SyntaxKind::SequentialBlockStatement: {
+            auto& block = stmt->as<BlockStatementSyntax>();
+            for (const auto* item : block.items) {
+                if (item->kind == SyntaxKind::ExpressionStatement ||
+                    item->kind == SyntaxKind::ConditionalStatement ||
+                    item->kind == SyntaxKind::SequentialBlockStatement ||
+                    item->kind == SyntaxKind::TimingControlStatement) {
+                    collectNBAFromStatement(&item->as<StatementSyntax>(), out);
+                }
+            }
+            break;
+        }
+        case SyntaxKind::ConditionalStatement: {
+            auto& cond = stmt->as<ConditionalStatementSyntax>();
+            collectNBAFromStatement(cond.statement, out);
+            if (cond.elseClause) {
+                collectNBAFromStatement(
+                    &cond.elseClause->clause->as<StatementSyntax>(), out);
+            }
+            break;
+        }
+        case SyntaxKind::ExpressionStatement: {
+            auto& exprStmt = stmt->as<ExpressionStatementSyntax>();
+            if (exprStmt.expr->kind == SyntaxKind::NonblockingAssignmentExpression) {
+                auto& assign = exprStmt.expr->as<BinaryExpressionSyntax>();
+                if (assign.left->kind == SyntaxKind::IdentifierName) {
+                    out.insert(std::string(
+                        assign.left->as<IdentifierNameSyntax>().identifier.valueText()));
+                } else if (assign.left->kind == SyntaxKind::IdentifierSelectName) {
+                    out.insert(std::string(
+                        assign.left->as<IdentifierSelectNameSyntax>().identifier.valueText()));
+                }
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// Scan a member list for all non-blocking assignment targets (= flop base names)
+static std::set<std::string> collectNBATargets(const SyntaxList<MemberSyntax>& members) {
+    std::set<std::string> result;
+    for (const auto* m : members) {
+        if (m->kind == SyntaxKind::AlwaysBlock ||
+            m->kind == SyntaxKind::AlwaysFFBlock ||
+            m->kind == SyntaxKind::AlwaysCombBlock) {
+            auto& block = m->as<ProceduralBlockSyntax>();
+            collectNBAFromStatement(block.statement.get(), result);
+        }
+        // Do NOT recurse into nested generate blocks — they have their own scopes
+    }
+    return result;
+}
+
+// Pre-populate DFG nodes for all DataDeclaration/NetDeclaration members in a
+// generate scope.  Must be called before any assignments in the same scope are
+// elaborated so that all local nodes exist when expressions reference them.
+static void resolveGenerateScopeDecls(
+    const SyntaxList<MemberSyntax>& members,
+    const std::set<std::string>& nbaTargets,
+    ResolutionContext& ctx)
+{
+    // Helper: process one declarator from a DataDeclaration or NetDeclaration
+    auto processDeclarator = [&](const DataTypeSyntax& typeSyntax,
+                                  const DeclaratorSyntax& decl,
+                                  bool isFlop) {
+        std::string name(decl.name.valueText());
+        ResolvedType type = resolveType(typeSyntax, ctx.params);
+
+        // Resolve unpacked dimensions from the declarator
+        auto unpacked = ResolveDimensions(decl.dimensions, ctx.params);
+        // ResolveDimensions returns [{0,0}] for empty dims — clear it for scalars
+        if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
+            unpacked.clear();
+        type.unpacked_dims = unpacked;
+
+        if (isFlop) {
+            if (!type.unpacked_dims.empty())
+                throw CompilerError(
+                    "Generate-scope flop arrays not yet supported: " + name);
+
+            auto* d_node = ctx.graph.outputPlaceholder(ctx.instance_path, name + ".d");
+            d_node->type = type;
+            auto* q_node = ctx.graph.input(ctx.instance_path, name + ".q");
+            q_node->type = type;
+
+            ctx.local_signals[name + ".d"] = d_node;
+            ctx.local_signals[name + ".q"] = q_node;
+            ctx.local_signals[name]         = q_node;  // reads return .q
+
+            // Qualified name used for FlopInfo and flopsTriggers key
+            std::string qualifiedName = ctx.instance_path.empty()
+                ? name : ctx.instance_path + "." + name;
+
+            ResolvedSignal flopSig;
+            flopSig.name = qualifiedName;
+            flopSig.type = type;
+
+            ctx.thisModule->flops.push_back(FlopInfo{
+                .name       = qualifiedName,
+                .type       = flopSig,
+                .flop_type  = FLOP_D,
+                .clock      = {},
+                .reset      = std::nullopt,
+                .reset_value = std::nullopt,
+                .d_node     = d_node,
+                .q_node     = q_node,
+            });
+        } else {
+            // Wire / internal signal
+            if (type.unpacked_dims.empty()) {
+                auto* node = ctx.graph.signal(ctx.instance_path, name);
+                node->type = type;
+                ctx.local_signals[name] = node;
+            } else {
+                // Array: create aggregate + individual elements
+                auto* aggregate = ctx.graph.signal(ctx.instance_path, name);
+                aggregate->type = type;
+                ctx.local_signals[name] = aggregate;
+                for (const auto& suffix : generateIndexSuffixes(type.unpacked_dims)) {
+                    auto* elem = ctx.graph.signal(ctx.instance_path, name + suffix);
+                    elem->type = type;
+                    elem->type->unpacked_dims = {};
+                    aggregate->in.push_back(elem);
+                    ctx.local_signals[name + suffix] = elem;
+                }
+            }
+        }
+    };
+
+    // Pass 1: create all DFG nodes for each declaration
+    for (const auto* m : members) {
+        if (m->kind == SyntaxKind::DataDeclaration) {
+            auto& dataDecl = m->as<DataDeclarationSyntax>();
+            for (auto* decl : dataDecl.declarators) {
+                std::string name(decl->name.valueText());
+                processDeclarator(*dataDecl.type, *decl, nbaTargets.count(name) > 0);
+            }
+        } else if (m->kind == SyntaxKind::NetDeclaration) {
+            auto& netDecl = m->as<NetDeclarationSyntax>();
+            for (auto* decl : netDecl.declarators) {
+                processDeclarator(*netDecl.type, *decl, false);
+            }
+        }
+    }
+
+    // Pass 2: connect NetDeclaration initializers (after all nodes exist)
+    for (const auto* m : members) {
+        if (m->kind != SyntaxKind::NetDeclaration) continue;
+        auto& netDecl = m->as<NetDeclarationSyntax>();
+        for (auto* decl : netDecl.declarators) {
+            if (!decl->initializer) continue;
+            std::string name(decl->name.valueText());
+            auto it = ctx.local_signals.find(name);
+            if (it == ctx.local_signals.end())
+                throw CompilerError("Net declaration initializer: signal not found: " + name);
+            auto* sigNode = it->second;
+            auto* rhsNode = buildExprDFG(decl->initializer->expr, ctx);
+            sigNode->in = {rhsNode};
+        }
+    }
+}
+
 // Forward declaration
 void resolveGenerateMemberInPlace(
         const MemberSyntax* member,
         ResolutionContext& ctx);
 
+// Forward declaration of helpers defined below
+static void collectNBAFromStatement(const StatementSyntax* stmt, std::set<std::string>& out);
+static std::set<std::string> collectNBATargets(const SyntaxList<MemberSyntax>& members);
+static void resolveGenerateScopeDecls(
+    const SyntaxList<MemberSyntax>& members,
+    const std::set<std::string>& nbaTargets,
+    ResolutionContext& ctx);
+
 // Resolve a list of generate-block members into the current ResolutionContext
 void resolveGenerateMembersInPlace(
         const SyntaxList<MemberSyntax>& members,
         ResolutionContext& ctx) {
+    // Pre-scan: find all flop names (LHS of non-blocking assigns) in this scope
+    auto nbaTargets = collectNBATargets(members);
+    ctx.local_flop_names.insert(nbaTargets.begin(), nbaTargets.end());
+    // Pre-populate DFG nodes for all signal/net declarations
+    resolveGenerateScopeDecls(members, nbaTargets, ctx);
+    // Process all members
     for (auto* m : members)
         resolveGenerateMemberInPlace(m, ctx);
 }
@@ -1893,12 +2260,36 @@ void resolveGenerateMemberInPlace(
         case SyntaxKind::IfGenerate: {
             auto& ifGen = member->as<IfGenerateSyntax>();
             int64_t cond = evaluateConstantExpr(ifGen.condition, ctx.params);
-            if (cond) {
-                resolveGenerateMemberInPlace(ifGen.block, ctx);
-            } else if (ifGen.elseClause) {
-                // elseClause->clause is always a MemberSyntax subtype (GenerateBlock or IfGenerate)
-                resolveGenerateMemberInPlace(
-                    static_cast<const MemberSyntax*>(ifGen.elseClause->clause.get()), ctx);
+            const MemberSyntax* selectedBlock = cond ? ifGen.block
+                : (ifGen.elseClause
+                   ? static_cast<const MemberSyntax*>(ifGen.elseClause->clause.get()) : nullptr);
+            if (!selectedBlock) break;
+
+            // Extract block name for instance path
+            std::string blockName;
+            if (selectedBlock->kind == SyntaxKind::GenerateBlock) {
+                auto& blk = selectedBlock->as<GenerateBlockSyntax>();
+                if (blk.beginName)
+                    blockName = std::string(blk.beginName->name.valueText());
+            }
+
+            if (!blockName.empty()) {
+                // Named block: create child context with updated instance_path
+                std::string childPath = (ctx.instance_path.empty() ? "" : ctx.instance_path + ".")
+                                        + blockName;
+                ResolutionContext childCtx = ctx;
+                childCtx.instance_path = childPath;
+                childCtx.combDrivers = {};
+
+                if (selectedBlock->kind == SyntaxKind::GenerateBlock) {
+                    resolveGenerateMembersInPlace(
+                        selectedBlock->as<GenerateBlockSyntax>().members, childCtx);
+                } else {
+                    resolveGenerateMemberInPlace(selectedBlock, childCtx);
+                }
+            } else {
+                // Unnamed block: process without new scope
+                resolveGenerateMemberInPlace(selectedBlock, ctx);
             }
             break;
         }
@@ -1907,16 +2298,36 @@ void resolveGenerateMemberInPlace(
             auto& loopGen = member->as<LoopGenerateSyntax>();
             std::string genvarName(loopGen.identifier.valueText());
 
+            // Extract block name for instance path
+            std::string blockName;
+            if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
+                auto& blk = loopGen.block->as<GenerateBlockSyntax>();
+                if (blk.beginName)
+                    blockName = std::string(blk.beginName->name.valueText());
+            }
+            if (blockName.empty()) blockName = "genblk";
+
             // Build per-iteration context with the genvar bound
             ParameterContext iterCtx = ctx.params;
             iterCtx.values[genvarName] = evaluateConstantExpr(loopGen.initialExpr, ctx.params);
 
             while (evaluateConstantExpr(loopGen.stopExpr, iterCtx)) {
-                // Create a ResolutionContext that exposes the genvar as a constant
+                int64_t genval = iterCtx.values.at(genvarName);
+                std::string childPath = (ctx.instance_path.empty() ? "" : ctx.instance_path + ".")
+                                        + blockName + "[" + std::to_string(genval) + "]";
+
+                // Per-iteration context: inherits parent local_signals for outer-scope access
                 ResolutionContext iterResCtx{
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
-                    ctx.sm, ctx.is_sequential, ctx.triggers, ctx.combDrivers};
-                resolveGenerateMemberInPlace(loopGen.block, iterResCtx);
+                    ctx.sm, false, {}, {}, childPath, ctx.local_signals, {}};
+
+                if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
+                    resolveGenerateMembersInPlace(
+                        loopGen.block->as<GenerateBlockSyntax>().members, iterResCtx);
+                } else {
+                    resolveGenerateMemberInPlace(loopGen.block, iterResCtx);
+                }
+
                 iterCtx.values[genvarName] =
                     evaluateGenvarStep(loopGen.iterationExpr, genvarName, iterCtx);
             }
@@ -1955,9 +2366,12 @@ void resolveGenerateMemberInPlace(
 
         case SyntaxKind::DataDeclaration:
         case SyntaxKind::NetDeclaration:
-            throw CompilerError(
-                "Signal declarations inside generate blocks are not yet supported",
-                resolveSourceLoc(*member, ctx.sm));
+            // Pre-populated by resolveGenerateScopeDecls — nothing to do here
+            break;
+
+        case SyntaxKind::GenvarDeclaration:
+            // Genvars handled by LoopGenerate via params — nothing to do here
+            break;
 
         default:
             throw CompilerError(
@@ -2067,7 +2481,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context
-    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}};
+    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}};
 
     for (const auto& block : unresolved.proceduralComboBlocks) {
         resolveProceduralComboInPlace(block, resCtx);

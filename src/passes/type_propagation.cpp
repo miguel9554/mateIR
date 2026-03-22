@@ -198,7 +198,8 @@ bool inferNodeType(DFGNode* node) {
             return true;
         }
 
-        // Logical AND: 1-bit unsigned (both inputs must be typed)
+        // Logical AND/OR: 1-bit unsigned
+        case DFGOp::LOGICAL_OR:
         case DFGOp::LOGICAL_AND: {
             if (node->in.size() < 2) {
                 throw CompilerError(std::format(
@@ -206,6 +207,21 @@ bool inferNodeType(DFGNode* node) {
             }
             if (!node->in[0].node->hasType() || !node->in[1].node->hasType()) return false;
             node->type = makeOneBitUnsigned();
+            return true;
+        }
+
+        // Bitwise binary ops: result same width as widest operand
+        case DFGOp::BITWISE_AND:
+        case DFGOp::BITWISE_OR:
+        case DFGOp::BITWISE_XOR:
+        case DFGOp::BITWISE_XNOR: {
+            if (node->in.size() < 2) return false;
+            auto* a = node->in[0].node;
+            auto* b = node->in[1].node;
+            if (!a->hasType() || !b->hasType()) return false;
+            int w = std::max(a->type->width, b->type->width);
+            bool s = a->type->isSigned() && b->type->isSigned();
+            node->type = ResolvedType::makeInteger(w, s);
             return true;
         }
 

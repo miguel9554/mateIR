@@ -104,8 +104,23 @@ static bool tryConstantFold(DFGNode* node) {
     // Skip nodes that are already constants or have no inputs
     if (node->op == DFGOp::CONST || node->op == DFGOp::INPUT ||
         node->op == DFGOp::INDEX ||
-        node->op == DFGOp::CONCAT || node->op == DFGOp::CONCAT_ALIGN)
+        node->op == DFGOp::CONCAT_ALIGN)
         return false;
+
+    // CONCAT with all-constant inputs: fold by bit-concatenation (MSB-first)
+    if (node->op == DFGOp::CONCAT) {
+        if (node->in.empty()) return false;
+        for (auto& inp : node->in) {
+            if (!isConst(inp.node)) return false;
+            if (!inp.node->hasType()) return false;  // need width for each segment
+        }
+        int64_t result = 0;
+        for (auto& inp : node->in) {
+            result = (result << inp.node->type->width) | getConst(inp.node);
+        }
+        makeConst(node, result);
+        return true;
+    }
 
     // Check if all inputs are constants
     if (node->in.empty()) return false;
@@ -191,6 +206,21 @@ static bool tryConstantFold(DFGNode* node) {
             break;
         case DFGOp::LOGICAL_AND:
             result = (getConst(node->in[0].node) != 0 && getConst(node->in[1].node) != 0) ? 1 : 0;
+            break;
+        case DFGOp::LOGICAL_OR:
+            result = (getConst(node->in[0].node) != 0 || getConst(node->in[1].node) != 0) ? 1 : 0;
+            break;
+        case DFGOp::BITWISE_AND:
+            result = getConst(node->in[0].node) & getConst(node->in[1].node);
+            break;
+        case DFGOp::BITWISE_OR:
+            result = getConst(node->in[0].node) | getConst(node->in[1].node);
+            break;
+        case DFGOp::BITWISE_XOR:
+            result = getConst(node->in[0].node) ^ getConst(node->in[1].node);
+            break;
+        case DFGOp::BITWISE_XNOR:
+            result = ~(getConst(node->in[0].node) ^ getConst(node->in[1].node));
             break;
         case DFGOp::REDUCTION_AND:
             // For constant folding, treat as: result is 1 if all bits are 1 (value == -1 for signed), else 0

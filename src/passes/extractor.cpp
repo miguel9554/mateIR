@@ -29,6 +29,12 @@ public:
 
     explicit FlopFinderVisitor(const slang::SourceManager& sm) : sm(sm) {}
 
+    // Stop traversal into generate blocks — their flops are discovered during elaboration
+    void handle(const LoopGenerateSyntax&) {}
+    void handle(const IfGenerateSyntax&) {}
+    void handle(const GenerateRegionSyntax&) {}
+    void handle(const GenerateBlockSyntax&) {}
+
     void handle(const BinaryExpressionSyntax& node) {
         if (node.kind == SyntaxKind::NonblockingAssignmentExpression) {
             extractLhsName(node.left);
@@ -84,7 +90,7 @@ public:
         SyntaxKind::DataDeclaration,
         SyntaxKind::NetDeclaration,
         SyntaxKind::ParameterDeclarationStatement,
-        // SyntaxKind::GenvarDeclaration,
+        SyntaxKind::GenvarDeclaration,
         SyntaxKind::EmptyMember,
         // SyntaxKind::ProceduralBlock,
         // SyntaxKind::InitialBlock,
@@ -251,6 +257,11 @@ public:
         if (!currentModule) throw CompilerError(
                 "Continuous assign must be inside module.", resolveSourceLoc(node, sm));
         currentModule->assignStatements.push_back(&node);
+    }
+
+    void handle(const GenvarDeclarationSyntax& node) {
+        // Genvars are used by loop generate; no extraction needed
+        (void)node;
     }
 
     void handle(const GenerateRegionSyntax& node) {

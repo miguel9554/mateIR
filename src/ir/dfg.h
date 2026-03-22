@@ -45,7 +45,13 @@ enum class DFGOp {
     UNARY_NEGATE,
     BITWISE_NOT,
     LOGICAL_NOT,
+    // Binary bitwise/logical ops
     LOGICAL_AND,
+    LOGICAL_OR,
+    BITWISE_AND,
+    BITWISE_OR,
+    BITWISE_XOR,
+    BITWISE_XNOR,
     REDUCTION_AND,
     REDUCTION_NAND,
     REDUCTION_OR,
@@ -82,7 +88,12 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::UNARY_NEGATE: return "UNARY_NEGATE";
         case DFGOp::BITWISE_NOT: return "BITWISE_NOT";
         case DFGOp::LOGICAL_NOT: return "LOGICAL_NOT";
-        case DFGOp::LOGICAL_AND: return "LOGICAL_AND";
+        case DFGOp::LOGICAL_AND:  return "LOGICAL_AND";
+        case DFGOp::LOGICAL_OR:   return "LOGICAL_OR";
+        case DFGOp::BITWISE_AND:  return "BITWISE_AND";
+        case DFGOp::BITWISE_OR:   return "BITWISE_OR";
+        case DFGOp::BITWISE_XOR:  return "BITWISE_XOR";
+        case DFGOp::BITWISE_XNOR: return "BITWISE_XNOR";
         case DFGOp::REDUCTION_AND: return "REDUCTION_AND";
         case DFGOp::REDUCTION_NAND: return "REDUCTION_NAND";
         case DFGOp::REDUCTION_OR: return "REDUCTION_OR";
@@ -129,7 +140,12 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::UNARY_NEGATE:    return 1;
         case DFGOp::BITWISE_NOT:     return 1;
         case DFGOp::LOGICAL_NOT:     return 1;
-        case DFGOp::LOGICAL_AND:     return 2;
+        case DFGOp::LOGICAL_AND:  return 2;
+        case DFGOp::LOGICAL_OR:   return 2;
+        case DFGOp::BITWISE_AND:  return 2;
+        case DFGOp::BITWISE_OR:   return 2;
+        case DFGOp::BITWISE_XOR:  return 2;
+        case DFGOp::BITWISE_XNOR: return 2;
         case DFGOp::REDUCTION_AND:   return 1;
         case DFGOp::REDUCTION_NAND:  return 1;
         case DFGOp::REDUCTION_OR:    return 1;
@@ -643,6 +659,16 @@ public:
     }
 
     // Helper for unary operations (single input)
+    DFGNode* binaryOp(DFGOp op, DFGNode* a, DFGNode* b, const std::string& name = "") {
+        auto n = name.empty()
+            ? std::make_unique<DFGNode>(op)
+            : std::make_unique<DFGNode>(op, name);
+        n->in = {a, b};
+        nodes.push_back(std::move(n));
+        if (!name.empty()) signals[name] = nodes.back().get();
+        return nodes.back().get();
+    }
+
     DFGNode* unaryOp(DFGOp op, DFGNode* a, const std::string& name = "") {
         auto n = name.empty()
             ? std::make_unique<DFGNode>(op)
@@ -679,6 +705,22 @@ public:
         nodes.push_back(std::move(n));
         if (!name.empty()) signals[name] = nodes.back().get();
         return nodes.back().get();
+    }
+
+    DFGNode* logicalOr(DFGNode* a, DFGNode* b, const std::string& name = "") {
+        return binaryOp(DFGOp::LOGICAL_OR, a, b, name);
+    }
+    DFGNode* bitwiseAnd(DFGNode* a, DFGNode* b, const std::string& name = "") {
+        return binaryOp(DFGOp::BITWISE_AND, a, b, name);
+    }
+    DFGNode* bitwiseOr(DFGNode* a, DFGNode* b, const std::string& name = "") {
+        return binaryOp(DFGOp::BITWISE_OR, a, b, name);
+    }
+    DFGNode* bitwiseXor(DFGNode* a, DFGNode* b, const std::string& name = "") {
+        return binaryOp(DFGOp::BITWISE_XOR, a, b, name);
+    }
+    DFGNode* bitwiseXnor(DFGNode* a, DFGNode* b, const std::string& name = "") {
+        return binaryOp(DFGOp::BITWISE_XNOR, a, b, name);
     }
 
     DFGNode* reductionAnd(DFGNode* a, const std::string& name = "") {

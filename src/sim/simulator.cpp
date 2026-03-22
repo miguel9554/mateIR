@@ -308,6 +308,11 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::BITWISE_NOT:   return ~getVal(0);
         case DFGOp::LOGICAL_NOT:   return getVal(0) == 0 ? 1 : 0;
         case DFGOp::LOGICAL_AND:   return (getVal(0) != 0 && getVal(1) != 0) ? 1 : 0;
+        case DFGOp::LOGICAL_OR:    return (getVal(0) != 0 || getVal(1) != 0) ? 1 : 0;
+        case DFGOp::BITWISE_AND:   return getVal(0) & getVal(1);
+        case DFGOp::BITWISE_OR:    return getVal(0) | getVal(1);
+        case DFGOp::BITWISE_XOR:   return getVal(0) ^ getVal(1);
+        case DFGOp::BITWISE_XNOR:  return ~(getVal(0) ^ getVal(1));
 
         case DFGOp::REDUCTION_AND: {
             int w = node->in[0].node->type.has_value() ? node->in[0].node->type->width : 64;

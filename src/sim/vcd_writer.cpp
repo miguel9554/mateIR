@@ -107,6 +107,7 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
     }
 
     for (const auto& [name, sig] : mod.signals) {
+        if (name.ends_with(".q") || name.ends_with(".d")) continue;
         addEntry(signals_mod, name, sig.dfg_node, alive);
     }
 

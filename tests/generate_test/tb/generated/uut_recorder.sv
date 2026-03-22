@@ -17,4 +17,20 @@ module uut_recorder(
         .data(_if.rst_n)
     );
 
+    // Sync recorders
+    sync_recorder#(
+        .filepath(path("data_in.txt")),
+        .TYPE(logic [4*8-1:0])
+    ) u_data_in_recorder(
+        .clk(_if.clk),
+        .data(_if.data_in)
+    );
+    sync_recorder#(
+        .filepath(path("lane_en.txt")),
+        .TYPE(logic [4-1:0])
+    ) u_lane_en_recorder(
+        .clk(_if.clk),
+        .data(_if.lane_en)
+    );
+
 endmodule

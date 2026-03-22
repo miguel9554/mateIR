@@ -1,0 +1,5 @@
+# time value followed by value
+0.000000ns 0
+45.000000ns 1
+135.000000ns 0
+145.000000ns 1

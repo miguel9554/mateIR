@@ -168,6 +168,39 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             return parseIntegerVectorExpression(vecExpr).value;
         }
 
+        case SyntaxKind::EqualityExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx) == evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+        }
+        case SyntaxKind::InequalityExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx) != evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+        }
+        case SyntaxKind::LessThanExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx) < evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+        }
+        case SyntaxKind::LessThanEqualExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx) <= evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+        }
+        case SyntaxKind::GreaterThanExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx) > evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+        }
+        case SyntaxKind::GreaterThanEqualExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx) >= evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+        }
+        case SyntaxKind::LogicalAndExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return (evaluateConstantExpr(binary.left, ctx) && evaluateConstantExpr(binary.right, ctx)) ? 1 : 0;
+        }
+        case SyntaxKind::LogicalOrExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return (evaluateConstantExpr(binary.left, ctx) || evaluateConstantExpr(binary.right, ctx)) ? 1 : 0;
+        }
+
         default:
             throw CompilerError(
                 "Unsupported expression kind in constant evaluation: " +
@@ -1796,6 +1829,144 @@ void resolvePortConnection(
     }
 }
 
+// Evaluate the next genvar value from a for-loop iteration expression.
+// Supports: i = expr, i++, i--, ++i, --i
+int64_t evaluateGenvarStep(
+        const ExpressionSyntax* iterExpr,
+        const std::string& genvarName,
+        const ParameterContext& ctx) {
+    switch (iterExpr->kind) {
+        case SyntaxKind::AssignmentExpression: {
+            auto& assign = iterExpr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(assign.right, ctx);
+        }
+        case SyntaxKind::PostincrementExpression:
+        case SyntaxKind::UnaryPreincrementExpression: {
+            auto it = ctx.values.find(genvarName);
+            if (it == ctx.values.end())
+                throw CompilerError("Genvar '" + genvarName + "' not found in context during increment");
+            return it->second + 1;
+        }
+        case SyntaxKind::PostdecrementExpression:
+        case SyntaxKind::UnaryPredecrementExpression: {
+            auto it = ctx.values.find(genvarName);
+            if (it == ctx.values.end())
+                throw CompilerError("Genvar '" + genvarName + "' not found in context during decrement");
+            return it->second - 1;
+        }
+        default:
+            throw CompilerError(
+                "Unsupported genvar iteration expression: " + std::string(toString(iterExpr->kind)));
+    }
+}
+
+// Forward declaration
+void resolveGenerateMemberInPlace(
+        const MemberSyntax* member,
+        ResolutionContext& ctx);
+
+// Resolve a list of generate-block members into the current ResolutionContext
+void resolveGenerateMembersInPlace(
+        const SyntaxList<MemberSyntax>& members,
+        ResolutionContext& ctx) {
+    for (auto* m : members)
+        resolveGenerateMemberInPlace(m, ctx);
+}
+
+void resolveGenerateMemberInPlace(
+        const MemberSyntax* member,
+        ResolutionContext& ctx) {
+    switch (member->kind) {
+
+        case SyntaxKind::GenerateRegion: {
+            auto& region = member->as<GenerateRegionSyntax>();
+            resolveGenerateMembersInPlace(region.members, ctx);
+            break;
+        }
+
+        case SyntaxKind::GenerateBlock: {
+            auto& block = member->as<GenerateBlockSyntax>();
+            resolveGenerateMembersInPlace(block.members, ctx);
+            break;
+        }
+
+        case SyntaxKind::IfGenerate: {
+            auto& ifGen = member->as<IfGenerateSyntax>();
+            int64_t cond = evaluateConstantExpr(ifGen.condition, ctx.params);
+            if (cond) {
+                resolveGenerateMemberInPlace(ifGen.block, ctx);
+            } else if (ifGen.elseClause) {
+                // elseClause->clause is always a MemberSyntax subtype (GenerateBlock or IfGenerate)
+                resolveGenerateMemberInPlace(
+                    static_cast<const MemberSyntax*>(ifGen.elseClause->clause.get()), ctx);
+            }
+            break;
+        }
+
+        case SyntaxKind::LoopGenerate: {
+            auto& loopGen = member->as<LoopGenerateSyntax>();
+            std::string genvarName(loopGen.identifier.valueText());
+
+            // Build per-iteration context with the genvar bound
+            ParameterContext iterCtx = ctx.params;
+            iterCtx.values[genvarName] = evaluateConstantExpr(loopGen.initialExpr, ctx.params);
+
+            while (evaluateConstantExpr(loopGen.stopExpr, iterCtx)) {
+                // Create a ResolutionContext that exposes the genvar as a constant
+                ResolutionContext iterResCtx{
+                    ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
+                    ctx.sm, ctx.is_sequential, ctx.triggers, ctx.combDrivers};
+                resolveGenerateMemberInPlace(loopGen.block, iterResCtx);
+                iterCtx.values[genvarName] =
+                    evaluateGenvarStep(loopGen.iterationExpr, genvarName, iterCtx);
+            }
+            break;
+        }
+
+        case SyntaxKind::ContinuousAssign: {
+            resolveAssignInPlace(&member->as<ContinuousAssignSyntax>(), ctx);
+            break;
+        }
+
+        case SyntaxKind::AlwaysBlock:
+        case SyntaxKind::AlwaysFFBlock: {
+            auto& block = member->as<ProceduralBlockSyntax>();
+            const StatementSyntax* statement = block.statement.get();
+            if (!statement->isKind(SyntaxKind::TimingControlStatement))
+                throw CompilerError(
+                    "AlwaysBlock inside generate must have timing control",
+                    resolveSourceLoc(*member, ctx.sm));
+            resolveProceduralTimingInPlace(
+                &statement->as<TimingControlStatementSyntax>(), ctx);
+            break;
+        }
+
+        case SyntaxKind::AlwaysCombBlock: {
+            auto& block = member->as<ProceduralBlockSyntax>();
+            const StatementSyntax* statement = block.statement.get();
+            resolveProceduralComboInPlace(statement, ctx);
+            break;
+        }
+
+        case SyntaxKind::HierarchyInstantiation:
+            throw CompilerError(
+                "Hierarchy instantiation inside generate is not yet supported",
+                resolveSourceLoc(*member, ctx.sm));
+
+        case SyntaxKind::DataDeclaration:
+        case SyntaxKind::NetDeclaration:
+            throw CompilerError(
+                "Signal declarations inside generate blocks are not yet supported",
+                resolveSourceLoc(*member, ctx.sm));
+
+        default:
+            throw CompilerError(
+                "Unsupported member inside generate block: " +
+                std::string(toString(member->kind)),
+                resolveSourceLoc(*member, ctx.sm));
+    }
+}
+
 } // anonymous namespace
 
 ResolvedModule resolveModule(const UnresolvedModule& unresolved, const ParameterContext& topCtx,
@@ -1908,6 +2079,10 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     for (const auto& assign : unresolved.assignStatements) {
         resolveAssignInPlace(assign, resCtx);
+    }
+
+    for (const auto& genBlock : unresolved.generateBlocks) {
+        resolveGenerateMemberInPlace(genBlock, resCtx);
     }
 
     // Resolve submodules and create MODULE nodes in the DFG

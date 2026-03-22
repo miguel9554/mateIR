@@ -56,6 +56,8 @@ struct UnresolvedTypes {
     using ProceduralCombo = const slang::syntax::StatementSyntax*;
     using Assign = const slang::syntax::ContinuousAssignSyntax*;
     using Hierarchy = const slang::syntax::HierarchyInstantiationSyntax*;
+    // Generate construct (IfGenerate, LoopGenerate, GenerateRegion) stored as opaque MemberSyntax*
+    using Generate = const slang::syntax::MemberSyntax*;
 };
 
 // ============================================================================
@@ -88,6 +90,9 @@ struct UnresolvedModule {
     // TODO a list of instantiated modules.
     // TODO prob. should be a list of pairs of params and modules
     std::vector<UnresolvedTypes::Hierarchy> hierarchyInstantiation;
+
+    // Generate constructs (IfGenerate, LoopGenerate, GenerateRegion) — flattened at elaboration time
+    std::vector<UnresolvedTypes::Generate> generateBlocks;
 
     void print(int indent = 0) const;
 };

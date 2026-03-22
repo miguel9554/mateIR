@@ -93,9 +93,9 @@ public:
         SyntaxKind::AlwaysCombBlock,
         SyntaxKind::AlwaysFFBlock,
         // SyntaxKind::AlwaysLatchBlock,
-        // SyntaxKind::GenerateRegion,
-        // SyntaxKind::LoopGenerate,
-        // SyntaxKind::IfGenerate,
+        SyntaxKind::GenerateRegion,
+        SyntaxKind::LoopGenerate,
+        SyntaxKind::IfGenerate,
         // SyntaxKind::CaseGenerate,
         // SyntaxKind::GenerateBlock,
         // SyntaxKind::TimeUnitsDeclaration,
@@ -251,6 +251,24 @@ public:
         if (!currentModule) throw CompilerError(
                 "Continuous assign must be inside module.", resolveSourceLoc(node, sm));
         currentModule->assignStatements.push_back(&node);
+    }
+
+    void handle(const GenerateRegionSyntax& node) {
+        if (!currentModule) throw CompilerError(
+                "Generate region must be inside module.", resolveSourceLoc(node, sm));
+        currentModule->generateBlocks.push_back(&node);
+    }
+
+    void handle(const LoopGenerateSyntax& node) {
+        if (!currentModule) throw CompilerError(
+                "Loop generate must be inside module.", resolveSourceLoc(node, sm));
+        currentModule->generateBlocks.push_back(&node);
+    }
+
+    void handle(const IfGenerateSyntax& node) {
+        if (!currentModule) throw CompilerError(
+                "If generate must be inside module.", resolveSourceLoc(node, sm));
+        currentModule->generateBlocks.push_back(&node);
     }
 
     void handle(const ProceduralBlockSyntax& node) {

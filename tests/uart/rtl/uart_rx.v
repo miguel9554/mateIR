@@ -63,18 +63,18 @@ module uart_rx #
 
 );
 
-reg [DATA_WIDTH-1:0] m_axis_tdata_reg = 0;
-reg m_axis_tvalid_reg = 0;
+reg [DATA_WIDTH-1:0] m_axis_tdata_reg ;
+reg m_axis_tvalid_reg ;
 
-reg rxd_reg = 1;
+reg rxd_reg ;
 
-reg busy_reg = 0;
-reg overrun_error_reg = 0;
-reg frame_error_reg = 0;
+reg busy_reg ;
+reg overrun_error_reg ;
+reg frame_error_reg ;
 
-reg [DATA_WIDTH-1:0] data_reg = 0;
-reg [18:0] prescale_reg = 0;
-reg [3:0] bit_cnt = 0;
+reg [DATA_WIDTH-1:0] data_reg ;
+reg [18:0] prescale_reg ;
+reg [3:0] bit_cnt ;
 
 assign m_axis_tdata = m_axis_tdata_reg;
 assign m_axis_tvalid = m_axis_tvalid_reg;

@@ -60,15 +60,15 @@ module uart_tx #
     input  wire [15:0]            prescale
 );
 
-reg s_axis_tready_reg = 0;
+reg s_axis_tready_reg;
 
-reg txd_reg = 1;
+reg txd_reg;
 
-reg busy_reg = 0;
+reg busy_reg;
 
-reg [DATA_WIDTH:0] data_reg = 0;
-reg [18:0] prescale_reg = 0;
-reg [3:0] bit_cnt = 0;
+reg [DATA_WIDTH:0] data_reg;
+reg [18:0] prescale_reg;
+reg [3:0] bit_cnt;
 
 assign s_axis_tready = s_axis_tready_reg;
 assign txd = txd_reg;

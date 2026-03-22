@@ -378,6 +378,26 @@ int main(int argc, char** argv) {
         std::cout << "Module: " << module.name << std::endl;
         std::cout << "========================================" << std::endl;
 
+        // Find a debug node in the flat DFG by locating the instance whose module type
+        // name matches modulePath, then looking up the instance-path-qualified node name.
+        auto findInlinedNode = [&](const std::string& modulePath, const std::string& nodeName) -> const DFGNode* {
+            std::function<const DFGNode*(const ResolvedModule&, const std::string&)> recurse =
+                [&](const ResolvedModule& mod, const std::string& prefix) -> const DFGNode* {
+                    for (const auto& sub : mod.hierarchyInstantiation) {
+                        std::string subPath = prefix.empty() ? sub.instance_name
+                                                             : prefix + "." + sub.instance_name;
+                        if (sub.name == modulePath) {
+                            std::string fullName = subPath + "." + nodeName;
+                            if (auto* n = module.dfg->getSignalNode(fullName)) return n;
+                            if (auto* n = module.dfg->getOutputNode(fullName)) return n;
+                        }
+                        if (auto* n = recurse(sub, subPath)) return n;
+                    }
+                    return nullptr;
+                };
+            return recurse(module, "");
+        };
+
         auto runPass = [&](const int number, const std::string& passName, auto passFn) {
             std::cout << "========================================" << std::endl;
             std::cout << "Performing " << passName << "..." << std::endl;
@@ -406,24 +426,28 @@ int main(int argc, char** argv) {
                 for (size_t specIdx = 0; specIdx < simConfig->debug_dfg_nodes.size(); specIdx++) {
                     const auto& spec = simConfig->debug_dfg_nodes[specIdx];
 
-                    // Check if this spec targets the current module (suffix match on hierarchy path)
-                    if (!spec.module_path.empty() &&
-                        currentPath != spec.module_path &&
-                        !currentPath.ends_with("." + spec.module_path))
-                        continue;
-
                     const DFGNode* node = nullptr;
-                    if (auto* n = module.dfg->getSignalNode(spec.node_name))
-                        node = n;
-                    else if (auto* n = module.dfg->getOutputNode(spec.node_name))
-                        node = n;
+                    bool pathMatches = spec.module_path.empty() ||
+                                       currentPath == spec.module_path ||
+                                       currentPath.ends_with("." + spec.module_path);
 
-                    if (!node) {
-                        if (!spec.module_path.empty())
-                            throw CompilerError(std::format(
-                                "debug_dfg_nodes: node '{}' not found in module '{}' signals or outputs",
-                                spec.node_name, module.name));
-                        continue; // no module_path — will be validated after pipeline
+                    if (pathMatches) {
+                        // Direct lookup in this module's DFG
+                        if (auto* n = module.dfg->getSignalNode(spec.node_name))
+                            node = n;
+                        else if (auto* n = module.dfg->getOutputNode(spec.node_name))
+                            node = n;
+
+                        if (!node) {
+                            if (!spec.module_path.empty())
+                                throw CompilerError(std::format(
+                                    "debug_dfg_nodes: node '{}' not found in module '{}' signals or outputs",
+                                    spec.node_name, module.name));
+                            continue; // no module_path — will be validated after pipeline
+                        }
+                    } else {
+                        node = findInlinedNode(spec.module_path, spec.node_name);
+                        if (!node) continue; // not yet inlined (e.g. pre-inline passes)
                     }
 
                     satisfiedDebugSpecs.insert(specIdx);
@@ -487,6 +511,27 @@ int main(int argc, char** argv) {
         }
         computeComboDeps(module);
         validateNoCombLoops(module);
+
+        if (simConfig && !simConfig->debug_dfg_nodes.empty()) {
+            std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
+            for (const auto& spec : simConfig->debug_dfg_nodes) {
+                const DFGNode* node = nullptr;
+                bool pathMatches = spec.module_path.empty() ||
+                                   currentPath == spec.module_path ||
+                                   currentPath.ends_with("." + spec.module_path);
+                if (pathMatches) {
+                    if (auto* n = module.dfg->getSignalNode(spec.node_name)) node = n;
+                    else if (auto* n = module.dfg->getOutputNode(spec.node_name)) node = n;
+                } else {
+                    node = findInlinedNode(spec.module_path, spec.node_name);
+                }
+                if (!node) continue;
+                std::ofstream(std::format("{}/{}.dot", dir, spec.node_name))
+                    << module.dfg->toDotCone(node, spec.node_name);
+                std::ofstream(std::format("{}/{}.json", dir, spec.node_name))
+                    << module.dfg->toJsonCone(node);
+            }
+        }
     };
 
     runPipeline(topModule, topModule.name);

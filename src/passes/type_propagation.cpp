@@ -334,8 +334,23 @@ bool inferNodeType(DFGNode* node) {
                 return true;
             }
 
-            // No dimensions — single-bit select fallback
-            node->type = ResolvedType::makeInteger(1, false);
+            // No packed/unpacked dims — flat bit-vector.
+            // Dynamic bit-select (hi and lo are the same node) → 1 bit.
+            // Constant range select → |hi - lo| + 1 bits.
+            // Non-constant range → not supported.
+            if (highNode == lowNode) {
+                node->type = ResolvedType::makeInteger(1, false);
+            } else if (highNode->op != DFGOp::CONST || lowNode->op != DFGOp::CONST) {
+                throw CompilerError(std::format(
+                    "Type propagation: INDEX {} on flat vector has non-constant range indices "
+                    "(dynamic range selects not supported)",
+                    node->str()), node->loc);
+            } else {
+                int64_t high_val = std::get<int64_t>(highNode->data);
+                int64_t low_val  = std::get<int64_t>(lowNode->data);
+                node->type = ResolvedType::makeInteger(
+                    static_cast<int>(std::abs(high_val - low_val)) + 1, false);
+            }
             return true;
         }
     }

@@ -92,6 +92,10 @@ subclass. One handle catches all kinds in a multiKind's kindmap.
 Expression), `StatementSyntax`, `MemberSyntax`, `TimingControlSyntax`,
 `NameSyntax` (extends Expression).
 
+## Domains file schema
+
+Schema: `src/domains.schema.json` — read this file when working with `.domains.yaml` files or `io_domains_set.h/.cpp`.
+
 ## Project structure
 
 ```

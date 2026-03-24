@@ -29,7 +29,7 @@ OUT = obj_dir/V$(TOP_MODULE)
 VERILATOR_WARNS ?= -Wno-TIMESCALEMOD -Wno-WIDTHTRUNC
 # Per-test extra warnings suppression (place -Wno-XXX flags in verilator.warns)
 VERILATOR_WARNS += $(shell cat verilator.warns 2>/dev/null)
-VERILATOR_OPTS ?= --trace --binary --x-initial unique
+VERILATOR_OPTS ?= --trace --binary --x-initial unique --main-top-name TOP
 
 # seed 0 uses a random seed
 SEED_ARG = $(if $(seed),+verilator+seed+$(seed))

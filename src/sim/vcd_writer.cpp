@@ -78,15 +78,28 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
     vcd_tracer::module flops_mod(scope, "flops");
     vcd_tracer::module outputs_mod(scope, "outputs");
 
-    // Cache of generate-scope vcd_tracer::module objects, keyed by dot-separated
-    // scope path (e.g. "g_lane[0]" or "g_lane[0].g_inner"). Created on demand and
-    // reused so that signals and flops from the same generate scope share one VCD scope.
-    // Generate scopes are direct children of `scope` (not of signals_mod/flops_mod).
-    std::map<std::string, std::unique_ptr<vcd_tracer::module>> gen_scopes;
-    std::function<vcd_tracer::module&(const std::string&)> getGenScope;
-    getGenScope = [&](const std::string& path) -> vcd_tracer::module& {
+    // Cache of generate-scope entries, keyed by dot-separated scope path.
+    // Each entry holds the generate scope VCD module plus lazily-created
+    // signals/ and flops/ sub-modules (mirroring the top-level hierarchy).
+    struct GenScopeEntry {
+        std::unique_ptr<vcd_tracer::module> scope;
+        std::unique_ptr<vcd_tracer::module> signals_mod;
+        std::unique_ptr<vcd_tracer::module> flops_mod;
+
+        vcd_tracer::module& get_or_create_signals() {
+            if (!signals_mod) signals_mod = std::make_unique<vcd_tracer::module>(*scope, "signals");
+            return *signals_mod;
+        }
+        vcd_tracer::module& get_or_create_flops() {
+            if (!flops_mod) flops_mod = std::make_unique<vcd_tracer::module>(*scope, "flops");
+            return *flops_mod;
+        }
+    };
+    std::map<std::string, GenScopeEntry> gen_scopes;
+    std::function<GenScopeEntry&(const std::string&)> getGenScope;
+    getGenScope = [&](const std::string& path) -> GenScopeEntry& {
         auto it = gen_scopes.find(path);
-        if (it != gen_scopes.end()) return *it->second;
+        if (it != gen_scopes.end()) return it->second;
         auto dot = path.rfind('.');
         vcd_tracer::module* parent;
         std::string last;
@@ -94,11 +107,12 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
             parent = &scope;
             last   = path;
         } else {
-            parent = &getGenScope(path.substr(0, dot));
+            parent = getGenScope(path.substr(0, dot)).scope.get();
             last   = path.substr(dot + 1);
         }
-        gen_scopes.emplace(path, std::make_unique<vcd_tracer::module>(*parent, last));
-        return *gen_scopes[path];
+        GenScopeEntry entry;
+        entry.scope = std::make_unique<vcd_tracer::module>(*parent, last);
+        return gen_scopes.emplace(path, std::move(entry)).first->second;
     };
 
     for (const auto& [name, sig] : mod.inputs) {
@@ -123,7 +137,8 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
         if (dot == std::string::npos) {
             addEntry(signals_mod, name, sig.dfg_node, alive);
         } else {
-            addEntry(getGenScope(name.substr(0, dot)), name.substr(dot + 1), sig.dfg_node, alive);
+            addEntry(getGenScope(name.substr(0, dot)).get_or_create_signals(),
+                     name.substr(dot + 1), sig.dfg_node, alive);
         }
     }
 
@@ -136,7 +151,8 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
         if (dot == std::string::npos) {
             v->elaborate(flops_mod.get_add_fn(), flop.name);
         } else {
-            v->elaborate(getGenScope(flop.name.substr(0, dot)).get_add_fn(), flop.name.substr(dot + 1));
+            v->elaborate(getGenScope(flop.name.substr(0, dot)).get_or_create_flops().get_add_fn(),
+                         flop.name.substr(dot + 1));
         }
         values_[flop.q_node].push_back(std::move(v));
     }

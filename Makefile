@@ -10,7 +10,10 @@ source ?= tests/counter/rtl/counter.v
 
 all: $(BINARY) run
 
-$(BINARY): $(SOURCES)
+build/CMakeCache.txt:
+	cmake -B build
+
+$(BINARY): build/CMakeCache.txt $(SOURCES)
 	cmake --build build -j$(shell nproc)
 
 build: $(BINARY)

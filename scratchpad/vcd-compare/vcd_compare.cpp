@@ -327,9 +327,13 @@ static void compare_scopes_recursive(
         }
     }
 
-    // Recurse into children: match by name
-    std::map<std::string, VCDScope *> children2;
-    for (auto *child : scope2->children) children2[child->name] = child;
+    // Recurse into children: match by name, with positional matching for
+    // multiple siblings sharing the same name (e.g. generate scopes like
+    // g_lane[0..3] which all parse to name "g_lane" due to VCD parser limits).
+    std::map<std::string, std::vector<VCDScope *>> children2;
+    for (auto *child : scope2->children) children2[child->name].push_back(child);
+    // Track per-name consumption index for positional matching
+    std::map<std::string, std::size_t> children2_idx;
 
     for (auto *child1 : scope1->children) {
         auto it = children2.find(child1->name);
@@ -340,18 +344,29 @@ static void compare_scopes_recursive(
             stats.failed_scopes.push_back(scope_path + "." + child1->name);
             continue;
         }
+        std::size_t &idx = children2_idx[child1->name];
+        if (idx >= it->second.size()) {
+            std::printf("\n  \033[31m[MISS]\033[0m  %s.%s  (scope exists in file 1 only)\n",
+                        scope_path.c_str(), child1->name.c_str());
+            stats.scopes_failed++;
+            stats.failed_scopes.push_back(scope_path + "." + child1->name);
+            continue;
+        }
+        VCDScope *child2 = it->second[idx++];
         std::string child_path = scope_path + "." + child1->name;
-        compare_scopes_recursive(f1, child1, ps1, f2, it->second, ps2,
+        compare_scopes_recursive(f1, child1, ps1, f2, child2, ps2,
                                  timestamps, child_path, stats);
-        children2.erase(it);
     }
 
     // Any children left in file 2 have no counterpart in file 1
-    for (auto &[name, child2] : children2) {
-        std::printf("\n  \033[31m[MISS]\033[0m  %s.%s  (scope exists in file 2 only)\n",
-                    scope_path.c_str(), name.c_str());
-        stats.scopes_failed++;
-        stats.failed_scopes.push_back(scope_path + "." + name);
+    for (auto &[name, vec] : children2) {
+        std::size_t used = children2_idx.count(name) ? children2_idx[name] : 0;
+        for (std::size_t i = used; i < vec.size(); ++i) {
+            std::printf("\n  \033[31m[MISS]\033[0m  %s.%s  (scope exists in file 2 only)\n",
+                        scope_path.c_str(), name.c_str());
+            stats.scopes_failed++;
+            stats.failed_scopes.push_back(scope_path + "." + name);
+        }
     }
 }
 

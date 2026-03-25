@@ -2164,11 +2164,32 @@ static void resolveGenerateScopeDecls(
                 auto* node = ctx.graph.signal(ctx.instance_path, name);
                 node->type = type;
                 ctx.local_signals[name] = node;
+                // Add to resolved.signals with qualified name so the VCD writer can
+                // place this signal under the correct generate-scope hierarchy.
+                if (!ctx.instance_path.empty()) {
+                    std::string qualName = ctx.instance_path + "." + name;
+                    ResolvedSignal genSig;
+                    genSig.name     = qualName;
+                    genSig.type     = type;
+                    genSig.dfg_node = node;
+                    ctx.thisModule->signals[qualName] = genSig;
+                }
             } else {
                 // Array: create aggregate + individual elements
                 auto* aggregate = ctx.graph.signal(ctx.instance_path, name);
                 aggregate->type = type;
                 ctx.local_signals[name] = aggregate;
+                // Add aggregate (with unpacked_dims intact) to resolved.signals.
+                // addEntry walks aggregate->in for the elements; do NOT add elements
+                // separately to avoid duplicate VCD vars.
+                if (!ctx.instance_path.empty()) {
+                    std::string qualName = ctx.instance_path + "." + name;
+                    ResolvedSignal genSig;
+                    genSig.name     = qualName;
+                    genSig.type     = type;   // includes unpacked_dims
+                    genSig.dfg_node = aggregate;
+                    ctx.thisModule->signals[qualName] = genSig;
+                }
                 for (const auto& suffix : generateIndexSuffixes(type.unpacked_dims)) {
                     auto* elem = ctx.graph.signal(ctx.instance_path, name + suffix);
                     elem->type = type;

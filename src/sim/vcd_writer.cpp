@@ -56,7 +56,7 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
 // VcdWriter::setupHier — hierarchical VCD
 // ============================================================================
 
-void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
+void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scope,
                           const std::unordered_set<const DFGNode*>& alive,
                           const NameMap& translation) {
     if (!mod.parameters.empty() || !mod.localparams.empty()) {
@@ -170,15 +170,15 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
             auto it = translation.find(parent_sig);
             composed[port] = it != translation.end() ? it->second : parent_sig;
         }
-        setupHier(sub, childScope, alive, composed);
+        setupGrouped(sub, childScope, alive, composed);
     }
 }
 
 // ============================================================================
-// VcdWriter::setupFlat — flat VCD
+// VcdWriter::setupRaw — raw VCD (no kind grouping)
 // ============================================================================
 
-void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
+void VcdWriter::setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
                           const std::unordered_set<const DFGNode*>& alive,
                           const NameMap& translation) {
     for (const auto* params : {&mod.parameters, &mod.localparams}) {
@@ -268,7 +268,7 @@ void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
             auto it = translation.find(parent_sig);
             composed[port] = it != translation.end() ? it->second : parent_sig;
         }
-        setupFlat(sub, childScope, alive, composed);
+        setupRaw(sub, childScope, alive, composed);
     }
 }
 
@@ -279,28 +279,28 @@ void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
 VcdWriter::VcdWriter(const ResolvedModule& module, const std::string& output_dir) {
     std::filesystem::create_directories(output_dir);
 
-    hier_path_ = output_dir + "/" + module.name + ".vcd";
-    flat_path_ = output_dir + "/" + module.name + "-flatten.vcd";
+    grouped_path_ = output_dir + "/" + module.name + ".vcd";
+    raw_path_ = output_dir + "/" + module.name + "-raw.vcd";
 
-    hier_out_.open(hier_path_);
-    if (!hier_out_.is_open())
-        throw CompilerError(std::format("VcdWriter: cannot open '{}'", hier_path_));
+    grouped_out_.open(grouped_path_);
+    if (!grouped_out_.is_open())
+        throw CompilerError(std::format("VcdWriter: cannot open '{}'", grouped_path_));
 
-    flat_out_.open(flat_path_);
-    if (!flat_out_.is_open())
-        throw CompilerError(std::format("VcdWriter: cannot open '{}'", flat_path_));
+    raw_out_.open(raw_path_);
+    if (!raw_out_.is_open())
+        throw CompilerError(std::format("VcdWriter: cannot open '{}'", raw_path_));
 
-    // Build alive set: nodes still in the flat DFG after DCE
+    // Build alive set: nodes still in the DFG after DCE
     std::unordered_set<const DFGNode*> alive;
     for (const auto& node : module.dfg->nodes) alive.insert(node.get());
 
-    hier_top_ = std::make_unique<vcd_tracer::top>(module.name);
-    setupHier(module, hier_top_->root, alive);
-    hier_top_->finalize_header(hier_out_, std::chrono::system_clock::from_time_t(0));
+    grouped_top_ = std::make_unique<vcd_tracer::top>(module.name);
+    setupGrouped(module, grouped_top_->root, alive);
+    grouped_top_->finalize_header(grouped_out_, std::chrono::system_clock::from_time_t(0));
 
-    flat_top_ = std::make_unique<vcd_tracer::top>(module.name);
-    setupFlat(module, flat_top_->root, alive);
-    flat_top_->finalize_header(flat_out_, std::chrono::system_clock::from_time_t(0));
+    raw_top_ = std::make_unique<vcd_tracer::top>(module.name);
+    setupRaw(module, raw_top_->root, alive);
+    raw_top_->finalize_header(raw_out_, std::chrono::system_clock::from_time_t(0));
 }
 
 // ============================================================================
@@ -308,8 +308,8 @@ VcdWriter::VcdWriter(const ResolvedModule& module, const std::string& output_dir
 // ============================================================================
 
 void VcdWriter::update(const ModuleInstance& root, int64_t time_ns) {
-    hier_top_->time_update_abs(hier_out_, std::chrono::nanoseconds{time_ns});
-    flat_top_->time_update_abs(flat_out_, std::chrono::nanoseconds{time_ns});
+    grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{time_ns});
+    raw_top_->time_update_abs(raw_out_, std::chrono::nanoseconds{time_ns});
 
     for (auto& [node, vcd_vals] : values_) {
         auto it = root.values.find(node);
@@ -329,11 +329,11 @@ void VcdWriter::update(const ModuleInstance& root, int64_t time_ns) {
 
 void VcdWriter::close(int64_t last_time_ns) {
     if (last_time_ns > 0) {
-        hier_top_->time_update_abs(hier_out_, std::chrono::nanoseconds{last_time_ns});
-        flat_top_->time_update_abs(flat_out_, std::chrono::nanoseconds{last_time_ns});
+        grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{last_time_ns});
+        raw_top_->time_update_abs(raw_out_, std::chrono::nanoseconds{last_time_ns});
     }
-    hier_out_.close();
-    flat_out_.close();
+    grouped_out_.close();
+    raw_out_.close();
 }
 
 } // namespace custom_hdl

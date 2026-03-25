@@ -782,8 +782,8 @@ void Simulator::run() {
         std::cout << "Simulator: flops-initial seed = " << rng_seed << std::endl;
     }
     std::cout << "Simulator: output written to '" << config_.output_dir << "/'" << std::endl;
-    std::cout << "Simulator: VCD trace written to '" << vcd_->hier_path() << "'" << std::endl;
-    std::cout << "Simulator: flat VCD trace written to '" << vcd_->flat_path() << "'" << std::endl;
+    std::cout << "Simulator: grouped VCD trace written to '" << vcd_->grouped_path() << "'" << std::endl;
+    std::cout << "Simulator: raw VCD trace written to '" << vcd_->raw_path() << "'" << std::endl;
 }
 
 } // namespace custom_hdl

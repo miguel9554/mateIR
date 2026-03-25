@@ -16,18 +16,6 @@ static unsigned int getWidth(const DFGNode* node) {
     return 64;
 }
 
-static void elaborateWithWidth(vcd_tracer::module& mod, vcd_tracer::value_base& var,
-                               std::string_view name, unsigned int width) {
-    auto original_add_fn = mod.get_add_fn();
-    auto override_fn = [original_add_fn, width](
-            std::string_view var_name, std::string_view var_type,
-            unsigned int /*bit_size*/, vcd_tracer::scope_fn::dumper_fn fn)
-            -> vcd_tracer::value_context {
-        return original_add_fn(var_name, var_type, width, fn);
-    };
-    var.elaborate(override_fn, name);
-}
-
 // ============================================================================
 // VcdWriter::addEntry
 // ============================================================================
@@ -50,8 +38,8 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
             std::string elem_name = name + "[" + std::to_string(idx) + "]";
             unsigned int w = getWidth(elem);
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(scope, *v, elem_name, w);
-            v->set_runtime_bit_size(w);
+            v->set_bit_size(w);
+            v->elaborate(scope.get_add_fn(), elem_name);
             values_[elem].push_back(std::move(v));
         }
         return;
@@ -59,8 +47,8 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
 
     unsigned int w = getWidth(node);
     auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-    elaborateWithWidth(scope, *v, name, w);
-    v->set_runtime_bit_size(w);
+    v->set_bit_size(w);
+    v->elaborate(scope.get_add_fn(), name);
     values_[node].push_back(std::move(v));
 }
 
@@ -77,8 +65,8 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
             for (const auto& param : *params) {
                 unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
                 auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-                elaborateWithWidth(params_mod, *v, param.name, w);
-                v->set_runtime_bit_size(w);
+                v->set_bit_size(w);
+                v->elaborate(params_mod.get_add_fn(), param.name);
                 v->set(static_cast<int64_t>(param.value));
                 params_.push_back(std::move(v));
             }
@@ -117,8 +105,8 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
         if (name.ends_with(".q")) continue;  // shown in flops section
         unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(inputs_mod, *v, name, w);
-        v->set_runtime_bit_size(w);
+        v->set_bit_size(w);
+        v->elaborate(inputs_mod.get_add_fn(), name);
         if (sig.sync_kind == SyncKind::Clock ||
             sig.sync_kind == SyncKind::Reset) {
             auto it = translation.find(name);
@@ -143,13 +131,13 @@ void VcdWriter::setupHier(const ResolvedModule& mod, vcd_tracer::module& scope,
         if (!flop.q_node || !alive.count(flop.q_node)) continue;
         unsigned int w = getWidth(flop.q_node);
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+        v->set_bit_size(w);
         auto dot = flop.name.rfind('.');
         if (dot == std::string::npos) {
-            elaborateWithWidth(flops_mod, *v, flop.name, w);
+            v->elaborate(flops_mod.get_add_fn(), flop.name);
         } else {
-            elaborateWithWidth(getGenScope(flop.name.substr(0, dot)), *v, flop.name.substr(dot + 1), w);
+            v->elaborate(getGenScope(flop.name.substr(0, dot)).get_add_fn(), flop.name.substr(dot + 1));
         }
-        v->set_runtime_bit_size(w);
         values_[flop.q_node].push_back(std::move(v));
     }
 
@@ -181,8 +169,8 @@ void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
         for (const auto& param : *params) {
             unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            elaborateWithWidth(scope, *v, param.name, w);
-            v->set_runtime_bit_size(w);
+            v->set_bit_size(w);
+            v->elaborate(scope.get_add_fn(), param.name);
             v->set(static_cast<int64_t>(param.value));
             params_.push_back(std::move(v));
         }
@@ -213,8 +201,8 @@ void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
         if (name.ends_with(".q")) continue;
         unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        elaborateWithWidth(scope, *v, name, w);
-        v->set_runtime_bit_size(w);
+        v->set_bit_size(w);
+        v->elaborate(scope.get_add_fn(), name);
         if (sig.sync_kind == SyncKind::Clock ||
             sig.sync_kind == SyncKind::Reset) {
             auto it = translation.find(name);
@@ -239,15 +227,15 @@ void VcdWriter::setupFlat(const ResolvedModule& mod, vcd_tracer::module& scope,
         if (!flop.q_node || !alive.count(flop.q_node)) continue;
         unsigned int w = getWidth(flop.q_node);
         auto v = std::make_unique<vcd_tracer::value<int64_t>>();
+        v->set_bit_size(w);
         std::string vcd_name = flop.name;
         if (vcd_name.ends_with(".q")) vcd_name.resize(vcd_name.size() - 2);
         auto dot = vcd_name.rfind('.');
         if (dot == std::string::npos) {
-            elaborateWithWidth(scope, *v, vcd_name, w);
+            v->elaborate(scope.get_add_fn(), vcd_name);
         } else {
-            elaborateWithWidth(getGenScope(vcd_name.substr(0, dot)), *v, vcd_name.substr(dot + 1), w);
+            v->elaborate(getGenScope(vcd_name.substr(0, dot)).get_add_fn(), vcd_name.substr(dot + 1));
         }
-        v->set_runtime_bit_size(w);
         values_[flop.q_node].push_back(std::move(v));
     }
 

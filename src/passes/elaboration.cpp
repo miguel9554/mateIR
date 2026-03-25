@@ -528,6 +528,13 @@ DFGNode* buildExprDFG(
                                 indexedSignalNode = elemIt->second;
                                 continue;
                             }
+                            // Also check module-level DFG for array elements not in local_signals
+                            // (e.g. lane_sum[i] where lane_sum is a module-scope unpacked array).
+                            DFGNode* globalElem = ctx.graph.lookupSignal("", elemKey);
+                            if (globalElem) {
+                                indexedSignalNode = globalElem;
+                                continue;
+                            }
                         } catch (const std::runtime_error&) {
                             // not constant — fall through to INDEX
                         }

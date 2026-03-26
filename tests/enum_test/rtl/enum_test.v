@@ -12,32 +12,19 @@ import enum_pkg::*;
 //   - enum as mux selector and mux data
 //   - passing enums through two submodule boundaries
 module enum_test (
-    input  wire        clk,
-    input  wire        rst_n,
-    // Enum-semantic inputs (logic at top boundary)
-    input  logic [1:0] cmd_in,     // cmd_t
-    input  logic [1:0] mode_in,    // mode_t
-    input  logic [1:0] prio_in,    // prio_t
+    input  wire    clk,
+    input  wire    rst_n,
+    input  cmd_t   cmd_in,
+    input  mode_t  mode_in,
+    input  prio_t  prio_in,
     input  logic [7:0] data_a,
     input  logic [7:0] data_b,
-    // Enum-semantic outputs (logic at top boundary)
-    output logic [2:0] state_out,  // state_t
+    output state_t  state_out,
     output logic [7:0] result_out,
-    output logic [1:0] status_out, // status_t
-    output logic [1:0] color_out,  // color_t
-    output logic       valid_out
+    output status_t status_out,
+    output color_t  color_out,
+    output logic    valid_out
 );
-
-    // -----------------------------------------------------------------------
-    // Cast inputs to enum types at the boundary
-    // -----------------------------------------------------------------------
-    cmd_t  cmd;
-    mode_t mode;
-    prio_t prio;
-
-    assign cmd  = cmd_t'(cmd_in);
-    assign mode = mode_t'(mode_in);
-    assign prio = prio_t'(prio_in);
 
     // -----------------------------------------------------------------------
     // Submodule: enum_decoder
@@ -51,9 +38,9 @@ module enum_test (
     enum_decoder u_dec (
         .clk      (clk),
         .rst_n    (rst_n),
-        .cmd_in   (cmd),
-        .mode_in  (mode),
-        .prio_in  (prio),
+        .cmd_in   (cmd_in),
+        .mode_in  (mode_in),
+        .prio_in  (prio_in),
         .cmd_out  (dec_cmd),
         .color_out(dec_color),
         .is_arith (dec_is_arith),
@@ -72,7 +59,7 @@ module enum_test (
         .clk       (clk),
         .rst_n     (rst_n),
         .cmd_in    (dec_cmd),
-        .mode_in   (mode),
+        .mode_in   (mode_in),
         .data_a    (data_a),
         .data_b    (data_b),
         .result_out(alu_result),
@@ -92,7 +79,7 @@ module enum_test (
 
     always_comb begin
         unique case (state)
-            ST_IDLE: next_state = (cmd == CMD_NOP)           ? ST_IDLE : ST_LOAD;
+            ST_IDLE: next_state = (cmd_in == CMD_NOP)         ? ST_IDLE : ST_LOAD;
             ST_LOAD: next_state =                              ST_EXEC;
             ST_EXEC: next_state = (alu_status == STATUS_ERR)  ? ST_ERR  : ST_DONE;
             ST_DONE: next_state = ST_IDLE;
@@ -115,9 +102,9 @@ module enum_test (
     // -----------------------------------------------------------------------
     logic [7:0] prio_data;
 
-    assign prio_data = (prio == PRIO_CRIT) ? 8'hFF :
-                       (prio == PRIO_HIGH) ? 8'h80 :
-                       (prio == PRIO_MED)  ? 8'h40 :
+    assign prio_data = (prio_in == PRIO_CRIT) ? 8'hFF :
+                       (prio_in == PRIO_HIGH) ? 8'h80 :
+                       (prio_in == PRIO_MED)  ? 8'h40 :
                        8'h00;
 
     // -----------------------------------------------------------------------
@@ -129,11 +116,11 @@ module enum_test (
         if (!rst_n) begin
             color <= COLOR_RED;
         end else begin
-            if (prio == PRIO_CRIT)
+            if (prio_in == PRIO_CRIT)
                 color <= COLOR_RED;
-            else if (mode == MODE_A)
+            else if (mode_in == MODE_A)
                 color <= COLOR_GREEN;
-            else if (mode == MODE_B)
+            else if (mode_in == MODE_B)
                 color <= COLOR_BLUE;
             else
                 // Pass through the decoder's colour — enum signal as mux data
@@ -147,7 +134,7 @@ module enum_test (
 
     // Equality / inequality chained into a flag
     logic arith_and_high;
-    assign arith_and_high = dec_is_arith && (prio == PRIO_HIGH || prio == PRIO_CRIT);
+    assign arith_and_high = dec_is_arith && (prio_in == PRIO_HIGH || prio_in == PRIO_CRIT);
 
     // Enum comparison feeding another mux
     logic [7:0] blended;
@@ -156,10 +143,10 @@ module enum_test (
     // -----------------------------------------------------------------------
     // Outputs — enum signals assigned to logic ports
     // -----------------------------------------------------------------------
-    assign state_out  = state;       // state_t  → logic [2:0]
+    assign state_out  = state;
     assign result_out = blended;
-    assign status_out = alu_status;  // status_t → logic [1:0]
-    assign color_out  = color;       // color_t  → logic [1:0]
+    assign status_out = alu_status;
+    assign color_out  = color;
     assign valid_out  = alu_valid && (state == ST_DONE || state == ST_EXEC);
 
 endmodule

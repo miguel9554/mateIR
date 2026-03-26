@@ -1,18 +1,20 @@
+import enum_pkg::*;
+
 interface uut_if;
     // Inputs
     logic clk;
     logic rst_n;
-    logic [1:0] cmd_in;
-    logic [1:0] mode_in;
-    logic [1:0] prio_in;
+    cmd_t cmd_in;
+    mode_t mode_in;
+    prio_t prio_in;
     logic [7:0] data_a;
     logic [7:0] data_b;
 
     // Outputs
-    logic [2:0] state_out;
+    state_t state_out;
     logic [7:0] result_out;
-    logic [1:0] status_out;
-    logic [1:0] color_out;
+    status_t status_out;
+    color_t color_out;
     logic valid_out;
 
     modport master(output clk, output rst_n, output cmd_in, output mode_in, output prio_in, output data_a, output data_b, input state_out, input result_out, input status_out, input color_out, input valid_out);

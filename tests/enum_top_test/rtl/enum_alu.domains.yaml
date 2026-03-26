@@ -1,0 +1,17 @@
+module_name: enum_alu
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - cmd_in
+      - mode_in
+      - data_a
+      - data_b
+      - result_out
+      - status_out
+      - valid_out

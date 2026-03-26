@@ -1,0 +1,17 @@
+module_name: enum_decoder
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - cmd_in
+      - mode_in
+      - prio_in
+      - cmd_out
+      - color_out
+      - is_arith
+      - is_mul

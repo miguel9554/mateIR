@@ -72,7 +72,9 @@ module uut_tb(
         // ---------------------------------------------------------------
         // Phase 3: PRIO_CRIT suppresses commands — toggle cmd while CRIT
         // ---------------------------------------------------------------
-        _if.prio_in = PRIO_CRIT;
+        @(posedge _if.clk) begin
+            _if.prio_in <= PRIO_CRIT;
+        end
         for (int c = 0; c < 4; c++) begin
             @(posedge _if.clk) begin
                 _if.cmd_in  <= cmd_t'(c[1:0]);
@@ -85,7 +87,9 @@ module uut_tb(
         // ---------------------------------------------------------------
         // Phase 4: overflow / corner cases
         // ---------------------------------------------------------------
-        _if.prio_in = PRIO_LOW;
+        @(posedge _if.clk) begin
+            _if.prio_in <= PRIO_LOW;
+        end
 
         // ADD overflow: 0x7F + 0x01 = 0x80 (sign change)
         @(posedge _if.clk) begin
@@ -134,7 +138,9 @@ module uut_tb(
         // Phase 5: MODE_B (invert) and MODE_C (xor) with all commands
         // ---------------------------------------------------------------
         for (int m = 1; m < 3; m++) begin
-            _if.mode_in = mode_t'(m[1:0]);
+            @(posedge _if.clk) begin
+                _if.mode_in <= mode_t'(m[1:0]);
+            end
             for (int c = 0; c < 4; c++) begin
                 @(posedge _if.clk) begin
                     _if.cmd_in  <= cmd_t'(c[1:0]);

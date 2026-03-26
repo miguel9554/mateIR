@@ -41,7 +41,7 @@ module tb;
     assign _if.overflow_out = overflow_out;
 
     // modules
-    enmum_local_test uut(.*);
+    enum_local_test uut(.*);
     uut_tb uut_tb(.*);
     uut_recorder u_recorder(.*);
     tb_common u_tb_common();

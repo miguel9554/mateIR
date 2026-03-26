@@ -8,7 +8,7 @@ import enum_pkg::*;
 //   - enum comparisons in combinational logic
 //   - enum as mux selector and mux data
 //   - passing enums through two submodule boundaries (enum_decoder, enum_alu)
-module enmum_top_test (
+module enum_top_test (
     input  wire    clk,
     input  wire    rst_n,
     input  cmd_t   cmd_in,

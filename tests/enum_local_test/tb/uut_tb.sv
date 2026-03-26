@@ -1,4 +1,4 @@
-// Testbench for enmum_local_test.
+// Testbench for enum_local_test.
 // Only drives inputs — no checking.
 // Goal: maximum toggling across all 4 enum dimensions (op, mode, shift, prio)
 // and both data operands, to exercise every enum-driven path.

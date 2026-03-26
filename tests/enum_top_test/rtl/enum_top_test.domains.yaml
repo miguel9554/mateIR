@@ -1,4 +1,4 @@
-module_name: enmum_top_test
+module_name: enum_top_test
 
 resets:
   rst_n:

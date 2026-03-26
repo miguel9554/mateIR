@@ -1,4 +1,4 @@
-// Testbench for enmum_top_test.
+// Testbench for enum_top_test.
 // Only drives inputs — no checking.
 // Goal: maximum toggling of all enum and data inputs to generate rich stimulus.
 import enum_pkg::*;

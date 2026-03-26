@@ -10,7 +10,7 @@
 //   - enum localparams
 //   - mixed arithmetic + enum datapath
 //   - enum-driven FSM with arithmetic accumulator
-module enmum_local_test (
+module enum_local_test (
     input  wire        clk,
     input  wire        rst_n,
     // All ports are plain logic — enums live entirely inside the module

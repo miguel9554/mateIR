@@ -1,4 +1,4 @@
-module_name: enmum_local_test
+module_name: enum_local_test
 
 resets:
   rst_n:

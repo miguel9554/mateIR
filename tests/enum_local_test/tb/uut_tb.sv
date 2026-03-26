@@ -12,6 +12,9 @@ module uut_tb(
     initial _if.clk = 0;
     always #5 _if.clk = ~_if.clk;
 
+    // -----------------------------------------------------------------------
+    // Reset
+    // -----------------------------------------------------------------------
     initial begin
             _if.rst_n    = 1;
 
@@ -25,19 +28,22 @@ module uut_tb(
             #1ns _if.rst_n = 1;
 
     end
+
     // -----------------------------------------------------------------------
     // Stimulus
     // -----------------------------------------------------------------------
-    initial begin
-        // Initialise — all-zero maps to OP_NOP / MODE_PASS / SHIFT_1 / PRIO_LOW
-        _if.op_in    = 2'b00;
-        _if.mode_in  = 2'b00;
-        _if.shift_in = 2'b00;
-        _if.prio_in  = 2'b00;
-        _if.data_a   = 8'h00;
-        _if.data_b   = 8'h00;
+    always @(posedge _if.clk) begin
+        // Initialise on first clock edge —
+        // all-zero maps to OP_NOP / MODE_PASS / SHIFT_1 / PRIO_LOW
+        @(posedge _if.clk) begin
+            _if.op_in    <= 2'b00;
+            _if.mode_in  <= 2'b00;
+            _if.shift_in <= 2'b00;
+            _if.prio_in  <= 2'b00;
+            _if.data_a   <= 8'h00;
+            _if.data_b   <= 8'h00;
+        end
 
-        repeat (1) @(posedge _if.clk);
         wait (_if.rst_n == 0);
         wait (_if.rst_n == 1);
         @(posedge _if.clk);
@@ -47,93 +53,109 @@ module uut_tb(
         // ---------------------------------------------------------------
         for (int o = 0; o < 4; o++) begin
             for (int m = 0; m < 4; m++) begin
-                @(posedge _if.clk);
-                _if.op_in    = o[1:0];
-                _if.mode_in  = m[1:0];
-                _if.prio_in  = 2'b00;
-                _if.data_a   = 8'(o * 23 + m * 17 + 5);
-                _if.data_b   = 8'(o * 11 + m * 37 + 3);
-                _if.shift_in = 2'(m % 4);
+                @(posedge _if.clk) begin
+                    _if.op_in    <= o[1:0];
+                    _if.mode_in  <= m[1:0];
+                    _if.prio_in  <= 2'b00;
+                    _if.data_a   <= 8'(o * 23 + m * 17 + 5);
+                    _if.data_b   <= 8'(o * 11 + m * 37 + 3);
+                    _if.shift_in <= 2'(m % 4);
+                end
             end
         end
 
         // ---------------------------------------------------------------
         // Phase 2: all shift values with MODE_SHIFT
         // ---------------------------------------------------------------
-        _if.op_in   = 2'b01;   // OP_ADD
-        _if.mode_in = 2'b11;   // MODE_SHIFT
-        _if.prio_in = 2'b00;
+        @(posedge _if.clk) begin
+            _if.op_in   <= 2'b01;   // OP_ADD
+            _if.mode_in <= 2'b11;   // MODE_SHIFT
+            _if.prio_in <= 2'b00;
+        end
         for (int s = 0; s < 4; s++) begin
-            @(posedge _if.clk);
-            _if.shift_in = s[1:0];
-            _if.data_a   = 8'(s * 43 + 7);
-            _if.data_b   = 8'(s * 19 + 2);
+            @(posedge _if.clk) begin
+                _if.shift_in <= s[1:0];
+                _if.data_a   <= 8'(s * 43 + 7);
+                _if.data_b   <= 8'(s * 19 + 2);
+            end
         end
 
         // ---------------------------------------------------------------
         // Phase 3: PRIO_CRIT suppresses output — op and mode toggling
         // ---------------------------------------------------------------
-        _if.prio_in = 2'b11;   // PRIO_CRIT
-        for (int o = 0; o < 4; o++) begin
-            @(posedge _if.clk);
-            _if.op_in   = o[1:0];
-            _if.mode_in = o[1:0];
-            _if.data_a  = 8'hAA;
-            _if.data_b  = 8'h55;
+        @(posedge _if.clk) begin
+            _if.prio_in <= 2'b11;   // PRIO_CRIT
         end
-        _if.prio_in = 2'b00;
+        for (int o = 0; o < 4; o++) begin
+            @(posedge _if.clk) begin
+                _if.op_in   <= o[1:0];
+                _if.mode_in <= o[1:0];
+                _if.data_a  <= 8'hAA;
+                _if.data_b  <= 8'h55;
+            end
+        end
+        @(posedge _if.clk) begin
+            _if.prio_in <= 2'b00;
+        end
 
         // ---------------------------------------------------------------
         // Phase 4: overflow and zero-result corners for each op
         // ---------------------------------------------------------------
         // OP_ADD overflow
-        @(posedge _if.clk); _if.op_in = 2'b01; _if.mode_in = 2'b00; _if.data_a = 8'h7F; _if.data_b = 8'h01;
+        @(posedge _if.clk) begin _if.op_in <= 2'b01; _if.mode_in <= 2'b00; _if.data_a <= 8'h7F; _if.data_b <= 8'h01; end
         // OP_ADD zero
-        @(posedge _if.clk); _if.op_in = 2'b01; _if.mode_in = 2'b00; _if.data_a = 8'hFF; _if.data_b = 8'h01;
+        @(posedge _if.clk) begin _if.op_in <= 2'b01; _if.mode_in <= 2'b00; _if.data_a <= 8'hFF; _if.data_b <= 8'h01; end
         // OP_SUB overflow
-        @(posedge _if.clk); _if.op_in = 2'b10; _if.mode_in = 2'b00; _if.data_a = 8'h80; _if.data_b = 8'h01;
+        @(posedge _if.clk) begin _if.op_in <= 2'b10; _if.mode_in <= 2'b00; _if.data_a <= 8'h80; _if.data_b <= 8'h01; end
         // OP_SUB zero
-        @(posedge _if.clk); _if.op_in = 2'b10; _if.mode_in = 2'b00; _if.data_a = 8'h42; _if.data_b = 8'h42;
+        @(posedge _if.clk) begin _if.op_in <= 2'b10; _if.mode_in <= 2'b00; _if.data_a <= 8'h42; _if.data_b <= 8'h42; end
         // OP_AND zero
-        @(posedge _if.clk); _if.op_in = 2'b11; _if.mode_in = 2'b00; _if.data_a = 8'hAA; _if.data_b = 8'h55;
+        @(posedge _if.clk) begin _if.op_in <= 2'b11; _if.mode_in <= 2'b00; _if.data_a <= 8'hAA; _if.data_b <= 8'h55; end
         // OP_AND non-zero
-        @(posedge _if.clk); _if.op_in = 2'b11; _if.mode_in = 2'b00; _if.data_a = 8'hFF; _if.data_b = 8'hFF;
+        @(posedge _if.clk) begin _if.op_in <= 2'b11; _if.mode_in <= 2'b00; _if.data_a <= 8'hFF; _if.data_b <= 8'hFF; end
         // OP_NOP
-        @(posedge _if.clk); _if.op_in = 2'b00; _if.mode_in = 2'b00; _if.data_a = 8'hDE; _if.data_b = 8'hAD;
+        @(posedge _if.clk) begin _if.op_in <= 2'b00; _if.mode_in <= 2'b00; _if.data_a <= 8'hDE; _if.data_b <= 8'hAD; end
 
         // ---------------------------------------------------------------
         // Phase 5: MODE_INV and MODE_XOR with arithmetic ops
         // ---------------------------------------------------------------
         for (int o = 1; o < 4; o++) begin
             // MODE_INV
-            @(posedge _if.clk);
-            _if.op_in   = o[1:0];
-            _if.mode_in = 2'b01;
-            _if.data_a  = 8'(o * 53 + 11);
-            _if.data_b  = 8'(o * 29 + 7);
+            @(posedge _if.clk) begin
+                _if.op_in   <= o[1:0];
+                _if.mode_in <= 2'b01;
+                _if.data_a  <= 8'(o * 53 + 11);
+                _if.data_b  <= 8'(o * 29 + 7);
+            end
 
             // MODE_XOR
-            @(posedge _if.clk);
-            _if.op_in   = o[1:0];
-            _if.mode_in = 2'b10;
-            _if.data_a  = 8'(o * 47 + 13);
-            _if.data_b  = 8'(o * 31 + 5);
+            @(posedge _if.clk) begin
+                _if.op_in   <= o[1:0];
+                _if.mode_in <= 2'b10;
+                _if.data_a  <= 8'(o * 47 + 13);
+                _if.data_b  <= 8'(o * 31 + 5);
+            end
         end
 
         // ---------------------------------------------------------------
         // Phase 6: PRIO_HIGH to trigger ACCUM state in FSM
         // ---------------------------------------------------------------
-        _if.prio_in = 2'b10;   // PRIO_HIGH
+        @(posedge _if.clk) begin
+            _if.prio_in <= 2'b10;   // PRIO_HIGH
+        end
         for (int o = 1; o < 4; o++) begin
             for (int m = 0; m < 4; m++) begin
-                @(posedge _if.clk);
-                _if.op_in   = o[1:0];
-                _if.mode_in = m[1:0];
-                _if.data_a  = 8'(o * 61 + m * 7);
-                _if.data_b  = 8'(o * 13 + m * 41);
+                @(posedge _if.clk) begin
+                    _if.op_in   <= o[1:0];
+                    _if.mode_in <= m[1:0];
+                    _if.data_a  <= 8'(o * 61 + m * 7);
+                    _if.data_b  <= 8'(o * 13 + m * 41);
+                end
             end
         end
-        _if.prio_in = 2'b00;
+        @(posedge _if.clk) begin
+            _if.prio_in <= 2'b00;
+        end
 
         // ---------------------------------------------------------------
         // Phase 7: pseudo-random LFSR sweep
@@ -142,14 +164,15 @@ module uut_tb(
             logic [31:0] lfsr;
             lfsr = 32'hDEAD_0001;
             repeat (200) begin
-                @(posedge _if.clk);
-                lfsr = {1'b0, lfsr[31:1]} ^ (lfsr[0] ? 32'hB400_0000 : 32'h0);
-                _if.op_in    = lfsr[1:0];
-                _if.mode_in  = lfsr[3:2];
-                _if.shift_in = lfsr[5:4];
-                _if.prio_in  = lfsr[7:6];
-                _if.data_a   = lfsr[15:8];
-                _if.data_b   = lfsr[23:16];
+                @(posedge _if.clk) begin
+                    lfsr = {1'b0, lfsr[31:1]} ^ (lfsr[0] ? 32'hB400_0000 : 32'h0);
+                    _if.op_in    <= lfsr[1:0];
+                    _if.mode_in  <= lfsr[3:2];
+                    _if.shift_in <= lfsr[5:4];
+                    _if.prio_in  <= lfsr[7:6];
+                    _if.data_a   <= lfsr[15:8];
+                    _if.data_b   <= lfsr[23:16];
+                end
             end
         end
 
@@ -157,12 +180,13 @@ module uut_tb(
         // Phase 8: rapid toggling — stress all FSM arcs
         // ---------------------------------------------------------------
         repeat (60) begin
-            @(posedge _if.clk);
-            _if.op_in   = ~_if.op_in;
-            _if.prio_in = ~_if.prio_in;
-            _if.data_a  = ~_if.data_a;
-            _if.data_b  = _if.data_a + 8'h01;
-            _if.mode_in = _if.op_in;
+            @(posedge _if.clk) begin
+                _if.op_in   <= ~_if.op_in;
+                _if.prio_in <= ~_if.prio_in;
+                _if.data_a  <= ~_if.data_a;
+                _if.data_b  <= _if.data_a + 8'h01;
+                _if.mode_in <= _if.op_in;
+            end
         end
 
         // Drain

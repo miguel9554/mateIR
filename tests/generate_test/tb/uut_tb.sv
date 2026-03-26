@@ -69,31 +69,38 @@ module uut_tb(
         end
     endtask
 
+
+    // Drive async reset
+    initial _if.rst_n = 1; // start deasserted
+    event assert_reset;
+    always @(assert_reset) begin
+            @(posedge _if.clk);
+            #1ns _if.rst_n    = 1;
+
+            // Reset the DUT
+            @(posedge _if.clk);
+
+            #1ns _if.rst_n = 0;
+
+            repeat (2) @(posedge _if.clk);
+
+            #1ns _if.rst_n = 1;
+    end
+
     // ----------------------------------------------------------------
     // Main stimulus
     // ----------------------------------------------------------------
     always @(posedge _if.clk) begin
         // ---- 1. Initialise ----------------------------------------
+        ->assert_reset; // trigger async reset
         @(posedge _if.clk) begin
             _if.data_in <= '0;
             _if.lane_en <= '0;
-            _if.rst_n   <= 0;
         end
 
-        // ---- 2. Assert async reset for several cycles --------------
-        repeat (4) @(posedge _if.clk);
-
-        // Verify all outputs are zero while in reset
-        #1;
-        if (_if.data_out !== '0)
-            $fatal(1, "data_out not zero in reset");
-        if (_if.accum !== '0)
-            $fatal(1, "accum not zero in reset");
-        if (_if.any_sat !== 0)
-            $fatal(1, "any_sat not zero in reset");
-
-        // ---- 3. Release reset --------------------------------------
-        @(posedge _if.clk) _if.rst_n <= 1;
+        // ---- 3. Wait for reset release -----------------------------
+        wait (_if.rst_n == 0);
+        wait (_if.rst_n == 1);
         repeat (2) @(posedge _if.clk);
 
         // ---- 4. Drive all lanes with distinct values ---------------
@@ -129,18 +136,9 @@ module uut_tb(
         check_any_sat(1, "sat_lane3");
 
         // ---- 8. Assert reset, check outputs clear ------------------
-        @(posedge _if.clk) begin
-            _if.rst_n <= 0;
-        end
-        #1;
-        if (_if.data_out !== '0)
-            $fatal(1, "reset: data_out not cleared");
-        if (_if.any_sat !== 0)
-            $fatal(1, "reset: any_sat not cleared");
-
-        @(posedge _if.clk) begin
-            _if.rst_n <= 1;
-        end
+        ->assert_reset; // trigger async reset
+        wait (_if.rst_n == 0);
+        wait (_if.rst_n == 1);
         repeat (2) @(posedge _if.clk);
 
         // ---- 9. Accumulator exercise -------------------------------

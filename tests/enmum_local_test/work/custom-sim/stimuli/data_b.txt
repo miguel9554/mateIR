@@ -1,0 +1,2 @@
+# value at each clock
+0

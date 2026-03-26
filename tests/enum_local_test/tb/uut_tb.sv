@@ -12,12 +12,24 @@ module uut_tb(
     initial _if.clk = 0;
     always #5 _if.clk = ~_if.clk;
 
+    initial begin
+            _if.rst_n    = 1;
+
+            // Reset the DUT
+            @(posedge _if.clk);
+
+            #1ns _if.rst_n = 0;
+
+            repeat (4) @(posedge _if.clk);
+
+            #1ns _if.rst_n = 1;
+
+    end
     // -----------------------------------------------------------------------
     // Stimulus
     // -----------------------------------------------------------------------
     initial begin
         // Initialise — all-zero maps to OP_NOP / MODE_PASS / SHIFT_1 / PRIO_LOW
-        _if.rst_n    = 0;
         _if.op_in    = 2'b00;
         _if.mode_in  = 2'b00;
         _if.shift_in = 2'b00;
@@ -25,8 +37,9 @@ module uut_tb(
         _if.data_a   = 8'h00;
         _if.data_b   = 8'h00;
 
-        repeat (4) @(posedge _if.clk);
-        _if.rst_n = 1;
+        repeat (1) @(posedge _if.clk);
+        wait (_if.rst_n == 0);
+        wait (_if.rst_n == 1);
         @(posedge _if.clk);
 
         // ---------------------------------------------------------------

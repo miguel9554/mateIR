@@ -11,8 +11,9 @@ TB_DIR = $(ROOT_DIR)/tb
 GEN_DIR = $(TB_DIR)/generated
 MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
 
-# Source files
-RTL_SRCS    = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
+# Source files — packages must come before modules that import them
+RTL_PKGS    = $(shell find -L $(RTL_DIR) -type f -name "*_pkg.sv")
+RTL_SRCS    = $(RTL_PKGS) $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \) | grep -v "_pkg.sv")
 TB_SRCS     = $(shell find -L $(TB_DIR) -path $(GEN_DIR) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print)
 GEN_SRCS    = $(shell find -L $(GEN_DIR) -type f \( -name "*.v" -o -name "*.sv" \) 2>/dev/null)
 DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml

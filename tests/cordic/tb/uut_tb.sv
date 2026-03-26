@@ -10,25 +10,33 @@ module uut_tb (
         #5 _if.clk = ~_if.clk;
     end
 
+    // Drive async reset
+    initial begin
+            _if.rst_n    = 1;
+
+            // Reset the DUT
+            @(posedge _if.clk);
+
+            #1ns _if.rst_n = 0;
+
+            repeat (2) @(posedge _if.clk);
+
+            #1ns _if.rst_n = 1;
+
+    end
+
     // Testbench procedure
     always @(posedge _if.clk) begin
         // Initialize signals
         @(posedge _if.clk) begin
-            _if.rst_n    <= 1;
             _if.start    <= 0;
             _if.angle_in <= 16'sd0;
         end
 
-        // Reset the DUT
-        @(posedge _if.clk) begin
-            _if.rst_n <= 0;
-        end
-
+        // Wait for 2 clocks after reset deassertion
+        wait (_if.rst_n == 0);
+        wait (_if.rst_n == 1);
         repeat (2) @(posedge _if.clk);
-
-        @(posedge _if.clk) begin
-            _if.rst_n <= 1;
-        end
 
         // -------------------------------------------------
         // Test Case 1: 0 degrees

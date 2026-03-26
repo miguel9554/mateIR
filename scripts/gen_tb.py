@@ -35,7 +35,9 @@ class ModuleInfo:
 def parse_module(filepath: Path) -> ModuleInfo:
     tree = pyslang.SyntaxTree.fromFile(str(filepath))
     root = tree.root
-    module = root.members[0]
+    module = next(
+        m for m in root.members if hasattr(m, 'header')
+    )
     header = module.header
 
     mod_name = header.name.valueText

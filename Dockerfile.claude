@@ -1,5 +1,8 @@
 FROM custom-hdl-compiler:latest
 
+RUN apt-get update && apt-get install -y sudo poppler-utils && rm -rf /var/lib/apt/lists/* \
+    && echo "ALL ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
 RUN HOME=/root curl -fsSL https://claude.ai/install.sh | bash \
     && cp /root/.local/bin/claude /usr/local/bin/claude \
     && chmod 755 /usr/local/bin/claude

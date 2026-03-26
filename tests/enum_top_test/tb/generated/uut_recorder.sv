@@ -1,5 +1,3 @@
-import enum_pkg::*;
-
 module uut_recorder(
     uut_if.slave _if
 );
@@ -19,7 +17,7 @@ module uut_recorder(
         .data(_if.rst_n)
     );
 
-    // Sync recorders — enum inputs recorded as their underlying integer value
+    // Sync recorders
     sync_recorder#(
         .filepath(path("cmd_in.txt")),
         .TYPE(logic [1:0])

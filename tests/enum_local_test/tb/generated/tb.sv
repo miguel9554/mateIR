@@ -23,21 +23,21 @@ module tb;
     // Interface and connection to UUT
     uut_if _if();
 
-    assign clk      = _if.clk;
-    assign rst_n    = _if.rst_n;
-    assign op_in    = _if.op_in;
-    assign mode_in  = _if.mode_in;
+    assign clk = _if.clk;
+    assign rst_n = _if.rst_n;
+    assign op_in = _if.op_in;
+    assign mode_in = _if.mode_in;
     assign shift_in = _if.shift_in;
-    assign prio_in  = _if.prio_in;
-    assign data_a   = _if.data_a;
-    assign data_b   = _if.data_b;
+    assign prio_in = _if.prio_in;
+    assign data_a = _if.data_a;
+    assign data_b = _if.data_b;
 
-    assign _if.result_out   = result_out;
-    assign _if.accum_out    = accum_out;
-    assign _if.state_out    = state_out;
-    assign _if.status_out   = status_out;
-    assign _if.color_out    = color_out;
-    assign _if.valid_out    = valid_out;
+    assign _if.result_out = result_out;
+    assign _if.accum_out = accum_out;
+    assign _if.state_out = state_out;
+    assign _if.status_out = status_out;
+    assign _if.color_out = color_out;
+    assign _if.valid_out = valid_out;
     assign _if.overflow_out = overflow_out;
 
     // modules

@@ -88,7 +88,34 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
     }
 
     int64_t value = std::stoll(valueText, nullptr, base);
-    int width = std::stoi(sizeText);
+
+    int width;
+    if (!sizeText.empty()) {
+        width = std::stoi(sizeText);
+    } else {
+        // Unsized literal: compute the minimum bits needed to represent the value.
+        bool is_signed_for_width = baseText.find('s') != std::string::npos ||
+                                   baseText.find('S') != std::string::npos;
+        if (is_signed_for_width) {
+            if (value == 0 || value == -1) {
+                width = 1;
+            } else if (value > 0) {
+                // Positive signed: need sign bit → floor(log2(value)) + 2
+                width = (64 - __builtin_clzll(static_cast<uint64_t>(value))) + 1;
+            } else {
+                // Negative (< -1): floor(log2(|value| - 1)) + 2
+                uint64_t abs_minus_1 = static_cast<uint64_t>(-(value + 1));
+                width = (64 - __builtin_clzll(abs_minus_1)) + 1;
+            }
+        } else {
+            if (value == 0) {
+                width = 1;
+            } else {
+                // Unsigned: floor(log2(value)) + 1
+                width = 64 - __builtin_clzll(static_cast<uint64_t>(value));
+            }
+        }
+    }
     bool is_signed = baseText.find('s') != std::string::npos ||
                      baseText.find('S') != std::string::npos;
     std::cout << "IntegerVectorExpression: " << literal << " -> " << value

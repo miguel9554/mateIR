@@ -12,6 +12,7 @@ all: $(BINARY) run
 
 build/CMakeCache.txt:
 	cmake -B build
+	ln -sf build/compile_commands.json compile_commands.json
 
 $(BINARY): build/CMakeCache.txt $(SOURCES)
 	cmake --build build -j$(shell nproc)

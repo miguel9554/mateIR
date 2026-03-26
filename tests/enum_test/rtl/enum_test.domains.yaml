@@ -7,4 +7,14 @@ resets:
 clock_domains:
   clk:
     polarity: posedge
-    inputs_outputs: []
+    inputs_outputs:
+      - cmd_in
+      - mode_in
+      - prio_in
+      - data_a
+      - data_b
+      - state_out
+      - result_out
+      - status_out
+      - color_out
+      - valid_out

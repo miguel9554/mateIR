@@ -386,6 +386,10 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::CONCAT_ALIGN:
             throw CompilerError("Simulator: CONCAT_ALIGN should have been cleaned up by concat_cleanup pass", node);
 
+        case DFGOp::CAST:
+            // CAST is a type-only operation; at simulation time the bits are unchanged.
+            return checkedGet(node->in[0].node, node);
+
         case DFGOp::MODULE:
             throw CompilerError("Simulator: MODULE nodes should not exist after dfg_inline pass", node);
     }
@@ -732,14 +736,23 @@ void Simulator::run() {
         // Track which clocks had their active edge in this batch
         std::set<std::string> active_edge_clocks;
 
+        // Process non-clock signals first so that reset deassertion is
+        // visible before any clock edge is evaluated in the same batch.
         for (const auto& [name, new_val] : new_async) {
+            if (clock_inputs_.count(name)) continue;
+            root_->setAsyncEvent(name, new_val);
+            async_prev[name] = new_val;
+        }
+
+        for (const auto& [name, new_val] : new_async) {
+            if (!clock_inputs_.count(name)) continue;
             int64_t old_val = async_prev[name];
 
             // Use setAsyncEvent on root for edge detection and d->q
             root_->setAsyncEvent(name, new_val);
 
             // Detect active edge on clock inputs
-            if (clock_inputs_.count(name) && old_val != new_val) {
+            if (old_val != new_val) {
                 bool is_posedge = (old_val == 0 && new_val == 1);
                 bool is_negedge = (old_val == 1 && new_val == 0);
                 auto edge_it = clock_active_edge_.find(name);

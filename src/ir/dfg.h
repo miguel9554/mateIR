@@ -24,6 +24,7 @@ enum class DFGOp {
     INDEX,      // Indexing: in[0]=source, in[1]=high, in[2]=low
     CONCAT,       // Concatenation: in[0..N-1] = parts, MSB-first
     CONCAT_ALIGN, // Temporary: in[0]=expr, in[1]=high_idx, in[2]=low_idx
+    CAST,         // Type cast: in[0]=source, type set at elaboration (e.g. integer → enum)
     // Binary ops
     ADD,
     SUB,
@@ -69,6 +70,7 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::INDEX: return "INDEX";
         case DFGOp::CONCAT: return "CONCAT";
         case DFGOp::CONCAT_ALIGN: return "CONCAT_ALIGN";
+        case DFGOp::CAST: return "CAST";
         case DFGOp::ADD: return "ADD";
         case DFGOp::SUB: return "SUB";
         case DFGOp::MUL: return "MUL";
@@ -122,6 +124,7 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::INDEX:  return 3;
         case DFGOp::CONCAT: return -1; // variable
         case DFGOp::CONCAT_ALIGN: return 3;
+        case DFGOp::CAST:   return 1;
         case DFGOp::ADD:    return 2;
         case DFGOp::SUB:    return 2;
         case DFGOp::MUL:    return 2;
@@ -405,6 +408,14 @@ public:
         if (!name.empty()) {
             signals[name] = nodes.back().get();
         }
+        return nodes.back().get();
+    }
+
+    // Create a CAST node: reinterpret source as the target type (same bits, different type)
+    // Caller must set node->type to the target ResolvedType.
+    DFGNode* cast(DFGNode* source) {
+        nodes.push_back(std::make_unique<DFGNode>(DFGOp::CAST));
+        nodes.back()->in = {source};
         return nodes.back().get();
     }
 

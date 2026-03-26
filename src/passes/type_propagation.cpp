@@ -49,11 +49,37 @@ static ResolvedType makeOneBitUnsigned() {
     return ResolvedType::makeInteger(1, false);
 }
 
-// Return the "wider" type: max width, signed only if both signed
+// Throw if the node has an enum type (enums cannot be used with arithmetic/bitwise ops)
+static void rejectEnum(const DFGNode* node, const char* opName) {
+    if (node->hasType() && node->type->isEnum())
+        throw CompilerError(std::format(
+            "Type error: enum type '{}' cannot be used with operator {}",
+            node->type->enumInfo().type_name, opName), node->loc);
+}
+
+// Return the "wider" type: max width, signed only if both signed.
+// Throws if either type is an enum — enum consistency must be validated before calling this.
 static ResolvedType widenTypes(const ResolvedType& a, const ResolvedType& b) {
     int width = std::max(a.width, b.width);
     bool is_signed = a.isSigned() && b.isSigned();
     return ResolvedType::makeInteger(width, is_signed);
+}
+
+// Validate that two enum types are compatible for a MUX/MUX_N branch.
+// Returns the enum type if both match, or the widened integer type if neither is enum.
+// Throws on mismatch.
+static ResolvedType mergeDataTypes(const ResolvedType& a, const ResolvedType& b,
+                                   std::optional<SourceLoc> loc = {}) {
+    if (a.isEnum() || b.isEnum()) {
+        if (!a.isEnum() || !b.isEnum() ||
+            a.enumInfo().type_name != b.enumInfo().type_name)
+            throw CompilerError(
+                std::format("Type error: MUX/MUX_N branches have incompatible types '{}' and '{}'",
+                    a.isEnum() ? a.enumInfo().type_name : "integer",
+                    b.isEnum() ? b.enumInfo().type_name : "integer"), loc);
+        return a;  // same enum type
+    }
+    return widenTypes(a, b);
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +104,21 @@ bool inferNodeType(DFGNode* node) {
                 "Type propagation: MODULE node '{}' encountered (should have been inlined)",
                 node->name), node->loc);
 
+        // CAST: type is pre-set at elaboration; validate source width matches
+        case DFGOp::CAST: {
+            if (node->in.empty()) throw CompilerError(
+                std::format("Type propagation: CAST {} has no inputs", node->str()), node->loc);
+            auto* src = node->in[0].node;
+            if (!src->hasType()) return false;
+            // node->type was set at elaboration and is the target enum type
+            if (src->type->width != node->type->width)
+                throw CompilerError(std::format(
+                    "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
+                    src->type->width, node->type->enumInfo().type_name, node->type->width),
+                    node->loc);
+            return false;  // already typed; no change
+        }
+
         // SUB: result is always signed (subtraction can produce negative values)
         case DFGOp::SUB: {
             if (node->in.size() < 2) {
@@ -88,6 +129,7 @@ bool inferNodeType(DFGNode* node) {
             auto* lhs = node->in[0].node;
             auto* rhs = node->in[1].node;
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectEnum(lhs, "SUB"); rejectEnum(rhs, "SUB");
             int width = std::max(lhs->type->width, rhs->type->width);
             node->type = ResolvedType::makeInteger(width, true);
             return true;
@@ -106,12 +148,35 @@ bool inferNodeType(DFGNode* node) {
             auto* lhs = node->in[0].node;
             auto* rhs = node->in[1].node;
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectEnum(lhs, to_string(node->op)); rejectEnum(rhs, to_string(node->op));
             node->type = widenTypes(*lhs->type, *rhs->type);
             return true;
         }
 
-        // Comparison ops: result is 1-bit unsigned
-        case DFGOp::EQ:
+        // EQ: allow enum == enum of same type; reject mixed enum/integer
+        case DFGOp::EQ: {
+            if (node->in.size() < 2) {
+                throw CompilerError(std::format(
+                    "Type propagation: comparison op {} has {} inputs (expected 2)",
+                    node->str(), node->in.size()), node->loc);
+            }
+            auto* lhs = node->in[0].node;
+            auto* rhs = node->in[1].node;
+            if (!lhs->hasType() || !rhs->hasType()) return false;
+            bool lhsEnum = lhs->type->isEnum(), rhsEnum = rhs->type->isEnum();
+            if (lhsEnum || rhsEnum) {
+                if (!lhsEnum || !rhsEnum ||
+                    lhs->type->enumInfo().type_name != rhs->type->enumInfo().type_name)
+                    throw CompilerError(std::format(
+                        "Type error: cannot compare '{}' and '{}' with ==",
+                        lhsEnum ? lhs->type->enumInfo().type_name : "integer",
+                        rhsEnum ? rhs->type->enumInfo().type_name : "integer"), node->loc);
+            }
+            node->type = makeOneBitUnsigned();
+            return true;
+        }
+
+        // Ordered comparisons: enums are not ordered
         case DFGOp::LT:
         case DFGOp::LE:
         case DFGOp::GT:
@@ -121,12 +186,15 @@ bool inferNodeType(DFGNode* node) {
                     "Type propagation: comparison op {} has {} inputs (expected 2)",
                     node->str(), node->in.size()), node->loc);
             }
-            if (!node->in[0].node->hasType() || !node->in[1].node->hasType()) return false;
+            auto* lhs = node->in[0].node;
+            auto* rhs = node->in[1].node;
+            if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectEnum(lhs, to_string(node->op)); rejectEnum(rhs, to_string(node->op));
             node->type = makeOneBitUnsigned();
             return true;
         }
 
-        // Shift ops: result = left operand type
+        // Shift ops: result = left operand type (enum not allowed)
         case DFGOp::SHL:
         case DFGOp::ASR: {
             if (node->in.size() < 2) {
@@ -136,11 +204,12 @@ bool inferNodeType(DFGNode* node) {
             }
             auto* lhs = node->in[0].node;
             if (!lhs->hasType()) return false;
+            rejectEnum(lhs, to_string(node->op));
             node->type = *lhs->type;
             return true;
         }
 
-        // MUX: result = type of data inputs (widened)
+        // MUX: result = type of data inputs (must be same enum type or both integer)
         case DFGOp::MUX: {
             if (node->in.size() < 3) {
                 throw CompilerError(std::format(
@@ -150,11 +219,11 @@ bool inferNodeType(DFGNode* node) {
             auto* tval = node->in[1].node;
             auto* fval = node->in[2].node;
             if (!tval->hasType() || !fval->hasType()) return false;
-            node->type = widenTypes(*tval->type, *fval->type);
+            node->type = mergeDataTypes(*tval->type, *fval->type, node->loc);
             return true;
         }
 
-        // MUX_N: result = widened type of all data inputs
+        // MUX_N: result = type of data inputs (must all be same enum type or all integer)
         case DFGOp::MUX_N: {
             size_t n = node->in.size() / 2;
             if (n == 0) {
@@ -167,13 +236,13 @@ bool inferNodeType(DFGNode* node) {
             }
             ResolvedType result = *node->in[n].node->type;
             for (size_t i = n + 1; i < node->in.size(); ++i) {
-                result = widenTypes(result, *node->in[i].node->type);
+                result = mergeDataTypes(result, *node->in[i].node->type, node->loc);
             }
             node->type = result;
             return true;
         }
 
-        // Unary arithmetic: same as operand
+        // Unary arithmetic: same as operand (enum not allowed)
         case DFGOp::UNARY_PLUS:
         case DFGOp::UNARY_NEGATE:
         case DFGOp::BITWISE_NOT: {
@@ -183,6 +252,7 @@ bool inferNodeType(DFGNode* node) {
             }
             auto* operand = node->in[0].node;
             if (!operand->hasType()) return false;
+            rejectEnum(operand, to_string(node->op));
             node->type = *operand->type;
             return true;
         }
@@ -210,7 +280,7 @@ bool inferNodeType(DFGNode* node) {
             return true;
         }
 
-        // Bitwise binary ops: result same width as widest operand
+        // Bitwise binary ops: result same width as widest operand (enum not allowed)
         case DFGOp::BITWISE_AND:
         case DFGOp::BITWISE_OR:
         case DFGOp::BITWISE_XOR:
@@ -219,6 +289,7 @@ bool inferNodeType(DFGNode* node) {
             auto* a = node->in[0].node;
             auto* b = node->in[1].node;
             if (!a->hasType() || !b->hasType()) return false;
+            rejectEnum(a, to_string(node->op)); rejectEnum(b, to_string(node->op));
             int w = std::max(a->type->width, b->type->width);
             bool s = a->type->isSigned() && b->type->isSigned();
             node->type = ResolvedType::makeInteger(w, s);

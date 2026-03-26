@@ -80,6 +80,7 @@ std::string DFG::renderDot(const std::string& graphName,
             case DFGOp::INDEX: ss << "INDEX"; break;
             case DFGOp::CONCAT: ss << "CONCAT"; break;
             case DFGOp::CONCAT_ALIGN: ss << "CONCAT_ALIGN"; break;
+            case DFGOp::CAST: ss << "CAST"; break;
             case DFGOp::UNARY_PLUS: ss << "+"; break;
             case DFGOp::UNARY_NEGATE: ss << "-"; break;
             case DFGOp::BITWISE_NOT: ss << "~"; break;

@@ -25,6 +25,11 @@ using namespace slang::syntax;
 
 namespace custom_hdl {
 
+// Enum type registry: typedef name → ResolvedType (Enum kind)
+using EnumRegistry  = std::map<std::string, ResolvedType>;
+// Map from enum member/enum-typed-localparam name → (integer value, enum ResolvedType)
+using EnumMemberMap = std::map<std::string, std::pair<int64_t, ResolvedType>>;
+
 // Context struct for resolution - bundles all parameters needed during DFG building
 struct ResolutionContext {
     DFG& graph;
@@ -52,6 +57,10 @@ struct ResolutionContext {
     std::map<std::string, DFGNode*> local_signals;
     // local_flop_names: base names of flops declared in this generate scope
     std::set<std::string> local_flop_names;
+
+    // Enum type registry and member map (populated in resolveModule before elaboration)
+    const EnumRegistry&  enumRegistry;
+    const EnumMemberMap& enumMemberValues;
 };
 
 // ============================================================================
@@ -256,14 +265,22 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 
 // Resolve an UnresolvedParam to ResolvedParam
 // TODO: Actually evaluate the type syntax and dimension expressions
-ResolvedParam resolveParameter(const UnresolvedParam& param, const ParameterContext& topCtx, ParameterContext& localCtx, bool isLocal = false) {
+ResolvedParam resolveParameter(const UnresolvedParam& param, const ParameterContext& topCtx,
+                               ParameterContext& localCtx, bool isLocal = false,
+                               const EnumRegistry* enumRegistry = nullptr) {
     ResolvedParam resolved;
     resolved.name = param.name;
 
-    // TODO: currently only support for implicit type
-    if (param.type.syntax->isKind(SyntaxKind::ImplicitType)){
+    if (param.type.syntax->kind == SyntaxKind::ImplicitType) {
         resolved.type = ResolvedType::makeInteger(32, false);
-    } else{
+    } else if (param.type.syntax->kind == SyntaxKind::NamedType && enumRegistry) {
+        auto& named = param.type.syntax->as<NamedTypeSyntax>();
+        std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
+        auto it = enumRegistry->find(typeName);
+        if (it == enumRegistry->end())
+            throw CompilerError("Unknown enum type for localparam: " + typeName);
+        resolved.type = it->second;
+    } else {
         throw CompilerError("Only implicit param type supported");
     }
 
@@ -381,9 +398,22 @@ std::vector<ResolvedDimension> ResolveDimensions(
 // Populates the dimensions vector and returns the ResolvedType with computed width
 ResolvedType resolveType(
     const DataTypeSyntax& syntax,
-    // const UnresolvedDimension& dimension,
-    const ParameterContext& ctx)
+    const ParameterContext& ctx,
+    const EnumRegistry& enumRegistry)
 {
+    // Enum named type: look up in registry
+    if (syntax.kind == SyntaxKind::NamedType) {
+        auto& named = syntax.as<NamedTypeSyntax>();
+        std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
+        auto it = enumRegistry.find(typeName);
+        if (it == enumRegistry.end())
+            throw CompilerError("Unknown type: " + typeName);
+        return it->second;
+    }
+
+    // Inline enum types must be declared via typedef
+    if (syntax.kind == SyntaxKind::EnumType)
+        throw CompilerError("Inline enum types are not supported; use typedef enum");
 
     SyntaxList<VariableDimensionSyntax> packedDimensionsSyntax = nullptr;
 
@@ -411,9 +441,6 @@ ResolvedType resolveType(
                 std::string(toString(syntax.kind)));
     }
 
-
-    // TODO we could store this in the struct also if needed
-    // TODO currently just storing the reduction of this, the width.
     const auto packedDimensions = ResolveDimensions(packedDimensionsSyntax, ctx);
 
     // Compute total width as product of all dimension sizes
@@ -465,6 +492,18 @@ DFGNode* buildExprDFG(
             return node;
         }
 
+        case SyntaxKind::UnbasedUnsizedLiteralExpression: {
+            // '0, '1 — fill literal; value is 0 or ~0; width determined by context.
+            // Treat as an untyped constant (width propagated by type_propagation).
+            auto& literal = expr->as<LiteralExpressionSyntax>();
+            char ch = literal.literal.rawText().empty() ? '0'
+                                                        : literal.literal.rawText()[1];
+            int64_t value = (ch == '1') ? -1 : 0;
+            auto* node = ctx.graph.constant(value);
+            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            return node;
+        }
+
         case SyntaxKind::IntegerVectorExpression: {
             auto& vecExpr = expr->as<IntegerVectorExpressionSyntax>();
             const auto lit = parseIntegerVectorExpression(vecExpr);
@@ -490,8 +529,16 @@ DFGNode* buildExprDFG(
                 auto it = ctx.local_signals.find(baseName);
                 if (it != ctx.local_signals.end()) return it->second;
             }
-            // Check if baseName is a genvar: in params but not in the DFG
+            // Check if baseName is a genvar/enum-member: in params but not in the DFG
             if (ctx.graph.lookupSignal("", baseName) == nullptr) {
+                // Check enum members/localparams first (for properly-typed CONST nodes)
+                auto eit = ctx.enumMemberValues.find(baseName);
+                if (eit != ctx.enumMemberValues.end()) {
+                    auto* n = ctx.graph.constant(eit->second.first);
+                    n->type = eit->second.second;
+                    n->loc = resolveSourceLoc(*expr, ctx.sm);
+                    return n;
+                }
                 auto paramIt = ctx.params.values.find(baseName);
                 if (paramIt != ctx.params.values.end()) {
                     auto* n = ctx.graph.constant(paramIt->second);
@@ -741,6 +788,16 @@ DFGNode* buildExprDFG(
             return node;
         }
 
+        case SyntaxKind::InequalityExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto* eqNode = ctx.graph.eq(buildExprDFG(binary.left, ctx),
+                                        buildExprDFG(binary.right, ctx));
+            eqNode->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto* notNode = ctx.graph.logicalNot(eqNode);
+            notNode->loc = resolveSourceLoc(*expr, ctx.sm);
+            return notNode;
+        }
+
         case SyntaxKind::LessThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
             auto* node = ctx.graph.lt(buildExprDFG(binary.left, ctx),
@@ -782,6 +839,7 @@ DFGNode* buildExprDFG(
             return node;
         }
 
+        case SyntaxKind::LogicalShiftRightExpression:
         case SyntaxKind::ArithmeticShiftRightExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
             auto* node = ctx.graph.asr(buildExprDFG(binary.left, ctx),
@@ -862,6 +920,34 @@ DFGNode* buildExprDFG(
             auto* node = ctx.graph.mux(condNode, trueNode, falseNode);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
+        }
+
+        case SyntaxKind::CastExpression: {
+            auto& castExpr = expr->as<CastExpressionSyntax>();
+            // Only enum type casts are supported: enum_t'(expr)
+            std::string typeName;
+            if (castExpr.left->kind == SyntaxKind::NamedType) {
+                typeName = std::string(
+                    castExpr.left->as<NamedTypeSyntax>().name->as<IdentifierNameSyntax>()
+                        .identifier.valueText());
+            } else if (castExpr.left->kind == SyntaxKind::IdentifierName) {
+                typeName = std::string(
+                    castExpr.left->as<IdentifierNameSyntax>().identifier.valueText());
+            } else {
+                throw CompilerError(
+                    "Only enum type casts are supported (e.g. state_t'(expr))",
+                    resolveSourceLoc(*expr, ctx.sm));
+            }
+            auto it = ctx.enumRegistry.find(typeName);
+            if (it == ctx.enumRegistry.end())
+                throw CompilerError(
+                    "Unknown enum type in cast: " + typeName,
+                    resolveSourceLoc(*expr, ctx.sm));
+            DFGNode* inner = buildExprDFG(castExpr.right->expression, ctx);
+            auto* castNode = ctx.graph.cast(inner);
+            castNode->type = it->second;
+            castNode->loc  = resolveSourceLoc(*expr, ctx.sm);
+            return castNode;
         }
 
         default:
@@ -1404,11 +1490,7 @@ void resolveCaseStatementInPlace(
         const CaseStatementSyntax* caseStatement,
         ResolutionContext& ctx) {
 
-    if (caseStatement->uniqueOrPriority) {
-        throw CompilerError("unique/priority case not supported",
-                            resolveSourceLoc(*caseStatement, ctx.sm));
-    }
-
+    // unique/priority qualifiers are synthesis hints; semantically equivalent to plain case
     // Only support basic 'case', not casez/casex
     auto caseKeyword = caseStatement->caseKeyword.kind;
     if (caseKeyword == slang::parsing::TokenKind::CaseZKeyword) {
@@ -1602,6 +1684,7 @@ void resolveCaseStatementInPlace(
             for (int64_t v = 0; v < numValues; ++v) {
                 if (explicitCaseValues.contains(v)) continue;
                 auto* missingConst = ctx.graph.constant(v);
+                missingConst->type = selectorNode->type;  // inherit selector type (e.g. enum)
                 missingConst->loc = caseLoc;
                 auto* missingSel = ctx.graph.eq(selectorNode, missingConst);
                 missingSel->loc = caseLoc;
@@ -1763,13 +1846,15 @@ void resolveProceduralTimingInPlace(
     resolveStatementInPlace(statement, ctx);
 }
 
-ResolvedSignal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx) {
+ResolvedSignal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx,
+                             const EnumRegistry& enumRegistry) {
     ResolvedSignal resolved;
     resolved.name = signal.name;
 
     resolved.type = resolveType(
         *signal.type.syntax,
-        ctx);
+        ctx,
+        enumRegistry);
 
 
     if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx);
@@ -2151,7 +2236,7 @@ static void resolveGenerateScopeDecls(
                                   const DeclaratorSyntax& decl,
                                   bool isFlop) {
         std::string name(decl.name.valueText());
-        ResolvedType type = resolveType(typeSyntax, ctx.params);
+        ResolvedType type = resolveType(typeSyntax, ctx.params, ctx.enumRegistry);
 
         // Resolve unpacked dimensions from the declarator
         auto unpacked = ResolveDimensions(decl.dimensions, ctx.params);
@@ -2374,7 +2459,8 @@ void resolveGenerateMemberInPlace(
                 // Per-iteration context: inherits parent local_signals for outer-scope access
                 ResolutionContext iterResCtx{
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
-                    ctx.sm, false, {}, {}, childPath, ctx.local_signals, {}};
+                    ctx.sm, false, {}, {}, childPath, ctx.local_signals, {},
+                    ctx.enumRegistry, ctx.enumMemberValues};
 
                 if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
                     resolveGenerateMembersInPlace(
@@ -2445,14 +2531,53 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     resolved.name = unresolved.name;
     auto localCtx = std::make_unique<ParameterContext>(topCtx);
 
+    // === Build enum registry from typedef enum declarations ===
+    // Must happen before any type resolution or parameter evaluation so that
+    // enum member names are available as constants.
+    EnumRegistry  enumRegistry;
+    EnumMemberMap enumMemberValues;
+
+    for (auto& [typeName, enumSyntax] : unresolved.enumTypedefs) {
+        // Resolve the underlying base type width (e.g. logic [1:0] → width 2)
+        int width = 32;  // default if no explicit base type
+        if (enumSyntax->baseType) {
+            // Use an empty registry — base types must be integer types
+            ResolvedType base = resolveType(*enumSyntax->baseType, *localCtx, {});
+            width = base.width;
+        }
+
+        // Walk members, auto-incrementing value unless overridden
+        std::vector<ResolvedEnumMember> members;
+        int64_t nextValue = 0;
+        for (const auto* decl : enumSyntax->members) {
+            int64_t val = nextValue;
+            if (decl->initializer) {
+                val = evaluateConstantExpr(decl->initializer->expr, *localCtx);
+            }
+            members.push_back({std::string(decl->name.valueText()), val});
+            nextValue = val + 1;
+        }
+
+        ResolvedType enumType = ResolvedType::makeEnum(typeName, width, members);
+        enumRegistry[typeName] = enumType;
+
+        // Inject member names as integer constants (for evaluateConstantExpr in localparams)
+        // and as typed entries (for buildExprDFG)
+        for (const auto& member : members) {
+            localCtx->values[member.name] = member.value;
+            enumMemberValues[member.name] = {member.value, enumType};
+        }
+    }
+
     // Resolve parameters
     for (const auto& param : unresolved.parameters) {
         resolved.parameters.push_back(resolveParameter(param, topCtx, *localCtx));
     }
 
     // Resolve localparams (cannot be overridden by instantiation context)
+    // Pass enum registry so enum-typed localparams (e.g. localparam op_t X = OP_NOP) are handled
     for (const auto& param : unresolved.localparams) {
-        resolved.localparams.push_back(resolveParameter(param, topCtx, *localCtx, true));
+        resolved.localparams.push_back(resolveParameter(param, topCtx, *localCtx, true, &enumRegistry));
     }
 
     auto mergedCtx = std::make_unique<ParameterContext>(topCtx);
@@ -2462,26 +2587,26 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
-        auto sig = resolveSignal(input, *mergedCtx);
+        auto sig = resolveSignal(input, *mergedCtx, enumRegistry);
         resolved.inputs[sig.name] = sig;
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
-        auto sig = resolveSignal(output, *mergedCtx);
+        auto sig = resolveSignal(output, *mergedCtx, enumRegistry);
         resolved.outputs[sig.name] = sig;
     }
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
-        auto sig = resolveSignal(signal, *mergedCtx);
+        auto sig = resolveSignal(signal, *mergedCtx, enumRegistry);
         resolved.signals[sig.name] = sig;
     }
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;
     for (const auto& flop : unresolved.flops) {
-        const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx));
+        const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx, enumRegistry));
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedSignal.name,
                 .type = resolvedSignal,
@@ -2503,8 +2628,14 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     }
 
     // Pre-populate module LOCALPARAMS
+    // For enum-typed localparams, fix the node type and inject into enumMemberValues
+    // so that buildExprDFG returns properly-typed CONST nodes for them.
     for (const auto& parameter : resolved.localparams) {
-        graph.named_constant(parameter.value, "", parameter.name);
+        auto* node = graph.named_constant(parameter.value, "", parameter.name);
+        if (parameter.type.isEnum()) {
+            node->type = parameter.type;
+            enumMemberValues[parameter.name] = {static_cast<int64_t>(parameter.value), parameter.type};
+        }
     }
 
     // Pre-populate module INPUTS (ports only)
@@ -2536,7 +2667,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context
-    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}};
+    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues};
 
     for (const auto& block : unresolved.proceduralComboBlocks) {
         resolveProceduralComboInPlace(block, resCtx);

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <cstdlib>
 #include <ostream>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -16,7 +18,7 @@ struct ResolvedDimension {
 
 enum class ResolvedTypeKind {
     Integer,
-    // Future: Real, Struct, Enum, etc.
+    Enum,
 };
 
 enum class SyncKind {
@@ -30,9 +32,21 @@ struct ResolvedIntegerInfo {
     bool is_signed = false;
 };
 
+struct ResolvedEnumMember {
+    std::string name;
+    int64_t     value;
+};
+
+struct ResolvedEnumInfo {
+    std::string                     type_name;
+    std::vector<ResolvedEnumMember> members;
+    // width lives on ResolvedType::width, not here
+};
+
 using ResolvedTypeMetadata = std::variant<
     std::monostate,
-    ResolvedIntegerInfo
+    ResolvedIntegerInfo,
+    ResolvedEnumInfo
 >;
 
 struct ResolvedType {
@@ -48,11 +62,20 @@ struct ResolvedType {
                                     std::vector<ResolvedDimension> packed_dims = {},
                                     std::vector<ResolvedDimension> unpacked_dims = {});
 
+    static ResolvedType makeEnum(std::string type_name, int width,
+                                 std::vector<ResolvedEnumMember> members);
+
     bool isSigned() const {
         if (std::holds_alternative<ResolvedIntegerInfo>(metadata)) {
             return std::get<ResolvedIntegerInfo>(metadata).is_signed;
         }
         return false;
+    }
+
+    bool isEnum() const { return kind == ResolvedTypeKind::Enum; }
+
+    const ResolvedEnumInfo& enumInfo() const {
+        return std::get<ResolvedEnumInfo>(metadata);
     }
 };
 

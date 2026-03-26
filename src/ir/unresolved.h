@@ -94,6 +94,9 @@ struct UnresolvedModule {
     // Generate constructs (IfGenerate, LoopGenerate, GenerateRegion) — flattened at elaboration time
     std::vector<UnresolvedTypes::Generate> generateBlocks;
 
+    // Enum typedef declarations (typedef_name → EnumType syntax pointer)
+    std::vector<std::pair<std::string, const slang::syntax::EnumTypeSyntax*>> enumTypedefs;
+
     void print(int indent = 0) const;
 };
 

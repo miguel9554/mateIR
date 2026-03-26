@@ -26,10 +26,27 @@ ResolvedType ResolvedType::makeInteger(int width, bool is_signed,
     };
 }
 
+ResolvedType ResolvedType::makeEnum(std::string type_name, int width,
+                                    std::vector<ResolvedEnumMember> members) {
+    return ResolvedType{
+        .kind = ResolvedTypeKind::Enum,
+        .width = width,
+        .metadata = ResolvedEnumInfo{
+            .type_name = std::move(type_name),
+            .members   = std::move(members)
+        },
+        .packed_dims  = {},
+        .unpacked_dims = {}
+    };
+}
+
 void ResolvedType::print(std::ostream& os) const {
     switch (kind) {
         case ResolvedTypeKind::Integer:
             os << "Integer";
+            break;
+        case ResolvedTypeKind::Enum:
+            os << "Enum(" << enumInfo().type_name << ")";
             break;
     }
     if (!packed_dims.empty()) {

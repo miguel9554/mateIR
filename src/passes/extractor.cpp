@@ -108,6 +108,7 @@ public:
         SyntaxKind::HierarchyInstantiation,
         // SyntaxKind::FunctionDeclaration,
         SyntaxKind::ContinuousAssign,
+        SyntaxKind::TypedefDeclaration,
         // SyntaxKind::DefParam,
         // SyntaxKind::ElabSystemTask,
         // SyntaxKind::LocalVariableDeclaration,
@@ -262,6 +263,19 @@ public:
     void handle(const GenvarDeclarationSyntax& node) {
         // Genvars are used by loop generate; no extraction needed
         (void)node;
+    }
+
+    void handle(const TypedefDeclarationSyntax& node) {
+        if (!currentModule) throw CompilerError(
+            "Typedef declaration must be inside a module.", resolveSourceLoc(node, sm));
+        if (node.type->kind != SyntaxKind::EnumType)
+            throw CompilerError(
+                "Only enum typedefs are supported (got " +
+                std::string(toString(node.type->kind)) + ")",
+                resolveSourceLoc(node, sm));
+        currentModule->enumTypedefs.emplace_back(
+            std::string(node.name.valueText()),
+            &node.type->as<EnumTypeSyntax>());
     }
 
     void handle(const GenerateRegionSyntax& node) {

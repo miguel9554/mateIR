@@ -62,6 +62,52 @@ def parse_module(filepath: Path) -> ModuleInfo:
             result = re.sub(rf'\b{name}\b', param_map[name], result)
         return result
 
+    # Collect typedef definitions from all *_pkg.sv files in the same RTL directory
+    # so that enum-typed ports (NamedType) can be resolved to their base dimensions.
+    typedef_map: dict[str, tuple[bool, str]] = {}  # name -> (is_signed, dims_str)
+
+    def _extract_base_dims(type_node) -> tuple[bool, str]:
+        """Return (is_signed, dims_str) for a DataTypeSyntax, recursing into EnumType."""
+        kind_name = str(type_node.kind)
+        if 'EnumType' in kind_name:
+            base = type_node.baseType
+            if base is not None:
+                return _extract_base_dims(base)
+            return False, ''   # plain `enum { ... }` — treated as 1-bit
+        # ImplicitType / LogicType / RegType / IntegerType all have .signing and .dimensions
+        try:
+            is_signed = (type_node.signing.kind == pyslang.TokenKind.SignedKeyword)
+        except AttributeError:
+            is_signed = False
+        try:
+            dims = ' '.join(str(d).strip() for d in type_node.dimensions)
+        except AttributeError:
+            dims = ''
+        return is_signed, dims
+
+    def _collect_typedefs_from_members(members) -> None:
+        for m in members:
+            kind_name = str(m.kind)
+            if 'TypedefDeclaration' in kind_name:
+                try:
+                    td_name = str(m.name.valueText)
+                    is_signed, dims = _extract_base_dims(m.type)
+                    typedef_map[td_name] = (is_signed, dims)
+                except Exception:
+                    pass
+            # Descend into packages and modules
+            if hasattr(m, 'members'):
+                _collect_typedefs_from_members(m.members)
+
+    for pkg_file in filepath.parent.glob('*_pkg.sv'):
+        try:
+            pkg_tree = pyslang.SyntaxTree.fromFile(str(pkg_file))
+            _collect_typedefs_from_members(pkg_tree.root.members)
+        except Exception:
+            pass
+    # Also scan the module's own file (typedefs defined at file/module scope)
+    _collect_typedefs_from_members(root.members)
+
     # Parse ports
     ports = []
     if header.ports is not None:
@@ -71,16 +117,33 @@ def parse_module(filepath: Path) -> ModuleInfo:
             direction = port.header.direction.rawText
             port_name = port.declarator.name.valueText
 
-            # Check signed
             dt = port.header.dataType
-            is_signed = (dt.signing.kind == pyslang.TokenKind.SignedKeyword)
+            kind_name = str(dt.kind)
 
-            # Dimensions
-            dim_parts = []
-            for dim in dt.dimensions:
-                dim_parts.append(str(dim).strip())
-            param_dims = ' '.join(dim_parts)
-            resolved_dims = resolve_dims(param_dims)
+            if 'NamedType' in kind_name:
+                # Port type is a user-defined typedef (e.g. an enum).
+                # Resolve via the typedef_map built above.
+                try:
+                    type_name = str(dt.name).strip()
+                except AttributeError:
+                    type_name = ''
+                if type_name in typedef_map:
+                    is_signed, param_dims = typedef_map[type_name]
+                else:
+                    # Unknown typedef — fall back to scalar logic
+                    is_signed, param_dims = False, ''
+                resolved_dims = resolve_dims(param_dims)
+            else:
+                # Standard integer / implicit / logic type
+                try:
+                    is_signed = (dt.signing.kind == pyslang.TokenKind.SignedKeyword)
+                except AttributeError:
+                    is_signed = False
+                dim_parts = []
+                for dim in dt.dimensions:
+                    dim_parts.append(str(dim).strip())
+                param_dims = ' '.join(dim_parts)
+                resolved_dims = resolve_dims(param_dims)
 
             ports.append(Port(
                 name=port_name,

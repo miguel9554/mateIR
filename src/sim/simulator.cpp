@@ -727,32 +727,34 @@ void Simulator::run() {
             idx++;
         }
 
-        // Apply new async values and detect edges
+        // Deduplicate: keep the last event per signal at this timestamp.
         std::map<std::string, int64_t> new_async;
         for (const auto* evt : batch) {
             new_async[evt->signal_name] = evt->value;
         }
 
-        // Track which clocks had their active edge in this batch
-        std::set<std::string> active_edge_clocks;
-
-        // Process non-clock signals first so that reset deassertion is
-        // visible before any clock edge is evaluated in the same batch.
-        for (const auto& [name, new_val] : new_async) {
-            if (clock_inputs_.count(name)) continue;
-            root_->setAsyncEvent(name, new_val);
-            async_prev[name] = new_val;
+        // Async events are physical signals: two different signals cannot
+        // change at exactly the same time.  t=0 is the initialization
+        // exception where all signals report their starting value.
+        if (batch_time > 0 && new_async.size() > 1) {
+            std::string names;
+            for (const auto& [n, v] : new_async)
+                names += (names.empty() ? "" : ", ") + n;
+            throw CompilerError(std::format(
+                "Simulator: multiple async events at the same timestamp {}ns "
+                "({}) — async signals cannot change simultaneously",
+                batch_time, names));
         }
 
+        // Apply events and detect active clock edges
+        std::set<std::string> active_edge_clocks;
+
         for (const auto& [name, new_val] : new_async) {
-            if (!clock_inputs_.count(name)) continue;
             int64_t old_val = async_prev[name];
 
-            // Use setAsyncEvent on root for edge detection and d->q
             root_->setAsyncEvent(name, new_val);
 
-            // Detect active edge on clock inputs
-            if (old_val != new_val) {
+            if (clock_inputs_.count(name) && old_val != new_val) {
                 bool is_posedge = (old_val == 0 && new_val == 1);
                 bool is_negedge = (old_val == 1 && new_val == 0);
                 auto edge_it = clock_active_edge_.find(name);

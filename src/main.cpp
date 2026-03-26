@@ -288,7 +288,7 @@ int main(int argc, char** argv) {
 
     try {
 
-    auto modules = buildIR(*tree);
+    auto ir = buildIR(*tree);
 
     // Build parameter context for top module if sim config provides parameters
     auto topModule = [&]() {
@@ -297,15 +297,18 @@ int main(int argc, char** argv) {
             for (const auto& [name, value] : simConfig->parameters) {
                 topParams.values[name] = static_cast<int>(value);
             }
-            return resolveModules(modules, tree->sourceManager(),
+            return resolveModules(ir.modules, ir.packages, ir.globalImports,
+                                  tree->sourceManager(),
                                   simConfig->top_module, topParams);
         }
         if (simConfig) {
             ParameterContext emptyCtx;
-            return resolveModules(modules, tree->sourceManager(),
+            return resolveModules(ir.modules, ir.packages, ir.globalImports,
+                                  tree->sourceManager(),
                                   simConfig->top_module, emptyCtx);
         }
-        return resolveModules(modules, tree->sourceManager());
+        return resolveModules(ir.modules, ir.packages, ir.globalImports,
+                              tree->sourceManager());
     }();
 
     // Build module_name -> YAML path map from --domains files
@@ -554,7 +557,7 @@ int main(int argc, char** argv) {
 
     std::cout << "========================================" << std::endl;
     std::cout << "Compilation completed successfully!" << std::endl;
-    std::cout << "Found " << modules.size() << " module(s)." << std::endl;
+    std::cout << "Found " << ir.modules.size() << " module(s)." << std::endl;
 
     } catch (const CompilerError& e) {
         std::cerr << "ERROR: " << e.what() << std::endl;

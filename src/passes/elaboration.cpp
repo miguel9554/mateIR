@@ -30,6 +30,13 @@ using EnumRegistry  = std::map<std::string, ResolvedType>;
 // Map from enum member/enum-typed-localparam name → (integer value, enum ResolvedType)
 using EnumMemberMap = std::map<std::string, std::pair<int64_t, ResolvedType>>;
 
+// Package registry: package name → its resolved enum types and members
+struct ResolvedPackageEntry {
+    EnumRegistry  enumTypes;
+    EnumMemberMap enumMembers;
+};
+using PackageRegistry = std::map<std::string, ResolvedPackageEntry>;
+
 // Context struct for resolution - bundles all parameters needed during DFG building
 struct ResolutionContext {
     DFG& graph;
@@ -59,8 +66,10 @@ struct ResolutionContext {
     std::set<std::string> local_flop_names;
 
     // Enum type registry and member map (populated in resolveModule before elaboration)
-    const EnumRegistry&  enumRegistry;
-    const EnumMemberMap& enumMemberValues;
+    const EnumRegistry&   enumRegistry;
+    const EnumMemberMap&  enumMemberValues;
+    // Package registry (for pkg::type and pkg::MEMBER references)
+    const PackageRegistry& pkgRegistry;
 };
 
 // ============================================================================
@@ -399,11 +408,26 @@ std::vector<ResolvedDimension> ResolveDimensions(
 ResolvedType resolveType(
     const DataTypeSyntax& syntax,
     const ParameterContext& ctx,
-    const EnumRegistry& enumRegistry)
+    const EnumRegistry& enumRegistry,
+    const PackageRegistry* pkgRegistry = nullptr)
 {
     // Enum named type: look up in registry
     if (syntax.kind == SyntaxKind::NamedType) {
         auto& named = syntax.as<NamedTypeSyntax>();
+
+        // Handle qualified type: pkg::type_name
+        if (named.name->kind == SyntaxKind::ScopedName) {
+            auto& scoped = named.name->as<ScopedNameSyntax>();
+            std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string typeName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            if (!pkgRegistry) throw CompilerError("No package registry available for qualified type: " + pkgName + "::" + typeName);
+            auto pkgIt = pkgRegistry->find(pkgName);
+            if (pkgIt == pkgRegistry->end()) throw CompilerError("Unknown package: " + pkgName);
+            auto it = pkgIt->second.enumTypes.find(typeName);
+            if (it == pkgIt->second.enumTypes.end()) throw CompilerError("Unknown type: " + pkgName + "::" + typeName);
+            return it->second;
+        }
+
         std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
         auto it = enumRegistry.find(typeName);
         if (it == enumRegistry.end())
@@ -553,6 +577,23 @@ DFGNode* buildExprDFG(
                     ctx.flopNames
             );
             return node;
+        }
+
+        case SyntaxKind::ScopedName: {
+            // Package-qualified reference: pkg::MEMBER or pkg::type'(...) used as expression
+            auto& scoped = expr->as<ScopedNameSyntax>();
+            std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string itemName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            auto pkgIt = ctx.pkgRegistry.find(pkgName);
+            if (pkgIt == ctx.pkgRegistry.end())
+                throw CompilerError("Unknown package: " + pkgName, resolveSourceLoc(*expr, ctx.sm));
+            auto mit = pkgIt->second.enumMembers.find(itemName);
+            if (mit == pkgIt->second.enumMembers.end())
+                throw CompilerError("Unknown package member: " + pkgName + "::" + itemName, resolveSourceLoc(*expr, ctx.sm));
+            auto* n = ctx.graph.constant(mit->second.first);
+            n->type = mit->second.second;
+            n->loc  = resolveSourceLoc(*expr, ctx.sm);
+            return n;
         }
 
         case SyntaxKind::IdentifierSelectName: {
@@ -924,28 +965,44 @@ DFGNode* buildExprDFG(
 
         case SyntaxKind::CastExpression: {
             auto& castExpr = expr->as<CastExpressionSyntax>();
-            // Only enum type casts are supported: enum_t'(expr)
-            std::string typeName;
+            // Only enum type casts are supported: enum_t'(expr) or pkg::enum_t'(expr)
+            ResolvedType castType;
             if (castExpr.left->kind == SyntaxKind::NamedType) {
-                typeName = std::string(
-                    castExpr.left->as<NamedTypeSyntax>().name->as<IdentifierNameSyntax>()
-                        .identifier.valueText());
+                auto& namedType = castExpr.left->as<NamedTypeSyntax>();
+                if (namedType.name->kind == SyntaxKind::ScopedName) {
+                    auto& scoped = namedType.name->as<ScopedNameSyntax>();
+                    std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                    std::string typeName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                    auto pkgIt = ctx.pkgRegistry.find(pkgName);
+                    if (pkgIt == ctx.pkgRegistry.end())
+                        throw CompilerError("Unknown package in cast: " + pkgName, resolveSourceLoc(*expr, ctx.sm));
+                    auto it = pkgIt->second.enumTypes.find(typeName);
+                    if (it == pkgIt->second.enumTypes.end())
+                        throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, resolveSourceLoc(*expr, ctx.sm));
+                    castType = it->second;
+                } else {
+                    std::string typeName = std::string(
+                        namedType.name->as<IdentifierNameSyntax>().identifier.valueText());
+                    auto it = ctx.enumRegistry.find(typeName);
+                    if (it == ctx.enumRegistry.end())
+                        throw CompilerError("Unknown enum type in cast: " + typeName, resolveSourceLoc(*expr, ctx.sm));
+                    castType = it->second;
+                }
             } else if (castExpr.left->kind == SyntaxKind::IdentifierName) {
-                typeName = std::string(
+                std::string typeName = std::string(
                     castExpr.left->as<IdentifierNameSyntax>().identifier.valueText());
+                auto it = ctx.enumRegistry.find(typeName);
+                if (it == ctx.enumRegistry.end())
+                    throw CompilerError("Unknown enum type in cast: " + typeName, resolveSourceLoc(*expr, ctx.sm));
+                castType = it->second;
             } else {
                 throw CompilerError(
                     "Only enum type casts are supported (e.g. state_t'(expr))",
                     resolveSourceLoc(*expr, ctx.sm));
             }
-            auto it = ctx.enumRegistry.find(typeName);
-            if (it == ctx.enumRegistry.end())
-                throw CompilerError(
-                    "Unknown enum type in cast: " + typeName,
-                    resolveSourceLoc(*expr, ctx.sm));
             DFGNode* inner = buildExprDFG(castExpr.right->expression, ctx);
             auto* castNode = ctx.graph.cast(inner);
-            castNode->type = it->second;
+            castNode->type = castType;
             castNode->loc  = resolveSourceLoc(*expr, ctx.sm);
             return castNode;
         }
@@ -1847,14 +1904,16 @@ void resolveProceduralTimingInPlace(
 }
 
 ResolvedSignal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx,
-                             const EnumRegistry& enumRegistry) {
+                             const EnumRegistry& enumRegistry,
+                             const PackageRegistry* pkgRegistry = nullptr) {
     ResolvedSignal resolved;
     resolved.name = signal.name;
 
     resolved.type = resolveType(
         *signal.type.syntax,
         ctx,
-        enumRegistry);
+        enumRegistry,
+        pkgRegistry);
 
 
     if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx);
@@ -2236,7 +2295,7 @@ static void resolveGenerateScopeDecls(
                                   const DeclaratorSyntax& decl,
                                   bool isFlop) {
         std::string name(decl.name.valueText());
-        ResolvedType type = resolveType(typeSyntax, ctx.params, ctx.enumRegistry);
+        ResolvedType type = resolveType(typeSyntax, ctx.params, ctx.enumRegistry, &ctx.pkgRegistry);
 
         // Resolve unpacked dimensions from the declarator
         auto unpacked = ResolveDimensions(decl.dimensions, ctx.params);
@@ -2460,7 +2519,7 @@ void resolveGenerateMemberInPlace(
                 ResolutionContext iterResCtx{
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
                     ctx.sm, false, {}, {}, childPath, ctx.local_signals, {},
-                    ctx.enumRegistry, ctx.enumMemberValues};
+                    ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry};
 
                 if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
                     resolveGenerateMembersInPlace(
@@ -2524,9 +2583,77 @@ void resolveGenerateMemberInPlace(
 
 } // anonymous namespace
 
+// Resolve all packages into a PackageRegistry
+static PackageRegistry resolvePackages(
+    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages)
+{
+    PackageRegistry registry;
+    for (const auto& pkg : packages) {
+        ResolvedPackageEntry entry;
+        ParameterContext emptyCtx;
+        for (const auto& [typeName, enumSyntax] : pkg->enumTypedefs) {
+            int width = 32;
+            if (enumSyntax->baseType)
+                width = resolveType(*enumSyntax->baseType, emptyCtx, {}).width;
+            std::vector<ResolvedEnumMember> members;
+            int64_t nextValue = 0;
+            for (const auto* decl : enumSyntax->members) {
+                int64_t val = nextValue;
+                if (decl->initializer)
+                    val = evaluateConstantExpr(decl->initializer->expr, emptyCtx);
+                members.push_back({std::string(decl->name.valueText()), val});
+                nextValue = val + 1;
+            }
+            ResolvedType enumType = ResolvedType::makeEnum(typeName, width, members);
+            entry.enumTypes[typeName] = enumType;
+            for (const auto& m : members)
+                entry.enumMembers[m.name] = {m.value, enumType};
+        }
+        registry[pkg->name] = std::move(entry);
+    }
+    return registry;
+}
+
+// Apply a list of import specs into the current module's enum registries
+static void applyImports(
+    const std::vector<ImportSpec>& imports,
+    const PackageRegistry& pkgRegistry,
+    EnumRegistry& enumRegistry,
+    EnumMemberMap& enumMemberValues,
+    ParameterContext& localCtx)
+{
+    for (const auto& spec : imports) {
+        auto pkgIt = pkgRegistry.find(spec.package_name);
+        if (pkgIt == pkgRegistry.end())
+            throw CompilerError("Unknown package: " + spec.package_name);
+        const auto& entry = pkgIt->second;
+        if (!spec.item) {
+            // wildcard: import all
+            for (const auto& [k, v] : entry.enumTypes)
+                enumRegistry[k] = v;
+            for (const auto& [k, v] : entry.enumMembers) {
+                enumMemberValues[k] = v;
+                localCtx.values[k]  = v.first;
+            }
+        } else {
+            // explicit import of a single name
+            auto it = entry.enumTypes.find(*spec.item);
+            if (it != entry.enumTypes.end())
+                enumRegistry[it->first] = it->second;
+            auto mit = entry.enumMembers.find(*spec.item);
+            if (mit != entry.enumMembers.end()) {
+                enumMemberValues[mit->first] = mit->second;
+                localCtx.values[mit->first]  = mit->second.first;
+            }
+        }
+    }
+}
+
 ResolvedModule resolveModule(const UnresolvedModule& unresolved, const ParameterContext& topCtx,
                              const ModuleLookup& moduleLookup,
-                             const slang::SourceManager& sourceManager) {
+                             const slang::SourceManager& sourceManager,
+                             const PackageRegistry& pkgRegistry,
+                             const std::vector<ImportSpec>& globalImports) {
     ResolvedModule resolved;
     resolved.name = unresolved.name;
     auto localCtx = std::make_unique<ParameterContext>(topCtx);
@@ -2536,6 +2663,10 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     // enum member names are available as constants.
     EnumRegistry  enumRegistry;
     EnumMemberMap enumMemberValues;
+
+    // Seed registry from package imports (global first, then module-header imports)
+    applyImports(globalImports,      pkgRegistry, enumRegistry, enumMemberValues, *localCtx);
+    applyImports(unresolved.imports, pkgRegistry, enumRegistry, enumMemberValues, *localCtx);
 
     for (auto& [typeName, enumSyntax] : unresolved.enumTypedefs) {
         // Resolve the underlying base type width (e.g. logic [1:0] → width 2)
@@ -2587,26 +2718,26 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
-        auto sig = resolveSignal(input, *mergedCtx, enumRegistry);
+        auto sig = resolveSignal(input, *mergedCtx, enumRegistry, &pkgRegistry);
         resolved.inputs[sig.name] = sig;
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
-        auto sig = resolveSignal(output, *mergedCtx, enumRegistry);
+        auto sig = resolveSignal(output, *mergedCtx, enumRegistry, &pkgRegistry);
         resolved.outputs[sig.name] = sig;
     }
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
-        auto sig = resolveSignal(signal, *mergedCtx, enumRegistry);
+        auto sig = resolveSignal(signal, *mergedCtx, enumRegistry, &pkgRegistry);
         resolved.signals[sig.name] = sig;
     }
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;
     for (const auto& flop : unresolved.flops) {
-        const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx, enumRegistry));
+        const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx, enumRegistry, &pkgRegistry));
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedSignal.name,
                 .type = resolvedSignal,
@@ -2667,7 +2798,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context
-    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues};
+    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues, pkgRegistry};
 
     for (const auto& block : unresolved.proceduralComboBlocks) {
         resolveProceduralComboInPlace(block, resCtx);
@@ -2700,7 +2831,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
         }
 
         // Resolve the submodule to get its port information
-        auto resolvedSub = resolveModule(*it->second, instCtx, moduleLookup, sourceManager);
+        auto resolvedSub = resolveModule(*it->second, instCtx, moduleLookup, sourceManager, pkgRegistry, globalImports);
 
         // Build sets of input/output port names for the submodule
         std::set<std::string> subInputNames, subOutputNames;
@@ -2744,13 +2875,18 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
 ResolvedModule resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
+    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
+    const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager) {
 
+    // Filter out package declarations from module count
     if (modules.size() != 1) {
         throw CompilerError(std::format(
             "Multiple modules found ({}); use --top to specify the top module",
             modules.size()));
     }
+
+    PackageRegistry pkgRegistry = resolvePackages(packages);
 
     ModuleLookup moduleLookup;
     for (const auto& module : modules) {
@@ -2758,14 +2894,18 @@ ResolvedModule resolveModules(
     }
 
     ParameterContext emptyCtx;
-    return resolveModule(*modules[0], emptyCtx, moduleLookup, sourceManager);
+    return resolveModule(*modules[0], emptyCtx, moduleLookup, sourceManager, pkgRegistry, globalImports);
 }
 
 ResolvedModule resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
+    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
+    const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     const std::string& topModuleName,
     const ParameterContext& topParams) {
+
+    PackageRegistry pkgRegistry = resolvePackages(packages);
 
     ModuleLookup moduleLookup;
     for (const auto& module : modules) {
@@ -2778,7 +2918,7 @@ ResolvedModule resolveModules(
             "Top module '{}' not found in input files", topModuleName));
     }
 
-    return resolveModule(*it->second, topParams, moduleLookup, sourceManager);
+    return resolveModule(*it->second, topParams, moduleLookup, sourceManager, pkgRegistry, globalImports);
 }
 
 } // namespace custom_hdl

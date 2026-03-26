@@ -47,7 +47,17 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
     info.name = std::string(header.name.valueText());
 
     if (header.lifetime) throw CompilerError("Can't parse lifetime");
-    if (!header.imports.empty()) throw CompilerError("Can't parse imports");
+
+    for (const auto* importDecl : header.imports) {
+        for (const auto* item : importDecl->items) {
+            ImportSpec spec;
+            spec.package_name = std::string(item->package.valueText());
+            bool isWildcard = (item->item.kind == slang::parsing::TokenKind::Star);
+            spec.item = isWildcard ? std::nullopt
+                                   : std::optional<std::string>(item->item.valueText());
+            info.imports.push_back(spec);
+        }
+    }
 
     // Extract parameters
     if (header.parameters) {

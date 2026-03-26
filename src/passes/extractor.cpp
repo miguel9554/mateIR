@@ -81,7 +81,10 @@ class IRBuilderVisitor : public SyntaxVisitor<IRBuilderVisitor> {
 public:
     const slang::SourceManager& sm;
     std::vector<std::unique_ptr<UnresolvedModule>> modules;
+    std::vector<std::unique_ptr<UnresolvedPackage>> packages;
+    std::vector<ImportSpec> globalImports;
     UnresolvedModule* currentModule = nullptr;
+    UnresolvedPackage* currentPackage = nullptr;
 
     explicit IRBuilderVisitor(const slang::SourceManager& sm) : sm(sm) {}
 
@@ -119,6 +122,26 @@ public:
     }
 
     void handle(const ModuleDeclarationSyntax& node) {
+        if (node.kind == SyntaxKind::PackageDeclaration) {
+            auto pkg = std::make_unique<UnresolvedPackage>();
+            auto& pkgHeader = node.header->as<ModuleHeaderSyntax>();
+            pkg->name = std::string(pkgHeader.name.valueText());
+            currentPackage = pkg.get();
+            for (auto* member : node.members) {
+                if (member->kind == SyntaxKind::TypedefDeclaration ||
+                    member->kind == SyntaxKind::PackageImportDeclaration ||
+                    member->kind == SyntaxKind::EmptyMember)
+                    member->visit(*this);
+                else
+                    throw CompilerError(
+                        "Unsupported package member: " + std::string(toString(member->kind)),
+                        resolveSourceLoc(*member, sm));
+            }
+            packages.push_back(std::move(pkg));
+            currentPackage = nullptr;
+            return;
+        }
+
         auto headerInfo = extractModuleHeader(*node.header);
 
         auto module = std::make_unique<UnresolvedModule>();
@@ -265,17 +288,39 @@ public:
         (void)node;
     }
 
+    void handle(const PackageImportDeclarationSyntax& node) {
+        // Compilation-unit-scope import (outside any module or package)
+        if (currentModule == nullptr && currentPackage == nullptr) {
+            for (const auto* item : node.items) {
+                ImportSpec spec;
+                spec.package_name = std::string(item->package.valueText());
+                bool isWildcard = (item->item.kind == slang::parsing::TokenKind::Star);
+                spec.item = isWildcard ? std::nullopt
+                                       : std::optional<std::string>(item->item.valueText());
+                globalImports.push_back(spec);
+            }
+        }
+        // Body-level imports inside a module body are not yet supported (deferred)
+        // Package body imports are handled via the package member loop in handlePackage
+    }
+
     void handle(const TypedefDeclarationSyntax& node) {
-        if (!currentModule) throw CompilerError(
-            "Typedef declaration must be inside a module.", resolveSourceLoc(node, sm));
+        if (!currentModule && !currentPackage) throw CompilerError(
+            "Typedef declaration must be inside a module or package.", resolveSourceLoc(node, sm));
         if (node.type->kind != SyntaxKind::EnumType)
             throw CompilerError(
                 "Only enum typedefs are supported (got " +
                 std::string(toString(node.type->kind)) + ")",
                 resolveSourceLoc(node, sm));
-        currentModule->enumTypedefs.emplace_back(
-            std::string(node.name.valueText()),
-            &node.type->as<EnumTypeSyntax>());
+        if (currentPackage) {
+            currentPackage->enumTypedefs.emplace_back(
+                std::string(node.name.valueText()),
+                &node.type->as<EnumTypeSyntax>());
+        } else {
+            currentModule->enumTypedefs.emplace_back(
+                std::string(node.name.valueText()),
+                &node.type->as<EnumTypeSyntax>());
+        }
     }
 
     void handle(const GenerateRegionSyntax& node) {
@@ -341,10 +386,14 @@ public:
 
 namespace custom_hdl {
 
-std::vector<std::unique_ptr<UnresolvedModule>> buildIR(const SyntaxTree& tree) {
+ExtractedIR buildIR(const SyntaxTree& tree) {
     IRBuilderVisitor visitor(tree.sourceManager());
     tree.root().visit(visitor);
-    return std::move(visitor.modules);
+    return ExtractedIR{
+        std::move(visitor.modules),
+        std::move(visitor.packages),
+        std::move(visitor.globalImports)
+    };
 }
 
 } // namespace custom_hdl

@@ -5,10 +5,29 @@
 
 #include <iosfwd>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace custom_hdl {
+
+// ============================================================================
+// Package import specification
+// ============================================================================
+
+struct ImportSpec {
+    std::string package_name;
+    std::optional<std::string> item;  // nullopt = wildcard (:*)
+};
+
+// ============================================================================
+// Unresolved package - typedef enum declarations inside a package body
+// ============================================================================
+
+struct UnresolvedPackage {
+    std::string name;
+    std::vector<std::pair<std::string, const slang::syntax::EnumTypeSyntax*>> enumTypedefs;
+};
 
 // ============================================================================
 // Unresolved types - store pointers to slang syntax nodes
@@ -96,6 +115,9 @@ struct UnresolvedModule {
 
     // Enum typedef declarations (typedef_name → EnumType syntax pointer)
     std::vector<std::pair<std::string, const slang::syntax::EnumTypeSyntax*>> enumTypedefs;
+
+    // Package imports (from module header)
+    std::vector<ImportSpec> imports;
 
     void print(int indent = 0) const;
 };

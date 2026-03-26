@@ -12,7 +12,7 @@ module uut_tb(
 
     // Loopback: TX output feeds back into RX input
     always @(posedge _if.clk) begin
-        _if.rxd <= _if.txd;
+        #1ns _if.rxd <= _if.txd;
     end
 
     // Testbench procedure
@@ -24,7 +24,6 @@ module uut_tb(
             _if.s_axis_tdata  <= 8'd0;
             _if.s_axis_tvalid <= 0;
             _if.m_axis_tready <= 0;
-            _if.rxd           <= 1;
         end
 
         // Assert reset

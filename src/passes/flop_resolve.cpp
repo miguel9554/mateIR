@@ -339,11 +339,16 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
         }
     }
 
-    // Check that no signal or output logic depends on clock/reset
+    // Check that no signal or output logic depends on clock/reset.
+    // Filter to nodes belonging to this module's instance_path only: the flat DFG
+    // contains all modules' nodes, and sibling/ancestor nodes may still have their
+    // reset MUXes intact (processing is bottom-up).
     for (const auto& [name, node] : graph.getSignalsMap()) {
+        if (node->instance_path != instance_path) continue;
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
     for (const auto& [name, node] : graph.getOutputsMap()) {
+        if (node->instance_path != instance_path) continue;
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
 

@@ -5,7 +5,8 @@
 
 namespace custom_hdl {
 
-bool eliminateDeadCode(DFG& graph) {
+bool eliminateDeadCode(DFG& graph,
+                       const std::unordered_set<DFGNode*>& extraRoots) {
     // Phase 1: Mark — walk backward from roots collecting alive set
     std::unordered_set<DFGNode*> alive;
     std::vector<DFGNode*> worklist;
@@ -17,6 +18,9 @@ bool eliminateDeadCode(DFG& graph) {
     }
     for (auto& [name, node] : graph.getSignalsMap()) {
         if (alive.insert(node).second) worklist.push_back(node);
+    }
+    for (auto* node : extraRoots) {
+        if (node && alive.insert(node).second) worklist.push_back(node);
     }
 
     // BFS/DFS through in edges

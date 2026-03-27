@@ -489,7 +489,20 @@ int main(int argc, char** argv) {
             std::ofstream f(std::format("{}/09_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        runPass(10, "dce", [&]{ eliminateDeadCode(*module.dfg); });
+        runPass(10, "dce", [&]{
+            // Collect declared signal nodes from every level of the hierarchy.
+            // After dfg_inline, these nodes live in module.dfg->nodes but are
+            // absent from module.dfg->signals, so DCE would otherwise remove them.
+            std::unordered_set<DFGNode*> declaredSignals;
+            std::function<void(const ResolvedModule&)> collect = [&](const ResolvedModule& mod) {
+                for (const auto& [name, sig] : mod.signals)
+                    if (sig.dfg_node) declaredSignals.insert(sig.dfg_node);
+                for (const auto& sub : mod.hierarchyInstantiation)
+                    collect(sub);
+            };
+            collect(module);
+            eliminateDeadCode(*module.dfg, declaredSignals);
+        });
         module.dfg->validateNoOrphans();
         runPass(11, "io_domains_set", [&]{
             // Call setIODomains for this module and all submodules recursively

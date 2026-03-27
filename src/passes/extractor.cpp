@@ -149,6 +149,7 @@ public:
         module->parameters = std::move(headerInfo.parameters);
         module->inputs = std::move(headerInfo.inputs);
         module->outputs = std::move(headerInfo.outputs);
+        module->imports = std::move(headerInfo.imports);
 
         if (node.blockName) throw CompilerError("Can't parse blockName", resolveSourceLoc(node, sm));
 

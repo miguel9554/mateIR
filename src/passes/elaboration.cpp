@@ -1036,6 +1036,18 @@ DFGNode* buildExprDFG(
                 if (it == ctx.enumRegistry.end())
                     throw CompilerError("Unknown enum type in cast: " + typeName, resolveSourceLoc(*expr, ctx.sm));
                 castType = it->second;
+            } else if (castExpr.left->kind == SyntaxKind::ScopedName) {
+                // Qualified cast: pkg::type'(expr) — left is a ScopedName expression
+                auto& scoped = castExpr.left->as<ScopedNameSyntax>();
+                std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                std::string typeName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                auto pkgIt = ctx.pkgRegistry.find(pkgName);
+                if (pkgIt == ctx.pkgRegistry.end())
+                    throw CompilerError("Unknown package in cast: " + pkgName, resolveSourceLoc(*expr, ctx.sm));
+                auto it = pkgIt->second.enumTypes.find(typeName);
+                if (it == pkgIt->second.enumTypes.end())
+                    throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, resolveSourceLoc(*expr, ctx.sm));
+                castType = it->second;
             } else {
                 throw CompilerError(
                     "Only enum type casts are supported (e.g. state_t'(expr))",

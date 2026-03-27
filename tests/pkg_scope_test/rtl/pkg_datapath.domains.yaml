@@ -1,0 +1,19 @@
+module_name: pkg_datapath
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - op_in
+      - src_in
+      - dir_in
+      - shape_in
+      - data_in
+      - dir_out
+      - phase_out
+      - result_out
+      - active_out

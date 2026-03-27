@@ -1,0 +1,17 @@
+module_name: pkg_ctrl_unit
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - op_in
+      - src_in
+      - dst_in
+      - data_in
+      - op_out
+      - result_out
+      - valid_out

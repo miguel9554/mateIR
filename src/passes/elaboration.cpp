@@ -2809,6 +2809,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     }
 
     for (const auto& assign : unresolved.assignStatements) {
+        resCtx.combDrivers.clear();  // each assign statement is independent
         resolveAssignInPlace(assign, resCtx);
     }
 

@@ -464,6 +464,35 @@ bool propagateTypes(DFG& graph) {
         anyChanged |= changed;
     } while (changed);
 
+    // Backward pass: implement Verilog context-determined width rule.
+    // When a SIGNAL or OUTPUT of width W consumes an arithmetic op of width W' < W,
+    // widen the arithmetic op to W so the simulator masks at the correct width.
+    {
+        static const auto isArithOp = [](DFGOp op) {
+            return op == DFGOp::ADD || op == DFGOp::SUB ||
+                   op == DFGOp::MUL || op == DFGOp::DIV || op == DFGOp::POWER;
+        };
+        bool backwardChanged;
+        do {
+            backwardChanged = false;
+            for (const auto& node : graph.nodes) {
+                if (node->op != DFGOp::SIGNAL && node->op != DFGOp::OUTPUT) continue;
+                if (!node->hasType()) continue;
+                int contextWidth = node->type->width;
+                for (const auto& edge : node->in) {
+                    DFGNode* src = edge.node;
+                    if (!src->hasType()) continue;
+                    if (!isArithOp(src->op)) continue;
+                    if (src->type->width < contextWidth) {
+                        src->type = ResolvedType::makeInteger(contextWidth, src->type->isSigned());
+                        backwardChanged = true;
+                        anyChanged = true;
+                    }
+                }
+            }
+        } while (backwardChanged);
+    }
+
     // Verify all nodes have types
     for (const auto& node : graph.nodes) {
         if (!node->hasType()) {

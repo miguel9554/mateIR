@@ -1,0 +1,18 @@
+module_name: spi_slave_regs
+
+resets:
+  rstn:
+    polarity: negative
+
+clock_domains:
+  sclk:
+    polarity: posedge
+    inputs_outputs:
+      - wr_data
+      - wr_addr
+      - wr_data_valid
+      - rd_addr
+      - rd_data
+      - dummy_cycles
+      - en_qpi
+      - wrap_length

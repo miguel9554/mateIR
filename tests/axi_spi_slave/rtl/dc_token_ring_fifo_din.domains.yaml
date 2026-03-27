@@ -1,0 +1,19 @@
+module_name: dc_token_ring_fifo_din
+
+resets:
+  rstn:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - data
+      - valid
+      - ready
+      - write_token
+      - data_async
+
+async_domain:
+  - read_pointer:
+      synchronized_into: clk

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <format>
 #include <iostream>
+#include <source_location>
 #include <map>
 #include <memory>
 #include <optional>
@@ -148,9 +149,12 @@ void resolveStatementInPlace(
 
 // Evaluate a constant expression given a parameter context
 // Throws if a referenced parameter is not in the context
-int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx) {
+int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
+                              std::source_location caller = std::source_location::current()) {
     if (!expr) {
-        throw CompilerError("Cannot evaluate null expression");
+        throw CompilerError(
+            std::string("Cannot evaluate null expression (called from ") +
+            caller.file_name() + ":" + std::to_string(caller.line()) + ")");
     }
 
     switch (expr->kind) {
@@ -259,6 +263,17 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                 "Unsupported expression kind in constant evaluation: " +
                 std::string(toString(expr->kind)));
     }
+}
+
+// Overload with source location: reports where the null/bad expression came from.
+int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
+                              const slang::SourceManager& sm,
+                              const slang::syntax::SyntaxNode& contextNode) {
+    if (!expr) {
+        throw CompilerError("Cannot evaluate null expression",
+                            resolveSourceLoc(contextNode, sm));
+    }
+    return evaluateConstantExpr(expr, ctx);
 }
 
 // IntegerType
@@ -721,7 +736,7 @@ DFGNode* buildExprDFG(
         case SyntaxKind::MultipleConcatenationExpression: {
             // {N{expr}} — repeat expr N times, concatenated MSB-first
             auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
-            int64_t N = evaluateConstantExpr(multiConcat.expression, ctx.params);
+            int64_t N = evaluateConstantExpr(multiConcat.expression, ctx.params, ctx.sm, *expr);
             std::vector<DFGNode*> parts;
             parts.reserve(static_cast<size_t>(N) * multiConcat.concatenation->expressions.size());
             for (int64_t i = 0; i < N; i++) {
@@ -2129,7 +2144,7 @@ void resolveNamedPortConnection(
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
         const std::map<std::string, size_t>& subOutputIndex,
-        const slang::SourceManager& sm) {
+        ResolutionContext& ctx) {
 
     // Extract port name
     std::string portName(named.name.valueText());
@@ -2141,16 +2156,15 @@ void resolveNamedPortConnection(
                 "Input port '" + portName + "' requires a connection expression");
         }
         auto* expr = extractPortExpr(*named.expr);
-        if (expr->kind != SyntaxKind::IdentifierName) {
-            throw CompilerError(
-                "Only simple identifier expressions supported for input port connections",
-                resolveSourceLoc(*expr, sm));
-        }
-        const std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
-        auto* driver = graph.lookupSignal("", name);
+        auto* driver = buildExprDFG(expr, ctx);
         moduleNode->in.push_back(driver);
         moduleNode->input_names.push_back(portName);
-        resolvedSub.asyncPortConnections[portName] = name;
+        // Only record simple identifier connections; asyncPortConnections is
+        // used solely for clock/reset port translation downstream.
+        if (expr->kind == SyntaxKind::IdentifierName) {
+            const std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            resolvedSub.asyncPortConnections[portName] = name;
+        }
     } else if (subOutputNames.contains(portName)) {
         if (!named.expr) {
             throw CompilerError(
@@ -2160,7 +2174,7 @@ void resolveNamedPortConnection(
         if (expr->kind != SyntaxKind::IdentifierName) {
             throw CompilerError(
                 "Only simple identifier expressions supported for output port connections",
-                resolveSourceLoc(*expr, sm));
+                resolveSourceLoc(*expr, ctx.sm));
         }
         std::string parentSignalName(expr->as<IdentifierNameSyntax>().identifier.valueText());
         connectModuleOutput(graph, moduleNode,
@@ -2195,13 +2209,13 @@ void resolvePortConnection(
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
         const std::map<std::string, size_t>& subOutputIndex,
-        const slang::SourceManager& sm) {
+        ResolutionContext& ctx) {
     switch (conn->kind) {
         case SyntaxKind::NamedPortConnection:
             resolveNamedPortConnection(conn->as<NamedPortConnectionSyntax>(),
                                        graph, moduleNode, resolvedSub,
                                        subInputNames, subOutputNames,
-                                       subOutputIndex, sm);
+                                       subOutputIndex, ctx);
             break;
         case SyntaxKind::WildcardPortConnection:
             resolveWildcardPortConnection(graph, moduleNode, resolvedSub);
@@ -2487,7 +2501,7 @@ void resolveGenerateMemberInPlace(
 
         case SyntaxKind::IfGenerate: {
             auto& ifGen = member->as<IfGenerateSyntax>();
-            int64_t cond = evaluateConstantExpr(ifGen.condition, ctx.params);
+            int64_t cond = evaluateConstantExpr(ifGen.condition, ctx.params, ctx.sm, ifGen);
             const MemberSyntax* selectedBlock = cond ? ifGen.block
                 : (ifGen.elseClause
                    ? static_cast<const MemberSyntax*>(ifGen.elseClause->clause.get()) : nullptr);
@@ -2537,9 +2551,9 @@ void resolveGenerateMemberInPlace(
 
             // Build per-iteration context with the genvar bound
             ParameterContext iterCtx = ctx.params;
-            iterCtx.values[genvarName] = evaluateConstantExpr(loopGen.initialExpr, ctx.params);
+            iterCtx.values[genvarName] = evaluateConstantExpr(loopGen.initialExpr, ctx.params, ctx.sm, loopGen);
 
-            while (evaluateConstantExpr(loopGen.stopExpr, iterCtx)) {
+            while (evaluateConstantExpr(loopGen.stopExpr, iterCtx, ctx.sm, loopGen)) {
                 int64_t genval = iterCtx.values.at(genvarName);
                 std::string childPath = (ctx.instance_path.empty() ? "" : ctx.instance_path + ".")
                                         + blockName + "[" + std::to_string(genval) + "]";
@@ -2929,7 +2943,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
             for (const auto* conn : inst->connections) {
                 resolvePortConnection(conn, graph, moduleNode,
                                       resolvedSub, subInputNames, subOutputNames,
-                                      subOutputIndex, sourceManager);
+                                      subOutputIndex, resCtx);
             }
         }
 

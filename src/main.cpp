@@ -18,6 +18,7 @@
 #include "passes/dfg_inline.h"
 #include "passes/flop_resolve.h"
 #include "passes/combo_deps.h"
+#include "passes/check_clock_and_reset.h"
 #include "passes/io_domains_set.h"
 #include "passes/type_propagation.h"
 #include "sim/simulator.h"
@@ -524,6 +525,7 @@ int main(int argc, char** argv) {
             std::ofstream f(std::format("{}/11_io_domains_set_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
+        runPass(12, "check_clock_and_reset", [&]{ checkClockAndReset(module); });
         computeComboDeps(module);
         validateNoCombLoops(module);
 

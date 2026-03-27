@@ -64,6 +64,7 @@ bool extract_reset(
     const DFGNode* dNodeDriver,
     const std::vector<asyncTrigger_t>& triggers,
     const std::string& flop_name,
+    const ResolvedModule& resolved,
     asyncTrigger_t& reset,
     asyncTrigger_t& clock,
     int& reset_value,
@@ -79,22 +80,27 @@ bool extract_reset(
     auto* mux_sel = dNodeDriver->in[0].node;
     auto* mux_true = dNodeDriver->in[1].node;
     auto* mux_else = dNodeDriver->in[2].node;
-    DFGNode* expectedResetNode = mux_sel;
     DFGNode* expectedResetAssign;
 
-    // Try to match selector to one of the triggers, which should be the reset. The other trigger is the clock.
-    // If no match, MUX should be a functional one.
-    const std::string& reset_name = expectedResetNode->name;
-    if (triggers[0].name == reset_name) {
+    // Match the MUX selector to one of the triggers (the reset). Compare by node identity
+    // rather than name, because after DFG inlining the trigger's INPUT node is replaced
+    // by the parent's signal node (with a different name), but resolved.inputs[name].dfg_node
+    // is updated to track that replacement.
+    auto nodeForTrigger = [&](const asyncTrigger_t& t) -> DFGNode* {
+        auto it = resolved.inputs.find(t.name);
+        return it != resolved.inputs.end() ? it->second.dfg_node : nullptr;
+    };
+
+    if (nodeForTrigger(triggers[0]) == mux_sel) {
         reset = triggers[0];
         clock = triggers[1];
-    } else if (triggers[1].name == reset_name) {
+    } else if (nodeForTrigger(triggers[1]) == mux_sel) {
         reset = triggers[1];
         clock = triggers[0];
     } else {
         throw CompilerError(std::format(
             "flop '{}' has 2 triggers but MUX selector '{}' matches neither trigger ('{}', '{}')",
-            flop_name, reset_name, triggers[0].name, triggers[1].name), dNodeDriver->loc);
+            flop_name, mux_sel->name, triggers[0].name, triggers[1].name), dNodeDriver->loc);
     }
 
     // Assign the expected reset and functional branches
@@ -148,7 +154,7 @@ FlopInfo extractFlopClockAndReset(
         has_reset = false;
     } else if (triggers.size() == 2) {
         has_reset = extract_reset(
-            dNodeDriver, triggers, flop_name,
+            dNodeDriver, triggers, flop_name, resolved,
             reset, clock, reset_value, functionalLogic);
     } else {
         throw CompilerError(std::format(

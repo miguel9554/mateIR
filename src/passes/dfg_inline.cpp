@@ -12,25 +12,24 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
     const std::string& moduleTypeName = std::get<std::string>(moduleNode->data);
     const std::string& instanceName = moduleNode->name;
 
-    // Find the sub ResolvedModule by type name
+    // Find the sub ResolvedModule by instance name
     ResolvedModule* sub = nullptr;
     for (auto& s : parent.hierarchyInstantiation) {
-        if (s.name == moduleTypeName) {
+        if (s.instance_name == instanceName) {
             sub = &s;
             break;
         }
     }
     if (!sub) {
         throw CompilerError(std::format(
-            "inlineDFGs: MODULE node '{}' references type '{}' "
+            "inlineDFGs: MODULE node '{}' (type '{}') "
             "not found in hierarchyInstantiation",
             instanceName, moduleTypeName), moduleNode);
     }
     if (!sub->dfg) {
         throw CompilerError(std::format(
-            "inlineDFGs: DFG for module type '{}' has already been consumed "
-            "(multiple instances of the same type are not supported)",
-            moduleTypeName), moduleNode);
+            "inlineDFGs: DFG for instance '{}' (type '{}') has already been consumed",
+            instanceName, moduleTypeName), moduleNode);
     }
 
     // Step 1: Rewire inputs — replace uses of sub INPUT nodes with parent drivers

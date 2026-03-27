@@ -2989,27 +2989,25 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
             instCtx = parseParameterValueAssignment(*moduleInst->parameters, *mergedCtx);
         }
 
-        // Resolve the submodule to get its port information
-        auto resolvedSub = resolveModule(*it->second, instCtx, moduleLookup, sourceManager, pkgRegistry, globalImports);
-
-        // Build sets of input/output port names for the submodule
-        std::set<std::string> subInputNames, subOutputNames;
-        std::map<std::string, size_t> subOutputIndex;
-        for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
-        size_t oi = 0;
-        for (const auto& [name, out] : resolvedSub.outputs) {
-            subOutputNames.insert(name);
-            subOutputIndex[name] = oi++;
-        }
-
-        // Process each instance in the instantiation
-        std::string lastInstanceName;
+        // Process each instance: resolve the submodule fresh per instance so
+        // each gets its own independent DFG (required for inlining).
         for (const auto* inst : moduleInst->instances) {
             std::string instanceName;
             if (inst->decl) {
                 instanceName = std::string(inst->decl->name.valueText());
             }
-            lastInstanceName = instanceName;
+
+            auto resolvedSub = resolveModule(*it->second, instCtx, moduleLookup, sourceManager, pkgRegistry, globalImports);
+
+            // Build sets of input/output port names for the submodule
+            std::set<std::string> subInputNames, subOutputNames;
+            std::map<std::string, size_t> subOutputIndex;
+            for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
+            size_t oi = 0;
+            for (const auto& [name, out] : resolvedSub.outputs) {
+                subOutputNames.insert(name);
+                subOutputIndex[name] = oi++;
+            }
 
             // Create MODULE node in the DFG with output port names
             std::vector<std::string> outputPortNames;
@@ -3023,10 +3021,10 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
                                       resolvedSub, subInputNames, subOutputNames,
                                       subOutputIndex, resCtx);
             }
-        }
 
-        resolvedSub.instance_name = lastInstanceName;
-        resolved.hierarchyInstantiation.push_back(std::move(resolvedSub));
+            resolvedSub.instance_name = instanceName;
+            resolved.hierarchyInstantiation.push_back(std::move(resolvedSub));
+        }
     }
 
     return resolved;

@@ -73,28 +73,6 @@ ResolvedSignal* findSignal(ResolvedModule& module, const std::string& name) {
     return nullptr;
 }
 
-// Build forward adjacency: for each node, which (node, arrival_port) pairs use it?
-struct FwdEdge {
-    const DFGNode* user;
-    // Which input slot of user this edge corresponds to
-    int input_slot;
-};
-
-std::map<const DFGNode*, std::vector<FwdEdge>> buildForwardMap(const DFG& dfg) {
-    std::map<const DFGNode*, std::vector<FwdEdge>> fwd;
-    for (const auto& node : dfg.nodes) {
-        for (int i = 0; i < static_cast<int>(node->in.size()); i++) {
-            fwd[node->in[i].node].push_back({node.get(), i});
-        }
-    }
-    return fwd;
-}
-
-// Get the flop base name from a .d signal name
-std::string flopBaseName(const std::string& dName) {
-    return dName.substr(0, dName.size() - 2);
-}
-
 } // anonymous namespace
 
 void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
@@ -206,7 +184,6 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
     }
 
     // Process async_domain
-    std::vector<std::string> asyncPorts;
     if (asyncNode && asyncNode.IsSequence()) {
         for (const auto& entry : asyncNode) {
             auto ref = parseSignalRef(entry);
@@ -224,7 +201,6 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                         module.name, name));
                 }
                 portClassMap[name] = {PortClass::Async, "", ref.synchronized_into};
-                asyncPorts.push_back(name);
             }
         }
     }
@@ -268,62 +244,9 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         }
     }
 
-    // 3e. Cross-check against flop_resolve results
-    // Clock inputs must be tagged Clock
-    for (const auto& [domainName, info] : clockDomains) {
-        ResolvedSignal* clkSig = findSignal(module, info.input_port);
-        if (clkSig && clkSig->sync_kind != SyncKind::Clock) {
-            throw CompilerError(std::format(
-                "io_domains_set: module '{}': clock port '{}' is not tagged as Clock type "
-                "(was flop_resolve run?)",
-                module.name, info.input_port));
-        }
-    }
+    // 3f (partial). Set sync_kind, clock_domain, clock_edge on inputs and outputs.
 
-    // Reset inputs must be tagged Reset
-    for (const auto& [resetName, info] : resets) {
-        ResolvedSignal* rstSig = findSignal(module, info.signal_name);
-        if (rstSig && rstSig->sync_kind != SyncKind::Reset) {
-            throw CompilerError(std::format(
-                "io_domains_set: module '{}': reset port '{}' is not tagged as Reset type "
-                "(was flop_resolve run?)",
-                module.name, info.signal_name));
-        }
-    }
-
-    // Cross-check clock polarity against flop info (skip if no flops)
-    if (!module.flops.empty()) {
-        for (const auto& [domainName, info] : clockDomains) {
-            edge_t expected = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
-            for (const auto& flop : module.flops) {
-                if (flop.clock.name == info.input_port) {
-                    if (flop.clock.edge != expected) {
-                        throw CompilerError(std::format(
-                            "io_domains_set: module '{}': clock domain '{}' polarity '{}' "
-                            "does not match flop '{}' clock edge",
-                            module.name, domainName, info.polarity, flop.name));
-                    }
-                }
-            }
-        }
-
-        // Cross-check reset polarity against flop info
-        for (const auto& [resetName, info] : resets) {
-            edge_t expected = (info.polarity == "positive") ? POSEDGE : NEGEDGE;
-            for (const auto& flop : module.flops) {
-                if (flop.reset && flop.reset->name == info.signal_name) {
-                    if (flop.reset->edge != expected) {
-                        throw CompilerError(std::format(
-                            "io_domains_set: module '{}': reset '{}' polarity '{}' "
-                            "does not match flop '{}' reset edge",
-                            module.name, resetName, info.polarity, flop.name));
-                    }
-                }
-            }
-        }
-    }
-
-    // 3f. Set sync_kind on all classified IO ports
+    // Set sync_kind on all classified IO ports
     for (const auto& [portName, cls] : portClassMap) {
         ResolvedSignal* sig = findSignal(module, portName);
         if (!sig) continue;
@@ -335,12 +258,17 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         }
     }
 
-    // Set domains on IO signals
+    // Set clock_domain and clock_edge on sync IO ports; also store each clock's own
+    // expected edge on the clock input signal so domains_propagate_and_check can
+    // validate polarity without re-parsing the YAML.
     for (const auto& [domainName, info] : clockDomains) {
         ResolvedSignal* clockSig = findSignal(module, info.input_port);
         if (!clockSig) continue;
 
         edge_t edge = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
+
+        // Store the clock's own polarity on the clock signal itself
+        clockSig->clock_edge = edge;
 
         for (const auto& portName : info.matched_ports) {
             ResolvedSignal* sig = findSignal(module, portName);
@@ -351,134 +279,12 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         }
     }
 
-    // Async and clock/reset ports: leave clock_domain = nullptr, clock_edge = nullopt
-    // (they are already default-initialized that way)
-
-    // Also set domains on internal signals and flop types (same as old domain_resolve)
-    for (auto& [name, sig] : module.signals) {
-        if (sig.sync_kind != SyncKind::Clock &&
-            sig.sync_kind != SyncKind::Reset) {
-            // Internal signals belong to whatever domain their driving logic is in.
-            // For single-clock modules this is straightforward; for multi-clock
-            // we just find the first clock domain (multi-clock support is future work).
-            if (clockDomains.size() == 1) {
-                auto& [domainName, info] = *clockDomains.begin();
-                ResolvedSignal* clockSig = findSignal(module, info.input_port);
-                edge_t edge = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
-                sig.clock_domain = clockSig;
-                sig.clock_edge = edge;
-            }
-        }
-    }
-    for (auto& flop : module.flops) {
-        // Find the clock domain this flop belongs to
-        for (const auto& [domainName, info] : clockDomains) {
-            if (flop.clock.name == info.input_port) {
-                ResolvedSignal* clockSig = findSignal(module, info.input_port);
-                edge_t edge = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
-                flop.type.clock_domain = clockSig;
-                flop.type.clock_edge = edge;
-                break;
-            }
-        }
-    }
-
-    // 3g. Fanin validation
-    if (module.dfg) {
-        auto fwd = buildForwardMap(*module.dfg);
-
-        // Build a map from flop name -> clock domain name for quick lookup
-        std::map<std::string, std::string> flopClockDomain;
-        for (const auto& flop : module.flops) {
-            for (const auto& [domainName, info] : clockDomains) {
-                if (flop.clock.name == info.input_port) {
-                    flopClockDomain[flop.name] = domainName;
-                    break;
-                }
-            }
-        }
-
-        // Forward traversal from an input node, collecting .d signals reached
-        auto forwardTraversal = [&](const DFGNode* start)
-                -> std::vector<std::pair<std::string, std::string>> {
-            // Returns pairs of (flop_name, clock_domain_name) for each .d reached
-            std::vector<std::pair<std::string, std::string>> reached;
-            std::set<const DFGNode*> visited;
-            std::vector<const DFGNode*> worklist = {start};
-
-            while (!worklist.empty()) {
-                const DFGNode* current = worklist.back();
-                worklist.pop_back();
-
-                if (!visited.insert(current).second) continue;
-
-                // If this is a .d signal, record it
-                if (current->op == DFGOp::OUTPUT && current->name.ends_with(".d")) {
-                    std::string base = flopBaseName(current->name);
-                    auto it = flopClockDomain.find(base);
-                    if (it != flopClockDomain.end()) {
-                        reached.push_back({base, it->second});
-                    }
-                    continue; // Don't traverse past .d
-                }
-
-                // Stop at .q signals (flop outputs don't propagate the input domain)
-                if (current->op == DFGOp::INPUT && current->name.ends_with(".q")) {
-                    continue;
-                }
-
-                // Follow forward edges
-                if (auto it = fwd.find(current); it != fwd.end()) {
-                    for (const auto& edge : it->second) {
-                        worklist.push_back(edge.user);
-                    }
-                }
-            }
-            return reached;
-        };
-
-        // Validate sync domain inputs
-        for (const auto& [portName, cls] : portClassMap) {
-            if (cls.cls != PortClass::Sync) continue;
-
-            // Only validate inputs (outputs don't feed into flops from outside)
-            auto inputIt = module.inputs.find(portName);
-            if (inputIt == module.inputs.end() || !inputIt->second.dfg_node) continue;
-
-            auto reached = forwardTraversal(inputIt->second.dfg_node);
-            for (const auto& [flopName, flopDomain] : reached) {
-                // Same domain: always allowed
-                if (flopDomain == cls.clock_name) continue;
-                // Declared crossing: allowed only into the specified domain
-                if (!cls.synchronized_into.empty() && flopDomain == cls.synchronized_into) continue;
-                throw CompilerError(std::format(
-                    "io_domains_set: module '{}': sync input '{}' (domain '{}') "
-                    "feeds flop '{}' in domain '{}' — cross-domain violation",
-                    module.name, portName, cls.clock_name, flopName, flopDomain));
-            }
-        }
-
-        // Validate async domain inputs
-        for (const auto& portName : asyncPorts) {
-            // Only validate inputs
-            auto inputIt2 = module.inputs.find(portName);
-            if (inputIt2 == module.inputs.end() || !inputIt2->second.dfg_node) continue;
-
-            const auto& cls = portClassMap.at(portName);
-
-            auto reached = forwardTraversal(inputIt2->second.dfg_node);
-            for (const auto& [flopName, flopDomain] : reached) {
-                // Declared crossing: allowed only into the specified domain
-                if (!cls.synchronized_into.empty() && flopDomain == cls.synchronized_into) continue;
-                throw CompilerError(std::format(
-                    "io_domains_set: module '{}': async input '{}' feeds flop '{}' in domain '{}'"
-                    "{}",
-                    module.name, portName, flopName, flopDomain,
-                    cls.synchronized_into.empty()
-                        ? " without synchronizer"
-                        : std::format(" — declared synchronized_into '{}' but crosses into '{}'",
-                                      cls.synchronized_into, flopDomain)));
-            }
+    // Store each reset's expected polarity on the reset signal itself (POSEDGE = positive,
+    // NEGEDGE = negative) so domains_propagate_and_check can validate without re-parsing.
+    for (const auto& [resetName, info] : resets) {
+        ResolvedSignal* sig = findSignal(module, info.signal_name);
+        if (sig) {
+            sig->clock_edge = (info.polarity == "positive") ? POSEDGE : NEGEDGE;
         }
     }
 }

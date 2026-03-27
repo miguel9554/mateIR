@@ -18,7 +18,7 @@
 #include "passes/dfg_inline.h"
 #include "passes/flop_resolve.h"
 #include "passes/combo_deps.h"
-#include "passes/check_clock_and_reset.h"
+#include "passes/domains_propagate_and_check.h"
 #include "passes/io_domains_set.h"
 #include "passes/type_propagation.h"
 #include "sim/simulator.h"
@@ -484,28 +484,7 @@ int main(int argc, char** argv) {
         runPass(6, "constant_fold", [&]{ constantFold(*module.dfg); });
         runPass(7, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
         runPass(8, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(9, "flop_resolve", [&]{ resolveFlops(module); });
-        {
-            std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/09_flop_resolve_flops.txt", dir));
-            dumpFlopsRecursive(module, f);
-        }
-        runPass(10, "dce", [&]{
-            // Collect declared signal nodes from every level of the hierarchy.
-            // After dfg_inline, these nodes live in module.dfg->nodes but are
-            // absent from module.dfg->signals, so DCE would otherwise remove them.
-            std::unordered_set<DFGNode*> declaredSignals;
-            std::function<void(const ResolvedModule&)> collect = [&](const ResolvedModule& mod) {
-                for (const auto& [name, sig] : mod.signals)
-                    if (sig.dfg_node) declaredSignals.insert(sig.dfg_node);
-                for (const auto& sub : mod.hierarchyInstantiation)
-                    collect(sub);
-            };
-            collect(module);
-            eliminateDeadCode(*module.dfg, declaredSignals);
-        });
-        module.dfg->validateNoOrphans();
-        runPass(11, "io_domains_set", [&]{
+        runPass(9, "io_domains_set", [&]{
             // Call setIODomains for this module and all submodules recursively
             std::function<void(ResolvedModule&)> setDomains = [&](ResolvedModule& mod) {
                 auto it = domainPathsByModule.find(mod.name);
@@ -520,12 +499,33 @@ int main(int argc, char** argv) {
             };
             setDomains(module);
         });
+        runPass(10, "flop_resolve", [&]{ resolveFlops(module); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/11_io_domains_set_flops.txt", dir));
+            std::ofstream f(std::format("{}/10_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        runPass(12, "check_clock_and_reset", [&]{ checkClockAndReset(module); });
+        runPass(11, "dce", [&]{
+            // Collect declared signal nodes from every level of the hierarchy.
+            // After dfg_inline, these nodes live in module.dfg->nodes but are
+            // absent from module.dfg->signals, so DCE would otherwise remove them.
+            std::unordered_set<DFGNode*> declaredSignals;
+            std::function<void(const ResolvedModule&)> collect = [&](const ResolvedModule& mod) {
+                for (const auto& [name, sig] : mod.signals)
+                    if (sig.dfg_node) declaredSignals.insert(sig.dfg_node);
+                for (const auto& sub : mod.hierarchyInstantiation)
+                    collect(sub);
+            };
+            collect(module);
+            eliminateDeadCode(*module.dfg, declaredSignals);
+        });
+        module.dfg->validateNoOrphans();
+        runPass(12, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(module); });
+        {
+            std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
+            std::ofstream f(std::format("{}/12_domains_propagate_flops.txt", dir));
+            dumpFlopsRecursive(module, f);
+        }
         computeComboDeps(module);
         validateNoCombLoops(module);
 

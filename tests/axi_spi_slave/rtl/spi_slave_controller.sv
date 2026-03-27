@@ -78,7 +78,6 @@ module spi_slave_controller
   logic        tx_counter_upd_next;
   logic        tx_data_valid_next;
   logic        tx_done_reg;
-  logic  [1:0] pad_mode_next;
 
   logic  [7:0] s_dummy_cycles;
 
@@ -241,8 +240,6 @@ module spi_slave_controller
           end
           else
           begin
-            if (en_quad)
-              pad_mode_next  = `SPI_QUAD_TX;
             state_next     = DATA_TX;
             tx_counter_next     = en_quad ? 8'h7 : 8'h1F;
             tx_counter_upd_next = 1;

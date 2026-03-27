@@ -385,7 +385,7 @@ std::vector<ResolvedDimension> ResolveDimensions(
                 throw CompilerError("Dimension specifier is null");
             }
 
-            if (!dimSyntax->specifier->isKind(SyntaxKind::RangeDimensionSpecifier)) {
+            if (dimSyntax->specifier->kind != SyntaxKind::RangeDimensionSpecifier) {
                 throw CompilerError(
                     "Only range dimension specifier supported, got: " +
                     std::string(toString(dimSyntax->specifier->kind)));
@@ -393,7 +393,7 @@ std::vector<ResolvedDimension> ResolveDimensions(
 
             auto& rangeSpec = dimSyntax->specifier->as<RangeDimensionSpecifierSyntax>();
 
-            if (!rangeSpec.selector->isKind(SyntaxKind::SimpleRangeSelect)) {
+            if (rangeSpec.selector->kind != SyntaxKind::SimpleRangeSelect) {
                 throw CompilerError(
                     "Only simple range select supported, got: " +
                     std::string(toString(rangeSpec.selector->kind)));

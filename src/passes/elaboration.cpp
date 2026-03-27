@@ -395,22 +395,28 @@ std::vector<ResolvedDimension> ResolveDimensions(
 
             auto& rangeSpec = dimSyntax->specifier->as<RangeDimensionSpecifierSyntax>();
 
-            if (rangeSpec.selector->kind != SyntaxKind::SimpleRangeSelect) {
+            if (rangeSpec.selector->kind == SyntaxKind::BitSelect) {
+                // [N] in a declaration means an unpacked array of N elements: [0:N-1]
+                auto& bitSelect = rangeSpec.selector->as<BitSelectSyntax>();
+                int64_t size = evaluateConstantExpr(bitSelect.expr, ctx);
+                resolvedDimensions.push_back(ResolvedDimension{
+                    .left = 0,
+                    .right = static_cast<int>(size - 1)
+                });
+            } else if (rangeSpec.selector->kind == SyntaxKind::SimpleRangeSelect) {
+                auto& rangeSelect = rangeSpec.selector->as<RangeSelectSyntax>();
+                int64_t left = evaluateConstantExpr(rangeSelect.left, ctx);
+                int64_t right = evaluateConstantExpr(rangeSelect.right, ctx);
+                resolvedDimensions.push_back(ResolvedDimension{
+                    .left = static_cast<int>(left),
+                    .right = static_cast<int>(right)
+                });
+            } else {
                 throw CompilerError(
                     "Only simple range select supported, got: " +
                     std::string(toString(rangeSpec.selector->kind)),
                     sm ? std::optional<SourceLoc>(resolveSourceLoc(*rangeSpec.selector, *sm)) : std::nullopt);
             }
-
-            auto& rangeSelect = rangeSpec.selector->as<RangeSelectSyntax>();
-
-            int64_t left = evaluateConstantExpr(rangeSelect.left, ctx);
-            int64_t right = evaluateConstantExpr(rangeSelect.right, ctx);
-
-            resolvedDimensions.push_back(ResolvedDimension{
-                .left = static_cast<int>(left),
-                .right = static_cast<int>(right)
-            });
         }
     } else {
         // No dimension syntax - default to single bit [0:0]

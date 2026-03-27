@@ -376,7 +376,8 @@ ResolvedParam resolveParameter(const UnresolvedParam& param, const ParameterCont
 
 std::vector<ResolvedDimension> ResolveDimensions(
         const SyntaxList<VariableDimensionSyntax>& dimensionsSyntaxList,
-        const ParameterContext& ctx){
+        const ParameterContext& ctx,
+        const slang::SourceManager* sm = nullptr){
     std::vector<ResolvedDimension> resolvedDimensions;
     // Parse dimensionsSyntax from syntax
     if (!dimensionsSyntaxList.empty()) {
@@ -388,7 +389,8 @@ std::vector<ResolvedDimension> ResolveDimensions(
             if (dimSyntax->specifier->kind != SyntaxKind::RangeDimensionSpecifier) {
                 throw CompilerError(
                     "Only range dimension specifier supported, got: " +
-                    std::string(toString(dimSyntax->specifier->kind)));
+                    std::string(toString(dimSyntax->specifier->kind)),
+                    sm ? std::optional<SourceLoc>(resolveSourceLoc(*dimSyntax->specifier, *sm)) : std::nullopt);
             }
 
             auto& rangeSpec = dimSyntax->specifier->as<RangeDimensionSpecifierSyntax>();
@@ -396,7 +398,8 @@ std::vector<ResolvedDimension> ResolveDimensions(
             if (rangeSpec.selector->kind != SyntaxKind::SimpleRangeSelect) {
                 throw CompilerError(
                     "Only simple range select supported, got: " +
-                    std::string(toString(rangeSpec.selector->kind)));
+                    std::string(toString(rangeSpec.selector->kind)),
+                    sm ? std::optional<SourceLoc>(resolveSourceLoc(*rangeSpec.selector, *sm)) : std::nullopt);
             }
 
             auto& rangeSelect = rangeSpec.selector->as<RangeSelectSyntax>();
@@ -1373,7 +1376,7 @@ void resolveAssignInPlace(
     ctx.is_sequential = false;
 
     for (const auto* assignExpr : syntax->assignments) {
-        if (!assignExpr->isKind(SyntaxKind::AssignmentExpression)) {
+        if (assignExpr->kind != SyntaxKind::AssignmentExpression) {
             throw CompilerError(
                 "Expected assignment expression, got: " +
                 std::string(toString(assignExpr->kind)),
@@ -1945,7 +1948,8 @@ void resolveProceduralTimingInPlace(
 
 ResolvedSignal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx,
                              const EnumRegistry& enumRegistry,
-                             const PackageRegistry* pkgRegistry = nullptr) {
+                             const PackageRegistry* pkgRegistry = nullptr,
+                             const slang::SourceManager* sm = nullptr) {
     ResolvedSignal resolved;
     resolved.name = signal.name;
 
@@ -1956,7 +1960,7 @@ ResolvedSignal resolveSignal(const UnresolvedSignal& signal, const ParameterCont
         pkgRegistry);
 
 
-    if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx);
+    if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, sm);
 
     // For some reason getting 1 dimension of [0:0]
     if(resolved.type.unpacked_dims.size() == 1 && resolved.type.unpacked_dims[0].left == 0 && resolved.type.unpacked_dims[0].right == 0){
@@ -2341,7 +2345,7 @@ static void resolveGenerateScopeDecls(
         ResolvedType type = resolveType(typeSyntax, ctx.params, ctx.enumRegistry, &ctx.pkgRegistry);
 
         // Resolve unpacked dimensions from the declarator
-        auto unpacked = ResolveDimensions(decl.dimensions, ctx.params);
+        auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.sm);
         // ResolveDimensions returns [{0,0}] for empty dims — clear it for scalars
         if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
             unpacked.clear();
@@ -2586,7 +2590,7 @@ void resolveGenerateMemberInPlace(
         case SyntaxKind::AlwaysFFBlock: {
             auto& block = member->as<ProceduralBlockSyntax>();
             const StatementSyntax* statement = block.statement.get();
-            if (!statement->isKind(SyntaxKind::TimingControlStatement))
+            if (statement->kind != SyntaxKind::TimingControlStatement)
                 throw CompilerError(
                     "AlwaysBlock inside generate must have timing control",
                     resolveSourceLoc(*member, ctx.sm));
@@ -2798,26 +2802,26 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
-        auto sig = resolveSignal(input, *mergedCtx, enumRegistry, &pkgRegistry);
+        auto sig = resolveSignal(input, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
         resolved.inputs[sig.name] = sig;
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
-        auto sig = resolveSignal(output, *mergedCtx, enumRegistry, &pkgRegistry);
+        auto sig = resolveSignal(output, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
         resolved.outputs[sig.name] = sig;
     }
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
-        auto sig = resolveSignal(signal, *mergedCtx, enumRegistry, &pkgRegistry);
+        auto sig = resolveSignal(signal, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
         resolved.signals[sig.name] = sig;
     }
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;
     for (const auto& flop : unresolved.flops) {
-        const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx, enumRegistry, &pkgRegistry));
+        const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager));
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedSignal.name,
                 .type = resolvedSignal,

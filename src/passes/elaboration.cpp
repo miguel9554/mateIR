@@ -136,8 +136,6 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
     }
     bool is_signed = baseText.find('s') != std::string::npos ||
                      baseText.find('S') != std::string::npos;
-    std::cout << "IntegerVectorExpression: " << literal << " -> " << value
-              << " (width=" << width << ", signed=" << is_signed << ")" << std::endl;
     return {value, width, is_signed};
 }
 
@@ -435,9 +433,28 @@ ResolvedType resolveType(
         return it->second;
     }
 
-    // Inline enum types must be declared via typedef
-    if (syntax.kind == SyntaxKind::EnumType)
-        throw CompilerError("Inline enum types are not supported; use typedef enum");
+    // Inline enum type: resolve directly, generating an anonymous name from the syntax pointer
+    // to ensure two references to the same syntax node produce the same type identity.
+    if (syntax.kind == SyntaxKind::EnumType) {
+        auto& enumSyntax = syntax.as<EnumTypeSyntax>();
+        std::string typeName = "$anon_enum_" +
+            std::to_string(reinterpret_cast<uintptr_t>(&enumSyntax));
+        int width = 32;
+        if (enumSyntax.baseType) {
+            EnumRegistry emptyReg;
+            width = resolveType(*enumSyntax.baseType, ctx, emptyReg).width;
+        }
+        std::vector<ResolvedEnumMember> members;
+        int64_t nextValue = 0;
+        for (const auto* decl : enumSyntax.members) {
+            int64_t val = nextValue;
+            if (decl->initializer)
+                val = evaluateConstantExpr(decl->initializer->expr, ctx);
+            members.push_back({std::string(decl->name.valueText()), val});
+            nextValue = val + 1;
+        }
+        return ResolvedType::makeEnum(typeName, width, members);
+    }
 
     SyntaxList<VariableDimensionSyntax> packedDimensionsSyntax = nullptr;
 
@@ -2714,6 +2731,43 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     auto mergedCtx = std::make_unique<ParameterContext>(topCtx);
     for (const auto& [k, v] : (*localCtx).values) {
         (*mergedCtx).values[k] = v;
+    }
+
+    // Pre-scan: register inline enum types from ports/signals so their member names are
+    // available in enumMemberValues and mergedCtx->values before DFG elaboration begins.
+    {
+        std::set<const EnumTypeSyntax*> seen;
+        auto registerInlineEnum = [&](const UnresolvedSignal& sig) {
+            if (!sig.type.syntax || sig.type.syntax->kind != SyntaxKind::EnumType) return;
+            auto* enumSyntax = &sig.type.syntax->as<EnumTypeSyntax>();
+            if (!seen.insert(enumSyntax).second) return;  // same syntax node already registered
+            std::string typeName = "$anon_enum_" +
+                std::to_string(reinterpret_cast<uintptr_t>(enumSyntax));
+            int width = 32;
+            if (enumSyntax->baseType) {
+                EnumRegistry emptyReg;
+                width = resolveType(*enumSyntax->baseType, *mergedCtx, emptyReg).width;
+            }
+            std::vector<ResolvedEnumMember> members;
+            int64_t nextValue = 0;
+            for (const auto* decl : enumSyntax->members) {
+                int64_t val = nextValue;
+                if (decl->initializer)
+                    val = evaluateConstantExpr(decl->initializer->expr, *mergedCtx);
+                members.push_back({std::string(decl->name.valueText()), val});
+                nextValue = val + 1;
+            }
+            ResolvedType enumType = ResolvedType::makeEnum(typeName, width, members);
+            enumRegistry[typeName] = enumType;
+            for (const auto& m : members) {
+                mergedCtx->values[m.name] = m.value;
+                enumMemberValues[m.name] = {m.value, enumType};
+            }
+        };
+        for (const auto& sig : unresolved.inputs)  registerInlineEnum(sig);
+        for (const auto& sig : unresolved.outputs) registerInlineEnum(sig);
+        for (const auto& sig : unresolved.signals) registerInlineEnum(sig);
+        for (const auto& sig : unresolved.flops)   registerInlineEnum(sig);
     }
 
     // Resolve inputs

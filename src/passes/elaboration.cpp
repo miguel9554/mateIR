@@ -1833,6 +1833,57 @@ void resolveSequentialBlockStatementInPlace(
     }
 }
 
+// Forward declaration (defined later in this file)
+int64_t evaluateStepExpr(
+    const slang::syntax::ExpressionSyntax* iterExpr,
+    const std::string& genvarName,
+    const ParameterContext& ctx);
+
+void resolveForLoopStatementInPlace(
+        const slang::syntax::ForLoopStatementSyntax* forLoop,
+        ResolutionContext& ctx
+){
+    if (forLoop->initializers.size() != 1)
+        throw CompilerError(
+            "For loop must have exactly one initializer",
+            resolveSourceLoc(*forLoop, ctx.sm));
+    if (forLoop->steps.size() != 1)
+        throw CompilerError(
+            "For loop must have exactly one step expression",
+            resolveSourceLoc(*forLoop, ctx.sm));
+    if (forLoop->initializers[0]->kind != SyntaxKind::ForVariableDeclaration)
+        throw CompilerError(
+            "For loop initializer must be a variable declaration (e.g. int i = 0)",
+            resolveSourceLoc(*forLoop, ctx.sm));
+
+    auto& decl = forLoop->initializers[0]->as<ForVariableDeclarationSyntax>();
+    std::string loopVar(decl.declarator->name.valueText());
+    if (!decl.declarator->initializer)
+        throw CompilerError(
+            "For loop variable '" + loopVar + "' must have an initializer",
+            resolveSourceLoc(*forLoop, ctx.sm));
+    int64_t initVal = evaluateConstantExpr(
+        decl.declarator->initializer->expr.get(), ctx.params, ctx.sm, *forLoop);
+
+    ParameterContext iterCtx = ctx.params;
+    iterCtx.values[loopVar] = initVal;
+
+    while (evaluateConstantExpr(forLoop->stopExpr, iterCtx, ctx.sm, *forLoop)) {
+        ResolutionContext iterBodyCtx {
+            ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
+            ctx.sm, ctx.is_sequential, ctx.triggers,
+            ctx.combDrivers,
+            ctx.instance_path, ctx.local_signals, ctx.local_flop_names,
+            ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry
+        };
+        resolveStatementInPlace(forLoop->statement.get(), iterBodyCtx);
+        ctx.combDrivers = iterBodyCtx.combDrivers;
+
+        iterCtx.values[loopVar] =
+            evaluateStepExpr(forLoop->steps[0], loopVar, iterCtx);
+    }
+}
+
 void resolveStatementInPlace(
         const slang::syntax::StatementSyntax* statement,
         ResolutionContext& ctx
@@ -1856,6 +1907,11 @@ void resolveStatementInPlace(
         case SyntaxKind::CaseStatement:{
             const auto& caseStmt = statement->as<CaseStatementSyntax>();
             resolveCaseStatementInPlace(&caseStmt, ctx);
+            break;
+        }
+        case SyntaxKind::ForLoopStatement:{
+            const auto& forLoop = statement->as<ForLoopStatementSyntax>();
+            resolveForLoopStatementInPlace(&forLoop, ctx);
             break;
         }
 
@@ -2250,9 +2306,9 @@ void resolvePortConnection(
 
 // Evaluate the next genvar value from a for-loop iteration expression.
 // Supports: i = expr, i++, i--, ++i, --i
-int64_t evaluateGenvarStep(
+int64_t evaluateStepExpr(
         const ExpressionSyntax* iterExpr,
-        const std::string& genvarName,
+        const std::string& loopVar,
         const ParameterContext& ctx) {
     switch (iterExpr->kind) {
         case SyntaxKind::AssignmentExpression: {
@@ -2261,21 +2317,21 @@ int64_t evaluateGenvarStep(
         }
         case SyntaxKind::PostincrementExpression:
         case SyntaxKind::UnaryPreincrementExpression: {
-            auto it = ctx.values.find(genvarName);
+            auto it = ctx.values.find(loopVar);
             if (it == ctx.values.end())
-                throw CompilerError("Genvar '" + genvarName + "' not found in context during increment");
+                throw CompilerError("Loop variable '" + loopVar + "' not found in context during increment");
             return it->second + 1;
         }
         case SyntaxKind::PostdecrementExpression:
         case SyntaxKind::UnaryPredecrementExpression: {
-            auto it = ctx.values.find(genvarName);
+            auto it = ctx.values.find(loopVar);
             if (it == ctx.values.end())
-                throw CompilerError("Genvar '" + genvarName + "' not found in context during decrement");
+                throw CompilerError("Loop variable '" + loopVar + "' not found in context during decrement");
             return it->second - 1;
         }
         default:
             throw CompilerError(
-                "Unsupported genvar iteration expression: " + std::string(toString(iterExpr->kind)));
+                "Unsupported loop step expression: " + std::string(toString(iterExpr->kind)));
     }
 }
 
@@ -2594,7 +2650,7 @@ void resolveGenerateMemberInPlace(
                 }
 
                 iterCtx.values[genvarName] =
-                    evaluateGenvarStep(loopGen.iterationExpr, genvarName, iterCtx);
+                    evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx);
             }
             break;
         }

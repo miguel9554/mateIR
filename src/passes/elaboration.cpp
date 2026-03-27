@@ -2128,7 +2128,8 @@ void resolveNamedPortConnection(
         ResolvedModule& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
-        const std::map<std::string, size_t>& subOutputIndex) {
+        const std::map<std::string, size_t>& subOutputIndex,
+        const slang::SourceManager& sm) {
 
     // Extract port name
     std::string portName(named.name.valueText());
@@ -2142,7 +2143,8 @@ void resolveNamedPortConnection(
         auto* expr = extractPortExpr(*named.expr);
         if (expr->kind != SyntaxKind::IdentifierName) {
             throw CompilerError(
-                "Only simple identifier expressions supported for input port connections");
+                "Only simple identifier expressions supported for input port connections",
+                resolveSourceLoc(*expr, sm));
         }
         const std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
         auto* driver = graph.lookupSignal("", name);
@@ -2157,7 +2159,8 @@ void resolveNamedPortConnection(
         auto* expr = extractPortExpr(*named.expr);
         if (expr->kind != SyntaxKind::IdentifierName) {
             throw CompilerError(
-                "Only simple identifier expressions supported for output port connections");
+                "Only simple identifier expressions supported for output port connections",
+                resolveSourceLoc(*expr, sm));
         }
         std::string parentSignalName(expr->as<IdentifierNameSyntax>().identifier.valueText());
         connectModuleOutput(graph, moduleNode,
@@ -2191,13 +2194,14 @@ void resolvePortConnection(
         ResolvedModule& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
-        const std::map<std::string, size_t>& subOutputIndex) {
+        const std::map<std::string, size_t>& subOutputIndex,
+        const slang::SourceManager& sm) {
     switch (conn->kind) {
         case SyntaxKind::NamedPortConnection:
             resolveNamedPortConnection(conn->as<NamedPortConnectionSyntax>(),
                                        graph, moduleNode, resolvedSub,
                                        subInputNames, subOutputNames,
-                                       subOutputIndex);
+                                       subOutputIndex, sm);
             break;
         case SyntaxKind::WildcardPortConnection:
             resolveWildcardPortConnection(graph, moduleNode, resolvedSub);
@@ -2925,7 +2929,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
             for (const auto* conn : inst->connections) {
                 resolvePortConnection(conn, graph, moduleNode,
                                       resolvedSub, subInputNames, subOutputNames,
-                                      subOutputIndex);
+                                      subOutputIndex, sourceManager);
             }
         }
 

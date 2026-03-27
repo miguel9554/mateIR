@@ -146,6 +146,9 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                         }
                         portClassMap[name] = {PortClass::Sync, domainName, ref.synchronized_into};
                         info.matched_ports.push_back(name);
+                        if (!ref.synchronized_into.empty()) {
+                            module.synchronizedSignals[name] = ref.synchronized_into;
+                        }
                     }
                 }
             }
@@ -201,6 +204,9 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
                         module.name, name));
                 }
                 portClassMap[name] = {PortClass::Async, "", ref.synchronized_into};
+                if (!ref.synchronized_into.empty()) {
+                    module.synchronizedSignals[name] = ref.synchronized_into;
+                }
             }
         }
     }

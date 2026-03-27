@@ -121,6 +121,12 @@ struct ResolvedModule {
     // writer to translate submodule async port names to top-level signal names.
     std::map<std::string, std::string> asyncPortConnections;
 
+    // CDC synchronizer declarations: input_port_name -> clock_domain_name
+    // Set by io_domains_set from the domains YAML (synchronized_into attribute).
+    // Indicates that the named input is intentionally crossing into the given
+    // clock domain inside this module (e.g. the first flop of a synchronizer).
+    std::map<std::string, std::string> synchronizedSignals;
+
     void print(int indent = 0) const;
 };
 

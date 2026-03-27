@@ -162,6 +162,12 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
         return reached;
     };
 
+    // Helper: resolve a clock domain name to its ResolvedSignal pointer
+    auto findClockSig = [&](const std::string& domainName) -> const ResolvedSignal* {
+        auto it = mod.inputs.find(domainName);
+        return it != mod.inputs.end() ? &it->second : nullptr;
+    };
+
     // Validate sync domain inputs
     for (const auto& [portName, inputSig] : mod.inputs) {
         if (inputSig.sync_kind != SyncKind::Sync) continue;
@@ -169,14 +175,11 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
 
         auto reached = forwardTraversal(inputSig.dfg_node);
         for (const auto& [flopName, flopClk] : reached) {
-            // Same domain: allowed
             if (flopClk == inputSig.clock_domain) continue;
-            // Declared crossing: allowed if synchronized_into matches — encoded as
-            // the output's clock_domain pointer pointing to the target domain signal.
-            // We don't have synchronized_into here post-YAML-parse, so we check
-            // whether the flop's clock is the declared target via the output signal.
-            // For now raise the violation; synchronized_into support requires storing
-            // the target in ResolvedSignal (future work).
+            // Declared CDC crossing via synchronized_into
+            auto syncIt = mod.synchronizedSignals.find(portName);
+            if (syncIt != mod.synchronizedSignals.end() &&
+                flopClk == findClockSig(syncIt->second)) continue;
             throw CompilerError(std::format(
                 "domains_propagate_and_check: module '{}': sync input '{}' "
                 "feeds flop '{}' in a different clock domain — cross-domain violation",
@@ -191,6 +194,10 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
 
         auto reached = forwardTraversal(inputSig.dfg_node);
         for (const auto& [flopName, flopClk] : reached) {
+            // Declared CDC crossing via synchronized_into
+            auto syncIt = mod.synchronizedSignals.find(portName);
+            if (syncIt != mod.synchronizedSignals.end() &&
+                flopClk == findClockSig(syncIt->second)) continue;
             throw CompilerError(std::format(
                 "domains_propagate_and_check: module '{}': async input '{}' "
                 "feeds flop '{}' without a declared synchronizer",

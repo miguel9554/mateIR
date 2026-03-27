@@ -1709,11 +1709,19 @@ void resolveCaseStatementInPlace(
         std::vector<DFGNode*> selectors;
         std::vector<DFGNode*> dataValues;
 
-        // Determine default value: explicit default branch, then .q fallback for sequential
+        // Determine default value: explicit default branch, pre-case assignment, then .q fallback for sequential
         DFGNode* defaultValue = nullptr;
         if (defaultDrivers) {
             auto it = defaultDrivers->find(signalName);
             if (it != defaultDrivers->end()) {
+                defaultValue = it->second;
+            }
+        }
+        if (!defaultValue) {
+            // A signal assigned before the case statement serves as the fallback
+            // for branches that don't reassign it (captured in fallbackDrivers).
+            auto it = fallbackDrivers.find(signalName);
+            if (it != fallbackDrivers.end()) {
                 defaultValue = it->second;
             }
         }

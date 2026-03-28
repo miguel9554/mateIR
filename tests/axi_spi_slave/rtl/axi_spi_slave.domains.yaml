@@ -3,6 +3,8 @@ module_name: axi_spi_slave
 resets:
   axi_aresetn:
     polarity: negative
+  spi_cs:
+    polarity: positive
 
 clock_domains:
   axi_aclk:
@@ -56,7 +58,6 @@ clock_domains:
   spi_sclk:
     polarity: posedge
     inputs_outputs:
-      - spi_cs
       - spi_sdi0
       - spi_sdi1
       - spi_sdi2

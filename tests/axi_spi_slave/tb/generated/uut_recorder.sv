@@ -22,6 +22,11 @@ module uut_recorder(
         .data(_if.axi_aresetn)
     );
     async_recorder#(
+        .filepath(path("spi_cs.txt"))
+    ) u_spi_cs_recorder(
+        .data(_if.spi_cs)
+    );
+    async_recorder#(
         .filepath(path("test_mode.txt"))
     ) u_test_mode_recorder(
         .data(_if.test_mode)
@@ -118,13 +123,6 @@ module uut_recorder(
     ) u_axi_master_b_user_recorder(
         .clk(_if.axi_aclk),
         .data(_if.axi_master_b_user)
-    );
-    sync_recorder#(
-        .filepath(path("spi_cs.txt")),
-        .TYPE(logic)
-    ) u_spi_cs_recorder(
-        .clk(_if.spi_sclk),
-        .data(_if.spi_cs)
     );
     sync_recorder#(
         .filepath(path("spi_sdi0.txt")),

@@ -251,6 +251,19 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
             // Sync → Async: allowed — the child explicitly declares an async/CDC input.
             if (parentKind == SyncKind::Sync && childKind == SyncKind::Async) continue;
 
+            // Reset/Clock → Async: allowed only when the child port declares
+            // synchronized_into, meaning it is the input to a synchronizer.
+            if (childKind == SyncKind::Async &&
+                (parentKind == SyncKind::Reset || parentKind == SyncKind::Clock)) {
+                if (sub.synchronizedSignals.contains(childPort)) continue;
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: module '{}': {} signal '{}' "
+                    "connected to async port '{}' of submodule '{}' without "
+                    "synchronized_into declaration on the child port",
+                    mod.name, syncKindStr(parentKind), parentSignal,
+                    childPort, sub.name));
+            }
+
             // Async → Sync: allowed only if the parent declares synchronized_into for
             // this signal, meaning it has been synchronized before reaching the child.
             if (parentKind == SyncKind::Async && childKind == SyncKind::Sync) {

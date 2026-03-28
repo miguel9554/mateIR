@@ -137,12 +137,13 @@ tests/<testname>/
     └── outputs/                 Expected output CSVs
 ```
 
-## DFG debug output
+## Debug output and inspection tools
 
 After each pass: `debug_output/<module>/<N>_<pass_name>.{dot,json}`
 
-See `scripts/dfg_inspect.py` for all query commands (driver, cone, node, op,
-fanout, mux, inputs, outputs, signals, undriven, diff, path).
+Use the skills `/read-dfg`, `/read-hierarchy`, and `/read-vcd` for inspecting
+debug output. Each skill documents the file format, available commands, and
+typical debugging workflows.
 
-**Never write throwaway scripts for one-off DFG queries.** Add new query types
-as named commands to `dfg_inspect.py` instead.
+**Never write throwaway scripts for one-off queries.** Add new query types as
+named commands to the relevant `scripts/*.py` tool instead.

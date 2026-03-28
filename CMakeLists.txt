@@ -12,15 +12,17 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -pedantic)
 endif()
 
-# Find pre-built slang from our local install
-set(SLANG_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/slang-install")
-if(NOT EXISTS "${SLANG_INSTALL_DIR}/lib/cmake/slang/slangConfig.cmake")
+# Find pre-built slang: prefer /opt/slang (Docker), fall back to external/slang-install (host)
+if(EXISTS "/opt/slang/lib/cmake/slang/slangConfig.cmake")
+    list(APPEND CMAKE_PREFIX_PATH "/opt/slang")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/slang-install/lib/cmake/slang/slangConfig.cmake")
+    list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external/slang-install")
+else()
     message(FATAL_ERROR
         "slang not found. Please build it first:\n"
         "  bash scripts/build_slang.sh"
     )
 endif()
-list(APPEND CMAKE_PREFIX_PATH "${SLANG_INSTALL_DIR}")
 find_package(slang REQUIRED CONFIG)
 
 # Check if yaml-cpp submodule is initialized

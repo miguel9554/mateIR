@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_ROOT/build/slang-build"
-INSTALL_DIR="$PROJECT_ROOT/external/slang-install"
+INSTALL_DIR="${SLANG_INSTALL_PREFIX:-$PROJECT_ROOT/external/slang-install}"
 
 echo "Building slang..."
 cmake -B "$BUILD_DIR" -S "$PROJECT_ROOT/external/slang" \

@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y \
     perl \
     flex \
     bison \
+    gdb \
+    graphviz \
     && rm -rf /var/lib/apt/lists/*
 
 # slang requires fmt >= 12.1 (see external/slang/external/CMakeLists.txt).
@@ -54,11 +56,10 @@ ENV CXX=clang++-18
 WORKDIR /workspace
 
 # Build slang from the submodule source (uses system fmt, so no network needed here).
-# Installs into external/slang-install/ — shadowed by the bind-mount at runtime,
-# so docker-run.sh mounts a named volume over that path.
+# Installs into /opt/slang — outside /workspace, never shadowed by the bind-mount.
 COPY external/slang external/slang
 COPY scripts/build_slang.sh scripts/build_slang.sh
-RUN bash scripts/build_slang.sh && rm -rf build/
+RUN SLANG_INSTALL_PREFIX=/opt/slang bash scripts/build_slang.sh && rm -rf build/ external/slang
 
 # Pre-install Python packages. pyslang has no cp314 wheel and must be compiled
 # from source. CC/CXX are cleared because clang-18 fails cmake's FindThreads check.

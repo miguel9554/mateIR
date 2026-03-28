@@ -194,15 +194,6 @@ public:
             // Add to flops list
             currentModule->flops.push_back(flopSignal);
 
-            // Create .d and .q signals with same type
-            UnresolvedSignal dSignal = flopSignal;
-            dSignal.name = flopName + ".d";
-            UnresolvedSignal qSignal = flopSignal;
-            qSignal.name = flopName + ".q";
-
-            currentModule->signals.push_back(std::move(dSignal));
-            currentModule->signals.push_back(std::move(qSignal));
-
             // If it was a signal (not output), remove from signals list
             if (sigIt != currentModule->signals.end()) {
                 // Need to re-find since we may have invalidated iterator by push_back

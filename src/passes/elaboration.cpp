@@ -2107,61 +2107,53 @@ void prePopulateOutput(DFG& graph, const ResolvedSignal& sig) {
     }
 }
 
-// Pre-populate internal signal with all bit indices
-// For vector signals, creates individual element nodes
-// For flop .d/.q signals: .q → INPUT nodes, .d → OUTPUT placeholder nodes
+// Pre-populate internal signal with all bit indices.
+// Only called for plain (non-flop) signals; .d/.q nodes are handled by
+// prePopulateFlopNodes below.
 void prePopulateSignal(DFG& graph, const ResolvedSignal& sig) {
-    const bool is_d = sig.name.ends_with(".d");
-    const bool is_q = sig.name.ends_with(".q");
-
     if (sig.type.unpacked_dims.empty()) {
-        // Scalar case
-        DFGNode* node;
-        if (is_d) {
-            node = graph.outputPlaceholder("", sig.name);
-        } else if (is_q) {
-            node = graph.input("", sig.name);
-        } else {
-            node = graph.signal("", sig.name);
-        }
-        node->type = sig.type;
+        graph.signal("", sig.name)->type = sig.type;
         return;
     }
 
-    // Extract base name and optional type suffix for flop signals (.d or .q)
-    std::string baseName = sig.name;
-    std::string typeSuffix;
-
-    if (is_d || is_q) {
-        baseName = sig.name.substr(0, sig.name.length() - 2);
-        typeSuffix = sig.name.substr(sig.name.length() - 2);
-    }
-
-    // .d arrays are write-only sinks: no aggregate node needed (and creating one
-    // would leave it permanently undriven, causing simulator errors).
-    // .q and plain signal arrays need an aggregate for dynamic read access.
-    DFGNode* aggregate = nullptr;
-    if (!is_d) {
-        aggregate = graph.signal("", sig.name);
-        aggregate->type = sig.type;
-    }
-
-    // Create individual element nodes (no unpacked dims on elements)
+    // Array: aggregate node for dynamic read access + individual element nodes.
+    auto* aggregate = graph.signal("", sig.name);
+    aggregate->type = sig.type;
     for (const auto& idxSuffix : generateIndexSuffixes(sig.type.unpacked_dims)) {
-        std::string elemName = baseName + idxSuffix + typeSuffix;
-        DFGNode* individual;
-        if (is_d) {
-            individual = graph.outputPlaceholder("", elemName);
-        } else if (is_q) {
-            individual = graph.input("", elemName);
-        } else {
-            individual = graph.signal("", elemName);
-        }
-        individual->type = sig.type;
-        individual->type->unpacked_dims = {};
-        if (!is_d) {
-            aggregate->in.push_back(individual);
-        }
+        auto* elem = graph.signal("", sig.name + idxSuffix);
+        elem->type = sig.type;
+        elem->type->unpacked_dims = {};
+        aggregate->in.push_back(elem);
+    }
+}
+
+// Pre-populate the DFG .d/.q nodes for a single flop, derived entirely from
+// the FlopInfo (name + type). Called after flops are resolved, before signals.
+void prePopulateFlopNodes(DFG& graph, const FlopInfo& flop) {
+    const std::string& name = flop.name;
+    const ResolvedType& type = flop.type.type;
+
+    if (type.unpacked_dims.empty()) {
+        // Scalar flop: one sink (.d) and one source (.q).
+        graph.outputPlaceholder("", name + ".d")->type = type;
+        graph.input("", name + ".q")->type = type;
+        return;
+    }
+
+    // Array flop: element-wise .d sinks (no aggregate — write-only) and
+    // an aggregate .q source with individual element INPUT nodes.
+    auto* qAggregate = graph.signal("", name + ".q");
+    qAggregate->type = type;
+
+    for (const auto& idxSuffix : generateIndexSuffixes(type.unpacked_dims)) {
+        auto elemType = type;
+        elemType.unpacked_dims = {};
+
+        graph.outputPlaceholder("", name + idxSuffix + ".d")->type = elemType;
+
+        auto* qElem = graph.input("", name + idxSuffix + ".q");
+        qElem->type = elemType;
+        qAggregate->in.push_back(qElem);
     }
 }
 
@@ -2941,7 +2933,12 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
         prePopulateOutput(graph, output);
     }
 
-    // Pre-populate internal SIGNALS (not ports)
+    // Pre-populate FLOP .d/.q DFG nodes directly from resolved.flops
+    for (const auto& flop : resolved.flops) {
+        prePopulateFlopNodes(graph, flop);
+    }
+
+    // Pre-populate internal SIGNALS (not ports, not flops)
     for (const auto& [name, signal] : resolved.signals) {
         prePopulateSignal(graph, signal);
     }

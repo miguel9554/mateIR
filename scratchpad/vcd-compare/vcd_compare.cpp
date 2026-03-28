@@ -161,6 +161,20 @@ static const char *category_label(SignalCategory c) {
     return "Unknown";
 }
 
+// Expand a signal name with unpacked dimensions into all indexed VCD names.
+// e.g. "foo", [{0,2}]       -> {"foo[0]", "foo[1]", "foo[2]"}
+// e.g. "bar", [{0,1},{0,1}] -> {"bar[0][0]", "bar[0][1]", "bar[1][0]", "bar[1][1]"}
+static void expand_unpacked(const std::string &base,
+                             const std::vector<std::pair<int,int>> &dims,
+                             size_t dim_idx,
+                             std::set<std::string> &out) {
+    if (dim_idx == dims.size()) { out.insert(base); return; }
+    int lo = std::min(dims[dim_idx].first, dims[dim_idx].second);
+    int hi = std::max(dims[dim_idx].first, dims[dim_idx].second);
+    for (int i = lo; i <= hi; ++i)
+        expand_unpacked(base + "[" + std::to_string(i) + "]", dims, dim_idx + 1, out);
+}
+
 static SignalCategory get_category(const HierarchyModule *mod, const std::string &sig) {
     if (!mod) return SignalCategory::Unknown;
     if (mod->inputs.count(sig))  return SignalCategory::Input;
@@ -250,8 +264,61 @@ struct HierarchyParser {
             ++p;
     }
 
-    // Parse [{..., "name": "x", ...}, ...] collecting the "name" field of each
-    // object into out.
+    int parse_integer() {
+        skip_ws();
+        int val = 0, sign = 1;
+        if (p < end && *p == '-') { sign = -1; ++p; }
+        while (p < end && std::isdigit((unsigned char)*p))
+            val = val * 10 + (*p++ - '0');
+        return sign * val;
+    }
+
+    // Parse a type object, returning its unpacked_dims as {left,right} pairs.
+    std::vector<std::pair<int,int>> parse_type_unpacked_dims() {
+        std::vector<std::pair<int,int>> dims;
+        expect('{');
+        skip_ws();
+        if (peek() != '}') {
+            do {
+                std::string key = parse_string();
+                expect(':');
+                if (key == "unpacked_dims") {
+                    expect('[');
+                    skip_ws();
+                    if (peek() != ']') {
+                        do {
+                            expect('{');
+                            skip_ws();
+                            int left = 0, right = 0;
+                            if (peek() != '}') {
+                                do {
+                                    std::string k = parse_string();
+                                    expect(':');
+                                    int v = parse_integer();
+                                    if      (k == "left")  left  = v;
+                                    else if (k == "right") right = v;
+                                    skip_ws();
+                                } while (peek() == ',' && (++p, true));
+                            }
+                            expect('}');
+                            dims.push_back({left, right});
+                            skip_ws();
+                        } while (peek() == ',' && (++p, true));
+                    }
+                    expect(']');
+                } else {
+                    skip_value();
+                }
+                skip_ws();
+            } while (peek() == ',' && (++p, true));
+        }
+        expect('}');
+        return dims;
+    }
+
+    // Parse [{..., "name": "x", "type": {...}, ...}, ...] collecting signal
+    // names into out. Signals with unpacked_dims are expanded to "name[i]..."
+    // to match the flat per-element names that VCD uses.
     void parse_named_array(std::set<std::string> &out) {
         expect('[');
         skip_ws();
@@ -261,17 +328,24 @@ struct HierarchyParser {
             expect('{');
             skip_ws();
             std::string found;
+            std::vector<std::pair<int,int>> unpacked_dims;
             if (peek() != '}') {
                 do {
                     std::string key = parse_string();
                     expect(':');
-                    if (key == "name") found = parse_string();
-                    else               skip_value();
+                    if      (key == "name") found = parse_string();
+                    else if (key == "type") unpacked_dims = parse_type_unpacked_dims();
+                    else                    skip_value();
                     skip_ws();
                 } while (peek() == ',' && (++p, true));
             }
             expect('}');
-            if (!found.empty()) out.insert(found);
+            if (!found.empty()) {
+                if (!unpacked_dims.empty())
+                    expand_unpacked(found, unpacked_dims, 0, out);
+                else
+                    out.insert(found);
+            }
             skip_ws();
         } while (peek() == ',' && (++p, true));
         expect(']');
@@ -443,7 +517,8 @@ static void compare_scopes_recursive(
     VCDFile *f2, VCDScope *scope2, double ps2,
     const std::vector<double> &timestamps,
     const std::string &scope_path,
-    GlobalStats &stats)
+    GlobalStats &stats,
+    bool show_flat_signals)
 {
     // Compare signals directly in this scope
     ScopeResult result = compare_scope_signals(
@@ -470,7 +545,8 @@ static void compare_scopes_recursive(
         for (auto &n : result.only_in_2) std::fprintf(stderr, "\033[31m      %s\033[0m\n", n.c_str());
     }
 
-    // Report diffing signals with detail
+    // Report diffing signals with detail; omit passing signals when hierarchy
+    // summary will show them categorized.
     for (auto &name : result.matched_signals) {
         bool has_diff = false;
         for (auto &d : result.signals_with_diffs)
@@ -501,7 +577,7 @@ static void compare_scopes_recursive(
                         std::printf("      ... (further diffs suppressed)\n");
                 }
             }
-        } else {
+        } else if (show_flat_signals) {
             std::printf("    \033[32mpass\033[0m  %s\n", name.c_str());
         }
     }
@@ -548,7 +624,7 @@ static void compare_scopes_recursive(
         }
         std::string child_path = scope_path + "." + child1->name;
         compare_scopes_recursive(f1, child1, ps1, f2, it->second, ps2,
-                                 timestamps, child_path, stats);
+                                 timestamps, child_path, stats, show_flat_signals);
         children2.erase(it);
     }
 
@@ -640,20 +716,7 @@ int main(int argc, char *argv[]) {
     std::printf("File 2: %s  scope: %s  (%.0f ps/tick)\n",
                 path2.c_str(), scope_path2.c_str(), ps2);
 
-    auto timestamps = merge_timestamps(f1, ps1, f2, ps2);
-    std::printf("Merged timestamp count: %zu\n", timestamps.size());
-
-    GlobalStats stats;
-    compare_scopes_recursive(f1, scope1, ps1, f2, scope2, ps2,
-                             timestamps, scope_path1, stats);
-
-    std::printf("\n========================================\n");
-    std::printf("Scopes compared:   %d\n", stats.scopes_compared);
-    std::printf("Value comparisons: %d  (matching: %d  different: %d)\n",
-                stats.total_match + stats.total_diff,
-                stats.total_match, stats.total_diff);
-
-    // Load hierarchy and build scope map if --hierarchy was given
+    // Load hierarchy before comparison so a bad path fails immediately.
     ScopeMap scope_map;
     std::unique_ptr<HierarchyModule> hier_root;
     if (!hierarchy_path.empty()) {
@@ -661,10 +724,24 @@ int main(int argc, char *argv[]) {
             hier_root = std::make_unique<HierarchyModule>(load_hierarchy(hierarchy_path));
             build_scope_map(*hier_root, scope_path1, scope_map);
         } catch (const std::exception &e) {
-            std::fprintf(stderr, "Error: could not load hierarchy file: %s\n", e.what());
+            std::fprintf(stderr, "\033[1;31mError:\033[0m could not load hierarchy file: %s\n", e.what());
             return 1;
         }
     }
+
+    auto timestamps = merge_timestamps(f1, ps1, f2, ps2);
+    std::printf("Merged timestamp count: %zu\n", timestamps.size());
+
+    GlobalStats stats;
+    compare_scopes_recursive(f1, scope1, ps1, f2, scope2, ps2,
+                             timestamps, scope_path1, stats,
+                             /*show_flat_signals=*/scope_map.empty());
+
+    std::printf("\n========================================\n");
+    std::printf("Scopes compared:   %d\n", stats.scopes_compared);
+    std::printf("Value comparisons: %d  (matching: %d  different: %d)\n",
+                stats.total_match + stats.total_diff,
+                stats.total_match, stats.total_diff);
 
     // When hierarchy is provided, check that every VCD signal is known to it.
     // Collect all violations first so we report them all at once.

@@ -127,6 +127,11 @@ struct ResolvedModule {
     // clock domain inside this module (e.g. the first flop of a synchronizer).
     std::map<std::string, std::string> synchronizedSignals;
 
+    // True if this module is purely combinational (no flops, no clock domains).
+    // Set by io_domains_set when the domains YAML has pure_combinational: true.
+    // Cross-module sync_kind checks are skipped for pure_combinational submodules.
+    bool pure_combinational = false;
+
     void print(int indent = 0) const;
 };
 

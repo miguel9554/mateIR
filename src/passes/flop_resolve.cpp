@@ -224,21 +224,6 @@ void check_logic_no_clock_reset(
 static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const std::string& instance_path);
 static void resolveFlopsRecursive(ResolvedModule& module, DFG& topDFG, const std::string& instance_path);
 
-// Propagate Clock/Reset type from submodule inputs to parent inputs by name matching.
-static void propagateHierarchyPortTypes(ResolvedModule& module) {
-    for (const auto& sub : module.hierarchyInstantiation) {
-        for (const auto& [portName, subInput] : sub.inputs) {
-            if (subInput.sync_kind != SyncKind::Clock &&
-                subInput.sync_kind != SyncKind::Reset) continue;
-            auto conn_it = sub.asyncPortConnections.find(portName);
-            if (conn_it == sub.asyncPortConnections.end()) continue;
-            auto it = module.inputs.find(conn_it->second);
-            if (it == module.inputs.end()) continue;
-            it->second.sync_kind = subInput.sync_kind;
-        }
-    }
-}
-
 void resolveFlops(ResolvedModule& module) {
     if (!module.dfg) return;
     resolveFlopsRecursive(module, *module.dfg, "");
@@ -249,7 +234,6 @@ static void resolveFlopsRecursive(ResolvedModule& module, DFG& topDFG, const std
     for (auto& sub : module.hierarchyInstantiation)
         resolveFlopsRecursive(sub, topDFG, inDFG(instance_path, sub.instance_name));
     resolveFlopsForModule(module, topDFG, instance_path);
-    propagateHierarchyPortTypes(module);
 }
 
 static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const std::string& instance_path) {
@@ -312,10 +296,12 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
                 return it->second;
             };
 
-            // Set clock and reset types
-            find_unique_input(clock.name, "clock").sync_kind = SyncKind::Clock;
+            // Validate clock/reset are input ports; do NOT override sync_kind here.
+            // sync_kind was set by io_domains_set from the domains file and must not
+            // be overwritten — domains_propagate_and_check will verify consistency.
+            find_unique_input(clock.name, "clock");  // validate it's an input port
             if (reset) {
-                find_unique_input(reset->name, "reset").sync_kind = SyncKind::Reset;
+                find_unique_input(reset->name, "reset");  // validate it's an input port
             }
 
             // Connect functional logic to the flop's .d signal
@@ -358,17 +344,6 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
 
-    // Trim asyncPortConnections to only Clock/Reset ports now that tagging is done
-    for (auto it = resolved.asyncPortConnections.begin(); it != resolved.asyncPortConnections.end(); ) {
-        auto inp_it = resolved.inputs.find(it->first);
-        if (inp_it == resolved.inputs.end() ||
-            (inp_it->second.sync_kind != SyncKind::Clock &&
-             inp_it->second.sync_kind != SyncKind::Reset)) {
-            it = resolved.asyncPortConnections.erase(it);
-        } else {
-            ++it;
-        }
-    }
 }
 
 

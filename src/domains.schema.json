@@ -4,7 +4,7 @@
   "description": "Describes clock domains, reset domains, and asynchronous interface inputs/outputs for an RTL module.",
   "type": "object",
 
-  "required": ["module_name", "clock_domains"],
+  "required": ["module_name"],
 
   "$defs": {
     "signal_name": {
@@ -61,6 +61,11 @@
       "type": "string",
       "description": "Name of the RTL module this configuration applies to.",
       "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$"
+    },
+
+    "pure_combinational": {
+      "type": "boolean",
+      "description": "If true, this module is purely combinational: no flops, no clock domains. Port classification is skipped and cross-module sync_kind checks are suppressed for this module."
     },
 
     "clock_domains": {

@@ -34,6 +34,12 @@ std::string flopBaseName(const std::string& dName) {
     return dName.substr(0, dName.size() - 2);
 }
 
+const char* syncKindStr(SyncKind k) {
+    return k == SyncKind::Sync  ? "Sync"  :
+           k == SyncKind::Clock ? "Clock" :
+           k == SyncKind::Reset ? "Reset" : "Async";
+}
+
 void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
     // a. Polarity and b. SyncKind checks — requires flop_resolve to have run
     for (const auto& flop : mod.flops) {
@@ -202,6 +208,77 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
                 "domains_propagate_and_check: module '{}': async input '{}' "
                 "feeds flop '{}' without a declared synchronizer",
                 mod.name, portName, flopName));
+        }
+    }
+
+    // e. Cross-module port sync_kind consistency check + asyncPortConnections trimming.
+    // For each submodule, every port connection must have matching sync_kind on both
+    // the parent signal and the child port. After verification, trim asyncPortConnections
+    // to Clock/Reset-only entries (used by the simulator for async port translation).
+    for (auto& sub : mod.hierarchyInstantiation) {
+        for (const auto& [childPort, parentSignal] : sub.asyncPortConnections) {
+            // Pure combinational submodules have no clock domain — skip the check.
+            if (sub.pure_combinational) continue;
+            // Look up parent signal's sync_kind (input or internal signal)
+            SyncKind parentKind;
+            auto pit = mod.inputs.find(parentSignal);
+            if (pit != mod.inputs.end()) {
+                parentKind = pit->second.sync_kind;
+            } else {
+                auto sit = mod.signals.find(parentSignal);
+                if (sit != mod.signals.end()) {
+                    parentKind = sit->second.sync_kind;
+                } else {
+                    throw CompilerError(std::format(
+                        "domains_propagate_and_check: module '{}': signal '{}' connected "
+                        "to port '{}' of submodule '{}' not found in parent inputs or signals",
+                        mod.name, parentSignal, childPort, sub.name));
+                }
+            }
+
+            // Look up child port's sync_kind
+            auto cit = sub.inputs.find(childPort);
+            if (cit == sub.inputs.end()) {
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: submodule '{}' port '{}' "
+                    "not found in inputs",
+                    sub.name, childPort));
+            }
+            SyncKind childKind = cit->second.sync_kind;
+
+            if (parentKind == childKind) continue;
+
+            // Sync → Async: allowed — the child explicitly declares an async/CDC input.
+            if (parentKind == SyncKind::Sync && childKind == SyncKind::Async) continue;
+
+            // Async → Sync: allowed only if the parent declares synchronized_into for
+            // this signal, meaning it has been synchronized before reaching the child.
+            if (parentKind == SyncKind::Async && childKind == SyncKind::Sync) {
+                if (mod.synchronizedSignals.contains(parentSignal)) continue;
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: module '{}': async signal '{}' "
+                    "connected to sync port '{}' of submodule '{}' without "
+                    "synchronized_into declaration",
+                    mod.name, parentSignal, childPort, sub.name));
+            }
+
+            throw CompilerError(std::format(
+                "domains_propagate_and_check: module '{}': signal '{}' ({}) "
+                "connected to port '{}' of submodule '{}' ({}) — sync_kind mismatch",
+                mod.name, parentSignal, syncKindStr(parentKind),
+                childPort, sub.name, syncKindStr(childKind)));
+        }
+
+        // Trim asyncPortConnections to Clock/Reset only
+        for (auto it = sub.asyncPortConnections.begin(); it != sub.asyncPortConnections.end(); ) {
+            auto cit = sub.inputs.find(it->first);
+            if (cit == sub.inputs.end() ||
+                (cit->second.sync_kind != SyncKind::Clock &&
+                 cit->second.sync_kind != SyncKind::Reset)) {
+                it = sub.asyncPortConnections.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 }

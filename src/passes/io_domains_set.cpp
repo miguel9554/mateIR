@@ -91,6 +91,12 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
             yamlModuleName, module.name));
     }
 
+    // Pure combinational modules have no clock/reset domains; skip all classification.
+    if (config["pure_combinational"] && config["pure_combinational"].as<bool>()) {
+        module.pure_combinational = true;
+        return;
+    }
+
     // Collect all port names
     std::set<std::string> allPortNames;
     for (const auto& [name, sig] : module.inputs) allPortNames.insert(name);

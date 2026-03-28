@@ -1,13 +1,2 @@
 module_name: spi_slave_cmd_parser
-
-async_domain:
-  - cmd
-  - get_addr
-  - get_mode
-  - get_data
-  - send_data
-  - enable_cont
-  - enable_regs
-  - wait_dummy
-  - error
-  - reg_sel
+pure_combinational: true

@@ -2137,9 +2137,14 @@ void prePopulateSignal(DFG& graph, const ResolvedSignal& sig) {
         typeSuffix = sig.name.substr(sig.name.length() - 2);
     }
 
-    // Create aggregate node for dynamic access (always SIGNAL for aggregates)
-    auto* aggregate = graph.signal("", sig.name);
-    aggregate->type = sig.type;
+    // .d arrays are write-only sinks: no aggregate node needed (and creating one
+    // would leave it permanently undriven, causing simulator errors).
+    // .q and plain signal arrays need an aggregate for dynamic read access.
+    DFGNode* aggregate = nullptr;
+    if (!is_d) {
+        aggregate = graph.signal("", sig.name);
+        aggregate->type = sig.type;
+    }
 
     // Create individual element nodes (no unpacked dims on elements)
     for (const auto& idxSuffix : generateIndexSuffixes(sig.type.unpacked_dims)) {
@@ -2155,7 +2160,6 @@ void prePopulateSignal(DFG& graph, const ResolvedSignal& sig) {
         individual->type = sig.type;
         individual->type->unpacked_dims = {};
         if (!is_d) {
-            // .d elements are OUTPUT nodes — don't add them as inputs to aggregate
             aggregate->in.push_back(individual);
         }
     }

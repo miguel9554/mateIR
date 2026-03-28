@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Module Hierarchy",
+  "description": "Design hierarchy produced by the custom-hdl compiler after the full pass pipeline. Written to debug_output/<module>/hierarchy.json.",
+  "type": "object",
+  "$ref": "#/$defs/module",
+
+  "$defs": {
+
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-zA-Z_][a-zA-Z0-9_$.]*$",
+      "description": "A Verilog identifier."
+    },
+
+    "dimension": {
+      "type": "object",
+      "description": "A single packed or unpacked array dimension [left:right].",
+      "required": ["left", "right"],
+      "properties": {
+        "left":  { "type": "integer" },
+        "right": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+
+    "enum_member": {
+      "type": "object",
+      "description": "One member of an enum type.",
+      "required": ["name", "value"],
+      "properties": {
+        "name":  { "$ref": "#/$defs/identifier" },
+        "value": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+
+    "type": {
+      "type": "object",
+      "description": "Resolved type of a signal or parameter.",
+      "required": ["kind", "width", "signed"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["integer", "enum"],
+          "description": "Base kind: plain integer or enumeration."
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total bit-width (product of all packed dimension sizes)."
+        },
+        "signed": {
+          "type": "boolean",
+          "description": "Whether the type is signed."
+        },
+        "packed_dims": {
+          "type": "array",
+          "description": "Packed dimensions, outermost first. Absent when the type is a plain scalar.",
+          "items": { "$ref": "#/$defs/dimension" }
+        },
+        "unpacked_dims": {
+          "type": "array",
+          "description": "Unpacked dimensions, outermost first. Absent for non-array types.",
+          "items": { "$ref": "#/$defs/dimension" }
+        },
+        "enum_type": {
+          "type": "string",
+          "description": "Name of the enum type. Present only when kind == \"enum\"."
+        },
+        "enum_members": {
+          "type": "array",
+          "description": "All members of the enum. Present only when kind == \"enum\".",
+          "items": { "$ref": "#/$defs/enum_member" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "trigger": {
+      "type": "object",
+      "description": "An edge-triggered async signal (clock or reset).",
+      "required": ["edge", "name"],
+      "properties": {
+        "edge": {
+          "type": "string",
+          "enum": ["posedge", "negedge"],
+          "description": "Active edge."
+        },
+        "name": {
+          "$ref": "#/$defs/identifier",
+          "description": "Name of the driving signal in this module's port list."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "signal": {
+      "type": "object",
+      "description": "A resolved input, output, or internal signal.",
+      "required": ["name", "type", "sync_kind"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "type": { "$ref": "#/$defs/type" },
+        "sync_kind": {
+          "type": "string",
+          "enum": ["sync", "clock", "reset", "async"],
+          "description": "Synchronisation classification. 'sync' belongs to a clock domain; 'clock' is a clock signal; 'reset' is a reset signal; 'async' carries purely asynchronous data."
+        },
+        "clock_domain": {
+          "$ref": "#/$defs/identifier",
+          "description": "Name of the clock signal that governs this signal. Present only when sync_kind == \"sync\"."
+        },
+        "clock_edge": {
+          "type": "string",
+          "enum": ["posedge", "negedge"],
+          "description": "Active clock edge for this signal. Present only when sync_kind == \"sync\"."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "param": {
+      "type": "object",
+      "description": "A resolved parameter or localparam with its elaborated value.",
+      "required": ["name", "type", "value"],
+      "properties": {
+        "name":  { "$ref": "#/$defs/identifier" },
+        "type":  { "$ref": "#/$defs/type" },
+        "value": {
+          "type": "number",
+          "description": "Elaborated numeric value."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "flop": {
+      "type": "object",
+      "description": "A D-type flip-flop inferred from always_ff logic.",
+      "required": ["name", "type", "clock"],
+      "properties": {
+        "name":  { "$ref": "#/$defs/identifier" },
+        "type":  { "$ref": "#/$defs/type" },
+        "clock": {
+          "$ref": "#/$defs/trigger",
+          "description": "Clock trigger for this flop."
+        },
+        "reset": {
+          "$ref": "#/$defs/trigger",
+          "description": "Async reset trigger. Absent for flops with no reset."
+        },
+        "reset_value": {
+          "type": "integer",
+          "description": "Value loaded on reset assertion. Absent when there is no reset."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "module": {
+      "type": "object",
+      "description": "A resolved RTL module, including all its ports, internal state, and submodule instantiations.",
+      "required": [
+        "name", "instance_name", "pure_combinational",
+        "parameters", "localparams",
+        "inputs", "outputs", "signals", "flops", "submodules"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/identifier",
+          "description": "Module type name (as declared in the Verilog source)."
+        },
+        "instance_name": {
+          "type": "string",
+          "description": "Instance name given by the parent. Empty string for the top-level module."
+        },
+        "pure_combinational": {
+          "type": "boolean",
+          "description": "True when the module has no flops and no clock domains (set by io_domains_set from the domains YAML)."
+        },
+        "parameters": {
+          "type": "array",
+          "description": "Module parameters with their elaborated values.",
+          "items": { "$ref": "#/$defs/param" }
+        },
+        "localparams": {
+          "type": "array",
+          "description": "Local parameters (localparam) with their elaborated values.",
+          "items": { "$ref": "#/$defs/param" }
+        },
+        "inputs": {
+          "type": "array",
+          "description": "Module input ports, ordered as they appear in the source.",
+          "items": { "$ref": "#/$defs/signal" }
+        },
+        "outputs": {
+          "type": "array",
+          "description": "Module output ports, ordered as they appear in the source.",
+          "items": { "$ref": "#/$defs/signal" }
+        },
+        "signals": {
+          "type": "array",
+          "description": "Internal signals (wires / logic not exposed as ports).",
+          "items": { "$ref": "#/$defs/signal" }
+        },
+        "flops": {
+          "type": "array",
+          "description": "All flip-flops inferred in this module (not in submodules).",
+          "items": { "$ref": "#/$defs/flop" }
+        },
+        "submodules": {
+          "type": "array",
+          "description": "Directly instantiated submodules, in instantiation order.",
+          "items": { "$ref": "#/$defs/module" }
+        }
+      },
+      "additionalProperties": false
+    }
+
+  }
+}

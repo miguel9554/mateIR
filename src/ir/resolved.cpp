@@ -168,6 +168,185 @@ void ResolvedModule::print(int indent) const {
 }
 
 // ============================================================================
+// JSON serialisation
+// ============================================================================
+
+static std::string typeToJson(const ResolvedType& t) {
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"kind\": \"" << (t.kind == ResolvedTypeKind::Enum ? "enum" : "integer") << "\", ";
+    ss << "\"width\": " << t.width << ", ";
+    ss << "\"signed\": " << (t.isSigned() ? "true" : "false");
+    if (!t.packed_dims.empty()) {
+        ss << ", \"packed_dims\": [";
+        for (size_t i = 0; i < t.packed_dims.size(); ++i) {
+            if (i) ss << ", ";
+            ss << "{\"left\": " << t.packed_dims[i].left
+               << ", \"right\": " << t.packed_dims[i].right << "}";
+        }
+        ss << "]";
+    }
+    if (!t.unpacked_dims.empty()) {
+        ss << ", \"unpacked_dims\": [";
+        for (size_t i = 0; i < t.unpacked_dims.size(); ++i) {
+            if (i) ss << ", ";
+            ss << "{\"left\": " << t.unpacked_dims[i].left
+               << ", \"right\": " << t.unpacked_dims[i].right << "}";
+        }
+        ss << "]";
+    }
+    if (t.kind == ResolvedTypeKind::Enum) {
+        const auto& ei = t.enumInfo();
+        ss << ", \"enum_type\": \"" << ei.type_name << "\"";
+        ss << ", \"enum_members\": [";
+        for (size_t i = 0; i < ei.members.size(); ++i) {
+            if (i) ss << ", ";
+            ss << "{\"name\": \"" << ei.members[i].name
+               << "\", \"value\": " << ei.members[i].value << "}";
+        }
+        ss << "]";
+    }
+    ss << "}";
+    return ss.str();
+}
+
+static std::string syncKindStr(SyncKind sk) {
+    switch (sk) {
+        case SyncKind::Sync:  return "sync";
+        case SyncKind::Clock: return "clock";
+        case SyncKind::Reset: return "reset";
+        case SyncKind::Async: return "async";
+    }
+    return "sync";
+}
+
+static std::string signalToJson(const ResolvedSignal& s) {
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"name\": \"" << s.name << "\", ";
+    ss << "\"type\": " << typeToJson(s.type) << ", ";
+    ss << "\"sync_kind\": \"" << syncKindStr(s.sync_kind) << "\"";
+    if (s.clock_domain)
+        ss << ", \"clock_domain\": \"" << s.clock_domain->name << "\"";
+    if (s.clock_edge.has_value())
+        ss << ", \"clock_edge\": \"" << (*s.clock_edge == POSEDGE ? "posedge" : "negedge") << "\"";
+    ss << "}";
+    return ss.str();
+}
+
+static std::string paramToJson(const ResolvedParam& p) {
+    std::ostringstream ss;
+    ss << "{\"name\": \"" << p.name << "\", \"type\": " << typeToJson(p.type)
+       << ", \"value\": " << p.value << "}";
+    return ss.str();
+}
+
+static std::string flopToJson(const FlopInfo& f) {
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"name\": \"" << f.name << "\", ";
+    ss << "\"type\": " << typeToJson(f.type.type) << ", ";
+    ss << "\"clock\": {\"edge\": \"" << (f.clock.edge == POSEDGE ? "posedge" : "negedge")
+       << "\", \"name\": \"" << f.clock.name << "\"}";
+    if (f.reset) {
+        ss << ", \"reset\": {\"edge\": \"" << (f.reset->edge == POSEDGE ? "posedge" : "negedge")
+           << "\", \"name\": \"" << f.reset->name << "\"}";
+    }
+    if (f.reset_value) {
+        ss << ", \"reset_value\": " << *f.reset_value;
+    }
+    ss << "}";
+    return ss.str();
+}
+
+static std::string moduleToJson(const ResolvedModule& m, int indent) {
+    auto ind = [](int n) { return std::string(n * 2, ' '); };
+    std::ostringstream ss;
+
+    ss << ind(indent) << "{\n";
+    ss << ind(indent+1) << "\"name\": \"" << m.name << "\",\n";
+    ss << ind(indent+1) << "\"instance_name\": \"" << m.instance_name << "\",\n";
+    ss << ind(indent+1) << "\"pure_combinational\": " << (m.pure_combinational ? "true" : "false") << ",\n";
+
+    // Parameters
+    ss << ind(indent+1) << "\"parameters\": [\n";
+    bool first = true;
+    for (const auto& p : m.parameters) {
+        if (!first) ss << ",\n";
+        ss << ind(indent+2) << paramToJson(p);
+        first = false;
+    }
+    ss << "\n" << ind(indent+1) << "],\n";
+
+    // Localparams
+    ss << ind(indent+1) << "\"localparams\": [\n";
+    first = true;
+    for (const auto& p : m.localparams) {
+        if (!first) ss << ",\n";
+        ss << ind(indent+2) << paramToJson(p);
+        first = false;
+    }
+    ss << "\n" << ind(indent+1) << "],\n";
+
+    // Inputs
+    ss << ind(indent+1) << "\"inputs\": [\n";
+    first = true;
+    for (const auto& [name, sig] : m.inputs) {
+        if (!first) ss << ",\n";
+        ss << ind(indent+2) << signalToJson(sig);
+        first = false;
+    }
+    ss << "\n" << ind(indent+1) << "],\n";
+
+    // Outputs
+    ss << ind(indent+1) << "\"outputs\": [\n";
+    first = true;
+    for (const auto& [name, sig] : m.outputs) {
+        if (!first) ss << ",\n";
+        ss << ind(indent+2) << signalToJson(sig);
+        first = false;
+    }
+    ss << "\n" << ind(indent+1) << "],\n";
+
+    // Signals
+    ss << ind(indent+1) << "\"signals\": [\n";
+    first = true;
+    for (const auto& [name, sig] : m.signals) {
+        if (!first) ss << ",\n";
+        ss << ind(indent+2) << signalToJson(sig);
+        first = false;
+    }
+    ss << "\n" << ind(indent+1) << "],\n";
+
+    // Flops
+    ss << ind(indent+1) << "\"flops\": [\n";
+    first = true;
+    for (const auto& flop : m.flops) {
+        if (!first) ss << ",\n";
+        ss << ind(indent+2) << flopToJson(flop);
+        first = false;
+    }
+    ss << "\n" << ind(indent+1) << "],\n";
+
+    // Submodules (recursive)
+    ss << ind(indent+1) << "\"submodules\": [\n";
+    first = true;
+    for (const auto& sub : m.hierarchyInstantiation) {
+        if (!first) ss << ",\n";
+        ss << moduleToJson(sub, indent+2);
+        first = false;
+    }
+    ss << "\n" << ind(indent+1) << "]\n";
+
+    ss << ind(indent) << "}";
+    return ss.str();
+}
+
+std::string ResolvedModule::toJson() const {
+    return moduleToJson(*this, 0) + "\n";
+}
+
+// ============================================================================
 // Combinational loop detection
 // ============================================================================
 

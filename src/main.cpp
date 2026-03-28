@@ -553,6 +553,12 @@ int main(int argc, char** argv) {
 
     runPipeline(topModule, topModule.name);
 
+    {
+        std::string dir = DEBUG_OUTPUT_DIR + "/" + topModule.name;
+        std::filesystem::create_directories(dir);
+        std::ofstream(dir + "/hierarchy.json") << topModule.toJson();
+    }
+
     std::cout << "----------------------------------------" << std::endl;
     std::cout << "\nResolved IR:" << std::endl;
     std::cout << "========================================" << std::endl;

@@ -1,9 +1,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -127,6 +130,209 @@ static std::pair<std::string, std::string> parse_arg(const char *arg) {
         std::exit(1);
     }
     return {s.substr(0, pos), s.substr(pos + 1)};
+}
+
+// ============================================================================
+// Hierarchy JSON parser
+// ============================================================================
+
+struct HierarchyModule {
+    std::string name;
+    std::string instance_name;
+    std::set<std::string> inputs;
+    std::set<std::string> outputs;
+    std::set<std::string> signals;
+    std::set<std::string> flops;
+    std::set<std::string> params;   // parameters + localparams merged
+    std::vector<HierarchyModule> submodules;
+};
+
+enum class SignalCategory { Input, Output, Signal, Flop, Param, Unknown };
+
+static const char *category_label(SignalCategory c) {
+    switch (c) {
+    case SignalCategory::Input:   return "Inputs";
+    case SignalCategory::Output:  return "Outputs";
+    case SignalCategory::Signal:  return "Signals";
+    case SignalCategory::Flop:    return "Flops";
+    case SignalCategory::Param:   return "Params";
+    case SignalCategory::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
+static SignalCategory get_category(const HierarchyModule *mod, const std::string &sig) {
+    if (!mod) return SignalCategory::Unknown;
+    if (mod->inputs.count(sig))  return SignalCategory::Input;
+    if (mod->outputs.count(sig)) return SignalCategory::Output;
+    if (mod->flops.count(sig))   return SignalCategory::Flop;
+    if (mod->signals.count(sig)) return SignalCategory::Signal;
+    if (mod->params.count(sig))  return SignalCategory::Param;
+    return SignalCategory::Unknown;
+}
+
+// Strip "(missing in f1/f2) " prefix to get the raw signal name.
+static std::string strip_missing_prefix(const std::string &s) {
+    if (s.starts_with("(missing in f1) ")) return s.substr(16);
+    if (s.starts_with("(missing in f2) ")) return s.substr(16);
+    return s;
+}
+
+struct HierarchyParser {
+    const char *p, *end;
+
+    void skip_ws() {
+        while (p < end && std::isspace((unsigned char)*p)) ++p;
+    }
+
+    char peek() { skip_ws(); return p < end ? *p : '\0'; }
+
+    void expect(char c) {
+        skip_ws();
+        if (p >= end || *p != c)
+            throw std::runtime_error(
+                std::string("hierarchy JSON: expected '") + c + "'");
+        ++p;
+    }
+
+    std::string parse_string() {
+        expect('"');
+        std::string s;
+        while (p < end && *p != '"') {
+            if (*p == '\\') {
+                ++p;
+                if (p < end) {
+                    switch (*p) {
+                    case '"':  s += '"';  break;
+                    case '\\': s += '\\'; break;
+                    case 'n':  s += '\n'; break;
+                    case 'r':  s += '\r'; break;
+                    case 't':  s += '\t'; break;
+                    default:   s += *p;   break;
+                    }
+                    ++p;
+                }
+            } else {
+                s += *p++;
+            }
+        }
+        expect('"');
+        return s;
+    }
+
+    // Skip any JSON value without interpreting it.
+    void skip_value() {
+        skip_ws();
+        if (p >= end) return;
+        char c = *p;
+        if (c == '"') { parse_string(); return; }
+        if (c == '{') {
+            ++p;
+            if (peek() != '}') {
+                do { parse_string(); expect(':'); skip_value(); skip_ws(); }
+                while (peek() == ',' && (++p, true));
+            }
+            expect('}');
+            return;
+        }
+        if (c == '[') {
+            ++p;
+            if (peek() != ']') {
+                do { skip_value(); skip_ws(); }
+                while (peek() == ',' && (++p, true));
+            }
+            expect(']');
+            return;
+        }
+        // number / bool / null — consume until a JSON delimiter
+        while (p < end && *p != ',' && *p != '}' && *p != ']' &&
+               !std::isspace((unsigned char)*p))
+            ++p;
+    }
+
+    // Parse [{..., "name": "x", ...}, ...] collecting the "name" field of each
+    // object into out.
+    void parse_named_array(std::set<std::string> &out) {
+        expect('[');
+        skip_ws();
+        if (peek() == ']') { ++p; return; }
+        do {
+            skip_ws();
+            expect('{');
+            skip_ws();
+            std::string found;
+            if (peek() != '}') {
+                do {
+                    std::string key = parse_string();
+                    expect(':');
+                    if (key == "name") found = parse_string();
+                    else               skip_value();
+                    skip_ws();
+                } while (peek() == ',' && (++p, true));
+            }
+            expect('}');
+            if (!found.empty()) out.insert(found);
+            skip_ws();
+        } while (peek() == ',' && (++p, true));
+        expect(']');
+    }
+
+    HierarchyModule parse_module() {
+        HierarchyModule m;
+        expect('{');
+        skip_ws();
+        if (peek() != '}') {
+            do {
+                std::string key = parse_string();
+                expect(':');
+                if      (key == "name")          m.name          = parse_string();
+                else if (key == "instance_name") m.instance_name = parse_string();
+                else if (key == "inputs")        parse_named_array(m.inputs);
+                else if (key == "outputs")       parse_named_array(m.outputs);
+                else if (key == "signals")       parse_named_array(m.signals);
+                else if (key == "flops")         parse_named_array(m.flops);
+                else if (key == "parameters")    parse_named_array(m.params);
+                else if (key == "localparams")   parse_named_array(m.params);
+                else if (key == "submodules") {
+                    expect('[');
+                    skip_ws();
+                    if (peek() != ']') {
+                        do {
+                            m.submodules.push_back(parse_module());
+                            skip_ws();
+                        } while (peek() == ',' && (++p, true));
+                    }
+                    expect(']');
+                }
+                else skip_value();
+                skip_ws();
+            } while (peek() == ',' && (++p, true));
+        }
+        expect('}');
+        return m;
+    }
+};
+
+static HierarchyModule load_hierarchy(const std::string &path) {
+    std::ifstream f(path);
+    if (!f) throw std::runtime_error("Cannot open hierarchy file: " + path);
+    std::string content((std::istreambuf_iterator<char>(f)), {});
+    HierarchyParser parser;
+    parser.p   = content.data();
+    parser.end = content.data() + content.size();
+    return parser.parse_module();
+}
+
+// Build a map from VCD scope_path → HierarchyModule*.
+// root_scope_path is the VCD scope that corresponds to the root hierarchy module.
+using ScopeMap = std::map<std::string, const HierarchyModule *>;
+
+static void build_scope_map(const HierarchyModule &m,
+                             const std::string &scope_path,
+                             ScopeMap &out) {
+    out[scope_path] = &m;
+    for (const auto &sub : m.submodules)
+        build_scope_map(sub, scope_path + "." + sub.instance_name, out);
 }
 
 // ============================================================================
@@ -360,9 +566,29 @@ static void compare_scopes_recursive(
 // ============================================================================
 
 int main(int argc, char *argv[]) {
-    if (argc != 3) {
+    // Parse arguments
+    std::string hierarchy_path;
+    std::vector<const char *> positional;
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--hierarchy") == 0) {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Error: --hierarchy requires a file argument\n");
+                return 1;
+            }
+            hierarchy_path = argv[++i];
+        } else {
+            positional.push_back(argv[i]);
+        }
+    }
+
+    if (positional.size() != 2) {
         std::fprintf(stderr,
-            "Usage: %s <file1.vcd>:<scope1> <file2.vcd>:<scope2>\n"
+            "Usage: %s [--hierarchy <file>] <file1.vcd>:<scope1> <file2.vcd>:<scope2>\n"
+            "\n"
+            "  --hierarchy <file>   Path to hierarchy.json produced by the compiler.\n"
+            "                       When provided, the summary groups signals by\n"
+            "                       category: Inputs, Outputs, Signals, Flops, Params.\n"
             "\n"
             "  scope is the dot-separated hierarchy path to the root module,\n"
             "  e.g. cordic_tb.dut or TOP.cordic\n"
@@ -373,8 +599,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    auto [path1, scope_path1] = parse_arg(argv[1]);
-    auto [path2, scope_path2] = parse_arg(argv[2]);
+    auto [path1, scope_path1] = parse_arg(positional[0]);
+    auto [path2, scope_path2] = parse_arg(positional[1]);
 
     VCDFileParser parser1;
     VCDFile *f1 = parser1.parse_file(path1);
@@ -427,15 +653,92 @@ int main(int argc, char *argv[]) {
                 stats.total_match + stats.total_diff,
                 stats.total_match, stats.total_diff);
 
-    // Summary: signals by scope (passed + failed)
+    // Load hierarchy and build scope map if --hierarchy was given
+    ScopeMap scope_map;
+    std::unique_ptr<HierarchyModule> hier_root;
+    if (!hierarchy_path.empty()) {
+        try {
+            hier_root = std::make_unique<HierarchyModule>(load_hierarchy(hierarchy_path));
+            build_scope_map(*hier_root, scope_path1, scope_map);
+        } catch (const std::exception &e) {
+            std::fprintf(stderr, "Error: could not load hierarchy file: %s\n", e.what());
+            return 1;
+        }
+    }
+
+    // When hierarchy is provided, check that every VCD signal is known to it.
+    // Collect all violations first so we report them all at once.
+    if (!scope_map.empty()) {
+        bool any_unknown = false;
+        for (auto &s : stats.scopes_summary) {
+            const HierarchyModule *mod = nullptr;
+            auto it = scope_map.find(s.scope_path);
+            if (it != scope_map.end()) mod = it->second;
+
+            auto check = [&](const std::string &display) {
+                std::string raw = strip_missing_prefix(display);
+                if (get_category(mod, raw) == SignalCategory::Unknown) {
+                    std::fprintf(stderr,
+                        "\033[1;31mError:\033[0m signal '%s' in scope '%s' "
+                        "not found in hierarchy\n",
+                        raw.c_str(), s.scope_path.c_str());
+                    any_unknown = true;
+                }
+            };
+            for (auto &sig : s.passed_signals) check(sig);
+            for (auto &sig : s.failed_signals) check(sig);
+        }
+        if (any_unknown) {
+            std::fprintf(stderr,
+                "\033[1;31mAbort:\033[0m VCD contains signals absent from the "
+                "hierarchy file. Pass the correct --hierarchy file.\n");
+            return 1;
+        }
+    }
+
+    // Summary: signals by scope, grouped by category when hierarchy is available
     if (!stats.scopes_summary.empty()) {
         std::printf("\nSignals by scope:\n");
         for (auto &s : stats.scopes_summary) {
             std::printf("  %s\n", s.scope_path.c_str());
-            for (auto &sig : s.passed_signals)
-                std::printf("    \033[32mpass\033[0m  %s\n", sig.c_str());
-            for (auto &sig : s.failed_signals)
-                std::printf("    \033[31mFAIL\033[0m  %s\n", sig.c_str());
+
+            if (!scope_map.empty()) {
+                // Group signals by category
+                struct SigEntry { std::string display; bool passed; };
+                std::map<SignalCategory, std::vector<SigEntry>> by_cat;
+
+                const HierarchyModule *mod = scope_map.at(s.scope_path);
+
+                for (auto &sig : s.passed_signals)
+                    by_cat[get_category(mod, sig)].push_back({sig, true});
+                for (auto &sig : s.failed_signals)
+                    by_cat[get_category(mod, strip_missing_prefix(sig))].push_back({sig, false});
+
+                const SignalCategory order[] = {
+                    SignalCategory::Input,
+                    SignalCategory::Output,
+                    SignalCategory::Signal,
+                    SignalCategory::Flop,
+                    SignalCategory::Param,
+                };
+                for (auto cat : order) {
+                    auto cit = by_cat.find(cat);
+                    if (cit == by_cat.end()) continue;
+                    std::printf("    %s:\n", category_label(cat));
+                    for (auto &e : cit->second) {
+                        if (e.passed)
+                            std::printf("      \033[32mpass\033[0m  %s\n", e.display.c_str());
+                        else
+                            std::printf("      \033[31mFAIL\033[0m  %s\n", e.display.c_str());
+                    }
+                }
+            } else {
+                // Flat format (no hierarchy)
+                for (auto &sig : s.passed_signals)
+                    std::printf("    \033[32mpass\033[0m  %s\n", sig.c_str());
+                for (auto &sig : s.failed_signals)
+                    std::printf("    \033[31mFAIL\033[0m  %s\n", sig.c_str());
+            }
         }
     }
 

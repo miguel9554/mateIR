@@ -133,6 +133,7 @@ struct ResolvedModule {
     bool pure_combinational = false;
 
     void print(int indent = 0) const;
+    std::string toJson() const;
 };
 
 // ============================================================================

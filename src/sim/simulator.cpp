@@ -545,11 +545,12 @@ void Simulator::loadSyncInputs() {
         while (std::getline(file, line)) {
             if (line.empty() || line[0] == '#') continue;
             std::istringstream iss(line);
-            int64_t val;
-            if (!(iss >> val)) {
+            uint64_t uval;
+            if (!(iss >> uval)) {
                 throw CompilerError(std::format(
                     "Simulator: sync file '{}' has unparseable line: {}", path, line));
             }
+            int64_t val = static_cast<int64_t>(uval);
             std::string extra;
             if (iss >> extra) {
                 throw CompilerError(std::format(

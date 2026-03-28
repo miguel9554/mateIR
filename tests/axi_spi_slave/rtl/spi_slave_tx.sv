@@ -34,9 +34,6 @@ module spi_slave_tx
     logic running;
     logic running_next;
 
-    logic sclk_inv;
-    logic sclk_test;
-
     assign sdo0 = (en_quad_in) ? data_int[28] : data_int[31];
     assign sdo1 = (en_quad_in) ? data_int[29] : 1'b0;
     assign sdo2 = (en_quad_in) ? data_int[30] : 1'b0;
@@ -84,21 +81,7 @@ module spi_slave_tx
         end
     end
 
-    pulp_clock_inverter clk_inv_i
-    (
-        .clk_i(sclk),
-        .clk_o(sclk_inv)
-    );
-
-    pulp_clock_mux2 clk_mux_i
-    (
-        .clk0_i(sclk_inv),
-        .clk1_i(sclk),
-        .clk_sel_i(test_mode),
-        .clk_o(sclk_test)
-    );
-
-    always @(posedge sclk_test or posedge cs)
+    always @(posedge sclk or posedge cs)
     begin
         if (cs == 1'b1)
         begin

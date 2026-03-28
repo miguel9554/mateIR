@@ -33,7 +33,8 @@ module dc_token_ring_fifo_din #(
     end
 
     // Full when advancing wr_token one step would equal read_pointer
-    wire [BUFFER_DEPTH-1:0] wr_token_next = {wr_token[BUFFER_DEPTH-2:0], wr_token[BUFFER_DEPTH-1]};
+    wire [BUFFER_DEPTH-1:0] wr_token_next;
+    assign wr_token_next = {wr_token[BUFFER_DEPTH-2:0], wr_token[BUFFER_DEPTH-1]};
     assign ready = (wr_token_next != read_pointer);
 
     always @(posedge clk or negedge rstn) begin

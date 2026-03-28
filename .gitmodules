@@ -7,9 +7,6 @@
 [submodule "external/cpp-vcd-tracer"]
 	path = external/cpp-vcd-tracer
 	url = git@github.com:miguel9554/cpp-vcd-tracer.git
-[submodule "external/apb_gpio"]
-	path = external/apb_gpio
-	url = git@github.com:pulp-platform/apb_gpio.git
 [submodule "external/verilog-vcd-parser"]
 	path = external/verilog-vcd-parser
 	url = git@github.com:miguel9554/verilog-vcd-parser.git

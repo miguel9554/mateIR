@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build and install slang into external/slang-install/.
+# Build and install slang. Install prefix is controlled by SLANG_INSTALL_PREFIX
+# (defaults to external/slang-install/ for host builds; the Dockerfile sets /opt/slang).
 # Run this once after cloning, or after updating the slang submodule.
 # Never called from the main project build.
 set -euo pipefail

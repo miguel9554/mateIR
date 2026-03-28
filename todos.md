@@ -1,8 +1,13 @@
 # Immediate TODOs
 
-* Add clock and reset types.
-* Clock and reset check, that they don't affect any logic.
-* Simulate.
+* Support non-clk/rst async inputs
+* Fix yaml to avoid passing rtl src and stimuli
+* Add regression script
+* Add hierarchy to simulation
+* Resolve vectors in DFG
+* define the final DFG hardware operations
+* Check type propagation rules, specially arithmetic
+* check assigns/general ops when the bitwidths have mismatch
 
 # Arch/high level TODOs
 
@@ -30,12 +35,6 @@ ir_builder (pass 1) extracts the module structure and then resolveModule finds
 it again by name string. Ideally the unresolved hierarchy instantiation should
 carry a direct reference to its UnresolvedModule rather than requiring a
 name-based lookup at resolution time.
-
-## Check clock and reset
-
-Actually we check clock and reset don't affect the functional logic of the
-flops they clock/reset. We should check this for *all* clocks and resets, and
-also for combinational logic.
 
 ## Constant folding: skipped bit-width-dependent optimizations
 
@@ -74,3 +73,9 @@ We have just 4 rules, are missing much more.
 Many that are in constant folding (x+0, x\*1, etc) are actually *normalization*.
 Should move them from constant folding, that pass should just be an eval of pure
 constant nodes.
+
+## index wrap
+
+We solved the indexing issue by wrapping in simulation, should we actually
+store this in the DFG?  This brings up the question of how much to put in the
+DFG (how much should we synthesize!) and how much resolve in sim.

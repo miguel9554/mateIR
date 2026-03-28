@@ -29,13 +29,13 @@ cmake_install.cmake
 # Compilation database
 compile_commands.json
 
-# Python cache (if you add Python scripts later)
+# Python
 __pycache__/
 *.pyc
 *.pyo
 .cache
+.venv/
 .clangd
-scratchpad/syntax-analysis/*/*.txt
 **/*.vcd
 tests/**/*.txt
 !tests/**/stimuli/*.txt

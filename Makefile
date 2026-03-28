@@ -1,4 +1,4 @@
-.PHONY: all build run clean clean_project clean_all debug debug-configure debug-build gdb
+.PHONY: all build run clean debug debug-build gdb sim vcd-diff
 
 # Find all source files using wildcards
 CPP_SOURCES := $(shell find src -name '*.cpp')
@@ -6,13 +6,12 @@ HEADER_SOURCES := $(shell find src -name '*.h')
 EXTERNAL_SOURCES := $(shell find external/cpp-vcd-tracer/src -name '*.cpp' -o -name '*.hpp' -o -name '*.h')
 SOURCES := $(CPP_SOURCES) $(HEADER_SOURCES) $(EXTERNAL_SOURCES)
 BINARY := build/custom_hdl_compiler
-source ?= tests/counter/rtl/counter.v
+source ?= tests/counter_top/rtl/counter_top.v
 
 all: $(BINARY) run
 
 build/CMakeCache.txt: $(SOURCES)
 	cmake -B build
-	ln -sf build/compile_commands.json compile_commands.json
 
 $(BINARY): build/CMakeCache.txt $(SOURCES)
 	cmake --build build -j$(shell nproc)
@@ -25,13 +24,12 @@ run: $(BINARY)
 sim: $(BINARY)
 	$(MAKE) -C tests/$(test)/work/custom-sim simulate
 
-# Debug targets
-debug-configure:
-	@if ! grep -q 'CMAKE_BUILD_TYPE:STRING=Debug' build/CMakeCache.txt 2>/dev/null; then \
-		cmake -B build -DCMAKE_BUILD_TYPE=Debug; \
-	fi
+vcd-diff:
+	./build/tools/vcd-compare/vcd_compare $(vcd1) $(vcd2)
 
-debug-build: debug-configure
+# Debug targets
+debug-build:
+	cmake -B build -DCMAKE_BUILD_TYPE=Debug
 	cmake --build build -j$(shell nproc)
 
 debug: debug-build
@@ -40,15 +38,5 @@ debug: debug-build
 gdb: debug-build
 	gdb --args ./$(BINARY) $(source)
 
-# Clean only project artifacts (preserves slang)
-clean_project:
-	cmake --build build --target clean_project
-
-clean: clean_project
-
-# Clean all artifacts including slang
-clean_all:
+clean:
 	cmake --build build --target clean
-
-vcd-diff:
-	./build/scratchpad/vcd-compare/vcd_compare $(vcd1) $(vcd2)

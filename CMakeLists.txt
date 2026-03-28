@@ -65,20 +65,8 @@ target_include_directories(custom_hdl_compiler PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-vcd-tracer/src
 )
 
-# Optional: Add install target
-install(TARGETS custom_hdl_compiler
-    RUNTIME DESTINATION bin
-)
-
-# Scratchpad tools
-add_subdirectory(scratchpad)
-
-# Custom target to clean only project artifacts (not slang)
-add_custom_target(clean_project
-    COMMAND ${CMAKE_COMMAND} -E rm -f ${CMAKE_BINARY_DIR}/custom_hdl_compiler
-    COMMAND find ${CMAKE_BINARY_DIR}/CMakeFiles/custom_hdl_compiler.dir -name "*.o" -delete 2>/dev/null || true
-    COMMENT "Cleaning project artifacts only (preserving slang)"
-)
+# Tools
+add_subdirectory(tools/vcd-compare)
 
 # Print build configuration
 message(STATUS "")

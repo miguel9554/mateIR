@@ -52,7 +52,9 @@ $(OUT): $(SRCS) $(GEN_DIR)/tb.sv
 $(WAVES): $(OUT) force
 	./obj_dir/V$(TOP_MODULE) +WAVES=$(WAVES) $(SEED_ARG)
 
-simulate: $(WAVES)
+simulate:
+	$(MAKE) clean
+	$(MAKE) $(WAVES)
 
 force:
 

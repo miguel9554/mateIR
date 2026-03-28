@@ -10,7 +10,7 @@ source ?= tests/counter/rtl/counter.v
 
 all: $(BINARY) run
 
-build/CMakeCache.txt:
+build/CMakeCache.txt: $(SOURCES)
 	cmake -B build
 	ln -sf build/compile_commands.json compile_commands.json
 

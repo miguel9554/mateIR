@@ -9,7 +9,10 @@ module uut_tb(
     // AXI clock: 10 ns period (100 MHz)
     // -----------------------------------------------------------------------
     initial _if.axi_aclk = 0;
-    always #5 _if.axi_aclk = ~_if.axi_aclk;
+    initial begin
+        #1ns;
+        forever #5ns _if.axi_aclk = ~_if.axi_aclk;
+    end
 
     // -----------------------------------------------------------------------
     // SPI clock: 40 ns period (25 MHz), free-running
@@ -24,7 +27,7 @@ module uut_tb(
     initial begin
         _if.axi_aresetn = 0;
         repeat (10) @(posedge _if.axi_aclk);
-        _if.axi_aresetn = 1;
+        #1ns _if.axi_aresetn = 1;
     end
 
     // SPI CS starts deasserted (positive-polarity reset = 1 means in reset/idle)

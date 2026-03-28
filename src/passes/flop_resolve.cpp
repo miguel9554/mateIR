@@ -168,6 +168,7 @@ FlopInfo extractFlopClockAndReset(
     }
     flop.name = flop_name;
     flop.type.name = flop_name;
+    flop.type.type.unpacked_dims = {};
     return flop;
 }
 

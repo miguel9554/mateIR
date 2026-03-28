@@ -1,10 +1,10 @@
 ---
 name: read-vcd
-description: Inspect VCD waveform files produced by the custom simulator or Verilator. Use this when debugging signal values, checking transitions, or understanding simulation output. Run scripts/vcd_inspect.py with the appropriate command.
+description: Inspect VCD waveform files produced by the custom simulator or Verilator. Use this when debugging signal values, checking transitions, or understanding simulation output. Run tools/vcd_inspect.py with the appropriate command.
 argument-hint: <path/to/file.vcd> [command] [args]
 ---
 
-Use `scripts/vcd_inspect.py` to inspect VCD files without loading them entirely into memory.
+Use `tools/vcd_inspect.py` to inspect VCD files without loading them entirely into memory.
 
 ## File locations
 
@@ -41,12 +41,12 @@ Signal paths are written as `scope.name` using the full dot-separated hierarchy.
 ## Available commands
 
 ```
-python3 scripts/vcd_inspect.py <file> header
-python3 scripts/vcd_inspect.py <file> scopes
-python3 scripts/vcd_inspect.py <file> signals [scope_path]
-python3 scripts/vcd_inspect.py <file> changes <signal_path>
-python3 scripts/vcd_inspect.py <file> at      <signal_path> <time>
-python3 scripts/vcd_inspect.py <file> stats
+python3 tools/vcd_inspect.py <file> header
+python3 tools/vcd_inspect.py <file> scopes
+python3 tools/vcd_inspect.py <file> signals [scope_path]
+python3 tools/vcd_inspect.py <file> changes <signal_path>
+python3 tools/vcd_inspect.py <file> at      <signal_path> <time>
+python3 tools/vcd_inspect.py <file> stats
 ```
 
 | Command | What it shows |

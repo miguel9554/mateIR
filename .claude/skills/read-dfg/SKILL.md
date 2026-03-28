@@ -1,10 +1,10 @@
 ---
 name: read-dfg
-description: Inspect DFG dot or JSON files produced by the compiler after each pass. Use this when debugging signal drivers, MUX trees, combinational cones, dead code, or comparing DFGs across passes. Run scripts/dfg_inspect.py with the appropriate command.
+description: Inspect DFG dot or JSON files produced by the compiler after each pass. Use this when debugging signal drivers, MUX trees, combinational cones, dead code, or comparing DFGs across passes. Run tools/dfg_inspect.py with the appropriate command.
 argument-hint: <path/to/dfg.json> [command] [args]
 ---
 
-Use `scripts/dfg_inspect.py` to inspect DFG JSON files, and any `.dot` viewer (or `dot -Tsvg`) for `.dot` files.
+Use `tools/dfg_inspect.py` to inspect DFG JSON files, and any `.dot` viewer (or `dot -Tsvg`) for `.dot` files.
 
 ## File location
 
@@ -72,18 +72,18 @@ Flop nodes appear as named `INPUT` (`.q`) and named `OUTPUT` (`.d`). Clock and r
 ## Available commands
 
 ```
-python3 scripts/dfg_inspect.py <file> driver  <name_or_id>
-python3 scripts/dfg_inspect.py <file> cone    <name_or_id> [max_depth]
-python3 scripts/dfg_inspect.py <file> node    <name_or_id>
-python3 scripts/dfg_inspect.py <file> op      <opname>
-python3 scripts/dfg_inspect.py <file> fanout  <name_or_id>
-python3 scripts/dfg_inspect.py <file> mux     <name_or_id>
-python3 scripts/dfg_inspect.py <file> inputs
-python3 scripts/dfg_inspect.py <file> outputs
-python3 scripts/dfg_inspect.py <file> signals
-python3 scripts/dfg_inspect.py <file> undriven
-python3 scripts/dfg_inspect.py <file> diff    <file2>
-python3 scripts/dfg_inspect.py <file> path    <id1> <id2>
+python3 tools/dfg_inspect.py <file> driver  <name_or_id>
+python3 tools/dfg_inspect.py <file> cone    <name_or_id> [max_depth]
+python3 tools/dfg_inspect.py <file> node    <name_or_id>
+python3 tools/dfg_inspect.py <file> op      <opname>
+python3 tools/dfg_inspect.py <file> fanout  <name_or_id>
+python3 tools/dfg_inspect.py <file> mux     <name_or_id>
+python3 tools/dfg_inspect.py <file> inputs
+python3 tools/dfg_inspect.py <file> outputs
+python3 tools/dfg_inspect.py <file> signals
+python3 tools/dfg_inspect.py <file> undriven
+python3 tools/dfg_inspect.py <file> diff    <file2>
+python3 tools/dfg_inspect.py <file> path    <id1> <id2>
 ```
 
 | Command | What it shows |

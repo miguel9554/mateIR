@@ -68,8 +68,4 @@ RUN poetry env use python3.14 && CC="" CXX="" poetry install --no-root
 
 RUN git config --global --add safe.directory /workspace
 
-# Auto-configure cmake on first run (build/ is a named volume, starts empty).
-COPY scripts/docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
-ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["bash"]

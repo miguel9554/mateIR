@@ -1,10 +1,10 @@
 ---
 name: read-hierarchy
-description: Inspect a hierarchy.json file produced by the compiler. Use this when asked about module structure, ports, signals, flops, clock domains, or submodule relationships. Run scripts/hierarchy_inspect.py with the appropriate command.
+description: Inspect a hierarchy.json file produced by the compiler. Use this when asked about module structure, ports, signals, flops, clock domains, or submodule relationships. Run tools/hierarchy_inspect.py with the appropriate command.
 argument-hint: <path/to/hierarchy.json> [command] [args]
 ---
 
-Use `scripts/hierarchy_inspect.py` to inspect hierarchy JSON files.
+Use `tools/hierarchy_inspect.py` to inspect hierarchy JSON files.
 
 ## File location
 
@@ -67,15 +67,15 @@ Array flops (e.g. `mem[7:0]`) are stored as individual elements: `mem[0]`, `mem[
 ## Available commands
 
 ```
-python3 scripts/hierarchy_inspect.py <file> tree
-python3 scripts/hierarchy_inspect.py <file> module  <instance.path>
-python3 scripts/hierarchy_inspect.py <file> inputs  <instance.path>
-python3 scripts/hierarchy_inspect.py <file> outputs <instance.path>
-python3 scripts/hierarchy_inspect.py <file> signals <instance.path>
-python3 scripts/hierarchy_inspect.py <file> flops   <instance.path>
-python3 scripts/hierarchy_inspect.py <file> find    <signal_name>
-python3 scripts/hierarchy_inspect.py <file> clocks
-python3 scripts/hierarchy_inspect.py <file> stats
+python3 tools/hierarchy_inspect.py <file> tree
+python3 tools/hierarchy_inspect.py <file> module  <instance.path>
+python3 tools/hierarchy_inspect.py <file> inputs  <instance.path>
+python3 tools/hierarchy_inspect.py <file> outputs <instance.path>
+python3 tools/hierarchy_inspect.py <file> signals <instance.path>
+python3 tools/hierarchy_inspect.py <file> flops   <instance.path>
+python3 tools/hierarchy_inspect.py <file> find    <signal_name>
+python3 tools/hierarchy_inspect.py <file> clocks
+python3 tools/hierarchy_inspect.py <file> stats
 ```
 
 | Command | What it shows |

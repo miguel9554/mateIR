@@ -125,7 +125,7 @@ src/
     ├── source_loc_resolve.h     Resolve slang tokens → SourceLoc
     └── syntax_helpers.h/.cpp   Misc slang utilities
 
-scripts/
+tools/
 └── dfg_inspect.py               DFG JSON query tool — see file header for commands
 
 tests/<testname>/
@@ -146,4 +146,4 @@ debug output. Each skill documents the file format, available commands, and
 typical debugging workflows.
 
 **Never write throwaway scripts for one-off queries.** Add new query types as
-named commands to the relevant `scripts/*.py` tool instead.
+named commands to the relevant `tools/*.py` tool instead.

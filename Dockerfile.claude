@@ -1,7 +1,6 @@
 ARG BASE_IMAGE=custom-hdl-compiler:latest
 FROM ${BASE_IMAGE}
 
-# Set timezone
 ENV TZ=America/Argentina/Buenos_Aires
 
 RUN apt-get update && apt-get install -y \
@@ -9,11 +8,18 @@ RUN apt-get update && apt-get install -y \
         poppler-utils \
         curl \
         tzdata \
+        nodejs \
+        npm \
+        bubblewrap \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/* \
     && echo "ALL ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
+# Install Claude CLI
 RUN HOME=/root curl -fsSL https://claude.ai/install.sh | bash \
     && cp /root/.local/bin/claude /usr/local/bin/claude \
     && chmod 755 /usr/local/bin/claude
+
+# Install Codex CLI
+RUN npm install -g @openai/codex

@@ -506,18 +506,26 @@ int main(int argc, char** argv) {
             dumpFlopsRecursive(module, f);
         }
         runPass(11, "dce", [&]{
-            // Collect declared signal nodes from every level of the hierarchy.
-            // After dfg_inline, these nodes live in module.dfg->nodes but are
-            // absent from module.dfg->signals, so DCE would otherwise remove them.
-            std::unordered_set<DFGNode*> declaredSignals;
+            // Preserve every named object in the resolved module hierarchy.
+            // After dfg_inline, many child nodes still exist in the flat top DFG
+            // but are no longer reachable via the flat DFG's named maps.
+            std::unordered_set<DFGNode*> keepAlive;
             std::function<void(const ResolvedModule&)> collect = [&](const ResolvedModule& mod) {
+                for (const auto& parameter : mod.parameters)
+                    if (parameter.dfg_node) keepAlive.insert(parameter.dfg_node);
+                for (const auto& parameter : mod.localparams)
+                    if (parameter.dfg_node) keepAlive.insert(parameter.dfg_node);
+                for (const auto& [name, sig] : mod.inputs)
+                    if (sig.dfg_node) keepAlive.insert(sig.dfg_node);
+                for (const auto& [name, sig] : mod.outputs)
+                    if (sig.dfg_node) keepAlive.insert(sig.dfg_node);
                 for (const auto& [name, sig] : mod.signals)
-                    if (sig.dfg_node) declaredSignals.insert(sig.dfg_node);
+                    if (sig.dfg_node) keepAlive.insert(sig.dfg_node);
                 for (const auto& sub : mod.hierarchyInstantiation)
                     collect(sub);
             };
             collect(module);
-            eliminateDeadCode(*module.dfg, declaredSignals);
+            eliminateDeadCode(*module.dfg, keepAlive);
         });
         module.dfg->validateNoOrphans();
         runPass(12, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(module); });

@@ -52,6 +52,7 @@ struct ResolvedSignal : ResolvedSignalBase{
 
 struct ResolvedParam : ResolvedSignalBase {
     double value = 0;
+    DFGNode* dfg_node = nullptr;  // direct pointer to the corresponding CONST node
     void print(std::ostream& os) const {
         ResolvedSignalBase::print(os);
         os << " value=" << value;

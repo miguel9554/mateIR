@@ -2943,7 +2943,11 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
         prePopulateSignal(graph, signal);
     }
 
-    // Back-patch DFG node pointers into ResolvedSignal and FlopInfo
+    // Back-patch DFG node pointers into resolved named objects and flops
+    for (auto& parameter : resolved.parameters)
+        parameter.dfg_node = graph.lookupSignal("", parameter.name);
+    for (auto& parameter : resolved.localparams)
+        parameter.dfg_node = graph.lookupSignal("", parameter.name);
     for (auto& [name, input] : resolved.inputs)
         input.dfg_node = graph.lookupSignal("", name);
     for (auto& [name, output] : resolved.outputs)

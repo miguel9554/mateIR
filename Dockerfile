@@ -42,7 +42,9 @@ RUN add-apt-repository ppa:deadsnakes/ppa && \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3.14 -m ensurepip --upgrade && \
-    python3.14 -m pip install --upgrade pip
+    python3.14 -m pip install --upgrade pip && \
+    ln -sf /usr/bin/python3.14 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.14 /usr/bin/python
 
 RUN curl -sSL https://install.python-poetry.org | python3.14 -
 ENV PATH="/root/.local/bin:$PATH"

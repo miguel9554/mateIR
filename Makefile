@@ -1,4 +1,4 @@
-.PHONY: all build run clean debug debug-build diagnostic-build gdb sim vcd-diff
+.PHONY: all build run clean debug debug-build ensure-debug-slang diagnostic-build gdb sim vcd-diff
 
 # Find all source files using wildcards
 CPP_SOURCES := $(shell find src -name '*.cpp')
@@ -20,7 +20,14 @@ $(BINARY): $(BUILD_DIR)/CMakeCache.txt $(SOURCES)
 build: $(BINARY)
 
 # Debug targets
+ensure-debug-slang:
+	@if [ ! -f external/slang-install-debug/lib/cmake/slang/slangConfig.cmake ]; then \
+		echo "Building Debug slang into external/slang-install-debug"; \
+		CMAKE_BUILD_TYPE=Debug bash scripts/build_slang.sh; \
+	fi
+
 debug-build:
+	$(MAKE) ensure-debug-slang
 	$(MAKE) BUILD_DIR=build/debug CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug" build
 
 diagnostic-build:

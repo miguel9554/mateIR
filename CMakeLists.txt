@@ -13,11 +13,29 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -pedantic)
 endif()
 
-# Find pre-built slang: prefer /opt/slang (Docker), fall back to external/slang-install (host)
-if(EXISTS "/opt/slang/lib/cmake/slang/slangConfig.cmake")
+# Find pre-built slang.
+# Debug consumers must use a Debug-built slang because SLANG_DEBUG changes ABI.
+set(SLANG_DEBUG_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/external/slang-install-debug")
+set(SLANG_RELEASE_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/external/slang-install")
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    if(EXISTS "${SLANG_DEBUG_PREFIX}/lib/cmake/slang/slangConfig.cmake")
+        list(APPEND CMAKE_PREFIX_PATH "${SLANG_DEBUG_PREFIX}")
+    elseif(EXISTS "/opt/slang-debug/lib/cmake/slang/slangConfig.cmake")
+        list(APPEND CMAKE_PREFIX_PATH "/opt/slang-debug")
+    else()
+        message(FATAL_ERROR
+            "Debug build requires a Debug-built slang install because SLANG_DEBUG changes ABI.\n"
+            "Build it with:\n"
+            "  CMAKE_BUILD_TYPE=Debug bash scripts/build_slang.sh\n"
+            "or use:\n"
+            "  make debug-build\n"
+        )
+    endif()
+elseif(EXISTS "/opt/slang/lib/cmake/slang/slangConfig.cmake")
     list(APPEND CMAKE_PREFIX_PATH "/opt/slang")
-elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/slang-install/lib/cmake/slang/slangConfig.cmake")
-    list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external/slang-install")
+elseif(EXISTS "${SLANG_RELEASE_PREFIX}/lib/cmake/slang/slangConfig.cmake")
+    list(APPEND CMAKE_PREFIX_PATH "${SLANG_RELEASE_PREFIX}")
 else()
     message(FATAL_ERROR
         "slang not found. Please build it first:\n"

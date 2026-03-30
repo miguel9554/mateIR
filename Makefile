@@ -6,7 +6,6 @@ HEADER_SOURCES := $(shell find src -name '*.h')
 EXTERNAL_SOURCES := $(shell find external/cpp-vcd-tracer/src -name '*.cpp' -o -name '*.hpp' -o -name '*.h')
 SOURCES := $(CPP_SOURCES) $(HEADER_SOURCES) $(EXTERNAL_SOURCES)
 BINARY := build/custom_hdl_compiler
-source ?= tests/counter_top/rtl/counter_top.v
 
 all: $(BINARY) run
 
@@ -17,15 +16,6 @@ $(BINARY): build/CMakeCache.txt $(SOURCES)
 	cmake --build build -j$(shell nproc)
 
 build: $(BINARY)
-
-run: $(BINARY)
-	./$(BINARY) $(source)
-
-sim: $(BINARY)
-	$(MAKE) -C tests/$(test)/work/custom-sim simulate
-
-vcd-diff:
-	./build/tools/vcd-compare/vcd_compare $(vcd1) $(vcd2)
 
 # Debug targets
 debug-build:

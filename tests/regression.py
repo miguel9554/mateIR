@@ -20,6 +20,17 @@ def find_test_cases():
     return cases
 
 
+def run_clean(name):
+    """Run make clean for a test case. Returns nothing."""
+    work_dir = TESTS_DIR / name / "work" / "validate"
+    subprocess.run(
+        ["make", "clean"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+    )
+
+
 def run_validate(name):
     """Run make validate for a test case. Returns (success, output)."""
     work_dir = TESTS_DIR / name / "work" / "validate"
@@ -42,6 +53,7 @@ def main():
     results = {}
     for name in cases:
         print(f"Running {name}...", flush=True)
+        # run_clean(name)
         ok, output = run_validate(name)
         results[name] = (ok, output)
         if ok:

@@ -1,4 +1,4 @@
-.PHONY: validate clean waves
+.PHONY: validate clean clean_all waves
 
 ROOT_DIR = ../..
 
@@ -12,4 +12,6 @@ waves:
 
 clean:
 	$(MAKE) -C ../verilator clean
+
+clean_all: clean
 	$(MAKE) -C ../custom-sim clean

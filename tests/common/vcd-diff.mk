@@ -1,6 +1,8 @@
 ROOT_DIR = ../..
 PROJECT_ROOT = $(ROOT_DIR)/../..
 MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
+BUILD_DIR ?= build/diagnostic-relwithdebinfo
+VCD_COMPARE = $(PROJECT_ROOT)/$(BUILD_DIR)/tools/vcd-compare/vcd_compare
 
 WORK_REL_TO_ROOT = tests/$(MODULE_NAME)/work
 CUSTOM_SIM_DIR = $(WORK_REL_TO_ROOT)/custom-sim
@@ -13,9 +15,13 @@ VERILATOR_SIM_VCD_FILE = $(VERILATOR_SIM_DIR)/waves.vcd
 
 CUSTOM_SIM_VCD = $(CUSTOM_SIM_VCD_RAW_FILE):$(MODULE_NAME)
 VERILATOR_SIM_VCD = $(VERILATOR_SIM_VCD_FILE):TOP.tb.uut
+HIERARCHY_JSON = $(CUSTOM_SIM_DIR)/debug_output/$(MODULE_NAME)_dfg.json
 
 compare:
-	make -C $(PROJECT_ROOT) vcd-diff vcd1=$(CUSTOM_SIM_VCD) vcd2=$(VERILATOR_SIM_VCD)
+	$(MAKE) -C $(PROJECT_ROOT) diagnostic-build
+	$(VCD_COMPARE) --hierarchy $(PROJECT_ROOT)/$(HIERARCHY_JSON) \
+		$(PROJECT_ROOT)/$(CUSTOM_SIM_VCD) \
+		$(PROJECT_ROOT)/$(VERILATOR_SIM_VCD)
 
 waves:
 	gtkwave $(PROJECT_ROOT)/$(CUSTOM_SIM_VCD_GROUPED_FILE) &>/dev/null & disown

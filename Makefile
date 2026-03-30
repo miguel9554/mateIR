@@ -1,32 +1,36 @@
-.PHONY: all build run clean debug debug-build gdb sim vcd-diff
+.PHONY: all build run clean debug debug-build diagnostic-build gdb sim vcd-diff
 
 # Find all source files using wildcards
 CPP_SOURCES := $(shell find src -name '*.cpp')
 HEADER_SOURCES := $(shell find src -name '*.h')
 EXTERNAL_SOURCES := $(shell find external/cpp-vcd-tracer/src -name '*.cpp' -o -name '*.hpp' -o -name '*.h')
 SOURCES := $(CPP_SOURCES) $(HEADER_SOURCES) $(EXTERNAL_SOURCES)
-BINARY := build/custom_hdl_compiler
+BUILD_DIR ?= build
+CMAKE_ARGS ?=
+BINARY := $(BUILD_DIR)/custom_hdl_compiler
 
 all: $(BINARY) run
 
-build/CMakeCache.txt: $(SOURCES)
-	cmake -B build
+$(BUILD_DIR)/CMakeCache.txt: $(SOURCES) CMakeLists.txt
+	cmake -B $(BUILD_DIR) $(CMAKE_ARGS)
 
-$(BINARY): build/CMakeCache.txt $(SOURCES)
-	cmake --build build -j$(shell nproc)
+$(BINARY): $(BUILD_DIR)/CMakeCache.txt $(SOURCES)
+	cmake --build $(BUILD_DIR) -j$(shell nproc)
 
 build: $(BINARY)
 
 # Debug targets
 debug-build:
-	cmake -B build -DCMAKE_BUILD_TYPE=Debug
-	cmake --build build -j$(shell nproc)
+	$(MAKE) BUILD_DIR=build/debug CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug" build
+
+diagnostic-build:
+	$(MAKE) BUILD_DIR=build/diagnostic-relwithdebinfo CMAKE_ARGS="-DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_SANITIZERS=ON" build
 
 debug: debug-build
-	./$(BINARY) $(source)
+	./build/debug/custom_hdl_compiler $(source)
 
 gdb: debug-build
-	gdb --args ./$(BINARY) $(source)
+	gdb --args ./build/debug/custom_hdl_compiler $(source)
 
 clean:
-	cmake --build build --target clean
+	rm -rf build build/debug build/diagnostic build/diagnostic-relwithdebinfo

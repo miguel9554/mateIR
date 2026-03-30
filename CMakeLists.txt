@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+option(ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
 # Add some useful compiler flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -49,7 +50,21 @@ add_executable(custom_hdl_compiler ${PROJECT_SOURCES} ${VCD_TRACER_SOURCES})
 
 # Ensure no optimizations in Debug builds for reliable debugging (project only, not slang)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(custom_hdl_compiler PRIVATE -O0)
+    target_compile_options(custom_hdl_compiler PRIVATE -O0 -g3)
+endif()
+
+if(ENABLE_SANITIZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR "ENABLE_SANITIZERS requires GCC or Clang")
+    endif()
+    target_compile_options(custom_hdl_compiler PRIVATE
+        -fno-omit-frame-pointer
+        -fsanitize=address,undefined
+    )
+    target_link_options(custom_hdl_compiler PRIVATE
+        -fno-omit-frame-pointer
+        -fsanitize=address,undefined
+    )
 endif()
 
 # Link against slang

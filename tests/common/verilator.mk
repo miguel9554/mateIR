@@ -53,7 +53,6 @@ $(WAVES): $(OUT) force
 	./obj_dir/V$(TOP_MODULE) +WAVES=$(WAVES) $(SEED_ARG)
 
 simulate:
-	$(MAKE) clean
 	$(MAKE) $(WAVES)
 
 force:

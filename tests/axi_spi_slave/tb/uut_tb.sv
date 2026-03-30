@@ -116,41 +116,41 @@ module uut_tb(
 
     // SPI memory write: CMD=0x02, 32-bit addr, 32-bit data.
     task automatic spi_mem_write(input logic [31:0] addr, input logic [31:0] wdata);
-        #1ns _if.spi_cs = 0;
+        #2ns _if.spi_cs = 0;
         spi_send_bits(32'h02, 8);   // write-mem command
         spi_send_bits(addr,   32);  // address
         spi_send_bits(wdata,  32);  // data
         @(posedge _if.spi_sclk);   // flush last bit into DUT
-        #1ns _if.spi_cs = 1;
+        #2ns _if.spi_cs = 1;
     endtask
 
     // SPI memory read: CMD=0x0B, 32-bit addr, dummy cycles, then clock out data.
     task automatic spi_mem_read(input logic [31:0] addr);
-        #1ns _if.spi_cs = 0;
+        #2ns _if.spi_cs = 0;
         spi_send_bits(32'h0B, 8);  // read-mem command
         spi_send_bits(addr,   32); // address
         spi_clock_bits(32);        // 32 dummy cycles (DUMMY_CYCLES default)
         spi_clock_bits(32);        // clock out 32-bit response
         @(posedge _if.spi_sclk);  // flush last bit into DUT
-        #1ns _if.spi_cs = 1;
+        #2ns _if.spi_cs = 1;
     endtask
 
     // SPI register write: CMD=0x01 (reg0) or 0x11 (reg1) etc., 8-bit data.
     task automatic spi_reg_write(input logic [7:0] cmd, input logic [7:0] wdata);
-        #1ns _if.spi_cs = 0;
+        #2ns _if.spi_cs = 0;
         spi_send_bits({24'h0, cmd},   8);  // command
         spi_send_bits({24'h0, wdata}, 8);  // 8-bit data
         @(posedge _if.spi_sclk);           // flush last bit into DUT
-        #1ns _if.spi_cs = 1;
+        #2ns _if.spi_cs = 1;
     endtask
 
     // SPI register read: CMD=0x05 (reg0) etc., clock out 8-bit response.
     task automatic spi_reg_read(input logic [7:0] cmd);
-        #1ns _if.spi_cs = 0;
+        #2ns _if.spi_cs = 0;
         spi_send_bits({24'h0, cmd}, 8);  // command
         spi_clock_bits(8);               // clock out 8-bit response
         @(posedge _if.spi_sclk);        // flush last bit into DUT
-        #1ns _if.spi_cs = 1;
+        #2ns _if.spi_cs = 1;
     endtask
 
     // -----------------------------------------------------------------------

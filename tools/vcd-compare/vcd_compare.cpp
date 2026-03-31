@@ -508,7 +508,15 @@ static void collect_flat_signals(VCDScope *scope,
     for (auto *child : scope->children) {
         if (blocked_child_scopes.count(child->name))
             continue;
-        collect_flat_signals(child, prefix + child->name + ".", blocked_child_scopes, out);
+
+        std::set<std::string> child_blocked_scopes;
+        const std::string child_prefix = child->name + ".";
+        for (const auto &blocked : blocked_child_scopes) {
+            if (blocked.rfind(child_prefix, 0) == 0)
+                child_blocked_scopes.insert(blocked.substr(child_prefix.size()));
+        }
+
+        collect_flat_signals(child, prefix + child->name + ".", child_blocked_scopes, out);
     }
 }
 
@@ -602,7 +610,7 @@ static bool validate_hierarchy_recursive(
     auto expected = collect_expected_signals(hier);
     std::set<std::string> expected_children;
     for (const auto &sub : hier.submodules)
-        expected_children.insert(first_scope_component(sub.instance_name));
+        expected_children.insert(sub.instance_name);
     auto signals1 = build_signal_map(scope1, expected_children, scope_path1, label1.c_str());
     auto signals2 = build_signal_map(scope2, expected_children, scope_path2, label2.c_str());
 
@@ -687,7 +695,7 @@ static void compare_hierarchy_recursive(
     auto expected = collect_expected_signals(hier);
     std::set<std::string> expected_children;
     for (const auto &sub : hier.submodules)
-        expected_children.insert(first_scope_component(sub.instance_name));
+        expected_children.insert(sub.instance_name);
     auto signals1 = build_signal_map(scope1, expected_children, scope_path1, label1.c_str());
     auto signals2 = build_signal_map(scope2, expected_children, scope_path2, label2.c_str());
     bool scope_failed = false;

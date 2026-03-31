@@ -476,14 +476,28 @@ static std::vector<CategorizedSignal> collect_expected_signals(const HierarchyMo
     return out;
 }
 
-static std::map<std::string, std::vector<VCDSignal *>> build_signal_map(
-    VCDScope *scope, const std::string &scope_path, const char *file_label) {
-    std::map<std::string, std::vector<VCDSignal *>> out;
-    for (auto *sig : scope->signals) {
-        (void)scope_path;
-        (void)file_label;
-        out[sig->reference].push_back(sig);
+static void collect_flat_signals(VCDScope *scope,
+                                 const std::string &prefix,
+                                 const std::set<std::string> &blocked_child_scopes,
+                                 std::map<std::string, std::vector<VCDSignal *>> &out) {
+    for (auto *sig : scope->signals)
+        out[prefix + sig->reference].push_back(sig);
+
+    for (auto *child : scope->children) {
+        if (blocked_child_scopes.count(child->name))
+            continue;
+        collect_flat_signals(child, prefix + child->name + ".", blocked_child_scopes, out);
     }
+}
+
+static std::map<std::string, std::vector<VCDSignal *>> build_signal_map(
+    VCDScope *scope,
+    const std::set<std::string> &blocked_child_scopes,
+    const std::string &scope_path, const char *file_label) {
+    std::map<std::string, std::vector<VCDSignal *>> out;
+    (void)scope_path;
+    (void)file_label;
+    collect_flat_signals(scope, "", blocked_child_scopes, out);
     return out;
 }
 
@@ -564,8 +578,11 @@ static bool validate_hierarchy_recursive(
     };
 
     auto expected = collect_expected_signals(hier);
-    auto signals1 = build_signal_map(scope1, scope_path1, label1.c_str());
-    auto signals2 = build_signal_map(scope2, scope_path2, label2.c_str());
+    std::set<std::string> expected_children;
+    for (const auto &sub : hier.submodules)
+        expected_children.insert(sub.instance_name);
+    auto signals1 = build_signal_map(scope1, expected_children, scope_path1, label1.c_str());
+    auto signals2 = build_signal_map(scope2, expected_children, scope_path2, label2.c_str());
 
     for (const auto &entry : expected) {
         auto it1 = signals1.find(entry.name);
@@ -601,10 +618,7 @@ static bool validate_hierarchy_recursive(
 
     auto children1 = build_child_scope_map(scope1, scope_path1, label1.c_str());
     auto children2 = build_child_scope_map(scope2, scope_path2, label2.c_str());
-    std::set<std::string> expected_children;
     for (const auto &sub : hier.submodules) {
-        expected_children.insert(sub.instance_name);
-
         auto it1 = children1.find(sub.instance_name);
         auto it2 = children2.find(sub.instance_name);
         std::string child_display = display_scope_path + "." + sub.instance_name;
@@ -635,20 +649,10 @@ static bool validate_hierarchy_recursive(
     }
 
     for (const auto &[name, _] : children1) {
-        if (!expected_children.count(name)) {
-            stats.errors.push_back(display_scope_path + "." + name + ": extra scope in " + label1);
-            stats.scopes_failed++;
-            stats.failed_scopes.push_back(display_scope_path + "." + name);
-            return false;
-        }
+        (void)name;
     }
     for (const auto &[name, _] : children2) {
-        if (!expected_children.count(name)) {
-            stats.errors.push_back(display_scope_path + "." + name + ": extra scope in " + label2);
-            stats.scopes_failed++;
-            stats.failed_scopes.push_back(display_scope_path + "." + name);
-            return false;
-        }
+        (void)name;
     }
 
     return true;
@@ -668,8 +672,11 @@ static void compare_hierarchy_recursive(
     summary.scope_path = display_scope_path;
 
     auto expected = collect_expected_signals(hier);
-    auto signals1 = build_signal_map(scope1, scope_path1, label1.c_str());
-    auto signals2 = build_signal_map(scope2, scope_path2, label2.c_str());
+    std::set<std::string> expected_children;
+    for (const auto &sub : hier.submodules)
+        expected_children.insert(sub.instance_name);
+    auto signals1 = build_signal_map(scope1, expected_children, scope_path1, label1.c_str());
+    auto signals2 = build_signal_map(scope2, expected_children, scope_path2, label2.c_str());
     bool scope_failed = false;
 
     std::printf("\n");

@@ -120,16 +120,36 @@ merge_timestamps(VCDFile *f1, double ps_per_tick1,
     return std::vector<double>(all.begin(), all.end());
 }
 
-// Parse a "file:scope" argument. Returns {filepath, scope_path}.
-static std::pair<std::string, std::string> parse_arg(const char *arg) {
+struct InputSpec {
+    std::string label;
+    std::string path;
+    std::string scope_path;
+};
+
+// Parse a "label=file:scope" argument.
+static InputSpec parse_arg(const char *arg) {
     std::string s(arg);
-    auto pos = s.find(':');
+    auto eq = s.find('=');
+    if (eq == std::string::npos || eq == 0) {
+        std::fprintf(stderr, "Error: argument '%s' missing '<label>=' prefix\n", arg);
+        std::fprintf(stderr, "Expected format: <label>=<file.vcd>:<scope>\n");
+        std::exit(1);
+    }
+    auto pos = s.find(':', eq + 1);
     if (pos == std::string::npos) {
         std::fprintf(stderr, "Error: argument '%s' missing ':scope' suffix\n", arg);
+        std::fprintf(stderr, "Expected format: <label>=<file.vcd>:<scope>\n");
+        std::exit(1);
+    }
+    std::string label = s.substr(0, eq);
+    std::string path = s.substr(eq + 1, pos - eq - 1);
+    std::string scope = s.substr(pos + 1);
+    if (path.empty() || scope.empty()) {
+        std::fprintf(stderr, "Error: argument '%s' is malformed\n", arg);
         std::fprintf(stderr, "Expected format: <file.vcd>:<scope>\n");
         std::exit(1);
     }
-    return {s.substr(0, pos), s.substr(pos + 1)};
+    return {label, path, scope};
 }
 
 // ============================================================================
@@ -161,6 +181,11 @@ static const char *category_label(SignalCategory c) {
     return "Unknown";
 }
 
+struct CategorizedSignal {
+    std::string name;
+    SignalCategory category;
+};
+
 // Expand a signal name with unpacked dimensions into all indexed VCD names.
 // e.g. "foo", [{0,2}]       -> {"foo[0]", "foo[1]", "foo[2]"}
 // e.g. "bar", [{0,1},{0,1}] -> {"bar[0][0]", "bar[0][1]", "bar[1][0]", "bar[1][1]"}
@@ -183,13 +208,6 @@ static SignalCategory get_category(const HierarchyModule *mod, const std::string
     if (mod->signals.count(sig)) return SignalCategory::Signal;
     if (mod->params.count(sig))  return SignalCategory::Param;
     return SignalCategory::Unknown;
-}
-
-// Strip "(missing in f1/f2) " prefix to get the raw signal name.
-static std::string strip_missing_prefix(const std::string &s) {
-    if (s.starts_with("(missing in f1) ")) return s.substr(16);
-    if (s.starts_with("(missing in f2) ")) return s.substr(16);
-    return s;
 }
 
 struct HierarchyParser {
@@ -402,105 +420,26 @@ static HierarchyModule load_hierarchy(const std::string &path) {
 using ScopeMap = std::map<std::string, const HierarchyModule *>;
 
 static void build_scope_map(const HierarchyModule &m,
-                             const std::string &scope_path,
-                             ScopeMap &out) {
+                            const std::string &scope_path,
+                            ScopeMap &out) {
     out[scope_path] = &m;
     for (const auto &sub : m.submodules)
         build_scope_map(sub, scope_path + "." + sub.instance_name, out);
 }
 
 // ============================================================================
-// Per-scope comparison result
+// Hierarchy-driven comparison
 // ============================================================================
 
-struct ScopeResult {
-    std::string scope_path;  // full dotted path for display
-    std::vector<std::string> matched_signals;
-    std::vector<std::string> only_in_1;
-    std::vector<std::string> only_in_2;
-    std::vector<std::string> signals_with_diffs;
-    int total_match = 0;
-    int total_diff  = 0;
-    bool signal_set_mismatch = false;
+struct ScopeSignalStatus {
+    std::string display;
+    bool passed = false;
+    SignalCategory category = SignalCategory::Unknown;
 };
-
-// Compare signals that exist directly in scope1 and scope2 (not children).
-static ScopeResult compare_scope_signals(
-    VCDFile *f1, VCDScope *scope1, double ps1,
-    VCDFile *f2, VCDScope *scope2, double ps2,
-    const std::vector<double> &timestamps,
-    const std::string &scope_path)
-{
-    ScopeResult result;
-    result.scope_path = scope_path;
-
-    // Build signal maps for direct signals only
-    std::map<std::string, VCDSignal *> map1, map2;
-    for (auto *sig : scope1->signals) map1[sig->reference] = sig;
-    for (auto *sig : scope2->signals) map2[sig->reference] = sig;
-
-    for (auto &[name, sig] : map1) {
-        if (map2.count(name))
-            result.matched_signals.push_back(name);
-        else
-            result.only_in_1.push_back(name);
-    }
-    for (auto &[name, sig] : map2) {
-        if (!map1.count(name))
-            result.only_in_2.push_back(name);
-    }
-
-    if (!result.only_in_1.empty() || !result.only_in_2.empty())
-        result.signal_set_mismatch = true;
-
-    auto strip_leading_zeros = [](const std::string &s) -> std::string {
-        size_t start = s.find_first_not_of('0');
-        if (start == std::string::npos) return "0";
-        return s.substr(start);
-    };
-
-    for (auto &name : result.matched_signals) {
-        VCDSignal *sig1 = map1[name];
-        VCDSignal *sig2 = map2[name];
-
-        bool has_diff = false;
-
-        for (double ps_time : timestamps) {
-            double t1 = ps_time / ps1;
-            double t2 = ps_time / ps2;
-
-            VCDValue *v1 = f1->get_signal_value_at(sig1->hash, t1);
-            VCDValue *v2 = f2->get_signal_value_at(sig2->hash, t2);
-
-            std::string s1 = value_to_string(v1);
-            std::string s2 = value_to_string(v2);
-
-            std::string n1 = strip_leading_zeros(s1);
-            std::string n2 = strip_leading_zeros(s2);
-
-            if (n1 == n2) {
-                result.total_match++;
-            } else {
-                result.total_diff++;
-                if (!has_diff) {
-                    has_diff = true;
-                    result.signals_with_diffs.push_back(name);
-                }
-            }
-        }
-    }
-
-    return result;
-}
-
-// ============================================================================
-// Recursive hierarchy walk
-// ============================================================================
 
 struct ScopeSummary {
     std::string scope_path;
-    std::vector<std::string> passed_signals;
-    std::vector<std::string> failed_signals;  // value diffs or missing
+    std::vector<ScopeSignalStatus> signals;
 };
 
 struct GlobalStats {
@@ -512,128 +451,278 @@ struct GlobalStats {
     std::vector<ScopeSummary> scopes_summary;  // all compared scopes, ordered by traversal
 };
 
-static void compare_scopes_recursive(
-    VCDFile *f1, VCDScope *scope1, double ps1,
-    VCDFile *f2, VCDScope *scope2, double ps2,
-    const std::vector<double> &timestamps,
-    const std::string &scope_path,
-    GlobalStats &stats,
-    bool show_flat_signals)
-{
-    // Compare signals directly in this scope
-    ScopeResult result = compare_scope_signals(
-        f1, scope1, ps1, f2, scope2, ps2, timestamps, scope_path);
+struct ValidationStats {
+    int scopes_checked = 0;
+    int scopes_failed = 0;
+    std::vector<std::string> failed_scopes;
+    std::vector<std::string> errors;
+    std::vector<ScopeSummary> scopes_summary;
+};
 
-    bool scope_failed = result.signal_set_mismatch || result.total_diff > 0;
+static std::vector<CategorizedSignal> collect_expected_signals(const HierarchyModule &mod) {
+    std::vector<CategorizedSignal> out;
+    std::set<std::string> seen;
+    auto append = [&](const std::set<std::string> &names, SignalCategory category) {
+        for (const auto &name : names) {
+            if (seen.insert(name).second)
+                out.push_back({name, category});
+        }
+    };
+    append(mod.inputs, SignalCategory::Input);
+    append(mod.outputs, SignalCategory::Output);
+    append(mod.signals, SignalCategory::Signal);
+    append(mod.flops, SignalCategory::Flop);
+    append(mod.params, SignalCategory::Param);
+    return out;
+}
 
-    // Print this scope's header
-    std::printf("\n");
-    if (scope_failed)
-        std::printf("  \033[1;31m[FAIL]\033[0m  %s\n", scope_path.c_str());
-    else if (!result.matched_signals.empty())
-        std::printf("  \033[1;32m[PASS]\033[0m  %s\n", scope_path.c_str());
-    else
-        std::printf("  [----]  %s  (no signals)\n", scope_path.c_str());
-
-    // Report signal set mismatches
-    if (!result.only_in_1.empty()) {
-        std::fprintf(stderr, "\033[31m    Signals only in file 1 (%zu):\033[0m\n", result.only_in_1.size());
-        for (auto &n : result.only_in_1) std::fprintf(stderr, "\033[31m      %s\033[0m\n", n.c_str());
+static std::map<std::string, std::vector<VCDSignal *>> build_signal_map(
+    VCDScope *scope, const std::string &scope_path, const char *file_label) {
+    std::map<std::string, std::vector<VCDSignal *>> out;
+    for (auto *sig : scope->signals) {
+        (void)scope_path;
+        (void)file_label;
+        out[sig->reference].push_back(sig);
     }
-    if (!result.only_in_2.empty()) {
-        std::fprintf(stderr, "\033[31m    Signals only in file 2 (%zu):\033[0m\n", result.only_in_2.size());
-        for (auto &n : result.only_in_2) std::fprintf(stderr, "\033[31m      %s\033[0m\n", n.c_str());
-    }
+    return out;
+}
 
-    // Report diffing signals with detail; omit passing signals when hierarchy
-    // summary will show them categorized.
-    for (auto &name : result.matched_signals) {
-        bool has_diff = false;
-        for (auto &d : result.signals_with_diffs)
-            if (d == name) { has_diff = true; break; }
-
-        if (has_diff) {
-            // Reprint detail (redo comparison for printing; avoids storing all diffs)
-            VCDSignal *sig1 = nullptr, *sig2 = nullptr;
-            for (auto *s : scope1->signals) if (s->reference == name) { sig1 = s; break; }
-            for (auto *s : scope2->signals) if (s->reference == name) { sig2 = s; break; }
-
-            std::printf("    \033[31mFAIL\033[0m  %s\n", name.c_str());
-            int shown = 0;
-            for (double ps_time : timestamps) {
-                VCDValue *v1 = f1->get_signal_value_at(sig1->hash, ps_time / ps1);
-                VCDValue *v2 = f2->get_signal_value_at(sig2->hash, ps_time / ps2);
-                std::string s1 = value_to_string(v1);
-                std::string s2 = value_to_string(v2);
-                auto strip = [](const std::string &s) {
-                    size_t p = s.find_first_not_of('0');
-                    return p == std::string::npos ? "0" : s.substr(p);
-                };
-                if (strip(s1) != strip(s2)) {
-                    if (++shown <= 10)
-                        std::printf("      @%.0f ps: f1=%-20s  f2=%s\n",
-                                    ps_time, s1.c_str(), s2.c_str());
-                    else if (shown == 11)
-                        std::printf("      ... (further diffs suppressed)\n");
-                }
-            }
-        } else if (show_flat_signals) {
-            std::printf("    \033[32mpass\033[0m  %s\n", name.c_str());
+static std::map<std::string, VCDScope *> build_child_scope_map(VCDScope *scope, const std::string &scope_path,
+                                                               const char *file_label) {
+    std::map<std::string, VCDScope *> out;
+    for (auto *child : scope->children) {
+        auto [it, inserted] = out.emplace(child->name, child);
+        if (!inserted) {
+            std::fprintf(stderr,
+                         "Error: duplicate child scope '%s' in %s scope '%s'\n",
+                         child->name.c_str(), file_label, scope_path.c_str());
+            std::exit(1);
         }
     }
+    return out;
+}
 
-    // Update global stats
-    stats.total_match += result.total_match;
-    stats.total_diff  += result.total_diff;
-    if (!result.matched_signals.empty() || result.signal_set_mismatch) {
-        stats.scopes_compared++;
+static std::string normalize_for_compare(const std::string &s) {
+    size_t start = s.find_first_not_of('0');
+    if (start == std::string::npos) return "0";
+    return s.substr(start);
+}
 
-        ScopeSummary summary;
-        summary.scope_path = scope_path;
+static bool compare_signal_values(VCDFile *f1, VCDSignal *sig1, double ps1,
+                                  VCDFile *f2, VCDSignal *sig2, double ps2,
+                                  const std::vector<double> &timestamps,
+                                  int &match_count, int &diff_count,
+                                  std::vector<std::string> *detail_lines = nullptr) {
+    bool has_diff = false;
+    int shown = 0;
+    for (double ps_time : timestamps) {
+        VCDValue *v1 = f1->get_signal_value_at(sig1->hash, ps_time / ps1);
+        VCDValue *v2 = f2->get_signal_value_at(sig2->hash, ps_time / ps2);
 
-        // Passed = matched and no diffs
-        for (auto &n : result.matched_signals) {
-            bool failed = false;
-            for (auto &d : result.signals_with_diffs)
-                if (d == n) { failed = true; break; }
-            if (!failed) summary.passed_signals.push_back(n);
-        }
-        for (auto &n : result.only_in_1) summary.failed_signals.push_back("(missing in f2) " + n);
-        for (auto &n : result.only_in_2) summary.failed_signals.push_back("(missing in f1) " + n);
-        for (auto &n : result.signals_with_diffs) summary.failed_signals.push_back(n);
-        stats.scopes_summary.push_back(std::move(summary));
+        std::string s1 = value_to_string(v1);
+        std::string s2 = value_to_string(v2);
 
-        if (scope_failed) {
-            stats.scopes_failed++;
-            stats.failed_scopes.push_back(scope_path);
-        }
-    }
-
-    // Recurse into children: match by name
-    std::map<std::string, VCDScope *> children2;
-    for (auto *child : scope2->children) children2[child->name] = child;
-
-    for (auto *child1 : scope1->children) {
-        auto it = children2.find(child1->name);
-        if (it == children2.end()) {
-            std::printf("\n  \033[31m[MISS]\033[0m  %s.%s  (scope exists in file 1 only)\n",
-                        scope_path.c_str(), child1->name.c_str());
-            stats.scopes_failed++;
-            stats.failed_scopes.push_back(scope_path + "." + child1->name);
+        if (normalize_for_compare(s1) == normalize_for_compare(s2)) {
+            match_count++;
             continue;
         }
-        std::string child_path = scope_path + "." + child1->name;
-        compare_scopes_recursive(f1, child1, ps1, f2, it->second, ps2,
-                                 timestamps, child_path, stats, show_flat_signals);
-        children2.erase(it);
+
+        diff_count++;
+        has_diff = true;
+        if (detail_lines && shown < 10) {
+            std::ostringstream line;
+            line << "      @" << ps_time << " ps: f1=" << s1 << "  f2=" << s2;
+            detail_lines->push_back(line.str());
+            shown++;
+        } else if (detail_lines && shown == 10) {
+            detail_lines->push_back("      ... (further diffs suppressed)");
+            shown++;
+        }
+    }
+    return !has_diff;
+}
+
+static bool validate_hierarchy_recursive(
+    VCDScope *scope1, const std::string &scope_path1,
+    VCDScope *scope2, const std::string &scope_path2,
+    const std::string &label1,
+    const std::string &label2,
+    const HierarchyModule &hier,
+    const std::string &display_scope_path,
+    ValidationStats &stats)
+{
+    ScopeSummary summary;
+    summary.scope_path = display_scope_path;
+    bool recorded_scope_failure = false;
+    auto mark_scope_failed = [&](const std::string &msg) {
+        stats.errors.push_back(msg);
+        if (!recorded_scope_failure) {
+            stats.scopes_failed++;
+            stats.failed_scopes.push_back(display_scope_path);
+            recorded_scope_failure = true;
+        }
+    };
+
+    auto expected = collect_expected_signals(hier);
+    auto signals1 = build_signal_map(scope1, scope_path1, label1.c_str());
+    auto signals2 = build_signal_map(scope2, scope_path2, label2.c_str());
+
+    for (const auto &entry : expected) {
+        auto it1 = signals1.find(entry.name);
+        auto it2 = signals2.find(entry.name);
+        if (it1 == signals1.end()) {
+            summary.signals.push_back({"(missing in " + label1 + ") " + entry.name, false, entry.category});
+            mark_scope_failed(display_scope_path + ": missing in " + label1 + ": " + entry.name);
+        }
+        if (it2 == signals2.end()) {
+            summary.signals.push_back({"(missing in " + label2 + ") " + entry.name, false, entry.category});
+            mark_scope_failed(display_scope_path + ": missing in " + label2 + ": " + entry.name);
+        }
+        if (it1 != signals1.end() && it2 != signals2.end())
+            summary.signals.push_back({entry.name, true, entry.category});
     }
 
-    // Any children left in file 2 have no counterpart in file 1
-    for (auto &[name, child2] : children2) {
-        std::printf("\n  \033[31m[MISS]\033[0m  %s.%s  (scope exists in file 2 only)\n",
-                    scope_path.c_str(), name.c_str());
+    for (const auto &[name, _] : signals1) {
+        if (get_category(&hier, name) == SignalCategory::Unknown) {
+            summary.signals.push_back({"(extra in " + label1 + ") " + name, false, SignalCategory::Unknown});
+            mark_scope_failed(display_scope_path + ": extra in " + label1 + ": " + name);
+        }
+    }
+    for (const auto &[name, _] : signals2) {
+        if (get_category(&hier, name) == SignalCategory::Unknown) {
+            summary.signals.push_back({"(extra in " + label2 + ") " + name, false, SignalCategory::Unknown});
+            mark_scope_failed(display_scope_path + ": extra in " + label2 + ": " + name);
+        }
+    }
+
+    if (!summary.signals.empty())
+        stats.scopes_checked++;
+    stats.scopes_summary.push_back(std::move(summary));
+
+    auto children1 = build_child_scope_map(scope1, scope_path1, label1.c_str());
+    auto children2 = build_child_scope_map(scope2, scope_path2, label2.c_str());
+    std::set<std::string> expected_children;
+    for (const auto &sub : hier.submodules) {
+        expected_children.insert(sub.instance_name);
+
+        auto it1 = children1.find(sub.instance_name);
+        auto it2 = children2.find(sub.instance_name);
+        std::string child_display = display_scope_path + "." + sub.instance_name;
+        std::string child_path1 = scope_path1 + "." + sub.instance_name;
+        std::string child_path2 = scope_path2 + "." + sub.instance_name;
+
+        if (it1 == children1.end()) {
+            stats.errors.push_back(child_display + ": scope missing in " + label1);
+            stats.scopes_failed++;
+            stats.failed_scopes.push_back(child_display);
+            return false;
+        }
+        if (it2 == children2.end()) {
+            stats.errors.push_back(child_display + ": scope missing in " + label2);
+            stats.scopes_failed++;
+            stats.failed_scopes.push_back(child_display);
+            return false;
+        }
+        if (it1 == children1.end() || it2 == children2.end())
+            continue;
+
+        if (!validate_hierarchy_recursive(it1->second, child_path1,
+                                          it2->second, child_path2,
+                                          label1, label2,
+                                          sub, child_display, stats)) {
+            return false;
+        }
+    }
+
+    for (const auto &[name, _] : children1) {
+        if (!expected_children.count(name)) {
+            stats.errors.push_back(display_scope_path + "." + name + ": extra scope in " + label1);
+            stats.scopes_failed++;
+            stats.failed_scopes.push_back(display_scope_path + "." + name);
+            return false;
+        }
+    }
+    for (const auto &[name, _] : children2) {
+        if (!expected_children.count(name)) {
+            stats.errors.push_back(display_scope_path + "." + name + ": extra scope in " + label2);
+            stats.scopes_failed++;
+            stats.failed_scopes.push_back(display_scope_path + "." + name);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void compare_hierarchy_recursive(
+    VCDFile *f1, VCDScope *scope1, double ps1, const std::string &scope_path1,
+    VCDFile *f2, VCDScope *scope2, double ps2, const std::string &scope_path2,
+    const std::string &label1,
+    const std::string &label2,
+    const HierarchyModule &hier,
+    const std::vector<double> &timestamps,
+    const std::string &display_scope_path,
+    GlobalStats &stats)
+{
+    ScopeSummary summary;
+    summary.scope_path = display_scope_path;
+
+    auto expected = collect_expected_signals(hier);
+    auto signals1 = build_signal_map(scope1, scope_path1, label1.c_str());
+    auto signals2 = build_signal_map(scope2, scope_path2, label2.c_str());
+    bool scope_failed = false;
+
+    std::printf("\n");
+
+    for (const auto &entry : expected) {
+        auto it1 = signals1.find(entry.name);
+        auto it2 = signals2.find(entry.name);
+        if (it1 == signals1.end() || it2 == signals2.end()) {
+            summary.signals.push_back({"(validation bug) missing " + entry.name, false, entry.category});
+            scope_failed = true;
+            continue;
+        }
+
+        std::vector<std::string> detail_lines;
+        int signal_match = 0;
+        int signal_diff = 0;
+        bool passed = compare_signal_values(f1, it1->second.front(), ps1,
+                                            f2, it2->second.front(), ps2,
+                                            timestamps, signal_match, signal_diff, &detail_lines);
+        stats.total_match += signal_match;
+        stats.total_diff  += signal_diff;
+        summary.signals.push_back({entry.name, passed, entry.category});
+        if (!passed) {
+            scope_failed = true;
+            std::printf("    \033[31mFAIL\033[0m  %s\n", entry.name.c_str());
+            for (const auto &line : detail_lines)
+                std::printf("%s\n", line.c_str());
+        }
+    }
+
+    if (scope_failed)
+        std::printf("  \033[1;31m[FAIL]\033[0m  %s\n", display_scope_path.c_str());
+    else
+        std::printf("  \033[1;32m[PASS]\033[0m  %s\n", display_scope_path.c_str());
+
+    if (!summary.signals.empty())
+        stats.scopes_compared++;
+    stats.scopes_summary.push_back(std::move(summary));
+
+    if (scope_failed) {
         stats.scopes_failed++;
-        stats.failed_scopes.push_back(scope_path + "." + name);
+        stats.failed_scopes.push_back(display_scope_path);
+    }
+
+    auto children1 = build_child_scope_map(scope1, scope_path1, label1.c_str());
+    auto children2 = build_child_scope_map(scope2, scope_path2, label2.c_str());
+    for (const auto &sub : hier.submodules) {
+        auto it1 = children1.find(sub.instance_name);
+        auto it2 = children2.find(sub.instance_name);
+        compare_hierarchy_recursive(f1, it1->second, ps1, scope_path1 + "." + sub.instance_name,
+                                    f2, it2->second, ps2, scope_path2 + "." + sub.instance_name,
+                                    label1, label2,
+                                    sub, timestamps, display_scope_path + "." + sub.instance_name, stats);
     }
 }
 
@@ -658,25 +747,32 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (positional.size() != 2) {
+    if (positional.size() != 2 || hierarchy_path.empty()) {
         std::fprintf(stderr,
-            "Usage: %s [--hierarchy <file>] <file1.vcd>:<scope1> <file2.vcd>:<scope2>\n"
+            "Usage: %s --hierarchy <file> <label1>=<file1.vcd>:<scope1> <label2>=<file2.vcd>:<scope2>\n"
             "\n"
             "  --hierarchy <file>   Path to hierarchy.json produced by the compiler.\n"
-            "                       When provided, the summary groups signals by\n"
-            "                       category: Inputs, Outputs, Signals, Flops, Params.\n"
+            "                       The hierarchy is mandatory and defines the exact\n"
+            "                       scopes and signals that must appear in both VCDs.\n"
             "\n"
             "  scope is the dot-separated hierarchy path to the root module,\n"
             "  e.g. cordic_tb.dut or TOP.cordic\n"
             "\n"
-            "  The tool walks the scope hierarchy recursively, comparing signals\n"
-            "  at each level and reporting per module.\n",
+            "  The tool walks the hierarchy JSON recursively, requiring an exact\n"
+            "  match: every hierarchy signal must exist in both VCDs, and VCDs\n"
+            "  may not contain extra signals or extra scopes under the root.\n",
             argv[0]);
         return 1;
     }
 
-    auto [path1, scope_path1] = parse_arg(positional[0]);
-    auto [path2, scope_path2] = parse_arg(positional[1]);
+    auto input1 = parse_arg(positional[0]);
+    auto input2 = parse_arg(positional[1]);
+    auto &label1 = input1.label;
+    auto &path1 = input1.path;
+    auto &scope_path1 = input1.scope_path;
+    auto &label2 = input2.label;
+    auto &path2 = input2.path;
+    auto &scope_path2 = input2.scope_path;
 
     VCDFileParser parser1;
     VCDFile *f1 = parser1.parse_file(path1);
@@ -711,31 +807,52 @@ int main(int argc, char *argv[]) {
     double ps1 = f1->time_resolution * unit_to_ps(f1->time_units);
     double ps2 = f2->time_resolution * unit_to_ps(f2->time_units);
 
-    std::printf("File 1: %s  scope: %s  (%.0f ps/tick)\n",
-                path1.c_str(), scope_path1.c_str(), ps1);
-    std::printf("File 2: %s  scope: %s  (%.0f ps/tick)\n",
-                path2.c_str(), scope_path2.c_str(), ps2);
+    std::printf("%s: %s  scope: %s  (%.0f ps/tick)\n",
+                label1.c_str(), path1.c_str(), scope_path1.c_str(), ps1);
+    std::printf("%s: %s  scope: %s  (%.0f ps/tick)\n",
+                label2.c_str(), path2.c_str(), scope_path2.c_str(), ps2);
 
     // Load hierarchy before comparison so a bad path fails immediately.
     ScopeMap scope_map;
     std::unique_ptr<HierarchyModule> hier_root;
-    if (!hierarchy_path.empty()) {
-        try {
-            hier_root = std::make_unique<HierarchyModule>(load_hierarchy(hierarchy_path));
-            build_scope_map(*hier_root, scope_path1, scope_map);
-        } catch (const std::exception &e) {
-            std::fprintf(stderr, "\033[1;31mError:\033[0m could not load hierarchy file: %s\n", e.what());
-            return 1;
+    try {
+        hier_root = std::make_unique<HierarchyModule>(load_hierarchy(hierarchy_path));
+        build_scope_map(*hier_root, scope_path1, scope_map);
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "\033[1;31mError:\033[0m could not load hierarchy file: %s\n", e.what());
+        return 1;
+    }
+
+    ValidationStats validation;
+    bool hierarchy_ok = validate_hierarchy_recursive(scope1, scope_path1,
+                                                     scope2, scope_path2,
+                                                     label1, label2,
+                                                     *hier_root, scope_path1, validation);
+
+    if (!hierarchy_ok) {
+        std::printf("\n========================================\n");
+        std::printf("Scopes checked:    %d\n", validation.scopes_checked);
+        std::printf("Value comparisons: 0  (matching: 0  different: 0)\n");
+        if (!validation.errors.empty()) {
+            std::printf("Validation errors:\n");
+            for (const auto &err : validation.errors)
+                std::printf("  %s\n", err.c_str());
         }
+        std::printf("\n  \033[1;31m========== %d SCOPE(S) FAILED ==========\033[0m\n\n",
+                    validation.scopes_failed);
+        delete f1;
+        delete f2;
+        return 1;
     }
 
     auto timestamps = merge_timestamps(f1, ps1, f2, ps2);
     std::printf("Merged timestamp count: %zu\n", timestamps.size());
 
     GlobalStats stats;
-    compare_scopes_recursive(f1, scope1, ps1, f2, scope2, ps2,
-                             timestamps, scope_path1, stats,
-                             /*show_flat_signals=*/scope_map.empty());
+    compare_hierarchy_recursive(f1, scope1, ps1, scope_path1,
+                                f2, scope2, ps2, scope_path2,
+                                label1, label2,
+                                *hier_root, timestamps, scope_path1, stats);
 
     std::printf("\n========================================\n");
     std::printf("Scopes compared:   %d\n", stats.scopes_compared);
@@ -743,78 +860,45 @@ int main(int argc, char *argv[]) {
                 stats.total_match + stats.total_diff,
                 stats.total_match, stats.total_diff);
 
-    // When hierarchy is provided, check that every VCD signal is known to it.
-    // Collect all violations first so we report them all at once.
-    if (!scope_map.empty()) {
-        bool any_unknown = false;
-        for (auto &s : stats.scopes_summary) {
-            const HierarchyModule *mod = nullptr;
-            auto it = scope_map.find(s.scope_path);
-            if (it != scope_map.end()) mod = it->second;
-
-            auto check = [&](const std::string &display) {
-                std::string raw = strip_missing_prefix(display);
-                if (get_category(mod, raw) == SignalCategory::Unknown) {
-                    std::fprintf(stderr,
-                        "\033[1;31mError:\033[0m signal '%s' in scope '%s' "
-                        "not found in hierarchy\n",
-                        raw.c_str(), s.scope_path.c_str());
-                    any_unknown = true;
-                }
-            };
-            for (auto &sig : s.passed_signals) check(sig);
-            for (auto &sig : s.failed_signals) check(sig);
-        }
-        if (any_unknown) {
-            std::fprintf(stderr,
-                "\033[1;31mAbort:\033[0m VCD contains signals absent from the "
-                "hierarchy file. Pass the correct --hierarchy file.\n");
-            return 1;
-        }
-    }
-
-    // Summary: signals by scope, grouped by category when hierarchy is available
+    // Summary: signals by scope, grouped by hierarchy category
     if (!stats.scopes_summary.empty()) {
         std::printf("\nSignals by scope:\n");
         for (auto &s : stats.scopes_summary) {
             std::printf("  %s\n", s.scope_path.c_str());
 
-            if (!scope_map.empty()) {
-                // Group signals by category
-                struct SigEntry { std::string display; bool passed; };
-                std::map<SignalCategory, std::vector<SigEntry>> by_cat;
+            struct SigEntry { std::string display; bool passed; };
+            std::map<SignalCategory, std::vector<SigEntry>> by_cat;
+            std::vector<SigEntry> unknown;
 
-                const HierarchyModule *mod = scope_map.at(s.scope_path);
+            for (auto &sig : s.signals) {
+                if (sig.category == SignalCategory::Unknown)
+                    unknown.push_back({sig.display, sig.passed});
+                else
+                    by_cat[sig.category].push_back({sig.display, sig.passed});
+            }
 
-                for (auto &sig : s.passed_signals)
-                    by_cat[get_category(mod, sig)].push_back({sig, true});
-                for (auto &sig : s.failed_signals)
-                    by_cat[get_category(mod, strip_missing_prefix(sig))].push_back({sig, false});
-
-                const SignalCategory order[] = {
-                    SignalCategory::Input,
-                    SignalCategory::Output,
-                    SignalCategory::Signal,
-                    SignalCategory::Flop,
-                    SignalCategory::Param,
-                };
-                for (auto cat : order) {
-                    auto cit = by_cat.find(cat);
-                    if (cit == by_cat.end()) continue;
-                    std::printf("    %s:\n", category_label(cat));
-                    for (auto &e : cit->second) {
-                        if (e.passed)
-                            std::printf("      \033[32mpass\033[0m  %s\n", e.display.c_str());
-                        else
-                            std::printf("      \033[31mFAIL\033[0m  %s\n", e.display.c_str());
-                    }
+            const SignalCategory order[] = {
+                SignalCategory::Input,
+                SignalCategory::Output,
+                SignalCategory::Signal,
+                SignalCategory::Flop,
+                SignalCategory::Param,
+            };
+            for (auto cat : order) {
+                auto cit = by_cat.find(cat);
+                if (cit == by_cat.end()) continue;
+                std::printf("    %s:\n", category_label(cat));
+                for (auto &e : cit->second) {
+                    if (e.passed)
+                        std::printf("      \033[32mpass\033[0m  %s\n", e.display.c_str());
+                    else
+                        std::printf("      \033[31mFAIL\033[0m  %s\n", e.display.c_str());
                 }
-            } else {
-                // Flat format (no hierarchy)
-                for (auto &sig : s.passed_signals)
-                    std::printf("    \033[32mpass\033[0m  %s\n", sig.c_str());
-                for (auto &sig : s.failed_signals)
-                    std::printf("    \033[31mFAIL\033[0m  %s\n", sig.c_str());
+            }
+            if (!unknown.empty()) {
+                std::printf("    Unknown:\n");
+                for (auto &e : unknown)
+                    std::printf("      \033[31mFAIL\033[0m  %s\n", e.display.c_str());
             }
         }
     }
@@ -831,8 +915,12 @@ int main(int argc, char *argv[]) {
         std::printf("%s  %6s  %6s  %s\n",
                     std::string(max_scope, '-').c_str(), "------", "------", "--------");
         for (auto &s : stats.scopes_summary) {
-            int passed = (int)s.passed_signals.size();
-            int failed = (int)s.failed_signals.size();
+            int passed = 0;
+            int failed = 0;
+            for (const auto &sig : s.signals) {
+                if (sig.passed) passed++;
+                else failed++;
+            }
             int total  = passed + failed;
             double pct = total > 0 ? 100.0 * failed / total : 0.0;
             const char *color = failed > 0 ? "\033[31m" : "\033[32m";
@@ -842,7 +930,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (stats.scopes_failed == 0 && stats.total_diff == 0)
+    if (stats.scopes_failed == 0 && stats.total_diff == 0 && hierarchy_ok)
         std::printf("\n  \033[1;32m========== ALL SCOPES PASS ==========\033[0m\n\n");
     else
         std::printf("\n  \033[1;31m========== %d SCOPE(S) FAILED ==========\033[0m\n\n",
@@ -850,5 +938,5 @@ int main(int argc, char *argv[]) {
 
     delete f1;
     delete f2;
-    return (stats.scopes_failed > 0 || stats.total_diff > 0) ? 1 : 0;
+    return (!hierarchy_ok || stats.scopes_failed > 0 || stats.total_diff > 0) ? 1 : 0;
 }

@@ -73,6 +73,28 @@ static std::vector<std::string> split_scope_path(const std::string &path) {
     return parts;
 }
 
+static std::string first_scope_component(const std::string &path) {
+    auto dot = path.find('.');
+    return dot == std::string::npos ? path : path.substr(0, dot);
+}
+
+static VCDScope *find_child_scope_by_path(VCDScope *scope, const std::string &path) {
+    auto parts = split_scope_path(path);
+    VCDScope *current = scope;
+    for (const auto &part : parts) {
+        VCDScope *found = nullptr;
+        for (auto *child : current->children) {
+            if (child->name == part) {
+                found = child;
+                break;
+            }
+        }
+        if (!found) return nullptr;
+        current = found;
+    }
+    return current;
+}
+
 // Navigate the VCD scope tree to find a scope by dot-separated path.
 // Returns nullptr if the path doesn't exist.
 static VCDScope *find_scope(VCDFile *file, const std::string &path) {
@@ -580,7 +602,7 @@ static bool validate_hierarchy_recursive(
     auto expected = collect_expected_signals(hier);
     std::set<std::string> expected_children;
     for (const auto &sub : hier.submodules)
-        expected_children.insert(sub.instance_name);
+        expected_children.insert(first_scope_component(sub.instance_name));
     auto signals1 = build_signal_map(scope1, expected_children, scope_path1, label1.c_str());
     auto signals2 = build_signal_map(scope2, expected_children, scope_path2, label2.c_str());
 
@@ -616,43 +638,34 @@ static bool validate_hierarchy_recursive(
         stats.scopes_checked++;
     stats.scopes_summary.push_back(std::move(summary));
 
-    auto children1 = build_child_scope_map(scope1, scope_path1, label1.c_str());
-    auto children2 = build_child_scope_map(scope2, scope_path2, label2.c_str());
     for (const auto &sub : hier.submodules) {
-        auto it1 = children1.find(sub.instance_name);
-        auto it2 = children2.find(sub.instance_name);
         std::string child_display = display_scope_path + "." + sub.instance_name;
         std::string child_path1 = scope_path1 + "." + sub.instance_name;
         std::string child_path2 = scope_path2 + "." + sub.instance_name;
+        VCDScope *child1 = find_child_scope_by_path(scope1, sub.instance_name);
+        VCDScope *child2 = find_child_scope_by_path(scope2, sub.instance_name);
 
-        if (it1 == children1.end()) {
+        if (!child1) {
             stats.errors.push_back(child_display + ": scope missing in " + label1);
             stats.scopes_failed++;
             stats.failed_scopes.push_back(child_display);
             return false;
         }
-        if (it2 == children2.end()) {
+        if (!child2) {
             stats.errors.push_back(child_display + ": scope missing in " + label2);
             stats.scopes_failed++;
             stats.failed_scopes.push_back(child_display);
             return false;
         }
-        if (it1 == children1.end() || it2 == children2.end())
+        if (!child1 || !child2)
             continue;
 
-        if (!validate_hierarchy_recursive(it1->second, child_path1,
-                                          it2->second, child_path2,
+        if (!validate_hierarchy_recursive(child1, child_path1,
+                                          child2, child_path2,
                                           label1, label2,
                                           sub, child_display, stats)) {
             return false;
         }
-    }
-
-    for (const auto &[name, _] : children1) {
-        (void)name;
-    }
-    for (const auto &[name, _] : children2) {
-        (void)name;
     }
 
     return true;
@@ -674,7 +687,7 @@ static void compare_hierarchy_recursive(
     auto expected = collect_expected_signals(hier);
     std::set<std::string> expected_children;
     for (const auto &sub : hier.submodules)
-        expected_children.insert(sub.instance_name);
+        expected_children.insert(first_scope_component(sub.instance_name));
     auto signals1 = build_signal_map(scope1, expected_children, scope_path1, label1.c_str());
     auto signals2 = build_signal_map(scope2, expected_children, scope_path2, label2.c_str());
     bool scope_failed = false;
@@ -721,13 +734,11 @@ static void compare_hierarchy_recursive(
         stats.failed_scopes.push_back(display_scope_path);
     }
 
-    auto children1 = build_child_scope_map(scope1, scope_path1, label1.c_str());
-    auto children2 = build_child_scope_map(scope2, scope_path2, label2.c_str());
     for (const auto &sub : hier.submodules) {
-        auto it1 = children1.find(sub.instance_name);
-        auto it2 = children2.find(sub.instance_name);
-        compare_hierarchy_recursive(f1, it1->second, ps1, scope_path1 + "." + sub.instance_name,
-                                    f2, it2->second, ps2, scope_path2 + "." + sub.instance_name,
+        auto *child1 = find_child_scope_by_path(scope1, sub.instance_name);
+        auto *child2 = find_child_scope_by_path(scope2, sub.instance_name);
+        compare_hierarchy_recursive(f1, child1, ps1, scope_path1 + "." + sub.instance_name,
+                                    f2, child2, ps2, scope_path2 + "." + sub.instance_name,
                                     label1, label2,
                                     sub, timestamps, display_scope_path + "." + sub.instance_name, stats);
     }

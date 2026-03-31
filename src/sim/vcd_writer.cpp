@@ -6,6 +6,29 @@
 
 namespace custom_hdl {
 
+namespace {
+
+vcd_tracer::module& getOrCreateNestedScope(
+    vcd_tracer::module& root,
+    std::map<std::string, std::unique_ptr<vcd_tracer::module>>& cache,
+    const std::string& path) {
+    auto it = cache.find(path);
+    if (it != cache.end()) return *it->second;
+
+    auto dot = path.rfind('.');
+    vcd_tracer::module* parent = &root;
+    std::string last = path;
+    if (dot != std::string::npos) {
+        parent = &getOrCreateNestedScope(root, cache, path.substr(0, dot));
+        last = path.substr(dot + 1);
+    }
+
+    auto [inserted_it, _] = cache.emplace(path, std::make_unique<vcd_tracer::module>(*parent, last));
+    return *inserted_it->second;
+}
+
+}  // namespace
+
 // ============================================================================
 // Bit-width helpers
 // ============================================================================
@@ -82,7 +105,7 @@ void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scop
     // Each entry holds the generate scope VCD module plus lazily-created
     // signals/ and flops/ sub-modules (mirroring the top-level hierarchy).
     struct GenScopeEntry {
-        std::unique_ptr<vcd_tracer::module> scope;
+        vcd_tracer::module* scope = nullptr;
         std::unique_ptr<vcd_tracer::module> signals_mod;
         std::unique_ptr<vcd_tracer::module> flops_mod;
 
@@ -95,23 +118,18 @@ void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scop
             return *flops_mod;
         }
     };
+    std::map<std::string, std::unique_ptr<vcd_tracer::module>> nested_scopes;
+    std::function<vcd_tracer::module&(const std::string&)> getOrCreateScope;
+    getOrCreateScope = [&](const std::string& path) -> vcd_tracer::module& {
+        return getOrCreateNestedScope(scope, nested_scopes, path);
+    };
     std::map<std::string, GenScopeEntry> gen_scopes;
     std::function<GenScopeEntry&(const std::string&)> getGenScope;
     getGenScope = [&](const std::string& path) -> GenScopeEntry& {
         auto it = gen_scopes.find(path);
         if (it != gen_scopes.end()) return it->second;
-        auto dot = path.rfind('.');
-        vcd_tracer::module* parent;
-        std::string last;
-        if (dot == std::string::npos) {
-            parent = &scope;
-            last   = path;
-        } else {
-            parent = getGenScope(path.substr(0, dot)).scope.get();
-            last   = path.substr(dot + 1);
-        }
         GenScopeEntry entry;
-        entry.scope = std::make_unique<vcd_tracer::module>(*parent, last);
+        entry.scope = &getOrCreateScope(path);
         return gen_scopes.emplace(path, std::move(entry)).first->second;
     };
 
@@ -164,7 +182,10 @@ void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scop
 
     for (const auto& sub : mod.hierarchyInstantiation) {
         const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
-        vcd_tracer::module childScope(scope, child_name);
+        auto dot = child_name.rfind('.');
+        vcd_tracer::module childScope(
+            dot == std::string::npos ? scope : getOrCreateScope(child_name.substr(0, dot)),
+            dot == std::string::npos ? child_name : child_name.substr(dot + 1));
         NameMap composed;
         for (const auto& [port, parent_sig] : sub.asyncPortConnections) {
             auto it = translation.find(parent_sig);
@@ -197,20 +218,7 @@ void VcdWriter::setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
     std::map<std::string, std::unique_ptr<vcd_tracer::module>> gen_scopes;
     std::function<vcd_tracer::module&(const std::string&)> getGenScope;
     getGenScope = [&](const std::string& path) -> vcd_tracer::module& {
-        auto it = gen_scopes.find(path);
-        if (it != gen_scopes.end()) return *it->second;
-        auto dot = path.rfind('.');
-        vcd_tracer::module* parent;
-        std::string last;
-        if (dot == std::string::npos) {
-            parent = &scope;
-            last   = path;
-        } else {
-            parent = &getGenScope(path.substr(0, dot));
-            last   = path.substr(dot + 1);
-        }
-        gen_scopes.emplace(path, std::make_unique<vcd_tracer::module>(*parent, last));
-        return *gen_scopes[path];
+        return getOrCreateNestedScope(scope, gen_scopes, path);
     };
 
     for (const auto& [name, sig] : mod.inputs) {
@@ -262,7 +270,10 @@ void VcdWriter::setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
 
     for (const auto& sub : mod.hierarchyInstantiation) {
         const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
-        vcd_tracer::module childScope(scope, child_name);
+        auto dot = child_name.rfind('.');
+        vcd_tracer::module childScope(
+            dot == std::string::npos ? scope : getGenScope(child_name.substr(0, dot)),
+            dot == std::string::npos ? child_name : child_name.substr(dot + 1));
         NameMap composed;
         for (const auto& [port, parent_sig] : sub.asyncPortConnections) {
             auto it = translation.find(parent_sig);

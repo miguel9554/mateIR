@@ -71,11 +71,22 @@ struct ResolutionContext {
     const EnumMemberMap&  enumMemberValues;
     // Package registry (for pkg::type and pkg::MEMBER references)
     const PackageRegistry& pkgRegistry;
+    // Module lookup and global imports (needed for hierarchy instantiation in generate)
+    const ModuleLookup& moduleLookup;
+    const std::vector<ImportSpec>& globalImports;
 };
 
 // ============================================================================
 // Resolution functions
 // ============================================================================
+
+// Forward declaration (defined after the anonymous namespace)
+static ResolvedModule resolveModule(const UnresolvedModule& unresolved,
+                                    const ParameterContext& topCtx,
+                                    const ModuleLookup& moduleLookup,
+                                    const slang::SourceManager& sourceManager,
+                                    const PackageRegistry& pkgRegistry,
+                                    const std::vector<ImportSpec>& globalImports);
 
 namespace {
 
@@ -1874,7 +1885,8 @@ void resolveForLoopStatementInPlace(
             ctx.sm, ctx.is_sequential, ctx.triggers,
             ctx.combDrivers,
             ctx.instance_path, ctx.local_signals, ctx.local_flop_names,
-            ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry
+            ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
+            ctx.moduleLookup, ctx.globalImports
         };
         resolveStatementInPlace(forLoop->statement.get(), iterBodyCtx);
         ctx.combDrivers = iterBodyCtx.combDrivers;
@@ -2245,14 +2257,67 @@ void resolveNamedPortConnection(
                 "Output port '" + portName + "' requires a connection expression");
         }
         auto* expr = extractPortExpr(*named.expr);
-        if (expr->kind != SyntaxKind::IdentifierName) {
+        std::string connectName;
+        if (expr->kind == SyntaxKind::IdentifierName) {
+            connectName = std::string(expr->as<IdentifierNameSyntax>().identifier.valueText());
+        } else if (expr->kind == SyntaxKind::IdentifierSelectName) {
+            auto& isel = expr->as<IdentifierSelectNameSyntax>();
+            std::string baseName(isel.identifier.valueText());
+            if (isel.selectors.size() != 1 || !isel.selectors[0]->selector ||
+                    isel.selectors[0]->selector->kind != SyntaxKind::BitSelect)
+                throw CompilerError(
+                    "Only single-dimension bit-select supported for output port connections",
+                    resolveSourceLoc(*expr, ctx.sm));
+            int64_t idx = evaluateConstantExpr(
+                isel.selectors[0]->selector->as<BitSelectSyntax>().expr,
+                ctx.params, ctx.sm, *isel.selectors[0]);
+            std::string elemName = baseName + "[" + std::to_string(idx) + "]";
+            // Qualify if the element lives in the current generate scope
+            if (ctx.local_signals.count(elemName) && !ctx.instance_path.empty())
+                connectName = ctx.instance_path + "." + elemName;
+            else
+                connectName = elemName;
+
+            // If the element node exists (unpacked array element), use the normal path.
+            // Otherwise, fall through to the CONCAT_ALIGN path for packed bit-selects.
+            if (graph.hasSignal("", connectName) || graph.hasOutput("", connectName)) {
+                connectModuleOutput(graph, moduleNode, connectName, subOutputIndex.at(portName));
+                return;
+            }
+
+            // Packed bit-select on an output port or signal: drive via CONCAT_ALIGN.
+            // Each iteration contributes one CONCAT_ALIGN slice; concat_cleanup merges them.
+            {
+                DFGNode* targetNode = graph.getOutputNode("", baseName);
+                if (!targetNode) targetNode = graph.getSignalNode("", baseName);
+                if (!targetNode)
+                    throw CompilerError(
+                        "Cannot find signal '" + baseName +
+                        "' for bit-select output port connection",
+                        resolveSourceLoc(*expr, ctx.sm));
+
+                size_t oi = subOutputIndex.at(portName);
+                auto* highConst = ctx.graph.constant((int64_t)idx);
+                auto* lowConst  = ctx.graph.constant((int64_t)idx);
+                auto* alignNode = ctx.graph.concatAlign(moduleNode, highConst, lowConst);
+                alignNode->in[0] = DFGOutput(moduleNode, (int)oi);
+
+                if (!targetNode->in.empty() &&
+                        targetNode->in[0].node->op == DFGOp::CONCAT) {
+                    targetNode->in[0].node->in.push_back(alignNode);
+                } else {
+                    auto* concatNode = ctx.graph.concat({alignNode});
+                    targetNode->in = {concatNode};
+                }
+            }
+            return;
+        } else {
             throw CompilerError(
                 "Only simple identifier expressions supported for output port connections",
                 resolveSourceLoc(*expr, ctx.sm));
         }
-        std::string parentSignalName(expr->as<IdentifierNameSyntax>().identifier.valueText());
         connectModuleOutput(graph, moduleNode,
-                            parentSignalName, subOutputIndex.at(portName));
+                            connectName, subOutputIndex.at(portName));
     } else {
         throw CompilerError(
             "Port name '" + portName + "' not found in submodule inputs or outputs");
@@ -2636,7 +2701,8 @@ void resolveGenerateMemberInPlace(
                 ResolutionContext iterResCtx{
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
                     ctx.sm, false, {}, {}, childPath, ctx.local_signals, {},
-                    ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry};
+                    ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
+                    ctx.moduleLookup, ctx.globalImports};
 
                 if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
                     resolveGenerateMembersInPlace(
@@ -2647,6 +2713,60 @@ void resolveGenerateMemberInPlace(
 
                 iterCtx.values[genvarName] =
                     evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx);
+            }
+            break;
+        }
+
+        case SyntaxKind::CaseGenerate: {
+            auto& caseGen = member->as<CaseGenerateSyntax>();
+            int64_t selector = evaluateConstantExpr(caseGen.condition, ctx.params, ctx.sm, caseGen);
+
+            const MemberSyntax* selectedBlock = nullptr;
+            const MemberSyntax* defaultBlock  = nullptr;
+
+            for (const auto* item : caseGen.items) {
+                if (item->kind == SyntaxKind::DefaultCaseItem) {
+                    const auto& defItem = item->as<DefaultCaseItemSyntax>();
+                    defaultBlock = static_cast<const MemberSyntax*>(defItem.clause.get());
+                } else if (item->kind == SyntaxKind::StandardCaseItem) {
+                    if (selectedBlock) continue;  // already matched an earlier arm
+                    const auto& stdItem = item->as<StandardCaseItemSyntax>();
+                    for (size_t ei = 0; ei < stdItem.expressions.size(); ++ei) {
+                        int64_t val = evaluateConstantExpr(
+                            stdItem.expressions[ei], ctx.params, ctx.sm, stdItem);
+                        if (val == selector) {
+                            selectedBlock = static_cast<const MemberSyntax*>(stdItem.clause.get());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!selectedBlock) selectedBlock = defaultBlock;
+            if (!selectedBlock) break;  // no match, no default: zero blocks instantiated
+
+            std::string blockName;
+            if (selectedBlock->kind == SyntaxKind::GenerateBlock) {
+                auto& blk = selectedBlock->as<GenerateBlockSyntax>();
+                if (blk.beginName)
+                    blockName = std::string(blk.beginName->name.valueText());
+            }
+
+            if (!blockName.empty()) {
+                std::string childPath = (ctx.instance_path.empty() ? "" : ctx.instance_path + ".")
+                                        + blockName;
+                ResolutionContext childCtx = ctx;
+                childCtx.instance_path = childPath;
+                childCtx.combDrivers = {};
+
+                if (selectedBlock->kind == SyntaxKind::GenerateBlock) {
+                    resolveGenerateMembersInPlace(
+                        selectedBlock->as<GenerateBlockSyntax>().members, childCtx);
+                } else {
+                    resolveGenerateMemberInPlace(selectedBlock, childCtx);
+                }
+            } else {
+                resolveGenerateMemberInPlace(selectedBlock, ctx);
             }
             break;
         }
@@ -2676,10 +2796,55 @@ void resolveGenerateMemberInPlace(
             break;
         }
 
-        case SyntaxKind::HierarchyInstantiation:
-            throw CompilerError(
-                "Hierarchy instantiation inside generate is not yet supported",
-                resolveSourceLoc(*member, ctx.sm));
+        case SyntaxKind::HierarchyInstantiation: {
+            auto& moduleInst = member->as<HierarchyInstantiationSyntax>();
+            std::string submoduleName(moduleInst.type.valueText());
+            auto it = ctx.moduleLookup.find(submoduleName);
+            if (it == ctx.moduleLookup.end())
+                throw CompilerError(
+                    "Submodule '" + submoduleName + "' not found in module lookup",
+                    resolveSourceLoc(*member, ctx.sm));
+
+            ParameterContext instCtx;
+            if (moduleInst.parameters)
+                instCtx = parseParameterValueAssignment(*moduleInst.parameters, ctx.params);
+
+            for (const auto* inst : moduleInst.instances) {
+                std::string baseName;
+                if (inst->decl)
+                    baseName = std::string(inst->decl->name.valueText());
+
+                std::string qualifiedName = ctx.instance_path.empty()
+                    ? baseName
+                    : ctx.instance_path + "." + baseName;
+
+                auto resolvedSub = resolveModule(*it->second, instCtx,
+                                                ctx.moduleLookup, ctx.sm,
+                                                ctx.pkgRegistry, ctx.globalImports);
+
+                std::set<std::string> subInputNames, subOutputNames;
+                std::map<std::string, size_t> subOutputIndex;
+                for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
+                size_t oi = 0;
+                for (const auto& [name, out] : resolvedSub.outputs) {
+                    subOutputNames.insert(name);
+                    subOutputIndex[name] = oi++;
+                }
+                std::vector<std::string> outputPortNames;
+                for (const auto& [name, out] : resolvedSub.outputs)
+                    outputPortNames.push_back(name);
+
+                auto* moduleNode = ctx.graph.module(submoduleName, qualifiedName, outputPortNames);
+
+                for (const auto* conn : inst->connections)
+                    resolvePortConnection(conn, ctx.graph, moduleNode, resolvedSub,
+                                         subInputNames, subOutputNames, subOutputIndex, ctx);
+
+                resolvedSub.instance_name = qualifiedName;
+                ctx.thisModule->hierarchyInstantiation.push_back(std::move(resolvedSub));
+            }
+            break;
+        }
 
         case SyntaxKind::DataDeclaration:
         case SyntaxKind::NetDeclaration:
@@ -2961,7 +3126,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context
-    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues, pkgRegistry};
+    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues, pkgRegistry, moduleLookup, globalImports};
 
     for (const auto& block : unresolved.proceduralComboBlocks) {
         resolveProceduralComboInPlace(block, resCtx);

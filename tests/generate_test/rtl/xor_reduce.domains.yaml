@@ -1,0 +1,3 @@
+module_name: xor_reduce
+
+pure_combinational: true

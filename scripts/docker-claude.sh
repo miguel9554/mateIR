@@ -25,6 +25,7 @@ docker run --network=host --rm -it \
   --cap-add=SYS_PTRACE \
   --user $(id -u):$(id -g) \
   -v "$(pwd)":/workspace \
+  -e HOST_PROJECT_ROOT="$(pwd)" \
   $EXTRA_VOLUMES \
   $API_KEY_ENV \
   -e HOME=$HOME \

@@ -1,0 +1,6 @@
+module_name: multiple_continuous_assign
+
+pure_combinational: true
+
+async_domain:
+  - z

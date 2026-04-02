@@ -122,15 +122,22 @@ void ModuleInstance::buildFlopMaps() {
             if (flop.q_node) {
                 flop_q_nodes[flop.q_node] = &flop;
             }
+            CollectedFlop collected{
+                .flop = &flop,
+                .clock_name = "",
+                .reset_name = std::nullopt,
+            };
             if (!flop.clock.name.empty()) {
-                const std::string& clk = translate(flop.clock.name, translation);
-                flops_by_clock[clk].push_back(&flop);
-                async_input_names.insert(clk);
+                collected.clock_name = translate(flop.clock.name, translation);
+                async_input_names.insert(collected.clock_name);
             }
             if (flop.reset.has_value()) {
-                const std::string& rst = translate(flop.reset->name, translation);
-                flops_by_reset[rst].push_back(&flop);
-                async_input_names.insert(rst);
+                collected.reset_name = translate(flop.reset->name, translation);
+                flops_by_reset[*collected.reset_name].push_back(collected);
+                async_input_names.insert(*collected.reset_name);
+            }
+            if (!collected.clock_name.empty()) {
+                flops_by_clock[collected.clock_name].push_back(std::move(collected));
             }
         }
         for (const auto& sub : mod.hierarchyInstantiation) {
@@ -198,13 +205,14 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
 
     // Clock edges -> d->q propagation (skipped if async reset is currently asserted)
     if (auto it = flops_by_clock.find(signalName); it != flops_by_clock.end()) {
-        for (const auto* flop : it->second) {
+        for (const auto& collected : it->second) {
+            const auto* flop = collected.flop;
             if ((flop->clock.edge == POSEDGE && posedge) ||
                 (flop->clock.edge == NEGEDGE && negedge)) {
                 // Async reset has priority: skip d->q if reset is active
-                if (flop->reset.has_value()) {
+                if (flop->reset.has_value() && collected.reset_name.has_value()) {
                     int64_t rst_val = 0;
-                    if (auto rit = async_values.find(flop->reset->name); rit != async_values.end()) {
+                    if (auto rit = async_values.find(*collected.reset_name); rit != async_values.end()) {
                         rst_val = rit->second;
                     }
                     bool rst_active = (flop->reset->edge == POSEDGE && rst_val == 1) ||
@@ -220,7 +228,8 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
 
     // Reset edges -> apply reset value
     if (auto it = flops_by_reset.find(signalName); it != flops_by_reset.end()) {
-        for (const auto* flop : it->second) {
+        for (const auto& collected : it->second) {
+            const auto* flop = collected.flop;
             if ((flop->reset->edge == POSEDGE && posedge) ||
                 (flop->reset->edge == NEGEDGE && negedge)) {
                 if (flop->reset_value.has_value() && flop->q_node) {
@@ -695,7 +704,8 @@ void Simulator::run() {
     // 4. If any reset is asserted at time 0 (level check), apply it
     for (const auto& [rst_name, flops] : root_->flops_by_reset) {
         int64_t rst_val = async_prev[rst_name];
-        for (const auto* flop : flops) {
+        for (const auto& collected : flops) {
+            const auto* flop = collected.flop;
             bool asserted = (flop->reset->edge == POSEDGE && rst_val == 1) ||
                             (flop->reset->edge == NEGEDGE && rst_val == 0);
             if (asserted && flop->reset_value.has_value() && flop->q_node) {

@@ -37,6 +37,12 @@ struct AsyncEvent {
     int64_t value;
 };
 
+struct CollectedFlop {
+    const FlopInfo* flop;
+    std::string clock_name;
+    std::optional<std::string> reset_name;
+};
+
 // Runtime state for the flat (inlined) design.
 // After DFG inlining, there is a single ModuleInstance for the entire design.
 // All nodes from all submodules are in module_def.dfg (the flat top DFG).
@@ -53,8 +59,8 @@ struct ModuleInstance {
     // Flat topology and flop maps (cover all submodules after inlining)
     std::vector<const DFGNode*> topo_order;
     std::map<const DFGNode*, const FlopInfo*> flop_q_nodes;
-    std::map<std::string, std::vector<const FlopInfo*>> flops_by_clock;
-    std::map<std::string, std::vector<const FlopInfo*>> flops_by_reset;
+    std::map<std::string, std::vector<CollectedFlop>> flops_by_clock;
+    std::map<std::string, std::vector<CollectedFlop>> flops_by_reset;
     std::set<std::string> async_input_names;  // input ports used as clock/reset
 
     ModuleInstance(const std::string& name, const ResolvedModule& mod);

@@ -17,9 +17,12 @@ CUSTOM_SIM_VCD = custom=$(PROJECT_ROOT)/$(CUSTOM_SIM_VCD_RAW_FILE):$(MODULE_NAME
 VERILATOR_SIM_VCD = verilator=$(PROJECT_ROOT)/$(VERILATOR_SIM_VCD_FILE):TOP.tb.uut
 HIERARCHY_JSON = $(CUSTOM_SIM_DIR)/debug_output/$(MODULE_NAME)/hierarchy.json
 
+# Per-test optional args (from vcd-diff.args file)
+VCD_COMPARE_ARGS = $(shell cat vcd-diff.args 2>/dev/null)
+
 compare:
 	$(MAKE) -C $(PROJECT_ROOT) diagnostic-build
-	$(VCD_COMPARE) --hierarchy $(PROJECT_ROOT)/$(HIERARCHY_JSON) \
+	$(VCD_COMPARE) --hierarchy $(PROJECT_ROOT)/$(HIERARCHY_JSON) $(VCD_COMPARE_ARGS) \
 		$(CUSTOM_SIM_VCD) \
 		$(VERILATOR_SIM_VCD)
 

@@ -1,9 +1,11 @@
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <cmath>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -140,6 +142,36 @@ merge_timestamps(VCDFile *f1, double ps_per_tick1,
     for (auto t : *f1->get_timestamps()) all.insert(t * ps_per_tick1);
     for (auto t : *f2->get_timestamps()) all.insert(t * ps_per_tick2);
     return std::vector<double>(all.begin(), all.end());
+}
+
+static double parse_time_to_ps(const std::string &token) {
+    size_t unit_start = token.size();
+    while (unit_start > 0 && std::isalpha(static_cast<unsigned char>(token[unit_start - 1]))) {
+        --unit_start;
+    }
+
+    if (unit_start == 0 || unit_start == token.size()) {
+        throw std::runtime_error("bad time token '" + token + "'; expected <number><unit> like 11ns");
+    }
+
+    double value = 0.0;
+    try {
+        value = std::stod(token.substr(0, unit_start));
+    } catch (const std::exception &) {
+        throw std::runtime_error("bad numeric value in time token '" + token + "'");
+    }
+
+    const std::string unit = token.substr(unit_start);
+    double multiplier = 0.0;
+    if (unit == "s") multiplier = 1e12;
+    else if (unit == "ms") multiplier = 1e9;
+    else if (unit == "us") multiplier = 1e6;
+    else if (unit == "ns") multiplier = 1e3;
+    else if (unit == "ps") multiplier = 1.0;
+    else if (unit == "fs") multiplier = 1e-3;
+    else throw std::runtime_error("unknown time unit '" + unit + "' in token '" + token + "'");
+
+    return value * multiplier;
 }
 
 struct InputSpec {
@@ -759,6 +791,7 @@ static void compare_hierarchy_recursive(
 int main(int argc, char *argv[]) {
     // Parse arguments
     std::string hierarchy_path;
+    std::string start_time_arg;
     std::vector<const char *> positional;
 
     for (int i = 1; i < argc; ++i) {
@@ -768,6 +801,12 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             hierarchy_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--start-time") == 0) {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Error: --start-time requires a time argument\n");
+                return 1;
+            }
+            start_time_arg = argv[++i];
         } else {
             positional.push_back(argv[i]);
         }
@@ -775,11 +814,12 @@ int main(int argc, char *argv[]) {
 
     if (positional.size() != 2 || hierarchy_path.empty()) {
         std::fprintf(stderr,
-            "Usage: %s --hierarchy <file> <label1>=<file1.vcd>:<scope1> <label2>=<file2.vcd>:<scope2>\n"
+            "Usage: %s --hierarchy <file> [--start-time <time>] <label1>=<file1.vcd>:<scope1> <label2>=<file2.vcd>:<scope2>\n"
             "\n"
             "  --hierarchy <file>   Path to hierarchy.json produced by the compiler.\n"
             "                       The hierarchy is mandatory and defines the exact\n"
             "                       scopes and signals that must appear in both VCDs.\n"
+            "  --start-time <time>  Ignore merged timestamps before this time, e.g. 11ns.\n"
             "\n"
             "  scope is the dot-separated hierarchy path to the root module,\n"
             "  e.g. cordic_tb.dut or TOP.cordic\n"
@@ -832,11 +872,25 @@ int main(int argc, char *argv[]) {
 
     double ps1 = f1->time_resolution * unit_to_ps(f1->time_units);
     double ps2 = f2->time_resolution * unit_to_ps(f2->time_units);
+    double start_time_ps = 0.0;
+    if (!start_time_arg.empty()) {
+        try {
+            start_time_ps = parse_time_to_ps(start_time_arg);
+        } catch (const std::exception &e) {
+            std::fprintf(stderr, "Error: %s\n", e.what());
+            delete f1;
+            delete f2;
+            return 1;
+        }
+    }
 
     std::printf("%s: %s  scope: %s  (%.0f ps/tick)\n",
                 label1.c_str(), path1.c_str(), scope_path1.c_str(), ps1);
     std::printf("%s: %s  scope: %s  (%.0f ps/tick)\n",
                 label2.c_str(), path2.c_str(), scope_path2.c_str(), ps2);
+    if (start_time_ps > 0.0) {
+        std::printf("Compare start time: %.0f ps\n", start_time_ps);
+    }
 
     // Load hierarchy before comparison so a bad path fails immediately.
     ScopeMap scope_map;
@@ -872,6 +926,12 @@ int main(int argc, char *argv[]) {
     }
 
     auto timestamps = merge_timestamps(f1, ps1, f2, ps2);
+    if (start_time_ps > 0.0) {
+        timestamps.erase(
+            std::remove_if(timestamps.begin(), timestamps.end(),
+                           [&](double t) { return t < start_time_ps; }),
+            timestamps.end());
+    }
     std::printf("Merged timestamp count: %zu\n", timestamps.size());
 
     GlobalStats stats;

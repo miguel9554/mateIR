@@ -74,6 +74,27 @@ struct ResolutionContext {
     // Module lookup and global imports (needed for hierarchy instantiation in generate)
     const ModuleLookup& moduleLookup;
     const std::vector<ImportSpec>& globalImports;
+
+    // Current user-originated write scope. Procedural blocks use one shared origin
+    // so sequential assignments inside the same block remain legal; continuous
+    // assignments and submodule output connections use distinct origins.
+    std::string current_write_origin;
+
+    struct PartialWrite {
+        int64_t low;
+        int64_t high;
+        std::string origin;
+        std::optional<SourceLoc> loc;
+    };
+
+    struct TargetWriteState {
+        std::optional<std::string> full_origin;
+        std::optional<SourceLoc> full_loc;
+        std::vector<PartialWrite> partial_writes;
+    };
+
+    // Elaborated target key -> user-visible write state accumulated so far.
+    std::unordered_map<std::string, TargetWriteState> write_states;
 };
 
 // ============================================================================
@@ -89,6 +110,73 @@ static ResolvedModule resolveModule(const UnresolvedModule& unresolved,
                                     const std::vector<ImportSpec>& globalImports);
 
 namespace {
+
+std::string formatLocOrUnknown(const std::optional<SourceLoc>& loc) {
+    return loc ? loc->str() : std::string("<unknown>");
+}
+
+std::string canonicalTargetKey(const ResolutionContext& ctx, const std::string& targetName) {
+    if (ctx.local_signals.contains(targetName) && !ctx.instance_path.empty()) {
+        return ctx.instance_path + "." + targetName;
+    }
+    return targetName;
+}
+
+[[noreturn]] void throwWriteConflict(
+        const std::string& targetName,
+        const std::string& reason,
+        const std::optional<SourceLoc>& currentLoc,
+        const std::optional<SourceLoc>& previousLoc) {
+    std::string msg = std::format(
+        "{} for target '{}' (previous write at {}, current write at {})",
+        reason, targetName, formatLocOrUnknown(previousLoc), formatLocOrUnknown(currentLoc));
+    throw CompilerError(msg, currentLoc);
+}
+
+void recordFullWrite(ResolutionContext& ctx,
+                     const std::string& targetName,
+                     const std::optional<SourceLoc>& writeLoc,
+                     const std::string& origin) {
+    auto& state = ctx.write_states[canonicalTargetKey(ctx, targetName)];
+
+    if (state.full_origin && *state.full_origin != origin) {
+        throwWriteConflict(targetName, "Multiple drivers", writeLoc, state.full_loc);
+    }
+
+    for (const auto& partial : state.partial_writes) {
+        if (partial.origin != origin) {
+            throwWriteConflict(targetName, "Multiple drivers", writeLoc, partial.loc);
+        }
+    }
+
+    if (!state.full_origin) {
+        state.full_origin = origin;
+        state.full_loc = writeLoc;
+    }
+}
+
+void recordPartialWrite(ResolutionContext& ctx,
+                        const std::string& targetName,
+                        int64_t low,
+                        int64_t high,
+                        const std::optional<SourceLoc>& writeLoc,
+                        const std::string& origin) {
+    auto& state = ctx.write_states[canonicalTargetKey(ctx, targetName)];
+
+    if (state.full_origin && *state.full_origin != origin) {
+        throwWriteConflict(targetName, "Multiple drivers", writeLoc, state.full_loc);
+    }
+
+    for (const auto& partial : state.partial_writes) {
+        if (partial.origin == origin) continue;
+        bool overlaps = !(high < partial.low || low > partial.high);
+        if (overlaps) {
+            throwWriteConflict(targetName, "Overlapping partial writes", writeLoc, partial.loc);
+        }
+    }
+
+    state.partial_writes.push_back({low, high, origin, writeLoc});
+}
 
 // TODO should be double? or parametrized by type.
 struct IntegerVectorLiteral {
@@ -1083,6 +1171,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         ResolutionContext& ctx){
     const auto& left = assignExpr.left;
     const auto& right = assignExpr.right;
+    const auto assignLoc = resolveSourceLoc(assignExpr, ctx.sm);
 
     // Helper: is this name a flop (module-level or generate-scope)?
     auto isFlopName = [&](const std::string& name) -> bool {
@@ -1109,7 +1198,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             ctx.graph.connectSignal("", outputName, driver);
         } else {
             throw CompilerError("Cannot assign to undeclared: " + outputName,
-                                resolveSourceLoc(assignExpr, ctx.sm));
+                                assignLoc);
         }
     };
 
@@ -1185,6 +1274,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 outputName = elem.baseName;
             }
 
+            recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
             connectNode(outputName, sliceNode);
 
             if (!ctx.is_sequential) {
@@ -1339,10 +1429,13 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 targetNode = n;
             } else {
                 throw CompilerError("Cannot assign to undeclared: " + outputName,
-                                    resolveSourceLoc(assignExpr, ctx.sm));
+                                    assignLoc);
             }
         }
 
+        recordPartialWrite(ctx, outputName, std::min(rangeLow, rangeHigh),
+                           std::max(rangeLow, rangeHigh), assignLoc,
+                           ctx.current_write_origin);
         // Check if the target already has a CONCAT driver
         if (!targetNode->in.empty() && targetNode->in[0].node->op == DFGOp::CONCAT) {
             // Append to existing CONCAT
@@ -1376,6 +1469,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             outputName = baseName + indexSuffix;
         }
 
+        recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
         // Connect driver to existing output or signal node (checks local_signals first)
         connectNode(outputName, RHSexprNode);
 
@@ -1403,6 +1497,8 @@ void resolveAssignInPlace(
                                             resolveSourceLoc(*syntax, ctx.sm));
 
     ctx.is_sequential = false;
+    ctx.current_write_origin = std::format("continuous-assign:{}",
+                                           reinterpret_cast<uintptr_t>(syntax));
 
     for (const auto* assignExpr : syntax->assignments) {
         if (assignExpr->kind != SyntaxKind::AssignmentExpression) {
@@ -1886,10 +1982,12 @@ void resolveForLoopStatementInPlace(
             ctx.combDrivers,
             ctx.instance_path, ctx.local_signals, ctx.local_flop_names,
             ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
-            ctx.moduleLookup, ctx.globalImports
+            ctx.moduleLookup, ctx.globalImports,
+            ctx.current_write_origin, ctx.write_states
         };
         resolveStatementInPlace(forLoop->statement.get(), iterBodyCtx);
         ctx.combDrivers = iterBodyCtx.combDrivers;
+        ctx.write_states = iterBodyCtx.write_states;
 
         iterCtx.values[loopVar] =
             evaluateStepExpr(forLoop->steps[0], loopVar, iterCtx);
@@ -1947,6 +2045,8 @@ void resolveProceduralComboInPlace(
     // always_comb is not sequential
     ctx.is_sequential = false;
     ctx.combDrivers.clear();
+    ctx.current_write_origin = std::format("procedural-block:{}",
+                                           reinterpret_cast<uintptr_t>(statement));
     resolveStatementInPlace(statement, ctx);
 }
 
@@ -2029,6 +2129,8 @@ void resolveProceduralTimingInPlace(
 
     }
     ctx.triggers = triggers;
+    ctx.current_write_origin = std::format("procedural-block:{}",
+                                           reinterpret_cast<uintptr_t>(timingStatement));
     resolveStatementInPlace(statement, ctx);
 }
 
@@ -2214,8 +2316,13 @@ const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr) {
 
 // Connect an output port of the submodule to a parent signal
 void connectModuleOutput(DFG& graph, DFGNode* moduleNode,
-                         const std::string& parentSignalName, size_t outputIdx) {
+                         const std::string& parentSignalName, size_t outputIdx,
+                         ResolutionContext& ctx,
+                         const std::optional<SourceLoc>& writeLoc) {
     DFGOutput modOut(moduleNode, static_cast<int>(outputIdx));
+    recordFullWrite(
+        ctx, parentSignalName, writeLoc,
+        std::format("module-output:{}:{}", moduleNode->name, outputIdx));
     if (graph.hasOutput("", parentSignalName)) {
         graph.connectOutput("", parentSignalName, modOut);
     } else if (graph.hasSignal("", parentSignalName)) {
@@ -2281,7 +2388,8 @@ void resolveNamedPortConnection(
             // If the element node exists (unpacked array element), use the normal path.
             // Otherwise, fall through to the CONCAT_ALIGN path for packed bit-selects.
             if (graph.hasSignal("", connectName) || graph.hasOutput("", connectName)) {
-                connectModuleOutput(graph, moduleNode, connectName, subOutputIndex.at(portName));
+                connectModuleOutput(graph, moduleNode, connectName, subOutputIndex.at(portName),
+                                    ctx, resolveSourceLoc(*expr, ctx.sm));
                 return;
             }
 
@@ -2301,6 +2409,9 @@ void resolveNamedPortConnection(
                 auto* lowConst  = ctx.graph.constant((int64_t)idx);
                 auto* alignNode = ctx.graph.concatAlign(moduleNode, highConst, lowConst);
                 alignNode->in[0] = DFGOutput(moduleNode, (int)oi);
+                recordPartialWrite(
+                    ctx, baseName, idx, idx, resolveSourceLoc(*expr, ctx.sm),
+                    std::format("module-output:{}:{}", moduleNode->name, oi));
 
                 if (!targetNode->in.empty() &&
                         targetNode->in[0].node->op == DFGOp::CONCAT) {
@@ -2317,7 +2428,8 @@ void resolveNamedPortConnection(
                 resolveSourceLoc(*expr, ctx.sm));
         }
         connectModuleOutput(graph, moduleNode,
-                            connectName, subOutputIndex.at(portName));
+                            connectName, subOutputIndex.at(portName),
+                            ctx, resolveSourceLoc(*expr, ctx.sm));
     } else {
         throw CompilerError(
             "Port name '" + portName + "' not found in submodule inputs or outputs");
@@ -2326,7 +2438,8 @@ void resolveNamedPortConnection(
 
 void resolveWildcardPortConnection(
         DFG& graph, DFGNode* moduleNode,
-        ResolvedModule& resolvedSub) {
+        ResolvedModule& resolvedSub,
+        ResolutionContext& ctx) {
     for (const auto& [name, inp] : resolvedSub.inputs) {
         auto* driver = graph.lookupSignal("", name);
         if (driver) {
@@ -2337,7 +2450,7 @@ void resolveWildcardPortConnection(
     }
     size_t oi = 0;
     for (const auto& [name, out] : resolvedSub.outputs) {
-        connectModuleOutput(graph, moduleNode, name, oi++);
+        connectModuleOutput(graph, moduleNode, name, oi++, ctx, moduleNode->loc);
     }
 }
 
@@ -2357,7 +2470,7 @@ void resolvePortConnection(
                                        subOutputIndex, ctx);
             break;
         case SyntaxKind::WildcardPortConnection:
-            resolveWildcardPortConnection(graph, moduleNode, resolvedSub);
+            resolveWildcardPortConnection(graph, moduleNode, resolvedSub, ctx);
             break;
         default:
             throw CompilerError(
@@ -2668,6 +2781,7 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(selectedBlock, childCtx);
                 }
+                ctx.write_states = childCtx.write_states;
             } else {
                 // Unnamed block: process without new scope
                 resolveGenerateMemberInPlace(selectedBlock, ctx);
@@ -2702,7 +2816,8 @@ void resolveGenerateMemberInPlace(
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
                     ctx.sm, false, {}, {}, childPath, ctx.local_signals, {},
                     ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
-                    ctx.moduleLookup, ctx.globalImports};
+                    ctx.moduleLookup, ctx.globalImports,
+                    ctx.current_write_origin, ctx.write_states};
 
                 if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
                     resolveGenerateMembersInPlace(
@@ -2710,6 +2825,7 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(loopGen.block, iterResCtx);
                 }
+                ctx.write_states = iterResCtx.write_states;
 
                 iterCtx.values[genvarName] =
                     evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx);
@@ -2765,6 +2881,7 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(selectedBlock, childCtx);
                 }
+                ctx.write_states = childCtx.write_states;
             } else {
                 resolveGenerateMemberInPlace(selectedBlock, ctx);
             }
@@ -2835,6 +2952,7 @@ void resolveGenerateMemberInPlace(
                     outputPortNames.push_back(name);
 
                 auto* moduleNode = ctx.graph.module(submoduleName, qualifiedName, outputPortNames);
+                moduleNode->loc = resolveSourceLoc(*inst, ctx.sm);
 
                 for (const auto* conn : inst->connections)
                     resolvePortConnection(conn, ctx.graph, moduleNode, resolvedSub,
@@ -3126,7 +3244,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context
-    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues, pkgRegistry, moduleLookup, globalImports};
+    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues, pkgRegistry, moduleLookup, globalImports, "", {}};
 
     for (const auto& block : unresolved.proceduralComboBlocks) {
         resolveProceduralComboInPlace(block, resCtx);
@@ -3185,6 +3303,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
                 outputPortNames.push_back(name);
             }
             auto* moduleNode = graph.module(submoduleName, instanceName, outputPortNames);
+            moduleNode->loc = resolveSourceLoc(*inst, sourceManager);
 
             for (const auto* conn : inst->connections) {
                 resolvePortConnection(conn, graph, moduleNode,

@@ -27,6 +27,7 @@ struct ImportSpec {
 struct UnresolvedPackage {
     std::string name;
     std::vector<std::pair<std::string, const slang::syntax::EnumTypeSyntax*>> enumTypedefs;
+    std::vector<const slang::syntax::FunctionDeclarationSyntax*> functions;
 };
 
 // ============================================================================
@@ -118,6 +119,9 @@ struct UnresolvedModule {
 
     // Package imports (from module header)
     std::vector<ImportSpec> imports;
+
+    // Automatic function/task declarations
+    std::vector<const slang::syntax::FunctionDeclarationSyntax*> functions;
 
     void print(int indent = 0) const;
 };

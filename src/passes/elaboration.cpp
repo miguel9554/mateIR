@@ -35,6 +35,7 @@ using EnumMemberMap = std::map<std::string, std::pair<int64_t, ResolvedType>>;
 struct ResolvedPackageEntry {
     EnumRegistry  enumTypes;
     EnumMemberMap enumMembers;
+    std::map<std::string, const FunctionDeclarationSyntax*> functions;
 };
 using PackageRegistry = std::map<std::string, ResolvedPackageEntry>;
 
@@ -95,6 +96,12 @@ struct ResolutionContext {
 
     // Elaborated target key -> user-visible write state accumulated so far.
     std::unordered_map<std::string, TargetWriteState> write_states;
+
+    // Subroutine support
+    std::map<std::string, const FunctionDeclarationSyntax*> subroutineRegistry = {};
+    std::set<std::string> subroutine_locals = {};   // names of function-local variables
+    std::set<std::string> currently_inlining = {};  // recursion guard
+    bool is_subroutine_scope = false;               // true when elaborating a function body
 };
 
 // ============================================================================
@@ -239,11 +246,26 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
     return {value, width, is_signed};
 }
 
-// Forward declaration - in-place statement resolver
+// Exception thrown by return statements during function inlining
+struct ReturnSignal {
+    DFGNode* value; // nullptr for void return
+};
+
+// Forward declarations
 void resolveStatementInPlace(
         const slang::syntax::StatementSyntax* statement,
         ResolutionContext& ctx
 );
+
+static DFGNode* inlineSubroutineCall(
+        const InvocationExpressionSyntax& invoc,
+        ResolutionContext& ctx
+);
+
+// Unwrap a PropertyExprSyntax (as produced by function argument positions) to ExpressionSyntax.
+// For synthesizable RTL, argument expressions are always:
+//   SimplePropertyExpr → SimpleSequenceExpr → ExpressionSyntax
+const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr);
 
 
 // Evaluate a constant expression given a parameter context
@@ -1159,6 +1181,10 @@ DFGNode* buildExprDFG(
             return castNode;
         }
 
+        case SyntaxKind::InvocationExpression: {
+            return inlineSubroutineCall(expr->as<InvocationExpressionSyntax>(), ctx);
+        }
+
         default:
             throw CompilerError(
                 "Unsupported expression kind in DFG building: " +
@@ -1187,6 +1213,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
     // Helper: connect a driver to an output/signal node, checking local_signals first
     auto connectNode = [&](const std::string& outputName, DFGOutput driver) {
+        if (ctx.subroutine_locals.count(outputName)) return;  // local var: combDrivers only
         auto localIt = ctx.local_signals.find(outputName);
         if (localIt != ctx.local_signals.end()) {
             localIt->second->in = {driver};
@@ -1274,7 +1301,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 outputName = elem.baseName;
             }
 
-            recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+            if (!ctx.subroutine_locals.count(outputName))
+                recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
             connectNode(outputName, sliceNode);
 
             if (!ctx.is_sequential) {
@@ -1433,9 +1461,10 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             }
         }
 
-        recordPartialWrite(ctx, outputName, std::min(rangeLow, rangeHigh),
-                           std::max(rangeLow, rangeHigh), assignLoc,
-                           ctx.current_write_origin);
+        if (!ctx.subroutine_locals.count(outputName))
+            recordPartialWrite(ctx, outputName, std::min(rangeLow, rangeHigh),
+                               std::max(rangeLow, rangeHigh), assignLoc,
+                               ctx.current_write_origin);
         // Check if the target already has a CONCAT driver
         if (!targetNode->in.empty() && targetNode->in[0].node->op == DFGOp::CONCAT) {
             // Append to existing CONCAT
@@ -1469,7 +1498,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             outputName = baseName + indexSuffix;
         }
 
-        recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+        if (!ctx.subroutine_locals.count(outputName))
+            recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
         // Connect driver to existing output or signal node (checks local_signals first)
         connectNode(outputName, RHSexprNode);
 
@@ -1513,10 +1543,151 @@ void resolveAssignInPlace(
     }
 }
 
+// ============================================================================
+// Subroutine inlining (automatic functions)
+// ============================================================================
+
+// Get the function name from a FunctionDeclarationSyntax
+static std::string getFuncName(const FunctionDeclarationSyntax& decl) {
+    return std::string(decl.prototype->name->as<IdentifierNameSyntax>().identifier.valueText());
+}
+
+// Look up a subroutine by name expression (IdentifierName or ScopedName).
+// Returns the declaration and sets *outFuncName to a canonical key.
+static const FunctionDeclarationSyntax* lookupSubroutine(
+        const ExpressionSyntax* nameExpr,
+        ResolutionContext& ctx,
+        std::string* outFuncName)
+{
+    if (nameExpr->kind == SyntaxKind::IdentifierName) {
+        std::string name(nameExpr->as<IdentifierNameSyntax>().identifier.valueText());
+        *outFuncName = name;
+        auto it = ctx.subroutineRegistry.find(name);
+        if (it != ctx.subroutineRegistry.end()) return it->second;
+        throw CompilerError("Unknown function: " + name, resolveSourceLoc(*nameExpr, ctx.sm));
+    } else if (nameExpr->kind == SyntaxKind::ScopedName) {
+        auto& scoped = nameExpr->as<ScopedNameSyntax>();
+        std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+        std::string funcName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+        *outFuncName = pkgName + "::" + funcName;
+        auto pkgIt = ctx.pkgRegistry.find(pkgName);
+        if (pkgIt == ctx.pkgRegistry.end())
+            throw CompilerError("Unknown package: " + pkgName, resolveSourceLoc(*nameExpr, ctx.sm));
+        auto fit = pkgIt->second.functions.find(funcName);
+        if (fit != pkgIt->second.functions.end()) return fit->second;
+        throw CompilerError("Unknown package function: " + pkgName + "::" + funcName,
+                            resolveSourceLoc(*nameExpr, ctx.sm));
+    }
+    throw CompilerError(
+        "Unsupported function name kind: " + std::string(toString(nameExpr->kind)),
+        resolveSourceLoc(*nameExpr, ctx.sm));
+}
+
+// Inline an automatic function call into the current DFG context.
+// Returns the result DFGNode* (nullptr for void functions).
+static DFGNode* inlineSubroutineCall(
+        const InvocationExpressionSyntax& invoc,
+        ResolutionContext& ctx)
+{
+    // 1. Resolve function name
+    std::string funcName;
+    const FunctionDeclarationSyntax* decl =
+        lookupSubroutine(invoc.left, ctx, &funcName);
+
+    // 2. Recursion guard
+    if (ctx.currently_inlining.count(funcName))
+        throw CompilerError("Recursive functions not supported: " + funcName,
+                            resolveSourceLoc(invoc, ctx.sm));
+
+    // 3. Build sub-context: copy then reset mutable state
+    ResolutionContext sub = ctx;
+    sub.combDrivers.clear();
+    sub.local_signals.clear();
+    sub.local_flop_names.clear();
+    sub.write_states.clear();
+    sub.subroutine_locals.clear();
+    sub.triggers = {};
+    sub.is_sequential = false;
+    sub.is_subroutine_scope = true;
+    sub.currently_inlining.insert(funcName);
+    sub.current_write_origin = "subroutine:" + funcName;
+
+    // 4. Bind input formals to actual argument DFG nodes
+    const auto* portList = decl->prototype->portList;
+    std::vector<const ExpressionSyntax*> actuals;
+    if (invoc.arguments) {
+        for (const auto* arg : invoc.arguments->parameters) {
+            if (arg->kind != SyntaxKind::OrderedArgument)
+                throw CompilerError("Only ordered function arguments are supported",
+                                    resolveSourceLoc(invoc, ctx.sm));
+            actuals.push_back(extractPortExpr(*arg->as<OrderedArgumentSyntax>().expr));
+        }
+    }
+
+    if (portList) {
+        slang::parsing::TokenKind curDir = slang::parsing::TokenKind::InputKeyword; // default
+        size_t argIdx = 0;
+        for (const auto* portBase : portList->ports) {
+            if (portBase->kind != SyntaxKind::FunctionPort) continue;
+            auto& port = portBase->as<FunctionPortSyntax>();
+
+            // Inherit direction if not specified (token is "missing"/invalid)
+            if (port.direction.kind != slang::parsing::TokenKind::Unknown)
+                curDir = port.direction.kind;
+
+            std::string formalName(port.declarator->name.valueText());
+
+            if (curDir == slang::parsing::TokenKind::InputKeyword) {
+                if (argIdx >= actuals.size())
+                    throw CompilerError(
+                        "Too few arguments in call to function '" + funcName + "'",
+                        resolveSourceLoc(invoc, ctx.sm));
+                auto* argNode = buildExprDFG(actuals[argIdx++], ctx);
+                sub.combDrivers[formalName] = argNode;
+                sub.subroutine_locals.insert(formalName);  // input formals are locals in sub-ctx
+            } else if (curDir == slang::parsing::TokenKind::OutputKeyword ||
+                       curDir == slang::parsing::TokenKind::InOutKeyword) {
+                throw CompilerError(
+                    "output/inout function ports not supported: " + formalName,
+                    resolveSourceLoc(invoc, ctx.sm));
+            }
+        }
+    }
+
+    // 5. Elaborate body items
+    std::string retName = getFuncName(*decl);
+    sub.subroutine_locals.insert(retName);  // implicit return variable is a local
+    DFGNode* result = nullptr;
+    try {
+        for (const auto* item : decl->items) {
+            if (item->kind == SyntaxKind::DataDeclaration) {
+                for (auto* d : item->as<DataDeclarationSyntax>().declarators)
+                    sub.subroutine_locals.insert(std::string(d->name.valueText()));
+            } else {
+                resolveStatementInPlace(&item->as<StatementSyntax>(), sub);
+            }
+        }
+        // No explicit return: read implicit function-name variable from combDrivers
+        auto it = sub.combDrivers.find(retName);
+        if (it != sub.combDrivers.end()) result = it->second;
+    } catch (const ReturnSignal& r) {
+        result = r.value;
+    }
+
+    return result;
+}
+
 void resolveExpressionStatementInPlace(
         const ExpressionStatementSyntax* exprStatement,
         ResolutionContext& ctx){
     auto& expr = exprStatement->expr;
+
+    // Function calls used as statements (void functions or result discarded)
+    if (expr->kind == SyntaxKind::InvocationExpression) {
+        inlineSubroutineCall(expr->as<InvocationExpressionSyntax>(), ctx);
+        return;
+    }
+
     const auto expectedKind = ctx.is_sequential ? SyntaxKind::NonblockingAssignmentExpression :
                                                   SyntaxKind::AssignmentExpression;
     if (expr->kind != expectedKind){
@@ -1935,6 +2106,17 @@ void resolveSequentialBlockStatementInPlace(
         ResolutionContext& ctx
 ){
     for (const auto* item: seqStatement->items){
+        if (item->kind == SyntaxKind::DataDeclaration) {
+            if (!ctx.is_subroutine_scope) {
+                throw CompilerError(
+                    "DataDeclaration inside procedural block not supported outside function body",
+                    resolveSourceLoc(*item, ctx.sm));
+            }
+            auto& dataDecl = item->as<DataDeclarationSyntax>();
+            for (auto* decl : dataDecl.declarators)
+                ctx.subroutine_locals.insert(std::string(decl->name.valueText()));
+            continue;
+        }
         const auto& statement = item->as<StatementSyntax>();
         resolveStatementInPlace(&statement, ctx);
     }
@@ -2023,6 +2205,12 @@ void resolveStatementInPlace(
             const auto& forLoop = statement->as<ForLoopStatementSyntax>();
             resolveForLoopStatementInPlace(&forLoop, ctx);
             break;
+        }
+
+        case SyntaxKind::ReturnStatement: {
+            auto& ret = statement->as<ReturnStatementSyntax>();
+            DFGNode* val = ret.returnValue ? buildExprDFG(ret.returnValue, ctx) : nullptr;
+            throw ReturnSignal{val};
         }
 
         default:
@@ -3009,6 +3197,8 @@ static PackageRegistry resolvePackages(
             for (const auto& m : members)
                 entry.enumMembers[m.name] = {m.value, enumType};
         }
+        for (const auto* fn : pkg->functions)
+            entry.functions[getFuncName(*fn)] = fn;
         registry[pkg->name] = std::move(entry);
     }
     return registry;
@@ -3186,6 +3376,11 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
         flopNames.insert(flop.name);
     }
 
+    // === Build subroutine registry from module-local functions ===
+    std::map<std::string, const FunctionDeclarationSyntax*> subroutineRegistry;
+    for (const auto* fn : unresolved.functions)
+        subroutineRegistry[getFuncName(*fn)] = fn;
+
     // === Create single DFG and pre-populate ===
     resolved.dfg = std::make_unique<DFG>();
     DFG& graph = *resolved.dfg;
@@ -3244,7 +3439,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context
-    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues, pkgRegistry, moduleLookup, globalImports, "", {}};
+    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues, pkgRegistry, moduleLookup, globalImports, "", {}, subroutineRegistry};
 
     for (const auto& block : unresolved.proceduralComboBlocks) {
         resolveProceduralComboInPlace(block, resCtx);

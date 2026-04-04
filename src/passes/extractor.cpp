@@ -34,6 +34,8 @@ public:
     void handle(const IfGenerateSyntax&) {}
     void handle(const GenerateRegionSyntax&) {}
     void handle(const GenerateBlockSyntax&) {}
+    // Stop traversal into function/task bodies — their assignments are NOT module-level flops
+    void handle(const FunctionDeclarationSyntax&) {}
 
     void handle(const BinaryExpressionSyntax& node) {
         if (node.kind == SyntaxKind::NonblockingAssignmentExpression) {
@@ -109,7 +111,7 @@ public:
         // SyntaxKind::GenerateBlock,
         // SyntaxKind::TimeUnitsDeclaration,
         SyntaxKind::HierarchyInstantiation,
-        // SyntaxKind::FunctionDeclaration,
+        SyntaxKind::FunctionDeclaration,
         SyntaxKind::ContinuousAssign,
         SyntaxKind::TypedefDeclaration,
         // SyntaxKind::DefParam,
@@ -129,6 +131,7 @@ public:
             currentPackage = pkg.get();
             for (auto* member : node.members) {
                 if (member->kind == SyntaxKind::TypedefDeclaration ||
+                    member->kind == SyntaxKind::FunctionDeclaration ||
                     member->kind == SyntaxKind::PackageImportDeclaration ||
                     member->kind == SyntaxKind::EmptyMember)
                     member->visit(*this);
@@ -331,6 +334,19 @@ public:
         if (!currentModule) throw CompilerError(
                 "If generate must be inside module.", resolveSourceLoc(node, sm));
         currentModule->generateBlocks.push_back(&node);
+    }
+
+    void handle(const FunctionDeclarationSyntax& node) {
+        auto& proto = *node.prototype;
+        if (proto.lifetime.kind != slang::parsing::TokenKind::AutomaticKeyword)
+            throw CompilerError(
+                "Only 'automatic' functions/tasks are supported (got static or implicit)",
+                resolveSourceLoc(node, sm));
+        if (currentModule)
+            currentModule->functions.push_back(&node);
+        else if (currentPackage)
+            currentPackage->functions.push_back(&node);
+        // Do NOT call visitDefault — we store the raw pointer; body elaborated later
     }
 
     void handle(const ProceduralBlockSyntax& node) {

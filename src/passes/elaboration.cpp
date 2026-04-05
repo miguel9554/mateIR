@@ -678,6 +678,31 @@ DFGNode* resolveIdentifier(
     return node;
 }
 
+const ResolvedType* lookupDeclaredType(const std::string& baseName,
+                                       const ResolutionContext& ctx) {
+    auto localIt = ctx.local_signals.find(baseName);
+    if (localIt != ctx.local_signals.end() && localIt->second && localIt->second->hasType()) {
+        return &(*localIt->second->type);
+    }
+
+    if (auto it = ctx.thisModule->inputs.find(baseName); it != ctx.thisModule->inputs.end()) {
+        return &it->second.type;
+    }
+    if (auto it = ctx.thisModule->outputs.find(baseName); it != ctx.thisModule->outputs.end()) {
+        return &it->second.type;
+    }
+    if (auto it = ctx.thisModule->signals.find(baseName); it != ctx.thisModule->signals.end()) {
+        return &it->second.type;
+    }
+    for (const auto& flop : ctx.thisModule->flops) {
+        if (flop.name == baseName) {
+            return &flop.type.type;
+        }
+    }
+
+    return nullptr;
+}
+
 // Build DFG node directly from slang expression syntax
 // For sequential blocks (is_sequential=true), flop references on RHS use .q suffix
 DFGNode* buildExprDFG(
@@ -1374,22 +1399,21 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 try {
                     int64_t idx = evaluateConstantExpr(selectorExpr, ctx.params);
 
-                    // Check if the base (with any prior indexSuffix) is a flat packed scalar.
-                    // If so, this bit-select is a partial packed assignment (e.g. sat[i] where
-                    // sat is wire [N-1:0]) → treat as a 1-bit range select for CONCAT_ALIGN.
+                    // Classify bit-selects from the declared object type, not DFG naming.
+                    // Packed vectors use partial writes on the aggregate target; unpacked
+                    // arrays use element selection via indexSuffix.
                     bool isFlatPackedBitSelect = false;
-                    {
-                        std::string lookupKey = baseName + indexSuffix;
-                        DFGNode* baseNode = nullptr;
-                        auto localIt = ctx.local_signals.find(lookupKey);
-                        if (localIt != ctx.local_signals.end()) {
-                            baseNode = localIt->second;
-                        } else {
-                            baseNode = ctx.graph.getSignalNode("", lookupKey);
-                            if (!baseNode) baseNode = ctx.graph.getOutputNode("", lookupKey);
+                    if (indexSuffix.empty()) {
+                        if (const auto* declaredType = lookupDeclaredType(baseName, ctx)) {
+                            isFlatPackedBitSelect = declaredType->unpacked_dims.empty();
                         }
-                        if (baseNode && baseNode->hasType() && baseNode->type->unpacked_dims.empty()) {
-                            isFlatPackedBitSelect = true;
+                    } else {
+                        std::string lookupKey = baseName + indexSuffix;
+                        auto localIt = ctx.local_signals.find(lookupKey);
+                        if (localIt != ctx.local_signals.end() &&
+                                localIt->second && localIt->second->hasType()) {
+                            isFlatPackedBitSelect =
+                                localIt->second->type->unpacked_dims.empty();
                         }
                     }
                     if (isFlatPackedBitSelect) {

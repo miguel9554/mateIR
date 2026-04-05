@@ -188,6 +188,23 @@ void recordPartialWrite(ResolutionContext& ctx,
     state.partial_writes.push_back({low, high, origin, writeLoc});
 }
 
+DFGNode* appendConcatInput(DFG& graph, DFGNode* existingDriver, DFGNode* newPart,
+                           const std::optional<SourceLoc>& loc) {
+    std::vector<DFGNode*> parts;
+    if (existingDriver && existingDriver->op == DFGOp::CONCAT) {
+        parts.reserve(existingDriver->in.size() + 1);
+        for (const auto& edge : existingDriver->in) {
+            parts.push_back(edge.node);
+        }
+    } else if (existingDriver) {
+        parts.push_back(existingDriver);
+    }
+    parts.push_back(newPart);
+    auto* concatNode = graph.concat(parts);
+    if (loc) concatNode->loc = *loc;
+    return concatNode;
+}
+
 // TODO should be double? or parametrized by type.
 struct IntegerVectorLiteral {
     int64_t value;
@@ -1470,8 +1487,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                                ctx.current_write_origin);
         // Check if the target already has a CONCAT driver
         if (!targetNode->in.empty() && targetNode->in[0].node->op == DFGOp::CONCAT) {
-            // Append to existing CONCAT
-            targetNode->in[0].node->in.push_back(alignNode);
+            auto* concatNode =
+                appendConcatInput(ctx.graph, targetNode->in[0].node, alignNode, assignLoc);
+            connectNode(outputName, concatNode);
         } else {
             // Create new CONCAT with this CONCAT_ALIGN as first input
             auto* concatNode = ctx.graph.concat({alignNode});
@@ -2710,7 +2728,10 @@ void resolveNamedPortConnection(
 
                 if (!targetNode->in.empty() &&
                         targetNode->in[0].node->op == DFGOp::CONCAT) {
-                    targetNode->in[0].node->in.push_back(alignNode);
+                    auto* concatNode = appendConcatInput(
+                        ctx.graph, targetNode->in[0].node, alignNode,
+                        resolveSourceLoc(*expr, ctx.sm));
+                    targetNode->in = {concatNode};
                 } else {
                     auto* concatNode = ctx.graph.concat({alignNode});
                     targetNode->in = {concatNode};

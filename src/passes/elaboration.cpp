@@ -1767,6 +1767,32 @@ void resolveConditionalStatementInPlace(
     }
     const auto& predicateExpr = predicate->conditions[0]->expr;
 
+    // If the predicate is statically known in the current elaboration context,
+    // only elaborate the reachable branch.
+    auto executeBranchStmt = [&ctx](const StatementSyntax& stmt) {
+        try {
+            resolveStatementInPlace(&stmt, ctx);
+        } catch (const ReturnSignal& r) {
+            if (ctx.current_return_var.empty()) throw;
+            if (r.value) ctx.combDrivers[ctx.current_return_var] = r.value;
+        }
+    };
+
+    try {
+        int64_t predicateValue =
+            evaluateConstantExpr(predicateExpr, ctx.params, ctx.sm, *conditionalStatement);
+        if (predicateValue) {
+            executeBranchStmt(*conditionalStatement->statement);
+        } else if (conditionalStatement->elseClause) {
+            const auto& elseClause = conditionalStatement->elseClause->clause;
+            const auto& elseStatement = elseClause->as<StatementSyntax>();
+            executeBranchStmt(elseStatement);
+        }
+        return;
+    } catch (const std::runtime_error&) {
+        // Non-constant predicate; fall through to structural branch merging.
+    }
+
     // construct the signal node for the predicate expression
     auto conditionNode = buildExprDFG(predicateExpr, ctx);
 
@@ -1793,17 +1819,6 @@ void resolveConditionalStatementInPlace(
     };
 
     const auto oldDrivers = getDrivers(ctx.graph);
-
-    // Execute a branch statement, catching 'return expr' and converting it to a
-    // combDrivers assignment so that if/else MUX building works correctly.
-    auto executeBranchStmt = [&ctx](const StatementSyntax& stmt) {
-        try {
-            resolveStatementInPlace(&stmt, ctx);
-        } catch (const ReturnSignal& r) {
-            if (ctx.current_return_var.empty()) throw;
-            if (r.value) ctx.combDrivers[ctx.current_return_var] = r.value;
-        }
-    };
 
     if (conditionalStatement->elseClause) {
         const auto& elseClause = conditionalStatement->elseClause->clause;
@@ -2401,8 +2416,9 @@ std::vector<asyncTrigger_t> extractAsyncTriggers(
             const auto& leftExpr = binaryEventExpr.left;
             const auto& rightExpr = binaryEventExpr.right;
             const auto& token = binaryEventExpr.operatorToken;
-            if (token.valueText() != "or"){
-                throw CompilerError("Only OR supported in event list.");
+            const auto op = token.valueText();
+            if (op != "or" && op != ","){
+                throw CompilerError("Only OR or comma supported in event list.");
             }
             triggers = extractAsyncTriggers(leftExpr, triggers);
             triggers = extractAsyncTriggers(rightExpr, triggers);

@@ -1024,8 +1024,15 @@ DFGNode* buildExprDFG(
         }
 
         case SyntaxKind::DivideExpression: {
-            throw CompilerError("DIV operation not yet supported in DFG",
-                                resolveSourceLoc(*expr, ctx.sm));
+            try {
+                auto value = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr);
+                auto* node = ctx.graph.constant(value);
+                node->loc = resolveSourceLoc(*expr, ctx.sm);
+                return node;
+            } catch (const std::runtime_error&) {
+                throw CompilerError("DIV operation not yet supported in DFG",
+                                    resolveSourceLoc(*expr, ctx.sm));
+            }
         }
 
         case SyntaxKind::EqualityExpression: {

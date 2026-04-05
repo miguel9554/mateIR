@@ -102,6 +102,9 @@ struct ResolutionContext {
     std::set<std::string> subroutine_locals = {};   // names of function-local variables
     std::set<std::string> currently_inlining = {};  // recursion guard
     bool is_subroutine_scope = false;               // true when elaborating a function body
+    // Name of the implicit return variable for the current function (empty if not in a function).
+    // Used to convert 'return expr' inside control flow (case/if arms) into combDrivers assignments.
+    std::string current_return_var = {};
 };
 
 // ============================================================================
@@ -1624,6 +1627,8 @@ static DFGNode* inlineSubroutineCall(
         }
     }
 
+    std::vector<std::pair<std::string, const ExpressionSyntax*>> outputBindings;
+
     if (portList) {
         slang::parsing::TokenKind curDir = slang::parsing::TokenKind::InputKeyword; // default
         size_t argIdx = 0;
@@ -1645,10 +1650,20 @@ static DFGNode* inlineSubroutineCall(
                 auto* argNode = buildExprDFG(actuals[argIdx++], ctx);
                 sub.combDrivers[formalName] = argNode;
                 sub.subroutine_locals.insert(formalName);  // input formals are locals in sub-ctx
-            } else if (curDir == slang::parsing::TokenKind::OutputKeyword ||
-                       curDir == slang::parsing::TokenKind::InOutKeyword) {
+            } else if (curDir == slang::parsing::TokenKind::OutputKeyword) {
+                if (argIdx >= actuals.size())
+                    throw CompilerError(
+                        "Too few arguments in call to '" + funcName + "'",
+                        resolveSourceLoc(invoc, ctx.sm));
+                outputBindings.emplace_back(formalName, actuals[argIdx++]);
+                sub.subroutine_locals.insert(formalName);
+            } else if (curDir == slang::parsing::TokenKind::InOutKeyword) {
                 throw CompilerError(
-                    "output/inout function ports not supported: " + formalName,
+                    "inout ports not supported: " + formalName,
+                    resolveSourceLoc(invoc, ctx.sm));
+            } else if (curDir == slang::parsing::TokenKind::RefKeyword) {
+                throw CompilerError(
+                    "ref ports not supported: " + formalName,
                     resolveSourceLoc(invoc, ctx.sm));
             }
         }
@@ -1657,6 +1672,7 @@ static DFGNode* inlineSubroutineCall(
     // 5. Elaborate body items
     std::string retName = getFuncName(*decl);
     sub.subroutine_locals.insert(retName);  // implicit return variable is a local
+    sub.current_return_var = retName;       // allows case/if arms to convert 'return' to assignment
     DFGNode* result = nullptr;
     try {
         for (const auto* item : decl->items) {
@@ -1672,6 +1688,26 @@ static DFGNode* inlineSubroutineCall(
         if (it != sub.combDrivers.end()) result = it->second;
     } catch (const ReturnSignal& r) {
         result = r.value;
+    }
+
+    // Copy output formals back to caller context
+    for (const auto& [formalOut, actualExpr] : outputBindings) {
+        if (actualExpr->kind != SyntaxKind::IdentifierName)
+            throw CompilerError("Output argument must be a simple identifier",
+                                resolveSourceLoc(invoc, ctx.sm));
+        std::string actualIdent(actualExpr->as<IdentifierNameSyntax>().identifier.valueText());
+        auto it = sub.combDrivers.find(formalOut);
+        if (it == sub.combDrivers.end())
+            throw CompilerError("Output argument '" + formalOut + "' not assigned in task body",
+                                resolveSourceLoc(invoc, ctx.sm));
+        ctx.combDrivers[actualIdent] = it->second;
+        // Also wire to the DFG graph node for module-level signals/outputs
+        if (!ctx.subroutine_locals.count(actualIdent)) {
+            if (ctx.graph.hasOutput("", actualIdent))
+                ctx.graph.connectOutput("", actualIdent, it->second);
+            else if (ctx.graph.hasSignal("", actualIdent))
+                ctx.graph.connectSignal("", actualIdent, it->second);
+        }
     }
 
     return result;
@@ -1716,38 +1752,57 @@ void resolveConditionalStatementInPlace(
     // construct the signal node for the predicate expression
     auto conditionNode = buildExprDFG(predicateExpr, ctx);
 
-    // Extract driver nodes from outputs and signals
-    // (we need to track what's connected before modifications)
-    // Skip aggregate nodes (in.size() > 1) which represent structural decomposition, not driven signals
-    auto getDrivers = [](const DFG& g) {
+    // Extract driver nodes from outputs, signals, and combDrivers for subroutine locals.
+    // In subroutine scope, skip module-level graph nodes — only track subroutine locals.
+    auto getDrivers = [&ctx](const DFG& g) {
         std::unordered_map<std::string, DFGNode*> drivers;
-        for (const auto& [outName, outNode] : g.getOutputsMap()) {
-            if (outNode->in.size() == 1) {
-                drivers[outName] = outNode->in[0].node;
+        if (!ctx.is_subroutine_scope) {
+            for (const auto& [outName, outNode] : g.getOutputsMap()) {
+                if (outNode->in.size() == 1) {
+                    drivers[outName] = outNode->in[0].node;
+                }
+            }
+            for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
+                if (sigNode->in.size() == 1) {
+                    drivers[sigName] = sigNode->in[0].node;
+                }
             }
         }
-        for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
-            if (sigNode->in.size() == 1) {
-                drivers[sigName] = sigNode->in[0].node;
-            }
+        for (const auto& [name, node] : ctx.combDrivers) {
+            if (ctx.subroutine_locals.count(name)) drivers[name] = node;
         }
         return drivers;
     };
 
     const auto oldDrivers = getDrivers(ctx.graph);
 
+    // Execute a branch statement, catching 'return expr' and converting it to a
+    // combDrivers assignment so that if/else MUX building works correctly.
+    auto executeBranchStmt = [&ctx](const StatementSyntax& stmt) {
+        try {
+            resolveStatementInPlace(&stmt, ctx);
+        } catch (const ReturnSignal& r) {
+            if (ctx.current_return_var.empty()) throw;
+            if (r.value) ctx.combDrivers[ctx.current_return_var] = r.value;
+        }
+    };
+
     if (conditionalStatement->elseClause) {
         const auto& elseClause = conditionalStatement->elseClause->clause;
         const auto& elseStatement = elseClause->as<StatementSyntax>();
-        resolveStatementInPlace(&elseStatement, ctx);
+        executeBranchStmt(elseStatement);
     }
 
     const auto elseDrivers = getDrivers(ctx.graph);
 
-    resolveStatementInPlace(conditionalStatement->statement, ctx);
+    executeBranchStmt(*conditionalStatement->statement);
 
-    // Helper to connect a signal (output or signal type)
+    // Helper to connect a signal (output, signal, or subroutine local via combDrivers)
     auto connectSignalOrOutput = [&ctx](const std::string& name, DFGNode* driver) {
+        if (ctx.subroutine_locals.count(name)) {
+            ctx.combDrivers[name] = driver;
+            return;
+        }
         if (ctx.graph.hasOutput("", name)) {
             ctx.graph.connectOutput("", name, driver);
         } else if (ctx.graph.hasSignal("", name)) {
@@ -1755,9 +1810,12 @@ void resolveConditionalStatementInPlace(
         }
     };
 
-    // Helper to get current driver for a signal
-    // Skip aggregate nodes (in.size() > 1) which represent structural decomposition
+    // Helper to get current driver for a signal or subroutine local
     auto getCurrentDriver = [&ctx](const std::string& name) -> DFGNode* {
+        if (ctx.subroutine_locals.count(name)) {
+            auto it = ctx.combDrivers.find(name);
+            return it != ctx.combDrivers.end() ? it->second : nullptr;
+        }
         if (auto* n = ctx.graph.getOutputNode("", name)) {
             return n->in.size() == 1 ? n->in[0].node : nullptr;
         }
@@ -1767,17 +1825,23 @@ void resolveConditionalStatementInPlace(
         return nullptr;
     };
 
-    // Collect all signals that were assigned
+    // Collect all signals that were assigned (including subroutine locals in combDrivers).
+    // In subroutine scope, skip module-level graph iteration — only check subroutine locals.
     std::set<std::string> assignedSignals;
-    for (const auto& [name, _] : ctx.graph.getOutputsMap()) {
-        if (getCurrentDriver(name) != nullptr) {
-            assignedSignals.insert(name);
+    if (!ctx.is_subroutine_scope) {
+        for (const auto& [name, _] : ctx.graph.getOutputsMap()) {
+            if (getCurrentDriver(name) != nullptr) {
+                assignedSignals.insert(name);
+            }
+        }
+        for (const auto& [name, _] : ctx.graph.getSignalsMap()) {
+            if (getCurrentDriver(name) != nullptr) {
+                assignedSignals.insert(name);
+            }
         }
     }
-    for (const auto& [name, _] : ctx.graph.getSignalsMap()) {
-        if (getCurrentDriver(name) != nullptr) {
-            assignedSignals.insert(name);
-        }
+    for (const auto& [name, _] : ctx.combDrivers) {
+        if (ctx.subroutine_locals.count(name)) assignedSignals.insert(name);
     }
 
     // Assign MUXes for signals that ARE assigned on IF branch
@@ -1893,8 +1957,12 @@ void resolveCaseStatementInPlace(
     // Build the selector expression node
     auto selectorNode = buildExprDFG(caseStatement->expr, ctx);
 
-    // Helper to connect a signal (output or signal type)
+    // Helper to connect a signal (output, signal, or subroutine local via combDrivers)
     auto connectSignalOrOutput = [&ctx](const std::string& name, DFGNode* driver) {
+        if (ctx.subroutine_locals.count(name)) {
+            ctx.combDrivers[name] = driver;
+            return;
+        }
         if (ctx.graph.hasOutput("", name)) {
             ctx.graph.connectOutput("", name, driver);
         } else if (ctx.graph.hasSignal("", name)) {
@@ -1902,64 +1970,101 @@ void resolveCaseStatementInPlace(
         }
     };
 
-    // Snapshot current drivers (only signals with exactly one driver)
-    auto getDrivers = [](const DFG& g) {
+    // Snapshot current drivers: DFG signals/outputs + combDrivers for subroutine locals.
+    // In subroutine scope, skip module-level graph nodes to avoid spurious bulk operations.
+    auto getDrivers = [&ctx](const DFG& g) {
         std::unordered_map<std::string, DFGNode*> drivers;
-        for (const auto& [outName, outNode] : g.getOutputsMap()) {
-            if (outNode->in.size() == 1) {
-                drivers[outName] = outNode->in[0].node;
+        if (!ctx.is_subroutine_scope) {
+            for (const auto& [outName, outNode] : g.getOutputsMap()) {
+                if (outNode->in.size() == 1) {
+                    drivers[outName] = outNode->in[0].node;
+                }
+            }
+            for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
+                if (sigNode->in.size() == 1) {
+                    drivers[sigName] = sigNode->in[0].node;
+                }
             }
         }
-        for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
-            if (sigNode->in.size() == 1) {
-                drivers[sigName] = sigNode->in[0].node;
-            }
+        for (const auto& [name, node] : ctx.combDrivers) {
+            if (ctx.subroutine_locals.count(name))
+                drivers[name] = node;
         }
         return drivers;
     };
 
-    // Diff current graph state against a baseline, returning only changed drivers
-    auto getModifiedDrivers = [](const DFG& g,
+    // Diff against baseline: DFG changes + combDrivers changes for subroutine locals.
+    // In subroutine scope, only diff subroutine locals.
+    auto getModifiedDrivers = [&ctx](const DFG& g,
             const std::unordered_map<std::string, DFGNode*>& baseline) {
         std::unordered_map<std::string, DFGNode*> modified;
-        for (const auto& [outName, outNode] : g.getOutputsMap()) {
-            if (outNode->in.size() == 1) {
-                auto it = baseline.find(outName);
-                if (it == baseline.end() || it->second != outNode->in[0].node) {
-                    modified[outName] = outNode->in[0].node;
+        if (!ctx.is_subroutine_scope) {
+            for (const auto& [outName, outNode] : g.getOutputsMap()) {
+                if (outNode->in.size() == 1) {
+                    auto it = baseline.find(outName);
+                    if (it == baseline.end() || it->second != outNode->in[0].node) {
+                        modified[outName] = outNode->in[0].node;
+                    }
+                }
+            }
+            for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
+                if (sigNode->in.size() == 1) {
+                    auto it = baseline.find(sigName);
+                    if (it == baseline.end() || it->second != sigNode->in[0].node) {
+                        modified[sigName] = sigNode->in[0].node;
+                    }
                 }
             }
         }
-        for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
-            if (sigNode->in.size() == 1) {
-                auto it = baseline.find(sigName);
-                if (it == baseline.end() || it->second != sigNode->in[0].node) {
-                    modified[sigName] = sigNode->in[0].node;
-                }
+        for (const auto& [name, node] : ctx.combDrivers) {
+            if (!ctx.subroutine_locals.count(name)) continue;
+            auto it = baseline.find(name);
+            if (it == baseline.end() || it->second != node) {
+                modified[name] = node;
             }
         }
         return modified;
     };
 
-    // Restore drivers to fallback state, and clear any signals that got
-    // connected during branch processing but weren't driven before the case
+    // Restore drivers to fallback state, including combDrivers for subroutine locals.
+    // In subroutine scope, skip module-level graph operations.
     auto restoreDrivers = [&connectSignalOrOutput, &ctx](const std::unordered_map<std::string, DFGNode*>& drivers) {
         for (const auto& [name, driver] : drivers) {
             connectSignalOrOutput(name, driver);
         }
-        for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
-            if (node->in.size() == 1 && !drivers.contains(name)) {
-                node->in.clear();
+        if (!ctx.is_subroutine_scope) {
+            for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
+                if (node->in.size() == 1 && !drivers.contains(name)) {
+                    node->in.clear();
+                }
+            }
+            for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
+                if (node->in.size() == 1 && !drivers.contains(name)) {
+                    node->in.clear();
+                }
             }
         }
-        for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
-            if (node->in.size() == 1 && !drivers.contains(name)) {
-                node->in.clear();
-            }
+        // Clear subroutine locals that weren't in the fallback snapshot
+        for (auto it = ctx.combDrivers.begin(); it != ctx.combDrivers.end(); ) {
+            if (ctx.subroutine_locals.count(it->first) && !drivers.count(it->first))
+                it = ctx.combDrivers.erase(it);
+            else
+                ++it;
         }
     };
 
     const auto fallbackDrivers = getDrivers(ctx.graph);
+
+    // Execute a case arm statement, catching 'return expr' and converting it to a
+    // combDrivers assignment so that case-MUX building works correctly.
+    auto executeArmStmt = [&ctx](const StatementSyntax& stmt) {
+        try {
+            resolveStatementInPlace(&stmt, ctx);
+        } catch (const ReturnSignal& r) {
+            if (ctx.current_return_var.empty()) throw;
+            if (r.value) ctx.combDrivers[ctx.current_return_var] = r.value;
+        }
+    };
 
     // Collect info for each case branch — drivers only contains signals
     // actually modified in that branch (diff against fallback)
@@ -1975,7 +2080,7 @@ void resolveCaseStatementInPlace(
         if (item->kind == SyntaxKind::DefaultCaseItem) {
             const auto& defaultItem = item->as<DefaultCaseItemSyntax>();
             restoreDrivers(fallbackDrivers);
-            resolveStatementInPlace(&defaultItem.clause->as<StatementSyntax>(), ctx);
+            executeArmStmt(defaultItem.clause->as<StatementSyntax>());
             defaultDrivers = getModifiedDrivers(ctx.graph, fallbackDrivers);
         } else if (item->kind == SyntaxKind::StandardCaseItem) {
             const auto& caseItem = item->as<StandardCaseItemSyntax>();
@@ -1996,7 +2101,7 @@ void resolveCaseStatementInPlace(
             }
 
             restoreDrivers(fallbackDrivers);
-            resolveStatementInPlace(&caseItem.clause->as<StatementSyntax>(), ctx);
+            executeArmStmt(caseItem.clause->as<StatementSyntax>());
             normalCases.push_back({conditionNode, getModifiedDrivers(ctx.graph, fallbackDrivers)});
         } else {
             throw CompilerError(
@@ -2165,7 +2270,9 @@ void resolveForLoopStatementInPlace(
             ctx.instance_path, ctx.local_signals, ctx.local_flop_names,
             ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
             ctx.moduleLookup, ctx.globalImports,
-            ctx.current_write_origin, ctx.write_states
+            ctx.current_write_origin, ctx.write_states,
+            ctx.subroutineRegistry, ctx.subroutine_locals,
+            ctx.currently_inlining, ctx.is_subroutine_scope
         };
         resolveStatementInPlace(forLoop->statement.get(), iterBodyCtx);
         ctx.combDrivers = iterBodyCtx.combDrivers;
@@ -3380,6 +3487,19 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     std::map<std::string, const FunctionDeclarationSyntax*> subroutineRegistry;
     for (const auto* fn : unresolved.functions)
         subroutineRegistry[getFuncName(*fn)] = fn;
+
+    // Also add wildcard-imported package functions so they can be called unqualified
+    auto addWildcardFunctions = [&](const std::vector<ImportSpec>& imports) {
+        for (const auto& spec : imports) {
+            if (spec.item) continue;  // skip explicit (non-wildcard) imports
+            auto pkgIt = pkgRegistry.find(spec.package_name);
+            if (pkgIt == pkgRegistry.end()) continue;
+            for (const auto& [fname, fdecl] : pkgIt->second.functions)
+                subroutineRegistry.emplace(fname, fdecl);  // module-local wins on conflict
+        }
+    };
+    addWildcardFunctions(globalImports);
+    addWildcardFunctions(unresolved.imports);
 
     // === Create single DFG and pre-populate ===
     resolved.dfg = std::make_unique<DFG>();

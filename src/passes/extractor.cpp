@@ -112,6 +112,7 @@ public:
         // SyntaxKind::TimeUnitsDeclaration,
         SyntaxKind::HierarchyInstantiation,
         SyntaxKind::FunctionDeclaration,
+        SyntaxKind::TaskDeclaration,
         SyntaxKind::ContinuousAssign,
         SyntaxKind::TypedefDeclaration,
         // SyntaxKind::DefParam,
@@ -132,6 +133,7 @@ public:
             for (auto* member : node.members) {
                 if (member->kind == SyntaxKind::TypedefDeclaration ||
                     member->kind == SyntaxKind::FunctionDeclaration ||
+                    member->kind == SyntaxKind::TaskDeclaration ||
                     member->kind == SyntaxKind::PackageImportDeclaration ||
                     member->kind == SyntaxKind::EmptyMember)
                     member->visit(*this);

@@ -72,10 +72,12 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
     for (auto& [name, node] : graph.getSignalsMap()) {
         postOrderVisit(node, visited, order);
     }
-    // Also visit any remaining nodes not reachable from outputs/signals
-    for (auto& node : graph.nodes) {
-        postOrderVisit(node.get(), visited, order);
-    }
+    // Do NOT visit orphaned nodes (not reachable from any output/signal).
+    // Visiting orphaned nodes causes constant_fold to loop forever: when
+    // redirectConsumers() silently no-ops on an already-orphaned node,
+    // tryAlgebraicSimplify still returns true, so 'changed' is set and the
+    // outer do-while never terminates.  Orphaned nodes cannot affect any
+    // output, so skipping them is both safe and correct.
     return order;
 }
 

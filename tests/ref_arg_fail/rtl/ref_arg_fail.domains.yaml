@@ -1,0 +1,12 @@
+module_name: ref_arg_fail
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - a
+      - result

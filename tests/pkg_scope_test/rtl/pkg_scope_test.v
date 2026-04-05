@@ -29,7 +29,12 @@ module pkg_scope_test
     output phase_t     phase_out,
     output logic [7:0] result_out,
     output dir_t       dir_out,
-    output logic       valid_out
+    output logic       valid_out,
+    // function call outputs
+    output logic [7:0] score_out,    // encode_ctrl(op_in, src_in) — unqualified wildcard
+    output logic       alu_flag_out, // ctrl_pkg::is_alu_op(op_in) — explicit pkg::
+    output logic [1:0] opp_dir_out,  // dir_opposite(dir_in) — unqualified wildcard
+    output logic [3:0] prio_out      // types_pkg::weight_score(weight_in, shape_in) — explicit pkg::
 );
 
     // -----------------------------------------------------------------------
@@ -183,5 +188,44 @@ module pkg_scope_test
     assign result_out = result_reg;
     assign dir_out    = dir_reg;
     assign valid_out  = valid_reg;
+
+    // -----------------------------------------------------------------------
+    // Function call outputs — registered
+    // -----------------------------------------------------------------------
+    logic [7:0] comb_score;
+    logic       comb_alu_flag;
+    logic [1:0] comb_opp_dir;
+    logic [3:0] comb_prio;
+
+    always_comb begin
+        comb_score    = encode_ctrl(op_in, src_in);               // unqualified (ctrl_pkg wildcard)
+        comb_alu_flag = ctrl_pkg::is_alu_op(op_in);               // explicit pkg::
+        comb_opp_dir  = dir_opposite(dir_in);                     // unqualified (types_pkg wildcard)
+        comb_prio     = types_pkg::weight_score(weight_in, shape_in); // explicit pkg::
+    end
+
+    logic [7:0] score_reg;
+    logic       alu_flag_reg;
+    logic [1:0] opp_dir_reg;
+    logic [3:0] prio_reg;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            score_reg    <= 8'h00;
+            alu_flag_reg <= 1'b0;
+            opp_dir_reg  <= 2'b00;
+            prio_reg     <= 4'h0;
+        end else begin
+            score_reg    <= comb_score;
+            alu_flag_reg <= comb_alu_flag;
+            opp_dir_reg  <= comb_opp_dir;
+            prio_reg     <= comb_prio;
+        end
+    end
+
+    assign score_out    = score_reg;
+    assign alu_flag_out = alu_flag_reg;
+    assign opp_dir_out  = opp_dir_reg;
+    assign prio_out     = prio_reg;
 
 endmodule

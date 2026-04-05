@@ -45,4 +45,19 @@ package types_pkg;
         PHASE_ERR  = 3'b101
     } phase_t;
 
+    // Called unqualified (comp-unit wildcard)
+    function automatic dir_t dir_opposite(input dir_t d);
+        case (d)
+            DIR_N:   dir_opposite = DIR_S;
+            DIR_S:   dir_opposite = DIR_N;
+            DIR_E:   dir_opposite = DIR_W;
+            default: dir_opposite = DIR_E;
+        endcase
+    endfunction
+
+    // Called as explicit types_pkg::weight_score(...)
+    function automatic logic [3:0] weight_score(input weight_t w, input shape_t sh);
+        weight_score = {w, sh[1:0]};
+    endfunction
+
 endpackage

@@ -18,6 +18,10 @@ module tb;
     logic [7:0] result_out;
     logic [1:0] dir_out;
     logic valid_out;
+    logic [7:0] score_out;
+    logic alu_flag_out;
+    logic [1:0] opp_dir_out;
+    logic [3:0] prio_out;
 
     // Interface and connection to UUT
     uut_if _if();
@@ -37,6 +41,10 @@ module tb;
     assign _if.result_out = result_out;
     assign _if.dir_out = dir_out;
     assign _if.valid_out = valid_out;
+    assign _if.score_out = score_out;
+    assign _if.alu_flag_out = alu_flag_out;
+    assign _if.opp_dir_out = opp_dir_out;
+    assign _if.prio_out = prio_out;
 
     // modules
     pkg_scope_test uut(.*);

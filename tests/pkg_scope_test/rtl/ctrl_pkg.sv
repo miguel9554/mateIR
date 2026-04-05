@@ -42,4 +42,15 @@ package ctrl_pkg;
         SCHED_WFQ  = 2'b11
     } sched_t;
 
+    // Called unqualified (module-header wildcard); also exercised as ctrl_pkg::encode_ctrl
+    function automatic logic [7:0] encode_ctrl(input op_t op, input src_t src);
+        encode_ctrl = {op, src, 3'b000};  // {3-bit op, 2-bit src, 3 zeros} = 8 bits
+    endfunction
+
+    // Called via explicit ctrl_pkg::is_alu_op(...)
+    function automatic logic is_alu_op(input op_t op);
+        is_alu_op = (op == OP_ADD) || (op == OP_SUB) ||
+                    (op == OP_AND) || (op == OP_OR)  || (op == OP_XOR);
+    endfunction
+
 endpackage

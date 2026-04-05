@@ -20,3 +20,7 @@ clock_domains:
       - result_out
       - dir_out
       - valid_out
+      - score_out
+      - alu_flag_out
+      - opp_dir_out
+      - prio_out

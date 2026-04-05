@@ -1,0 +1,25 @@
+name: Regression
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build Docker images
+        run: bash scripts/docker-build.sh
+
+      - name: Run full regression in Docker
+        run: scripts/docker-run.sh python tests/regression.py

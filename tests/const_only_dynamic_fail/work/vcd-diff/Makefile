@@ -1,0 +1,1 @@
+../../../common/vcd-diff.mk

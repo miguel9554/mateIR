@@ -205,6 +205,18 @@ DFGNode* appendConcatInput(DFG& graph, DFGNode* existingDriver, DFGNode* newPart
     return concatNode;
 }
 
+static int64_t intPowConst(int64_t base, int64_t exp) {
+    if (exp < 0)
+        throw std::runtime_error("negative exponent");
+    if (base == 0 && exp == 0)
+        throw std::runtime_error("0**0");
+    int64_t result = 1;
+    for (int64_t i = 0; i < exp; i++) {
+        result *= base;
+    }
+    return result;
+}
+
 // TODO should be double? or parametrized by type.
 struct IntegerVectorLiteral {
     int64_t value;
@@ -361,6 +373,15 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             return evaluateConstantExpr(binary.left, ctx) / divisor;
         }
 
+        case SyntaxKind::ModExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto divisor = evaluateConstantExpr(binary.right, ctx);
+            if (divisor == 0) {
+                throw CompilerError("Modulo by zero in constant expression");
+            }
+            return evaluateConstantExpr(binary.left, ctx) % divisor;
+        }
+
         case SyntaxKind::IntegerVectorExpression: {
             auto& vecExpr = expr->as<IntegerVectorExpressionSyntax>();
             return parseIntegerVectorExpression(vecExpr).value;
@@ -397,6 +418,12 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
         case SyntaxKind::LogicalOrExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
             return (evaluateConstantExpr(binary.left, ctx) || evaluateConstantExpr(binary.right, ctx)) ? 1 : 0;
+        }
+
+        case SyntaxKind::PowerExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return intPowConst(evaluateConstantExpr(binary.left, ctx),
+                               evaluateConstantExpr(binary.right, ctx));
         }
 
         default:
@@ -701,6 +728,17 @@ const ResolvedType* lookupDeclaredType(const std::string& baseName,
     }
 
     return nullptr;
+}
+
+DFGNode* tryBuildConstantExprNode(const ExpressionSyntax* expr, ResolutionContext& ctx) {
+    try {
+        auto value = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr);
+        auto* node = ctx.graph.constant(value);
+        node->loc = resolveSourceLoc(*expr, ctx.sm);
+        return node;
+    } catch (const std::runtime_error&) {
+        return nullptr;
+    }
 }
 
 // Build DFG node directly from slang expression syntax
@@ -1024,15 +1062,19 @@ DFGNode* buildExprDFG(
         }
 
         case SyntaxKind::DivideExpression: {
-            try {
-                auto value = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr);
-                auto* node = ctx.graph.constant(value);
-                node->loc = resolveSourceLoc(*expr, ctx.sm);
+            if (auto* node = tryBuildConstantExprNode(expr, ctx)) {
                 return node;
-            } catch (const std::runtime_error&) {
-                throw CompilerError("DIV operation not yet supported in DFG",
-                                    resolveSourceLoc(*expr, ctx.sm));
             }
+            throw CompilerError("DIV operation requires constant operands",
+                                resolveSourceLoc(*expr, ctx.sm));
+        }
+
+        case SyntaxKind::ModExpression: {
+            if (auto* node = tryBuildConstantExprNode(expr, ctx)) {
+                return node;
+            }
+            throw CompilerError("MOD operation requires constant operands",
+                                resolveSourceLoc(*expr, ctx.sm));
         }
 
         case SyntaxKind::EqualityExpression: {
@@ -1104,11 +1146,11 @@ DFGNode* buildExprDFG(
         }
 
         case SyntaxKind::PowerExpression: {
-            auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.power(buildExprDFG(binary.left, ctx),
-                                         buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
-            return node;
+            if (auto* node = tryBuildConstantExprNode(expr, ctx)) {
+                return node;
+            }
+            throw CompilerError("POWER operation requires constant operands",
+                                resolveSourceLoc(*expr, ctx.sm));
         }
 
         case SyntaxKind::LogicalAndExpression: {

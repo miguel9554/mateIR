@@ -29,7 +29,6 @@ enum class DFGOp {
     ADD,
     SUB,
     MUL,
-    DIV,
     EQ,         // Equal (==)
     LT,         // Less than (<)
     LE,         // Less or equal (<=)
@@ -37,7 +36,6 @@ enum class DFGOp {
     GE,         // Greater or equal (>=)
     SHL,        // Arithmetic shift left (<<<)
     ASR,        // Arithmetic shift right (>>>)
-    POWER,      // Exponentiation (**)
     MUX,        // 2:1 mux: in[0]=sel, in[1]=true_val, in[2]=false_val
     MUX_N,      // N:1 mux: in[0..N-1]=selectors, in[N..2N-1]=data values (one-hot select)
     MODULE,     // Submodule instance: name=instance_name, data=module_type_name, in=input_port_drivers
@@ -74,7 +72,6 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::ADD: return "ADD";
         case DFGOp::SUB: return "SUB";
         case DFGOp::MUL: return "MUL";
-        case DFGOp::DIV: return "DIV";
         case DFGOp::EQ: return "EQ";
         case DFGOp::LT: return "LT";
         case DFGOp::LE: return "LE";
@@ -82,7 +79,6 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::GE: return "GE";
         case DFGOp::SHL: return "SHL";
         case DFGOp::ASR: return "ASR";
-        case DFGOp::POWER: return "POWER";
         case DFGOp::MUX: return "MUX";
         case DFGOp::MUX_N: return "MUX_N";
         case DFGOp::MODULE: return "MODULE";
@@ -128,7 +124,6 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::ADD:    return 2;
         case DFGOp::SUB:    return 2;
         case DFGOp::MUL:    return 2;
-        case DFGOp::DIV:    return 2;
         case DFGOp::EQ:     return 2;
         case DFGOp::LT:     return 2;
         case DFGOp::LE:     return 2;
@@ -136,7 +131,6 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::GE:     return 2;
         case DFGOp::SHL:    return 2;
         case DFGOp::ASR:    return 2;
-        case DFGOp::POWER:  return 2;
         case DFGOp::MUX:    return 3;
 
         case DFGOp::UNARY_PLUS:      return 1;
@@ -601,18 +595,6 @@ public:
         auto n = name.empty()
             ? std::make_unique<DFGNode>(DFGOp::ASR)
             : std::make_unique<DFGNode>(DFGOp::ASR, name);
-        n->in = {a, b};
-        nodes.push_back(std::move(n));
-        if (!name.empty()) {
-            signals[name] = nodes.back().get();
-        }
-        return nodes.back().get();
-    }
-
-    DFGNode* power(DFGNode* a, DFGNode* b, const std::string& name = "") {
-        auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGOp::POWER)
-            : std::make_unique<DFGNode>(DFGOp::POWER, name);
         n->in = {a, b};
         nodes.push_back(std::move(n));
         if (!name.empty()) {

@@ -275,20 +275,6 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::ADD:   return getVal(0) + getVal(1);
         case DFGOp::SUB:   return getVal(0) - getVal(1);
         case DFGOp::MUL:   return getVal(0) * getVal(1);
-        case DFGOp::DIV: {
-            int64_t divisor = getVal(1);
-            if (divisor == 0)
-                throw CompilerError("Simulator: division by zero", node);
-            return getVal(0) / divisor;
-        }
-        case DFGOp::POWER: {
-            int64_t base = getVal(0);
-            int64_t exp = getVal(1);
-            if (exp < 0) return 0;
-            int64_t result = 1;
-            for (int64_t i = 0; i < exp; i++) result *= base;
-            return result;
-        }
 
         case DFGOp::EQ:  return getVal(0) == getVal(1) ? 1 : 0;
         case DFGOp::LT:  return getVal(0) <  getVal(1) ? 1 : 0;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ir/resolved.h"
+#include "sim/sim_value.h"
 #include "sim/vcd_writer.h"
 
 #include <map>
@@ -51,7 +52,7 @@ struct ModuleInstance {
     const ResolvedModule& module_def;
 
     // Runtime values for all DFG nodes (flat — covers entire design hierarchy)
-    std::map<const DFGNode*, int64_t> values;
+    std::map<const DFGNode*, SimValue> values;
 
     // Async signal state for edge detection (port_name -> current value)
     std::map<std::string, int64_t> async_values;
@@ -78,13 +79,13 @@ struct ModuleInstance {
     void evaluateCombinational();
 
     // Evaluate a single node
-    int64_t evaluateNode(const DFGNode* node);
+    SimValue evaluateNode(const DFGNode* node);
 
     // Mask value to node's bit width
-    static int64_t maskToWidth(int64_t val, const DFGNode* node);
+    static SimValue maskToWidth(const SimValue& val, const DFGNode* node);
 
     // values.at() with a useful error message naming the missing node
-    int64_t checkedGet(const DFGNode* node, const DFGNode* context = nullptr) const;
+    SimValue checkedGet(const DFGNode* node, const DFGNode* context = nullptr) const;
 };
 
 class Simulator {
@@ -107,9 +108,9 @@ private:
     std::map<std::string, edge_t> clock_active_edge_;
     // Sync input -> clock name
     std::map<std::string, std::string> sync_input_clock_;
-    std::map<std::string, std::vector<int64_t>> sync_input_data_;
+    std::map<std::string, std::vector<SimValue>> sync_input_data_;
     std::map<std::string, size_t> sync_input_pos_;
-    std::map<std::string, std::vector<int64_t>> recorded_values_;
+    std::map<std::string, std::vector<SimValue>> recorded_values_;
 
     std::unique_ptr<VcdWriter> vcd_;
 

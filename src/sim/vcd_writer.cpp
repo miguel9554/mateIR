@@ -3,8 +3,75 @@
 
 #include <filesystem>
 #include <format>
+#include <utility>
 
 namespace custom_hdl {
+
+SimVcdValue::SimVcdValue(unsigned int bit_size)
+    : value_base(bit_size),
+      bit_size_(bit_size),
+      value_(bit_size == 0 ? "0" : std::string(bit_size, '0'))
+{
+}
+
+void SimVcdValue::set(const SimValue& value) {
+    std::string next = value.resized(static_cast<int>(bit_size_), false).toBinaryString();
+    if (state_ != vcd_tracer::value_state::known || next != value_) {
+        state_ = vcd_tracer::value_state::known;
+        value_ = std::move(next);
+        dirty_ = true;
+    }
+}
+
+void SimVcdValue::unknown() {
+    if (state_ != vcd_tracer::value_state::unknown_x) {
+        state_ = vcd_tracer::value_state::unknown_x;
+        dirty_ = true;
+    }
+}
+
+void SimVcdValue::undriven() {
+    if (state_ != vcd_tracer::value_state::undriven_z) {
+        state_ = vcd_tracer::value_state::undriven_z;
+        dirty_ = true;
+    }
+}
+
+void SimVcdValue::set_uint64(uint64_t v) {
+    set(SimValue::fromU64(v, static_cast<int>(bit_size_), false));
+}
+
+void SimVcdValue::set_double(double v) {
+    set_uint64(static_cast<uint64_t>(v));
+}
+
+void SimVcdValue::elaborate(vcd_tracer::scope_fn::add_fn add_fn,
+                            std::string_view var_name) {
+    elaborate_base(bit_size_, "wire", std::move(add_fn), var_name,
+                   [this](std::ostream& out, bool start) {
+                       return dump(out, start);
+                   });
+}
+
+vcd_tracer::scope_fn::dump_sequence_t SimVcdValue::dump(std::ostream& out, bool start) {
+    (void)start;
+    if (!dirty_) return vcd_tracer::scope_fn::end_sequence;
+
+    if (state_ == vcd_tracer::value_state::unknown_x) {
+        if (bit_size_ == 1) out << "x" << _scope.identifier << "\n";
+        else out << "bx " << _scope.identifier << "\n";
+    } else if (state_ == vcd_tracer::value_state::undriven_z) {
+        if (bit_size_ == 1) out << "z" << _scope.identifier << "\n";
+        else out << "bz " << _scope.identifier << "\n";
+    } else if (bit_size_ == 1) {
+        out << (value_.empty() ? '0' : value_.back()) << _scope.identifier << "\n";
+    } else {
+        out << "b" << value_ << " " << _scope.identifier << "\n";
+    }
+
+    dirty_ = false;
+    return vcd_tracer::scope_fn::end_sequence;
+}
 
 namespace {
 
@@ -60,8 +127,7 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
                 : dim.left - static_cast<int64_t>(i);
             std::string elem_name = name + "[" + std::to_string(idx) + "]";
             unsigned int w = getWidth(elem);
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            v->set_bit_size(w);
+            auto v = std::make_unique<SimVcdValue>(w);
             v->elaborate(scope.get_add_fn(), elem_name);
             values_[elem].push_back(std::move(v));
         }
@@ -69,8 +135,7 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
     }
 
     unsigned int w = getWidth(node);
-    auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-    v->set_bit_size(w);
+    auto v = std::make_unique<SimVcdValue>(w);
     v->elaborate(scope.get_add_fn(), name);
     values_[node].push_back(std::move(v));
 }
@@ -136,8 +201,7 @@ void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scop
     for (const auto& [name, sig] : mod.inputs) {
         if (name.ends_with(".q")) continue;  // shown in flops section
         unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        v->set_bit_size(w);
+        auto v = std::make_unique<SimVcdValue>(w);
         v->elaborate(inputs_mod.get_add_fn(), name);
         if (sig.sync_kind == SyncKind::Clock ||
             sig.sync_kind == SyncKind::Reset) {
@@ -163,8 +227,7 @@ void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scop
     for (const auto& flop : mod.flops) {
         if (!flop.q_node || !alive.count(flop.q_node)) continue;
         unsigned int w = getWidth(flop.q_node);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        v->set_bit_size(w);
+        auto v = std::make_unique<SimVcdValue>(w);
         auto dot = flop.name.rfind('.');
         if (dot == std::string::npos) {
             v->elaborate(flops_mod.get_add_fn(), flop.name);
@@ -224,8 +287,7 @@ void VcdWriter::setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
     for (const auto& [name, sig] : mod.inputs) {
         if (name.ends_with(".q")) continue;
         unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        v->set_bit_size(w);
+        auto v = std::make_unique<SimVcdValue>(w);
         v->elaborate(scope.get_add_fn(), name);
         if (sig.sync_kind == SyncKind::Clock ||
             sig.sync_kind == SyncKind::Reset) {
@@ -250,8 +312,7 @@ void VcdWriter::setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
     for (const auto& flop : mod.flops) {
         if (!flop.q_node || !alive.count(flop.q_node)) continue;
         unsigned int w = getWidth(flop.q_node);
-        auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-        v->set_bit_size(w);
+        auto v = std::make_unique<SimVcdValue>(w);
         std::string vcd_name = flop.name;
         if (vcd_name.ends_with(".q")) vcd_name.resize(vcd_name.size() - 2);
         auto dot = vcd_name.rfind('.');
@@ -330,7 +391,7 @@ void VcdWriter::update(const ModuleInstance& root, int64_t time_ns) {
     for (auto& [name, vcd_vals] : async_values_) {
         auto it = root.async_values.find(name);
         if (it != root.async_values.end())
-            for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
+            for (auto& vcd_val : vcd_vals) vcd_val->set_uint64(static_cast<uint64_t>(it->second));
     }
 }
 

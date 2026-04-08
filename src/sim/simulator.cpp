@@ -10,9 +10,71 @@
 #include <random>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 
 
 namespace custom_hdl {
+
+namespace {
+
+int nodeWidth(const DFGNode* node, int fallback = 64) {
+    if (node && node->type.has_value() && node->type->width > 0) return node->type->width;
+    return fallback;
+}
+
+bool nodeSigned(const DFGNode* node) {
+    return node && node->type.has_value() && node->type->isSigned();
+}
+
+SimValue simValueFromInt(int64_t value, const DFGNode* node) {
+    return SimValue::fromI64(value, nodeWidth(node), nodeSigned(node));
+}
+
+SimValue simValueFromType(int64_t value, const ResolvedType& type) {
+    int width = type.width > 0 ? type.width : 64;
+    return SimValue::fromI64(value, width, type.isSigned());
+}
+
+SimValue boolValue(bool value) {
+    return SimValue::fromU64(value ? 1 : 0, 1, false);
+}
+
+bool useSignedCompare(const DFGNode* lhs, const DFGNode* rhs) {
+    return nodeSigned(lhs) && nodeSigned(rhs);
+}
+
+std::optional<int64_t> constantIndex(const DFGNode* node) {
+    if (!node || node->op != DFGOp::CONST) return std::nullopt;
+    return std::get<int64_t>(node->data);
+}
+
+std::optional<int64_t> packedBitPosition(const DFGNode* index_node) {
+    if (!index_node || index_node->op != DFGOp::INDEX || index_node->in.size() < 3)
+        return std::nullopt;
+
+    auto high = constantIndex(index_node->in[1].node);
+    auto low = constantIndex(index_node->in[2].node);
+    if (!high || !low) return std::nullopt;
+
+    const DFGNode* source_node = index_node->in[0].node;
+    if (source_node->type.has_value() && !source_node->type->packed_dims.empty()) {
+        const auto& dim = source_node->type->packed_dims[0];
+        if (dim.left >= dim.right) return *low - dim.right;
+        return dim.right - *high;
+    }
+    return *low;
+}
+
+SimValue overlayAtBitPosition(const SimValue& base, const SimValue& patch,
+                              int64_t bit_pos, const DFGNode* result_node) {
+    SimValue result = base.resized(nodeWidth(result_node), nodeSigned(result_node));
+    for (int bit = 0; bit < patch.width(); ++bit) {
+        result.setBit(static_cast<int>(bit_pos) + bit, patch.getBit(bit));
+    }
+    return result;
+}
+
+} // namespace
 
 // ============================================================================
 // ModuleInstance
@@ -24,33 +86,17 @@ ModuleInstance::ModuleInstance(const std::string& name, const ResolvedModule& mo
     buildFlopMaps();
     buildTopology();
     initConsts();
-
-    // Width check on all nodes
-    for (const auto& node : module_def.dfg->nodes) {
-        if (node->type.has_value() && node->type->width > 64) {
-            throw CompilerError(std::format(
-                "Simulator: node '{}' has width {} (max 64 supported)",
-                node->str(), node->type->width), node.get());
-        }
-    }
 }
 
 // ============================================================================
 // Bit mask helper
 // ============================================================================
 
-int64_t ModuleInstance::maskToWidth(int64_t val, const DFGNode* node) {
+SimValue ModuleInstance::maskToWidth(const SimValue& val, const DFGNode* node) {
     if (!node->type.has_value() || node->type->width <= 0)
         return val;
 
-    int w = node->type->width;
-    uint64_t mask = (w == 64) ? ~0ULL : (1ULL << w) - 1;
-    val &= static_cast<int64_t>(mask);
-
-    if (node->type->isSigned() && w < 64 && (val & (1LL << (w - 1)))) {
-        val |= ~static_cast<int64_t>(mask);
-    }
-    return val;
+    return val.resized(node->type->width, node->type->isSigned());
 }
 
 // ============================================================================
@@ -159,7 +205,7 @@ void ModuleInstance::buildFlopMaps() {
 void ModuleInstance::initConsts() {
     for (const auto& node : module_def.dfg->nodes) {
         if (node->op == DFGOp::CONST) {
-            values[node.get()] = std::get<int64_t>(node->data);
+            values[node.get()] = simValueFromInt(std::get<int64_t>(node->data), node.get());
         }
     }
 }
@@ -172,13 +218,12 @@ void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
     // flop_q_nodes already covers all flops from all submodules (built by buildFlopMaps)
     for (const auto& [qnode, flop] : flop_q_nodes) {
         int w = flop->type.type.width;
-        uint64_t mask = (w == 64) ? ~0ULL : (1ULL << w) - 1;
         if (mode == FlopsInitial::Random) {
-            values[qnode] = static_cast<int64_t>(rng() & mask);
+            values[qnode] = SimValue::random(w, flop->type.type.isSigned(), rng);
         } else if (mode == FlopsInitial::AllOnes) {
-            values[qnode] = static_cast<int64_t>(mask);
+            values[qnode] = SimValue::ones(w, flop->type.type.isSigned());
         } else {
-            values[qnode] = 0;
+            values[qnode] = SimValue::zero(w, flop->type.type.isSigned());
         }
     }
 }
@@ -196,7 +241,7 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
     // Update stored value and INPUT node
     async_values[signalName] = newValue;
     if (auto* inputNode = module_def.dfg->getInputNode("", signalName)) {
-        values[inputNode] = newValue;
+        values[inputNode] = simValueFromInt(newValue, inputNode);
     }
 
     // Detect edges
@@ -233,7 +278,7 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
             if ((flop->reset->edge == POSEDGE && posedge) ||
                 (flop->reset->edge == NEGEDGE && negedge)) {
                 if (flop->reset_value.has_value() && flop->q_node) {
-                    values[flop->q_node] = flop->reset_value.value();
+                    values[flop->q_node] = simValueFromType(flop->reset_value.value(), flop->type.type);
                 }
             }
         }
@@ -244,7 +289,7 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
 // Node evaluation
 // ============================================================================
 
-int64_t ModuleInstance::checkedGet(const DFGNode* node, const DFGNode* context) const {
+SimValue ModuleInstance::checkedGet(const DFGNode* node, const DFGNode* context) const {
     auto it = values.find(node);
     if (it == values.end())
         throw CompilerError(std::format(
@@ -257,8 +302,8 @@ int64_t ModuleInstance::checkedGet(const DFGNode* node, const DFGNode* context) 
     return it->second;
 }
 
-int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
-    auto getVal = [&](int idx) -> int64_t {
+SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
+    auto getVal = [&](int idx) -> SimValue {
         return checkedGet(node->in[idx].node, node);
     };
 
@@ -272,26 +317,62 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
             if (node->in.empty()) return checkedGet(node);
             return getVal(0);
 
-        case DFGOp::ADD:   return getVal(0) + getVal(1);
-        case DFGOp::SUB:   return getVal(0) - getVal(1);
-        case DFGOp::MUL:   return getVal(0) * getVal(1);
+        case DFGOp::ADD:   return getVal(0).add(getVal(1));
+        case DFGOp::SUB:   return getVal(0).sub(getVal(1));
+        case DFGOp::MUL:   return getVal(0).mul(getVal(1));
 
-        case DFGOp::EQ:  return getVal(0) == getVal(1) ? 1 : 0;
-        case DFGOp::LT:  return getVal(0) <  getVal(1) ? 1 : 0;
-        case DFGOp::LE:  return getVal(0) <= getVal(1) ? 1 : 0;
-        case DFGOp::GT:  return getVal(0) >  getVal(1) ? 1 : 0;
-        case DFGOp::GE:  return getVal(0) >= getVal(1) ? 1 : 0;
+        case DFGOp::EQ:  return boolValue(getVal(0).eq(getVal(1)));
+        case DFGOp::LT: {
+            auto lhs = getVal(0);
+            auto rhs = getVal(1);
+            return boolValue(useSignedCompare(node->in[0].node, node->in[1].node)
+                ? lhs.signedLt(rhs)
+                : lhs.unsignedLt(rhs));
+        }
+        case DFGOp::LE: {
+            auto lhs = getVal(0);
+            auto rhs = getVal(1);
+            bool lt = useSignedCompare(node->in[0].node, node->in[1].node)
+                ? lhs.signedLt(rhs)
+                : lhs.unsignedLt(rhs);
+            return boolValue(lt || lhs.eq(rhs));
+        }
+        case DFGOp::GT: {
+            auto lhs = getVal(0);
+            auto rhs = getVal(1);
+            return boolValue(useSignedCompare(node->in[0].node, node->in[1].node)
+                ? rhs.signedLt(lhs)
+                : rhs.unsignedLt(lhs));
+        }
+        case DFGOp::GE: {
+            auto lhs = getVal(0);
+            auto rhs = getVal(1);
+            bool lt = useSignedCompare(node->in[0].node, node->in[1].node)
+                ? lhs.signedLt(rhs)
+                : lhs.unsignedLt(rhs);
+            return boolValue(!lt);
+        }
 
-        case DFGOp::SHL:  return getVal(0) << getVal(1);
-        case DFGOp::ASR:  return getVal(0) >> getVal(1);
+        case DFGOp::SHL:  return getVal(0).shl(getVal(1).lowU64());
+        case DFGOp::ASR:  return getVal(0).shr(getVal(1).lowU64(), true);
 
         case DFGOp::MUX:
-            return getVal(0) ? getVal(1) : getVal(2);
+            if (getVal(0).isZero()) return getVal(2);
+            if (auto bit_pos = packedBitPosition(node->in[0].node)) {
+                SimValue patch = getVal(1);
+                SimValue base = getVal(2);
+                if (node->type.has_value() &&
+                        patch.width() < node->type->width &&
+                        base.width() == node->type->width) {
+                    return overlayAtBitPosition(base, patch, *bit_pos, node);
+                }
+            }
+            return getVal(1);
 
         case DFGOp::MUX_N: {
             int n = static_cast<int>(node->in.size()) / 2;
             for (int i = 0; i < n; i++) {
-                if (checkedGet(node->in[i].node, node) != 0) {
+                if (!checkedGet(node->in[i].node, node).isZero()) {
                     return checkedGet(node->in[n + i].node, node);
                 }
             }
@@ -299,56 +380,41 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
         }
 
         case DFGOp::UNARY_PLUS:    return getVal(0);
-        case DFGOp::UNARY_NEGATE:  return -getVal(0);
-        case DFGOp::BITWISE_NOT:   return ~getVal(0);
-        case DFGOp::LOGICAL_NOT:   return getVal(0) == 0 ? 1 : 0;
-        case DFGOp::LOGICAL_AND:   return (getVal(0) != 0 && getVal(1) != 0) ? 1 : 0;
-        case DFGOp::LOGICAL_OR:    return (getVal(0) != 0 || getVal(1) != 0) ? 1 : 0;
-        case DFGOp::BITWISE_AND:   return getVal(0) & getVal(1);
-        case DFGOp::BITWISE_OR:    return getVal(0) | getVal(1);
-        case DFGOp::BITWISE_XOR:   return getVal(0) ^ getVal(1);
-        case DFGOp::BITWISE_XNOR:  return ~(getVal(0) ^ getVal(1));
+        case DFGOp::UNARY_NEGATE:  return getVal(0).negated();
+        case DFGOp::BITWISE_NOT:   return getVal(0).bitwiseNot();
+        case DFGOp::LOGICAL_NOT:   return boolValue(getVal(0).isZero());
+        case DFGOp::LOGICAL_AND:   return boolValue(!getVal(0).isZero() && !getVal(1).isZero());
+        case DFGOp::LOGICAL_OR:    return boolValue(!getVal(0).isZero() || !getVal(1).isZero());
+        case DFGOp::BITWISE_AND:   return getVal(0).bitwiseAnd(getVal(1));
+        case DFGOp::BITWISE_OR:    return getVal(0).bitwiseOr(getVal(1));
+        case DFGOp::BITWISE_XOR:   return getVal(0).bitwiseXor(getVal(1));
+        case DFGOp::BITWISE_XNOR:  return getVal(0).bitwiseXnor(getVal(1));
 
-        case DFGOp::REDUCTION_AND: {
-            int w = node->in[0].node->type.has_value() ? node->in[0].node->type->width : 64;
-            uint64_t mask = (w == 64) ? ~0ULL : (1ULL << w) - 1;
-            return (static_cast<uint64_t>(getVal(0)) & mask) == mask ? 1 : 0;
-        }
-        case DFGOp::REDUCTION_NAND: {
-            int w = node->in[0].node->type.has_value() ? node->in[0].node->type->width : 64;
-            uint64_t mask = (w == 64) ? ~0ULL : (1ULL << w) - 1;
-            return (static_cast<uint64_t>(getVal(0)) & mask) == mask ? 0 : 1;
-        }
+        case DFGOp::REDUCTION_AND:
+            return boolValue(getVal(0).reductionAnd());
+        case DFGOp::REDUCTION_NAND:
+            return boolValue(!getVal(0).reductionAnd());
         case DFGOp::REDUCTION_OR:
-            return getVal(0) != 0 ? 1 : 0;
+            return boolValue(getVal(0).reductionOr());
         case DFGOp::REDUCTION_NOR:
-            return getVal(0) == 0 ? 1 : 0;
-        case DFGOp::REDUCTION_XOR: {
-            uint64_t v = static_cast<uint64_t>(getVal(0));
-            int w = node->in[0].node->type.has_value() ? node->in[0].node->type->width : 64;
-            if (w < 64) v &= (1ULL << w) - 1;
-            return std::popcount(v) & 1;
-        }
-        case DFGOp::REDUCTION_XNOR: {
-            uint64_t v = static_cast<uint64_t>(getVal(0));
-            int w = node->in[0].node->type.has_value() ? node->in[0].node->type->width : 64;
-            if (w < 64) v &= (1ULL << w) - 1;
-            return (std::popcount(v) & 1) ^ 1;
-        }
+            return boolValue(!getVal(0).reductionOr());
+        case DFGOp::REDUCTION_XOR:
+            return boolValue(getVal(0).reductionXor());
+        case DFGOp::REDUCTION_XNOR:
+            return boolValue(!getVal(0).reductionXor());
 
         case DFGOp::INDEX: {
             const DFGNode* source_node = node->in[0].node;
 
             if (source_node->type.has_value() && !source_node->type->unpacked_dims.empty()) {
-                int64_t index = getVal(1);
+                int64_t index = static_cast<int64_t>(getVal(1).lowU64());
                 int64_t n = static_cast<int64_t>(source_node->in.size());
                 index = ((index % n) + n) % n;
                 return checkedGet(source_node->in[index].node, node);
             }
 
-            int64_t high = getVal(1);
-            int64_t low = getVal(2);
-            int64_t source_val = getVal(0);
+            int64_t high = static_cast<int64_t>(getVal(1).lowU64());
+            int64_t low = static_cast<int64_t>(getVal(2).lowU64());
             int64_t width = high - low + 1;
 
             int64_t bit_pos;
@@ -363,19 +429,16 @@ int64_t ModuleInstance::evaluateNode(const DFGNode* node) {
                 bit_pos = low;
             }
 
-            uint64_t elem_mask = (width >= 64) ? ~0ULL : (1ULL << width) - 1;
-            return static_cast<int64_t>((static_cast<uint64_t>(source_val) >> bit_pos) & elem_mask);
+            return getVal(0).slice(static_cast<int>(bit_pos + width - 1), static_cast<int>(bit_pos));
         }
 
         case DFGOp::CONCAT: {
-            uint64_t result = 0;
+            std::vector<SimValue> parts;
+            parts.reserve(node->in.size());
             for (size_t i = 0; i < node->in.size(); ++i) {
-                const DFGNode* inputNode = node->in[i].node;
-                int w = inputNode->type.has_value() ? inputNode->type->width : 64;
-                uint64_t mask = (w >= 64) ? ~0ULL : (1ULL << w) - 1;
-                result = (result << w) | (static_cast<uint64_t>(checkedGet(inputNode, node)) & mask);
+                parts.push_back(checkedGet(node->in[i].node, node));
             }
-            return static_cast<int64_t>(result);
+            return SimValue::concat(parts);
         }
 
         case DFGOp::CONCAT_ALIGN:
@@ -400,7 +463,7 @@ void ModuleInstance::evaluateCombinational() {
     for (const DFGNode* node : topo_order) {
         if (node->op == DFGOp::INPUT || node->op == DFGOp::CONST) continue;
         if (flop_q_nodes.count(node)) continue;
-        int64_t val = maskToWidth(evaluateNode(node), node);
+        SimValue val = maskToWidth(evaluateNode(node), node);
         values[node] = val;
     }
 }
@@ -535,17 +598,16 @@ void Simulator::loadSyncInputs() {
                 "Simulator: cannot open sync input file '{}'", path));
         }
 
-        std::vector<int64_t> values;
+        std::vector<SimValue> values;
         std::string line;
         while (std::getline(file, line)) {
             if (line.empty() || line[0] == '#') continue;
             std::istringstream iss(line);
-            uint64_t uval;
-            if (!(iss >> uval)) {
+            std::string value_text;
+            if (!(iss >> value_text)) {
                 throw CompilerError(std::format(
                     "Simulator: sync file '{}' has unparseable line: {}", path, line));
             }
-            int64_t val = static_cast<int64_t>(uval);
             std::string extra;
             if (iss >> extra) {
                 throw CompilerError(std::format(
@@ -553,7 +615,15 @@ void Simulator::loadSyncInputs() {
                     "(expected single integer per line, got '{}'). "
                     "Is this an async (clock/reset) file?", path, line));
             }
-            values.push_back(val);
+            try {
+                values.push_back(SimValue::fromDecimalString(
+                    value_text,
+                    input.type.width > 0 ? input.type.width : 64,
+                    input.type.isSigned()));
+            } catch (const std::invalid_argument&) {
+                throw CompilerError(std::format(
+                    "Simulator: sync file '{}' has unparseable line: {}", path, line));
+            }
         }
 
         if (values.empty()) {
@@ -606,8 +676,8 @@ void Simulator::writeOutputFiles() {
             throw CompilerError(std::format(
                 "Simulator: cannot open output file '{}'", filepath));
         }
-        for (int64_t v : values) {
-            out << v << "\n";
+        for (const SimValue& v : values) {
+            out << v.toBinaryString() << "\n";
         }
     }
 }
@@ -666,7 +736,7 @@ void Simulator::run() {
                 }
                 async_prev[name] = evt.value;
                 if (auto* inputNode = module_.dfg->getInputNode("", name)) {
-                    root_->values[inputNode] = evt.value;
+                    root_->values[inputNode] = simValueFromInt(evt.value, inputNode);
                 }
                 // Also initialize the root's async_values for edge detection
                 root_->async_values[name] = evt.value;
@@ -695,7 +765,7 @@ void Simulator::run() {
             bool asserted = (flop->reset->edge == POSEDGE && rst_val == 1) ||
                             (flop->reset->edge == NEGEDGE && rst_val == 0);
             if (asserted && flop->reset_value.has_value() && flop->q_node) {
-                root_->values[flop->q_node] = flop->reset_value.value();
+                root_->values[flop->q_node] = simValueFromType(flop->reset_value.value(), flop->type.type);
             }
         }
     }
@@ -730,40 +800,64 @@ void Simulator::run() {
             new_async[evt->signal_name] = evt->value;
         }
 
-        // Async events are physical signals: two different signals cannot
-        // change at exactly the same time.  t=0 is the initialization
-        // exception where all signals report their starting value.
-        if (batch_time > 0 && new_async.size() > 1) {
-            std::string names;
-            for (const auto& [n, v] : new_async)
-                names += (names.empty() ? "" : ", ") + n;
-            throw CompilerError(std::format(
-                "Simulator: multiple async events at the same timestamp {}ns "
-                "({}) — async signals cannot change simultaneously",
-                batch_time, names));
-        }
-
-        // Apply events and detect active clock edges
+        // Apply all async updates in the batch before triggering flops so
+        // simultaneous clock/reset events observe the same post-event state.
         std::set<std::string> active_edge_clocks;
+        std::set<std::string> active_edge_resets;
 
         for (const auto& [name, new_val] : new_async) {
             int64_t old_val = async_prev[name];
 
-            root_->setAsyncEvent(name, new_val);
+            root_->async_values[name] = new_val;
+            if (auto* inputNode = module_.dfg->getInputNode("", name)) {
+                root_->values[inputNode] = simValueFromInt(new_val, inputNode);
+            }
 
-            if (clock_inputs_.count(name) && old_val != new_val) {
-                bool is_posedge = (old_val == 0 && new_val == 1);
-                bool is_negedge = (old_val == 1 && new_val == 0);
+            if (old_val != new_val) {
+                bool posedge = (old_val == 0 && new_val == 1);
+                bool negedge = (old_val == 1 && new_val == 0);
                 auto edge_it = clock_active_edge_.find(name);
-                if (edge_it != clock_active_edge_.end()) {
-                    if ((edge_it->second == POSEDGE && is_posedge) ||
-                        (edge_it->second == NEGEDGE && is_negedge)) {
+                if (clock_inputs_.count(name) && edge_it != clock_active_edge_.end()) {
+                    if ((edge_it->second == POSEDGE && posedge) ||
+                        (edge_it->second == NEGEDGE && negedge)) {
                         active_edge_clocks.insert(name);
+                    }
+                }
+                if (auto reset_it = root_->flops_by_reset.find(name);
+                    reset_it != root_->flops_by_reset.end() && !reset_it->second.empty()) {
+                    const auto* reset = reset_it->second.front().flop->reset ? &*reset_it->second.front().flop->reset : nullptr;
+                    if (reset && ((reset->edge == POSEDGE && posedge) ||
+                                  (reset->edge == NEGEDGE && negedge))) {
+                        active_edge_resets.insert(name);
                     }
                 }
             }
 
             async_prev[name] = new_val;
+        }
+
+        for (const auto& reset_name : active_edge_resets) {
+            for (const auto& collected : root_->flops_by_reset[reset_name]) {
+                const auto* flop = collected.flop;
+                if (flop->reset_value.has_value() && flop->q_node) {
+                    root_->values[flop->q_node] = simValueFromType(flop->reset_value.value(), flop->type.type);
+                }
+            }
+        }
+
+        for (const auto& clock_name : active_edge_clocks) {
+            for (const auto& collected : root_->flops_by_clock[clock_name]) {
+                const auto* flop = collected.flop;
+                if (flop->reset.has_value() && collected.reset_name.has_value()) {
+                    int64_t rst_val = root_->async_values[*collected.reset_name];
+                    bool rst_active = (flop->reset->edge == POSEDGE && rst_val == 1) ||
+                                      (flop->reset->edge == NEGEDGE && rst_val == 0);
+                    if (rst_active) continue;
+                }
+                if (flop->q_node && flop->d_node) {
+                    root_->values[flop->q_node] = root_->checkedGet(flop->d_node);
+                }
+            }
         }
 
         // On clock active edge: advance sync inputs

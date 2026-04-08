@@ -13,12 +13,9 @@ all: $(BINARY) run
 
 $(BUILD_DIR)/CMakeCache.txt: $(SOURCES) CMakeLists.txt
 	cmake -B $(BUILD_DIR) $(CMAKE_ARGS)
-ifdef HOST_PROJECT_ROOT
 	sed -i \
-		-e "s|/workspace|$(HOST_PROJECT_ROOT)|g" \
-		-e "s|/opt/slang|$(HOST_PROJECT_ROOT)/external/slang-install|g" \
+		-e "s|/opt/slang|$(CURDIR)/external/slang-install|g" \
 		$(BUILD_DIR)/compile_commands.json 2>/dev/null || true
-endif
 
 $(BINARY): $(BUILD_DIR)/CMakeCache.txt $(SOURCES)
 	cmake --build $(BUILD_DIR) -j$(shell nproc)

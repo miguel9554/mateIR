@@ -13,9 +13,6 @@ all: $(BINARY) run
 
 $(BUILD_DIR)/CMakeCache.txt: $(SOURCES) CMakeLists.txt
 	cmake -B $(BUILD_DIR) $(CMAKE_ARGS)
-	sed -i \
-		-e "s|/opt/slang|$(CURDIR)/external/slang-install|g" \
-		$(BUILD_DIR)/compile_commands.json 2>/dev/null || true
 
 $(BINARY): $(BUILD_DIR)/CMakeCache.txt $(SOURCES)
 	cmake --build $(BUILD_DIR) -j$(shell nproc)

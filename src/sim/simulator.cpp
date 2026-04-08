@@ -603,26 +603,21 @@ void Simulator::loadSyncInputs() {
         while (std::getline(file, line)) {
             if (line.empty() || line[0] == '#') continue;
             std::istringstream iss(line);
-            std::string value_text;
-            if (!(iss >> value_text)) {
+            std::string hex_text;
+            if (!(iss >> hex_text)) {
                 throw CompilerError(std::format(
                     "Simulator: sync file '{}' has unparseable line: {}", path, line));
             }
-            std::string extra;
-            if (iss >> extra) {
-                throw CompilerError(std::format(
-                    "Simulator: sync file '{}' line has extra data "
-                    "(expected single integer per line, got '{}'). "
-                    "Is this an async (clock/reset) file?", path, line));
-            }
             try {
-                values.push_back(SimValue::fromDecimalString(
-                    value_text,
+                values.push_back(SimValue::fromHexString(
+                    hex_text,
                     input.type.width > 0 ? input.type.width : 64,
                     input.type.isSigned()));
             } catch (const std::invalid_argument&) {
                 throw CompilerError(std::format(
-                    "Simulator: sync file '{}' has unparseable line: {}", path, line));
+                    "Simulator: sync file '{}' has bad hex value "
+                    "(expected leading token like 0x1a2b, optional trailing debug text): {}",
+                    path, line));
             }
         }
 

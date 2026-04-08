@@ -17,6 +17,7 @@ public:
     static SimValue fromU64(uint64_t value, int width, bool is_signed = false);
     static SimValue fromI64(int64_t value, int width, bool is_signed = false);
     static SimValue fromDecimalString(const std::string& text, int width, bool is_signed = false);
+    static SimValue fromHexString(const std::string& text, int width, bool is_signed = false);
     static SimValue random(int width, bool is_signed, std::mt19937_64& rng);
     static SimValue concat(std::span<const SimValue> parts);
 

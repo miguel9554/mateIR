@@ -73,6 +73,40 @@ SimValue SimValue::fromDecimalString(const std::string& text, int width, bool is
     return value.resized(width, is_signed);
 }
 
+SimValue SimValue::fromHexString(const std::string& text, int width, bool is_signed) {
+    size_t pos = 0;
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
+
+    if (pos + 2 > text.size() || text[pos] != '0' ||
+        (text[pos + 1] != 'x' && text[pos + 1] != 'X')) {
+        throw std::invalid_argument("missing 0x prefix");
+    }
+    pos += 2;
+
+    SimValue value = zero(width, is_signed);
+    bool saw_digit = false;
+    for (; pos < text.size(); pos++) {
+        unsigned char c = static_cast<unsigned char>(text[pos]);
+        if (std::isspace(c)) {
+            while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
+            if (pos != text.size()) throw std::invalid_argument("trailing characters");
+            break;
+        }
+
+        uint32_t digit = 0;
+        if (c >= '0' && c <= '9') digit = static_cast<uint32_t>(c - '0');
+        else if (c >= 'a' && c <= 'f') digit = static_cast<uint32_t>(10 + c - 'a');
+        else if (c >= 'A' && c <= 'F') digit = static_cast<uint32_t>(10 + c - 'A');
+        else throw std::invalid_argument("not a hex digit");
+
+        saw_digit = true;
+        value.mulAddSmall(16, digit);
+    }
+
+    if (!saw_digit) throw std::invalid_argument("no digits");
+    return value.resized(width, is_signed);
+}
+
 SimValue SimValue::random(int width, bool is_signed, std::mt19937_64& rng) {
     SimValue value(width, is_signed);
     for (auto& word : value.words_) {

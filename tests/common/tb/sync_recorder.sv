@@ -22,14 +22,14 @@ module sync_recorder#(
 
     // Whenever data changes, write to file
     always @(posedge clk) begin
-        $fwrite(file, "%0d\n", data);
+        $fwrite(file, "0x%h (%d)\n", data, data);
         last_data <= data;
     end
 
     // Close file at end of simulation
     final begin
         if (last_data !== data) begin
-            $fwrite(file, "%0d\n", data);
+            $fwrite(file, "0x%h (%d)\n", data, data);
         end
         $fclose(file);
     end

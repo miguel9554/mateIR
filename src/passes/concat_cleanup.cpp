@@ -8,11 +8,13 @@ namespace custom_hdl {
 bool cleanupConcats(DFG& graph) {
     bool changed = false;
 
-    for (auto& nodePtr : graph.nodes) {
-        if (nodePtr->op != DFGOp::CONCAT) continue;
+    const size_t originalNodeCount = graph.nodes.size();
+    for (size_t nodeIndex = 0; nodeIndex < originalNodeCount; ++nodeIndex) {
+        DFGNode* node = graph.nodes[nodeIndex].get();
+        if (node->op != DFGOp::CONCAT) continue;
 
         // If no inputs are CONCAT_ALIGN, this is a direct RHS concat — already clean
-        bool hasAlign = std::any_of(nodePtr->in.begin(), nodePtr->in.end(),
+        bool hasAlign = std::any_of(node->in.begin(), node->in.end(),
             [](const DFGOutput& e) { return e.node->op == DFGOp::CONCAT_ALIGN; });
         if (!hasAlign) continue;
 
@@ -21,10 +23,12 @@ bool cleanupConcats(DFG& graph) {
             int64_t high;
             int64_t low;
             DFGNode* expr;
+            size_t order;
         };
         std::vector<AlignInfo> parts;
 
-        for (auto& input : nodePtr->in) {
+        for (size_t i = 0; i < node->in.size(); ++i) {
+            auto& input = node->in[i];
             DFGNode* child = input.node;
             if (child->op != DFGOp::CONCAT_ALIGN) {
                 throw CompilerError(std::format(
@@ -45,18 +49,45 @@ bool cleanupConcats(DFG& graph) {
             }
             int64_t high = std::get<int64_t>(highNode->data);
             int64_t low = std::get<int64_t>(lowNode->data);
-            parts.push_back({high, low, child->in[0].node});
+            if (high < low) std::swap(high, low);
+            parts.push_back({high, low, child->in[0].node, i});
         }
+
+        // Later CONCAT_ALIGN inputs are later writes to the same aggregate. If
+        // they fully cover earlier default/partial slices, drop the covered
+        // slices instead of leaving an over-wide concat for the simulator to
+        // truncate.
+        std::vector<AlignInfo> filtered;
+        for (size_t i = 0; i < parts.size(); ++i) {
+            bool covered = false;
+            for (size_t j = i + 1; j < parts.size(); ++j) {
+                bool overlaps = !(parts[i].high < parts[j].low || parts[i].low > parts[j].high);
+                if (!overlaps) continue;
+
+                bool fullyCovered = parts[j].low <= parts[i].low && parts[j].high >= parts[i].high;
+                if (fullyCovered) {
+                    covered = true;
+                    break;
+                }
+
+                throw CompilerError(std::format(
+                    "concat_cleanup: partial overlap between CONCAT_ALIGN ranges [{}:{}] and [{}:{}]",
+                    parts[i].high, parts[i].low, parts[j].high, parts[j].low), node);
+            }
+            if (!covered) filtered.push_back(parts[i]);
+        }
+        parts = std::move(filtered);
 
         // Sort by descending high index (MSB first)
         std::sort(parts.begin(), parts.end(), [](const AlignInfo& a, const AlignInfo& b) {
-            return a.high > b.high;
+            if (a.high != b.high) return a.high > b.high;
+            return a.order < b.order;
         });
 
         // Replace CONCAT's input list with sorted expression nodes (unwrap CONCAT_ALIGN)
-        nodePtr->in.clear();
+        node->in.clear();
         for (const auto& part : parts) {
-            nodePtr->in.push_back(part.expr);
+            node->in.push_back(part.expr);
         }
 
         changed = true;

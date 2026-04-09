@@ -7,7 +7,8 @@ module uut_recorder(
 
     // Async recorders
     async_recorder#(
-        .filepath(path("clk.txt"))
+        .filepath(path("clk.txt")),
+        .TYPE(logic)
     ) u_clk_recorder(
         .data(_if.clk)
     );

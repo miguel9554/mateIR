@@ -7,27 +7,32 @@ module uut_recorder(
 
     // Async recorders
     async_recorder#(
-        .filepath(path("axi_aclk.txt"))
+        .filepath(path("axi_aclk.txt")),
+        .TYPE(logic)
     ) u_axi_aclk_recorder(
         .data(_if.axi_aclk)
     );
     async_recorder#(
-        .filepath(path("spi_sclk.txt"))
+        .filepath(path("spi_sclk.txt")),
+        .TYPE(logic)
     ) u_spi_sclk_recorder(
         .data(_if.spi_sclk)
     );
     async_recorder#(
-        .filepath(path("axi_aresetn.txt"))
+        .filepath(path("axi_aresetn.txt")),
+        .TYPE(logic)
     ) u_axi_aresetn_recorder(
         .data(_if.axi_aresetn)
     );
     async_recorder#(
-        .filepath(path("spi_cs.txt"))
+        .filepath(path("spi_cs.txt")),
+        .TYPE(logic)
     ) u_spi_cs_recorder(
         .data(_if.spi_cs)
     );
     async_recorder#(
-        .filepath(path("test_mode.txt"))
+        .filepath(path("test_mode.txt")),
+        .TYPE(logic)
     ) u_test_mode_recorder(
         .data(_if.test_mode)
     );

@@ -60,7 +60,57 @@ std::string inDFG(const std::string& instance_path, const std::string& name) {
     return instance_path.empty() ? name : instance_path + "." + name;
 }
 
-bool extract_reset(
+DFGNode* nodeForTrigger(const ResolvedModule& resolved, const asyncTrigger_t& trigger) {
+    auto it = resolved.inputs.find(trigger.name);
+    return it != resolved.inputs.end() ? it->second.dfg_node : nullptr;
+}
+
+bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
+    if (node->op == DFGOp::INPUT) {
+        return node->name == flop_name + ".q";
+    }
+    if (node->op != DFGOp::INDEX) {
+        return false;
+    }
+    auto* source = node->in[0].node;
+    return source->op == DFGOp::INPUT && source->name == flop_name + ".q";
+}
+
+int64_t maskForWidth(int width) {
+    if (width <= 0) return 0;
+    if (width >= 64) return ~0LL;
+    return (1LL << width) - 1;
+}
+
+std::optional<int64_t> constantValueOfNode(const DFGNode* node) {
+    if (node->op == DFGOp::CONST) {
+        return std::get<int64_t>(node->data);
+    }
+    if (node->op == DFGOp::INDEX) {
+        auto src = constantValueOfNode(node->in[0].node);
+        if (!src) return std::nullopt;
+        auto hi = constantValueOfNode(node->in[1].node);
+        auto lo = constantValueOfNode(node->in[2].node);
+        if (!hi || !lo || *hi < *lo) return std::nullopt;
+        int width = static_cast<int>(*hi - *lo + 1);
+        return (*src >> *lo) & maskForWidth(width);
+    }
+    if (node->op == DFGOp::CONCAT) {
+        int64_t value = 0;
+        for (const auto& input : node->in) {
+            auto part = constantValueOfNode(input.node);
+            if (!part || !input.node->type) return std::nullopt;
+            int width = input.node->type->width;
+            if (width <= 0 || width > 63) return std::nullopt;
+            value = (value << width) | (*part & maskForWidth(width));
+        }
+        return value;
+    }
+    return std::nullopt;
+}
+
+bool extract_reset_from_concat(
+    DFG& graph,
     const DFGNode* dNodeDriver,
     const std::vector<asyncTrigger_t>& triggers,
     const std::string& flop_name,
@@ -70,10 +120,119 @@ bool extract_reset(
     int& reset_value,
     DFGNode*& functionalLogic)
 {
-    // With 2 triggers the driver must be a reset MUX — anything else is a compiler bug.
+    if (dNodeDriver->in.empty()) {
+        throw CompilerError(
+            std::format("flop '{}' reset CONCAT has no inputs", flop_name),
+            dNodeDriver->loc);
+    }
+
+    const DFGNode* firstMux = dNodeDriver->in[0].node;
+    if (firstMux->op != DFGOp::MUX) {
+        throw CompilerError(
+            std::format("flop '{}' reset CONCAT input is not a MUX (op={})",
+                flop_name, to_string(firstMux->op)),
+            firstMux->loc);
+    }
+
+    auto* mux_sel = firstMux->in[0].node;
+    if (nodeForTrigger(resolved, triggers[0]) == mux_sel) {
+        reset = triggers[0];
+        clock = triggers[1];
+    } else if (nodeForTrigger(resolved, triggers[1]) == mux_sel) {
+        reset = triggers[1];
+        clock = triggers[0];
+    } else {
+        throw CompilerError(std::format(
+            "flop '{}' has 2 triggers but CONCAT/MUX selector '{}' matches neither trigger ('{}', '{}')",
+            flop_name, mux_sel->name, triggers[0].name, triggers[1].name), dNodeDriver->loc);
+    }
+
+    std::vector<DFGNode*> functionalParts;
+    functionalParts.reserve(dNodeDriver->in.size());
+
+    bool resetIsConst = true;
+    bool resetIsQ = true;
+    int64_t assembledReset = 0;
+
+    for (const auto& input : dNodeDriver->in) {
+        auto* mux = input.node;
+        if (mux->op != DFGOp::MUX) {
+            throw CompilerError(
+                std::format("flop '{}' reset CONCAT contains non-MUX input (op={})",
+                    flop_name, to_string(mux->op)),
+                mux->loc);
+        }
+        if (mux->in[0].node != mux_sel) {
+            throw CompilerError(
+                std::format("flop '{}' reset CONCAT mixes different selectors", flop_name),
+                mux->loc);
+        }
+
+        auto* resetBranch = reset.edge == edge_t::POSEDGE ? mux->in[1].node : mux->in[2].node;
+        auto* functionalBranch = reset.edge == edge_t::POSEDGE ? mux->in[2].node : mux->in[1].node;
+        functionalParts.push_back(functionalBranch);
+
+        int partWidth = mux->type ? mux->type->width : (resetBranch->type ? resetBranch->type->width : 0);
+        if (partWidth <= 0 || partWidth > 63) {
+            throw CompilerError(
+                std::format("flop '{}' reset CONCAT contains unsupported slice width {}", flop_name, partWidth),
+                mux->loc);
+        }
+
+        if (auto constValue = constantValueOfNode(resetBranch)) {
+            assembledReset = (assembledReset << partWidth) |
+                (*constValue & maskForWidth(partWidth));
+            resetIsQ = false;
+        } else if (isFlopQValue(resetBranch, flop_name)) {
+            resetIsConst = false;
+        } else {
+            throw CompilerError(
+                "Unsupported reset CONCAT branch: " + resetBranch->str(),
+                resetBranch->loc ? resetBranch->loc : dNodeDriver->loc);
+        }
+
+        if (!resetIsConst && !resetIsQ) {
+            throw CompilerError(
+                std::format("flop '{}' reset CONCAT mixes reset constants and retained .q slices", flop_name),
+                mux->loc);
+        }
+    }
+
+    if (resetIsConst) {
+        reset_value = static_cast<int>(assembledReset);
+    } else if (!resetIsQ) {
+        throw CompilerError(
+            std::format("flop '{}' reset CONCAT is not a pure reset constant nor retained .q", flop_name),
+            dNodeDriver->loc);
+    }
+
+    functionalLogic = functionalParts.size() == 1 ? functionalParts[0] : graph.concat(functionalParts);
+    functionalLogic->type = dNodeDriver->type;
+    functionalLogic->loc = dNodeDriver->loc;
+    return resetIsConst;
+}
+
+bool extract_reset(
+    DFG& graph,
+    const DFGNode* dNodeDriver,
+    const std::vector<asyncTrigger_t>& triggers,
+    const std::string& flop_name,
+    const ResolvedModule& resolved,
+    asyncTrigger_t& reset,
+    asyncTrigger_t& clock,
+    int& reset_value,
+    DFGNode*& functionalLogic)
+{
+    if (dNodeDriver->op == DFGOp::CONCAT) {
+        return extract_reset_from_concat(
+            graph, dNodeDriver, triggers, flop_name, resolved,
+            reset, clock, reset_value, functionalLogic);
+    }
+
+    // With 2 triggers the driver must be a reset MUX, or a CONCAT of reset MUX slices.
     if (dNodeDriver->op != DFGOp::MUX) {
         throw CompilerError(std::format(
-            "flop '{}' has 2 triggers but its .d driver is not a MUX (op={})",
+            "flop '{}' has 2 triggers but its .d driver is neither MUX nor CONCAT-of-MUX (op={})",
             flop_name, to_string(dNodeDriver->op)), dNodeDriver->loc);
     }
 
@@ -86,15 +245,10 @@ bool extract_reset(
     // rather than name, because after DFG inlining the trigger's INPUT node is replaced
     // by the parent's signal node (with a different name), but resolved.inputs[name].dfg_node
     // is updated to track that replacement.
-    auto nodeForTrigger = [&](const asyncTrigger_t& t) -> DFGNode* {
-        auto it = resolved.inputs.find(t.name);
-        return it != resolved.inputs.end() ? it->second.dfg_node : nullptr;
-    };
-
-    if (nodeForTrigger(triggers[0]) == mux_sel) {
+    if (nodeForTrigger(resolved, triggers[0]) == mux_sel) {
         reset = triggers[0];
         clock = triggers[1];
-    } else if (nodeForTrigger(triggers[1]) == mux_sel) {
+    } else if (nodeForTrigger(resolved, triggers[1]) == mux_sel) {
         reset = triggers[1];
         clock = triggers[0];
     } else {
@@ -109,14 +263,10 @@ bool extract_reset(
 
     // Check the reset assignment is either a CONSTANT (has reset) or its .q value (NO reset)
     bool has_reset;
-    if (expectedResetAssign->op == DFGOp::CONST) {
-        reset_value = std::get<int64_t>(expectedResetAssign->data);
+    if (auto constValue = constantValueOfNode(expectedResetAssign)) {
+        reset_value = static_cast<int>(*constValue);
         has_reset = true;
-    } else if (expectedResetAssign->op == DFGOp::INPUT) {
-        // Check the assignment is the .q value (now an INPUT node after .q promotion)
-        if (expectedResetAssign->name != flop_name + ".q") {
-            throw CompilerError("Unsupported INPUT for reset MUX TRUE: " + expectedResetAssign->name, dNodeDriver->loc);
-        }
+    } else if (isFlopQValue(expectedResetAssign, flop_name)) {
         has_reset = false;
     } else {
         throw CompilerError("Unsupported MUX TRUE branch for reset: " + expectedResetAssign->str(), dNodeDriver->loc);
@@ -154,7 +304,7 @@ FlopInfo extractFlopClockAndReset(
         has_reset = false;
     } else if (triggers.size() == 2) {
         has_reset = extract_reset(
-            dNodeDriver, triggers, flop_name, resolved,
+            graph, dNodeDriver, triggers, flop_name, resolved,
             reset, clock, reset_value, functionalLogic);
     } else {
         throw CompilerError(std::format(

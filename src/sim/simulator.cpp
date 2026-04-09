@@ -47,37 +47,6 @@ bool useSignedCompare(const DFGNode* lhs, const DFGNode* rhs) {
     return nodeSigned(lhs) && nodeSigned(rhs);
 }
 
-std::optional<int64_t> constantIndex(const DFGNode* node) {
-    if (!node || node->op != DFGOp::CONST) return std::nullopt;
-    return std::get<int64_t>(node->data);
-}
-
-std::optional<int64_t> packedBitPosition(const DFGNode* index_node) {
-    if (!index_node || index_node->op != DFGOp::INDEX || index_node->in.size() < 3)
-        return std::nullopt;
-
-    auto high = constantIndex(index_node->in[1].node);
-    auto low = constantIndex(index_node->in[2].node);
-    if (!high || !low) return std::nullopt;
-
-    const DFGNode* source_node = index_node->in[0].node;
-    if (source_node->type.has_value() && !source_node->type->packed_dims.empty()) {
-        const auto& dim = source_node->type->packed_dims[0];
-        if (dim.left >= dim.right) return *low - dim.right;
-        return dim.right - *high;
-    }
-    return *low;
-}
-
-SimValue overlayAtBitPosition(const SimValue& base, const SimValue& patch,
-                              int64_t bit_pos, const DFGNode* result_node) {
-    SimValue result = base.resized(nodeWidth(result_node), nodeSigned(result_node));
-    for (int bit = 0; bit < patch.width(); ++bit) {
-        result.setBit(static_cast<int>(bit_pos) + bit, patch.getBit(bit));
-    }
-    return result;
-}
-
 } // namespace
 
 // ============================================================================
@@ -373,17 +342,7 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::ASR:  return getVal(0).shr(getVal(1).lowU64(), true);
 
         case DFGOp::MUX:
-            if (getVal(0).isZero()) return getVal(2);
-            if (auto bit_pos = packedBitPosition(node->in[0].node)) {
-                SimValue patch = getVal(1);
-                SimValue base = getVal(2);
-                if (node->type.has_value() &&
-                        patch.width() < node->type->width &&
-                        base.width() == node->type->width) {
-                    return overlayAtBitPosition(base, patch, *bit_pos, node);
-                }
-            }
-            return getVal(1);
+            return getVal(0).isZero() ? getVal(2) : getVal(1);
 
         case DFGOp::MUX_N: {
             int n = static_cast<int>(node->in.size()) / 2;
@@ -818,8 +777,12 @@ void Simulator::run() {
             new_async[evt->signal_name] = evt->value;
         }
 
-        // Apply all async updates in the batch before triggering flops so
-        // simultaneous clock/reset events observe the same post-event state.
+        if (batch.size() > 1) {
+            throw CompilerError(std::format(
+                "Simulator: multiple async events share timestamp {} ps; this is unsupported",
+                batch_time));
+        }
+
         std::set<std::string> active_edge_clocks;
         std::set<std::string> active_edge_resets;
 

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <iostream>
 #include <source_location>
@@ -30,6 +31,19 @@ namespace custom_hdl {
 using EnumRegistry  = std::map<std::string, ResolvedType>;
 // Map from enum member/enum-typed-localparam name → (integer value, enum ResolvedType)
 using EnumMemberMap = std::map<std::string, std::pair<int64_t, ResolvedType>>;
+
+struct PartialSliceDriver {
+    int64_t low;
+    int64_t high;
+    DFGNode* expr;
+};
+
+struct PartialTargetState {
+    ResolvedType type;
+    std::vector<PartialSliceDriver> slices;
+};
+
+using PartialDriverMap = std::unordered_map<std::string, PartialTargetState>;
 
 // Package registry: package name → its resolved enum types and members
 struct ResolvedPackageEntry {
@@ -80,6 +94,11 @@ struct ResolutionContext {
     // so sequential assignments inside the same block remain legal; continuous
     // assignments and submodule output connections use distinct origins.
     std::string current_write_origin;
+
+    // Packed targets that were normalized into partial-write aggregate mode.
+    // Each target keeps disjoint slice drivers and is materialized as a single
+    // CONCAT of CONCAT_ALIGN nodes.
+    PartialDriverMap partial_drivers;
 
     struct PartialWrite {
         int64_t low;
@@ -294,6 +313,9 @@ static DFGNode* inlineSubroutineCall(
         ResolutionContext& ctx
 );
 
+const ResolvedType* lookupDeclaredType(const std::string& baseName,
+                                       const ResolutionContext& ctx);
+
 // Unwrap a PropertyExprSyntax (as produced by function argument positions) to ExpressionSyntax.
 // For synthesizable RTL, argument expressions are always:
 //   SimplePropertyExpr → SimpleSequenceExpr → ExpressionSyntax
@@ -304,30 +326,33 @@ using DriverMap = std::unordered_map<std::string, DFGNode*>;
 struct ConditionalBranch {
     DFGNode* condition;
     DriverMap modifiedDrivers;
+    PartialDriverMap modifiedPartialDrivers;
 };
 
 struct DriverSnapshot {
     DriverMap visibleDrivers;
+    PartialDriverMap partialDrivers;
     std::map<std::string, DFGNode*> combDrivers;
 };
 
 static DriverSnapshot snapshotDrivers(const ResolutionContext& ctx) {
     DriverSnapshot snapshot;
     snapshot.combDrivers = ctx.combDrivers;
+    snapshot.partialDrivers = ctx.partial_drivers;
     DriverMap drivers;
     if (!ctx.is_subroutine_scope) {
         for (const auto& [outName, outNode] : ctx.graph.getOutputsMap()) {
-            if (outNode->in.size() == 1) {
+            if (!ctx.partial_drivers.contains(outName) && outNode->in.size() == 1) {
                 drivers[outName] = outNode->in[0].node;
             }
         }
         for (const auto& [sigName, sigNode] : ctx.graph.getSignalsMap()) {
-            if (sigNode->in.size() == 1) {
+            if (!ctx.partial_drivers.contains(sigName) && sigNode->in.size() == 1) {
                 drivers[sigName] = sigNode->in[0].node;
             }
         }
         for (const auto& [name, node] : ctx.local_signals) {
-            if (node->in.size() == 1) {
+            if (!ctx.partial_drivers.contains(name) && node->in.size() == 1) {
                 drivers[name] = node->in[0].node;
             }
         }
@@ -337,6 +362,15 @@ static DriverSnapshot snapshotDrivers(const ResolutionContext& ctx) {
     }
     snapshot.visibleDrivers = std::move(drivers);
     return snapshot;
+}
+
+static DFGNode* lookupTargetNode(ResolutionContext& ctx, const std::string& name) {
+    if (auto localIt = ctx.local_signals.find(name); localIt != ctx.local_signals.end()) {
+        return localIt->second;
+    }
+    if (ctx.graph.hasOutput("", name)) return ctx.graph.getOutputNode("", name);
+    if (ctx.graph.hasSignal("", name)) return ctx.graph.getSignalNode("", name);
+    return nullptr;
 }
 
 static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNode* driver) {
@@ -355,24 +389,112 @@ static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNo
     }
 }
 
+static void clearVisibleDrivers(ResolutionContext& ctx) {
+    if (ctx.is_subroutine_scope) return;
+    for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
+        node->in.clear();
+    }
+    for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
+        node->in.clear();
+    }
+    for (const auto& [name, node] : ctx.local_signals) {
+        node->in.clear();
+    }
+}
+
+static void sortSlices(PartialTargetState& state) {
+    std::sort(state.slices.begin(), state.slices.end(),
+              [](const PartialSliceDriver& a, const PartialSliceDriver& b) {
+                  if (a.high != b.high) return a.high > b.high;
+                  return a.low > b.low;
+              });
+}
+
+static bool partialStatesEqual(const PartialTargetState& lhs, const PartialTargetState& rhs) {
+    if (lhs.type.width != rhs.type.width || lhs.type.isSigned() != rhs.type.isSigned()) return false;
+    if (lhs.slices.size() != rhs.slices.size()) return false;
+    for (size_t i = 0; i < lhs.slices.size(); ++i) {
+        if (lhs.slices[i].low != rhs.slices[i].low || lhs.slices[i].high != rhs.slices[i].high ||
+                lhs.slices[i].expr != rhs.slices[i].expr) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static DFGNode* buildRelativeSliceExpr(ResolutionContext& ctx,
+                                       const PartialSliceDriver& slice,
+                                       int64_t subLow,
+                                       int64_t subHigh,
+                                       const std::optional<SourceLoc>& loc) {
+    if (subLow == slice.low && subHigh == slice.high) return slice.expr;
+
+    auto* relHigh = ctx.graph.constant(subHigh - slice.low);
+    auto* relLow = ctx.graph.constant(subLow - slice.low);
+    if (loc) {
+        relHigh->loc = *loc;
+        relLow->loc = *loc;
+    }
+    auto* idx = ctx.graph.index(slice.expr, relHigh, relLow);
+    if (loc) idx->loc = *loc;
+    return idx;
+}
+
+static DFGNode* materializePartialTarget(ResolutionContext& ctx,
+                                         const std::string& targetName,
+                                         PartialTargetState& state,
+                                         const std::optional<SourceLoc>& loc) {
+    sortSlices(state);
+    std::vector<DFGNode*> alignNodes;
+    alignNodes.reserve(state.slices.size());
+    for (const auto& slice : state.slices) {
+        auto* highConst = ctx.graph.constant(slice.high);
+        auto* lowConst = ctx.graph.constant(slice.low);
+        if (loc) {
+            highConst->loc = *loc;
+            lowConst->loc = *loc;
+        }
+        auto* align = ctx.graph.concatAlign(slice.expr, highConst, lowConst);
+        if (loc) align->loc = *loc;
+        alignNodes.push_back(align);
+    }
+    DFGNode* driver = nullptr;
+    if (!alignNodes.empty()) {
+        driver = ctx.graph.concat(alignNodes);
+        if (loc) driver->loc = *loc;
+        connectDriver(ctx, targetName, driver);
+    } else if (auto* node = lookupTargetNode(ctx, targetName)) {
+        node->in.clear();
+    }
+    return driver;
+}
+
 static void restoreDrivers(ResolutionContext& ctx, const DriverSnapshot& snapshot) {
     ctx.combDrivers = snapshot.combDrivers;
+    ctx.partial_drivers = snapshot.partialDrivers;
+    clearVisibleDrivers(ctx);
     for (const auto& [name, driver] : snapshot.visibleDrivers) {
         connectDriver(ctx, name, driver);
     }
+    for (auto& [name, state] : ctx.partial_drivers) {
+        materializePartialTarget(ctx, name, state, std::nullopt);
+    }
     if (!ctx.is_subroutine_scope) {
         for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
-            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name)) {
+            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
+                    !snapshot.partialDrivers.contains(name)) {
                 node->in.clear();
             }
         }
         for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
-            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name)) {
+            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
+                    !snapshot.partialDrivers.contains(name)) {
                 node->in.clear();
             }
         }
         for (const auto& [name, node] : ctx.local_signals) {
-            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name)) {
+            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
+                    !snapshot.partialDrivers.contains(name)) {
                 node->in.clear();
             }
         }
@@ -383,6 +505,7 @@ static DriverMap modifiedDriversSince(const ResolutionContext& ctx, const Driver
     DriverMap modified;
     if (!ctx.is_subroutine_scope) {
         for (const auto& [outName, outNode] : ctx.graph.getOutputsMap()) {
+            if (ctx.partial_drivers.contains(outName)) continue;
             if (outNode->in.size() == 1) {
                 auto it = baseline.visibleDrivers.find(outName);
                 if (it == baseline.visibleDrivers.end() || it->second != outNode->in[0].node) {
@@ -391,6 +514,7 @@ static DriverMap modifiedDriversSince(const ResolutionContext& ctx, const Driver
             }
         }
         for (const auto& [sigName, sigNode] : ctx.graph.getSignalsMap()) {
+            if (ctx.partial_drivers.contains(sigName)) continue;
             if (sigNode->in.size() == 1) {
                 auto it = baseline.visibleDrivers.find(sigName);
                 if (it == baseline.visibleDrivers.end() || it->second != sigNode->in[0].node) {
@@ -399,6 +523,7 @@ static DriverMap modifiedDriversSince(const ResolutionContext& ctx, const Driver
             }
         }
         for (const auto& [name, node] : ctx.local_signals) {
+            if (ctx.partial_drivers.contains(name)) continue;
             if (node->in.size() == 1) {
                 auto it = baseline.visibleDrivers.find(name);
                 if (it == baseline.visibleDrivers.end() || it->second != node->in[0].node) {
@@ -412,6 +537,18 @@ static DriverMap modifiedDriversSince(const ResolutionContext& ctx, const Driver
         auto it = baseline.visibleDrivers.find(name);
         if (it == baseline.visibleDrivers.end() || it->second != node) {
             modified[name] = node;
+        }
+    }
+    return modified;
+}
+
+static PartialDriverMap modifiedPartialDriversSince(const ResolutionContext& ctx,
+                                                    const DriverSnapshot& baseline) {
+    PartialDriverMap modified;
+    for (const auto& [name, state] : ctx.partial_drivers) {
+        auto it = baseline.partialDrivers.find(name);
+        if (it == baseline.partialDrivers.end() || !partialStatesEqual(it->second, state)) {
+            modified[name] = state;
         }
     }
     return modified;
@@ -451,6 +588,158 @@ static DFGNode* getRetainedDriver(ResolutionContext& ctx,
     return qNode;
 }
 
+static PartialTargetState makeWholeDriverState(const ResolvedType& type, DFGNode* driver) {
+    PartialTargetState state{type, {}};
+    if (driver && type.width > 0) {
+        state.slices.push_back({0, type.width - 1, driver});
+    }
+    return state;
+}
+
+static const ResolvedType& lookupTargetTypeOrThrow(const std::string& targetName,
+                                                   ResolutionContext& ctx,
+                                                   const std::optional<SourceLoc>& loc) {
+    std::string baseName = targetName;
+    if (baseName.ends_with(".d") || baseName.ends_with(".q")) {
+        baseName = baseName.substr(0, baseName.size() - 2);
+    }
+    if (const auto* type = lookupDeclaredType(baseName, ctx)) return *type;
+    throw CompilerError("Could not find declared type for target '" + targetName + "'", loc);
+}
+
+static std::optional<PartialTargetState> getRetainedPartialState(
+        ResolutionContext& ctx,
+        const std::string& targetName,
+        const DriverSnapshot& baseline,
+        const std::optional<SourceLoc>& loc) {
+    if (auto it = baseline.partialDrivers.find(targetName); it != baseline.partialDrivers.end()) {
+        return it->second;
+    }
+    DFGNode* retained = getRetainedDriver(ctx, targetName, baseline, loc);
+    if (!retained) return std::nullopt;
+    return makeWholeDriverState(lookupTargetTypeOrThrow(targetName, ctx, loc), retained);
+}
+
+static std::optional<PartialTargetState> branchPartialStateValue(
+        ResolutionContext& ctx,
+        const std::string& targetName,
+        const ConditionalBranch& branch,
+        const std::optional<PartialTargetState>& retained,
+        const std::optional<SourceLoc>& loc) {
+    if (auto it = branch.modifiedPartialDrivers.find(targetName); it != branch.modifiedPartialDrivers.end()) {
+        return it->second;
+    }
+    if (auto it = branch.modifiedDrivers.find(targetName); it != branch.modifiedDrivers.end()) {
+        return makeWholeDriverState(lookupTargetTypeOrThrow(targetName, ctx, loc), it->second);
+    }
+    return retained;
+}
+
+static std::optional<PartialTargetState> fallbackPartialStateValue(
+        ResolutionContext& ctx,
+        const std::string& targetName,
+        const std::optional<DriverMap>& fallbackBranch,
+        const std::optional<PartialDriverMap>& fallbackPartialBranch,
+        const std::optional<PartialTargetState>& retained,
+        const std::optional<SourceLoc>& loc) {
+    if (fallbackPartialBranch) {
+        if (auto it = fallbackPartialBranch->find(targetName); it != fallbackPartialBranch->end()) {
+            return it->second;
+        }
+    }
+    if (fallbackBranch) {
+        if (auto it = fallbackBranch->find(targetName); it != fallbackBranch->end()) {
+            return makeWholeDriverState(lookupTargetTypeOrThrow(targetName, ctx, loc), it->second);
+        }
+    }
+    return retained;
+}
+
+static DFGNode* exprForSliceInterval(ResolutionContext& ctx,
+                                     const PartialTargetState& state,
+                                     int64_t low,
+                                     int64_t high,
+                                     const std::optional<SourceLoc>& loc) {
+    for (const auto& slice : state.slices) {
+        if (slice.low <= low && slice.high >= high) {
+            return buildRelativeSliceExpr(ctx, slice, low, high, loc);
+        }
+    }
+    return nullptr;
+}
+
+static std::vector<std::pair<int64_t, int64_t>> computeSlicePartition(
+        const std::vector<std::optional<PartialTargetState>>& states) {
+    std::set<int64_t> cuts;
+    for (const auto& maybeState : states) {
+        if (!maybeState) continue;
+        for (const auto& slice : maybeState->slices) {
+            cuts.insert(slice.low);
+            cuts.insert(slice.high + 1);
+        }
+    }
+    std::vector<std::pair<int64_t, int64_t>> intervals;
+    if (cuts.empty()) return intervals;
+    std::vector<int64_t> sorted(cuts.begin(), cuts.end());
+    for (size_t i = 0; i + 1 < sorted.size(); ++i) {
+        int64_t low = sorted[i];
+        int64_t next = sorted[i + 1];
+        if (next <= low) continue;
+        intervals.push_back({low, next - 1});
+    }
+    std::sort(intervals.begin(), intervals.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    return intervals;
+}
+
+static std::optional<PartialTargetState> buildMergedPartialDriver(
+        ResolutionContext& ctx,
+        const std::string& targetName,
+        const std::vector<ConditionalBranch>& branches,
+        const std::optional<DriverMap>& fallbackBranch,
+        const std::optional<PartialDriverMap>& fallbackPartialBranch,
+        const DriverSnapshot& baseline,
+        const std::optional<SourceLoc>& loc) {
+    auto retained = getRetainedPartialState(ctx, targetName, baseline, loc);
+    auto defaultState = fallbackPartialStateValue(
+        ctx, targetName, fallbackBranch, fallbackPartialBranch, retained, loc);
+
+    std::vector<std::optional<PartialTargetState>> states;
+    states.push_back(defaultState);
+    for (const auto& branch : branches) {
+        states.push_back(branchPartialStateValue(ctx, targetName, branch, retained, loc));
+    }
+
+    auto intervals = computeSlicePartition(states);
+    if (intervals.empty()) return defaultState;
+
+    PartialTargetState merged;
+    if (defaultState) merged.type = defaultState->type;
+    else if (retained) merged.type = retained->type;
+    else merged.type = lookupTargetTypeOrThrow(targetName, ctx, loc);
+
+    for (const auto& [low, high] : intervals) {
+        DFGNode* result = defaultState ? exprForSliceInterval(ctx, *defaultState, low, high, loc) : nullptr;
+        for (auto it = branches.rbegin(); it != branches.rend(); ++it) {
+            auto selectedState = branchPartialStateValue(ctx, targetName, *it, retained, loc);
+            DFGNode* selected = selectedState ? exprForSliceInterval(ctx, *selectedState, low, high, loc) : nullptr;
+            if (!selected && !result) continue;
+            if (!selected || !result) {
+                throw CompilerError(
+                    "Signal '" + targetName + "' not assigned in all branches and has no default/fallback",
+                    loc);
+            }
+            if (selected == result) continue;
+            auto* mux = ctx.graph.mux(it->condition, selected, result);
+            mux->loc = loc;
+            result = mux;
+        }
+        if (result) merged.slices.push_back({low, high, result});
+    }
+    sortSlices(merged);
+    return merged;
+}
+
 static DFGNode* buildMergedDriver(ResolutionContext& ctx,
                                   const std::string& targetName,
                                   const std::vector<ConditionalBranch>& branches,
@@ -488,15 +777,24 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
 }
 
 static std::set<std::string> collectAssignedSignals(const std::vector<ConditionalBranch>& branches,
-                                                    const std::optional<DriverMap>& fallbackBranch) {
+                                                    const std::optional<DriverMap>& fallbackBranch,
+                                                    const std::optional<PartialDriverMap>& fallbackPartialBranch) {
     std::set<std::string> assignedSignals;
     for (const auto& branch : branches) {
         for (const auto& [name, _] : branch.modifiedDrivers) {
             assignedSignals.insert(name);
         }
+        for (const auto& [name, _] : branch.modifiedPartialDrivers) {
+            assignedSignals.insert(name);
+        }
     }
     if (fallbackBranch) {
         for (const auto& [name, _] : *fallbackBranch) {
+            assignedSignals.insert(name);
+        }
+    }
+    if (fallbackPartialBranch) {
+        for (const auto& [name, _] : *fallbackPartialBranch) {
             assignedSignals.insert(name);
         }
     }
@@ -506,15 +804,40 @@ static std::set<std::string> collectAssignedSignals(const std::vector<Conditiona
 static void mergeIfBranches(ResolutionContext& ctx,
                             const std::vector<ConditionalBranch>& branches,
                             const std::optional<DriverMap>& fallbackBranch,
+                            const std::optional<PartialDriverMap>& fallbackPartialBranch,
                             const DriverSnapshot& baseline,
                             const std::optional<SourceLoc>& loc) {
-    std::set<std::string> assignedSignals = collectAssignedSignals(branches, fallbackBranch);
+    std::set<std::string> assignedSignals = collectAssignedSignals(
+        branches, fallbackBranch, fallbackPartialBranch);
 
     for (const auto& signalName : assignedSignals) {
-        DFGNode* merged = buildMergedDriver(ctx, signalName, branches, fallbackBranch, baseline, loc);
-        connectDriver(ctx, signalName, merged);
-        if (!ctx.is_sequential) {
-            ctx.combDrivers[signalName] = merged;
+        bool partialTarget = baseline.partialDrivers.contains(signalName);
+        if (!partialTarget) {
+            partialTarget = std::any_of(branches.begin(), branches.end(),
+                [&](const ConditionalBranch& branch) {
+                    return branch.modifiedPartialDrivers.contains(signalName);
+                });
+        }
+        if (!partialTarget && fallbackPartialBranch) {
+            partialTarget = fallbackPartialBranch->contains(signalName);
+        }
+
+        if (partialTarget) {
+            auto merged = buildMergedPartialDriver(
+                ctx, signalName, branches, fallbackBranch, fallbackPartialBranch, baseline, loc);
+            if (merged) {
+                ctx.partial_drivers[signalName] = *merged;
+                DFGNode* aggregate = materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
+                if (!ctx.is_sequential && aggregate) {
+                    ctx.combDrivers[signalName] = aggregate;
+                }
+            }
+        } else {
+            DFGNode* merged = buildMergedDriver(ctx, signalName, branches, fallbackBranch, baseline, loc);
+            connectDriver(ctx, signalName, merged);
+            if (!ctx.is_sequential) {
+                ctx.combDrivers[signalName] = merged;
+            }
         }
     }
 }
@@ -523,10 +846,12 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                               DFGNode* selectorNode,
                               const std::vector<ConditionalBranch>& branches,
                               const std::optional<DriverMap>& fallbackBranch,
+                              const std::optional<PartialDriverMap>& fallbackPartialBranch,
                               const DriverSnapshot& baseline,
                               const std::set<int64_t>& explicitCaseValues,
                               const std::optional<SourceLoc>& loc) {
-    std::set<std::string> assignedSignals = collectAssignedSignals(branches, fallbackBranch);
+    std::set<std::string> assignedSignals = collectAssignedSignals(
+        branches, fallbackBranch, fallbackPartialBranch);
 
     auto branchValue = [&](const std::string& targetName, const DriverMap& modified, DFGNode* retained) -> DFGNode* {
         if (auto it = modified.find(targetName); it != modified.end()) {
@@ -536,6 +861,88 @@ static void mergeCaseBranches(ResolutionContext& ctx,
     };
 
     for (const auto& signalName : assignedSignals) {
+        bool partialTarget = baseline.partialDrivers.contains(signalName);
+        if (!partialTarget) {
+            partialTarget = std::any_of(branches.begin(), branches.end(),
+                [&](const ConditionalBranch& branch) {
+                    return branch.modifiedPartialDrivers.contains(signalName);
+                });
+        }
+        if (!partialTarget && fallbackPartialBranch) {
+            partialTarget = fallbackPartialBranch->contains(signalName);
+        }
+
+        if (partialTarget) {
+            auto retained = getRetainedPartialState(ctx, signalName, baseline, loc);
+            auto defaultValue = fallbackPartialStateValue(
+                ctx, signalName, fallbackBranch, fallbackPartialBranch, retained, loc);
+            std::vector<std::optional<PartialTargetState>> states;
+            states.push_back(defaultValue);
+            for (const auto& branch : branches) {
+                states.push_back(branchPartialStateValue(ctx, signalName, branch, retained, loc));
+            }
+            auto intervals = computeSlicePartition(states);
+            PartialTargetState merged;
+            if (defaultValue) merged.type = defaultValue->type;
+            else if (retained) merged.type = retained->type;
+            else merged.type = lookupTargetTypeOrThrow(signalName, ctx, loc);
+
+            for (const auto& [low, high] : intervals) {
+                DFGNode* defaultExpr = defaultValue ? exprForSliceInterval(ctx, *defaultValue, low, high, loc) : nullptr;
+                std::vector<DFGNode*> selectors;
+                std::vector<DFGNode*> dataValues;
+                for (const auto& branch : branches) {
+                    auto branchState = branchPartialStateValue(ctx, signalName, branch, retained, loc);
+                    DFGNode* value = branchState ? exprForSliceInterval(ctx, *branchState, low, high, loc) : defaultExpr;
+                    if (!value) {
+                        throw CompilerError(
+                            "Signal '" + signalName + "' not assigned in all branches and has no default/fallback",
+                            loc);
+                    }
+                    selectors.push_back(branch.condition);
+                    dataValues.push_back(value);
+                }
+                DFGNode* result = nullptr;
+                if (selectors.empty()) {
+                    result = defaultExpr;
+                } else if (selectors.size() == 1) {
+                    result = dataValues[0];
+                } else {
+                    if (!defaultExpr) {
+                        throw CompilerError(
+                            "Signal '" + signalName + "' not assigned in any case branch and has no default/fallback",
+                            loc);
+                    }
+                    if (selectorNode->hasType()) {
+                        int width = selectorNode->type->width;
+                        int64_t numValues = int64_t(1) << width;
+                        for (int64_t v = 0; v < numValues; ++v) {
+                            if (explicitCaseValues.contains(v)) continue;
+                            auto* missingConst = ctx.graph.constant(v);
+                            missingConst->type = selectorNode->type;
+                            missingConst->loc = loc;
+                            auto* missingSel = ctx.graph.eq(selectorNode, missingConst);
+                            missingSel->loc = loc;
+                            selectors.push_back(missingSel);
+                            dataValues.push_back(defaultExpr);
+                        }
+                    }
+                    result = ctx.graph.muxN(selectors, dataValues);
+                    result->loc = loc;
+                }
+                if (result) merged.slices.push_back({low, high, result});
+            }
+            sortSlices(merged);
+            ctx.partial_drivers[signalName] = std::move(merged);
+            materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
+            if (!ctx.is_sequential) {
+                if (auto* node = lookupTargetNode(ctx, signalName); node && !node->in.empty()) {
+                    ctx.combDrivers[signalName] = node->in[0].node;
+                }
+            }
+            continue;
+        }
+
         DFGNode* retained = getRetainedDriver(ctx, signalName, baseline, loc);
         DFGNode* defaultValue = nullptr;
         if (fallbackBranch) {
@@ -1023,6 +1430,138 @@ const ResolvedType* lookupDeclaredType(const std::string& baseName,
     }
 
     return nullptr;
+}
+
+const ResolvedType* lookupDeclaredTypeWithSuffix(const std::string& baseName,
+                                                 const std::string& indexSuffix,
+                                                 const ResolutionContext& ctx) {
+    if (indexSuffix.empty()) return lookupDeclaredType(baseName, ctx);
+    const std::string fullName = baseName + indexSuffix;
+    auto localIt = ctx.local_signals.find(fullName);
+    if (localIt != ctx.local_signals.end() && localIt->second && localIt->second->hasType()) {
+        return &(*localIt->second->type);
+    }
+    if (auto* signal = ctx.graph.lookupSignal("", fullName); signal && signal->hasType()) {
+        return &(*signal->type);
+    }
+    return nullptr;
+}
+
+static int64_t packedIndexOffsetFromLsb(const ResolvedDimension& dim, int64_t idx) {
+    int64_t lo = std::min(dim.left, dim.right);
+    int64_t hi = std::max(dim.left, dim.right);
+    if (idx < lo || idx > hi) {
+        throw CompilerError(std::format(
+            "Packed index {} out of bounds [{}:{}]", idx, dim.left, dim.right));
+    }
+    return std::llabs(idx - dim.right);
+}
+
+static int64_t packedSuffixWidth(const ResolvedType& type, size_t fromDim) {
+    int64_t width = 1;
+    for (size_t i = fromDim; i < type.packed_dims.size(); ++i) {
+        width *= type.packed_dims[i].size();
+    }
+    return width;
+}
+
+static bool isPackedAggregateTarget(const std::string& baseName,
+                                    const std::string& indexSuffix,
+                                    const ResolutionContext& ctx) {
+    if (!indexSuffix.empty()) return false;
+    const auto* declaredType = lookupDeclaredType(baseName, ctx);
+    if (!declaredType) return false;
+    return declaredType->unpacked_dims.empty() && declaredType->width > 0;
+}
+
+static DFGNode* currentWholeDriverForTarget(ResolutionContext& ctx,
+                                            const std::string& targetName,
+                                            const std::optional<SourceLoc>& loc) {
+    if (ctx.partial_drivers.contains(targetName)) return nullptr;
+    if (auto* node = lookupTargetNode(ctx, targetName); node && node->in.size() == 1) {
+        return node->in[0].node;
+    }
+    if (!ctx.is_sequential) return nullptr;
+
+    std::string qName = targetName;
+    if (qName.ends_with(".d")) {
+        qName = qName.substr(0, qName.length() - 2) + ".q";
+    }
+    if (auto localIt = ctx.local_signals.find(qName); localIt != ctx.local_signals.end()) {
+        return localIt->second;
+    }
+    if (auto* qNode = ctx.graph.lookupSignal("", qName)) return qNode;
+    throw CompilerError("Could not find .q signal: " + qName, loc);
+}
+
+static void setPartialSlice(ResolutionContext& ctx,
+                            PartialTargetState& state,
+                            int64_t low,
+                            int64_t high,
+                            DFGNode* expr,
+                            const std::optional<SourceLoc>& loc) {
+    std::vector<PartialSliceDriver> updated;
+    updated.reserve(state.slices.size() + 2);
+    for (const auto& slice : state.slices) {
+        if (slice.high < low || slice.low > high) {
+            updated.push_back(slice);
+            continue;
+        }
+        if (slice.high > high) {
+            updated.push_back({
+                high + 1,
+                slice.high,
+                buildRelativeSliceExpr(ctx, slice, high + 1, slice.high, loc)
+            });
+        }
+        if (slice.low < low) {
+            updated.push_back({
+                slice.low,
+                low - 1,
+                buildRelativeSliceExpr(ctx, slice, slice.low, low - 1, loc)
+            });
+        }
+    }
+    updated.push_back({low, high, expr});
+    state.slices = std::move(updated);
+    sortSlices(state);
+}
+
+static PartialTargetState& ensurePartialTargetState(ResolutionContext& ctx,
+                                                    const std::string& targetName,
+                                                    const std::optional<SourceLoc>& loc) {
+    auto it = ctx.partial_drivers.find(targetName);
+    if (it != ctx.partial_drivers.end()) return it->second;
+
+    PartialTargetState state;
+    state.type = lookupTargetTypeOrThrow(targetName, ctx, loc);
+    if (DFGNode* driver = currentWholeDriverForTarget(ctx, targetName, loc)) {
+        state.slices.push_back({0, state.type.width - 1, driver});
+    }
+    auto [insertedIt, _] = ctx.partial_drivers.emplace(targetName, std::move(state));
+    return insertedIt->second;
+}
+
+static void writePartialTargetSlice(ResolutionContext& ctx,
+                                    const std::string& targetName,
+                                    int64_t high,
+                                    int64_t low,
+                                    DFGNode* expr,
+                                    const std::optional<SourceLoc>& loc) {
+    auto& state = ensurePartialTargetState(ctx, targetName, loc);
+    if (high < low) std::swap(high, low);
+    setPartialSlice(ctx, state, low, high, expr, loc);
+    materializePartialTarget(ctx, targetName, state, loc);
+}
+
+static void writeWholeTargetAsPartial(ResolutionContext& ctx,
+                                      const std::string& targetName,
+                                      DFGNode* expr,
+                                      const std::optional<SourceLoc>& loc) {
+    auto& state = ensurePartialTargetState(ctx, targetName, loc);
+    state.slices.clear();
+    state.slices.push_back({0, state.type.width - 1, expr});
+    materializePartialTarget(ctx, targetName, state, loc);
 }
 
 DFGNode* tryBuildConstantExprNode(const ExpressionSyntax* expr, ResolutionContext& ctx) {
@@ -1728,6 +2267,10 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     std::string indexSuffix;
     bool hasRangeSelect = false;
     int64_t rangeHigh = 0, rangeLow = 0;
+    std::optional<ResolvedType> currentSelectedType;
+    if (const auto* declaredType = lookupDeclaredType(baseName, ctx)) {
+        currentSelectedType = *declaredType;
+    }
 
     if (selectors) {
         for (const auto& elemSelect : *selectors) {
@@ -1743,29 +2286,25 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 try {
                     int64_t idx = evaluateConstantExpr(selectorExpr, ctx.params);
 
-                    // Classify bit-selects from the declared object type, not DFG naming.
-                    // Packed vectors use partial writes on the aggregate target; unpacked
-                    // arrays use element selection via indexSuffix.
-                    bool isFlatPackedBitSelect = false;
-                    if (indexSuffix.empty()) {
-                        if (const auto* declaredType = lookupDeclaredType(baseName, ctx)) {
-                            isFlatPackedBitSelect = declaredType->unpacked_dims.empty();
-                        }
-                    } else {
-                        std::string lookupKey = baseName + indexSuffix;
-                        auto localIt = ctx.local_signals.find(lookupKey);
-                        if (localIt != ctx.local_signals.end() &&
-                                localIt->second && localIt->second->hasType()) {
-                            isFlatPackedBitSelect =
-                                localIt->second->type->unpacked_dims.empty();
-                        }
-                    }
-                    if (isFlatPackedBitSelect) {
-                        rangeHigh = idx;
-                        rangeLow = idx;
+                    if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
+                        const auto& dim = currentSelectedType->packed_dims.front();
+                        int64_t elemWidth = packedSuffixWidth(*currentSelectedType, 1);
+                        int64_t offset = packedIndexOffsetFromLsb(dim, idx) * elemWidth;
+                        int64_t baseLow = hasRangeSelect ? std::min(rangeLow, rangeHigh) : 0;
+                        rangeLow = baseLow + offset;
+                        rangeHigh = rangeLow + elemWidth - 1;
                         hasRangeSelect = true;
+                        ResolvedType narrowed = *currentSelectedType;
+                        narrowed.width = static_cast<int>(elemWidth);
+                        narrowed.packed_dims.erase(narrowed.packed_dims.begin());
+                        currentSelectedType = narrowed;
                     } else {
                         indexSuffix += "[" + std::to_string(idx) + "]";
+                        if (const auto* indexedType = lookupDeclaredTypeWithSuffix(baseName, indexSuffix, ctx)) {
+                            currentSelectedType = *indexedType;
+                        } else {
+                            currentSelectedType.reset();
+                        }
                     }
                 } catch (const std::runtime_error&) {
                     throw CompilerError(
@@ -1775,8 +2314,22 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect) {
                 const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                 try {
-                    rangeHigh = evaluateConstantExpr(rangeSelect.left, ctx.params);
-                    rangeLow = evaluateConstantExpr(rangeSelect.right, ctx.params);
+                    int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params);
+                    int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params);
+                    if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
+                        const auto& dim = currentSelectedType->packed_dims.front();
+                        int64_t elemWidth = packedSuffixWidth(*currentSelectedType, 1);
+                        int64_t leftOffset = packedIndexOffsetFromLsb(dim, left);
+                        int64_t rightOffset = packedIndexOffsetFromLsb(dim, right);
+                        int64_t lowOffset = std::min(leftOffset, rightOffset);
+                        int64_t highOffset = std::max(leftOffset, rightOffset);
+                        int64_t baseLow = hasRangeSelect ? std::min(rangeLow, rangeHigh) : 0;
+                        rangeLow = baseLow + lowOffset * elemWidth;
+                        rangeHigh = baseLow + (highOffset + 1) * elemWidth - 1;
+                    } else {
+                        rangeHigh = left;
+                        rangeLow = right;
+                    }
                 } catch (const std::runtime_error&) {
                     throw CompilerError(
                         "Dynamic range on LHS not supported for: " + baseName,
@@ -1822,51 +2375,16 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             outputName = baseName + indexSuffix;
         }
 
-        // Create CONST nodes for high/low indices
-        auto* highConst = ctx.graph.constant(rangeHigh);
-        highConst->loc = resolveSourceLoc(assignExpr, ctx.sm);
-        auto* lowConst = ctx.graph.constant(rangeLow);
-        lowConst->loc = resolveSourceLoc(assignExpr, ctx.sm);
-
-        // Create CONCAT_ALIGN wrapping the RHS expression
-        auto* alignNode = ctx.graph.concatAlign(RHSexprNode, highConst, lowConst);
-        alignNode->loc = resolveSourceLoc(assignExpr, ctx.sm);
-
-        // Find the target node (check local_signals first)
-        DFGNode* targetNode = nullptr;
-        {
-            auto localIt = ctx.local_signals.find(outputName);
-            if (localIt != ctx.local_signals.end()) targetNode = localIt->second;
-        }
-        if (!targetNode) {
-            if (auto* n = ctx.graph.getOutputNode("", outputName)) {
-                targetNode = n;
-            } else if (auto* n = ctx.graph.getSignalNode("", outputName)) {
-                targetNode = n;
-            } else {
-                throw CompilerError("Cannot assign to undeclared: " + outputName,
-                                    assignLoc);
-            }
-        }
-
         if (!ctx.subroutine_locals.count(outputName))
             recordPartialWrite(ctx, outputName, std::min(rangeLow, rangeHigh),
                                std::max(rangeLow, rangeHigh), assignLoc,
                                ctx.current_write_origin);
-        // Check if the target already has a CONCAT driver
-        if (!targetNode->in.empty() && targetNode->in[0].node->op == DFGOp::CONCAT) {
-            auto* concatNode =
-                appendConcatInput(ctx.graph, targetNode->in[0].node, alignNode, assignLoc);
-            connectNode(outputName, concatNode);
-        } else {
-            // Create new CONCAT with this CONCAT_ALIGN as first input
-            auto* concatNode = ctx.graph.concat({alignNode});
-            concatNode->loc = resolveSourceLoc(assignExpr, ctx.sm);
-            connectNode(outputName, concatNode);
-        }
+        writePartialTargetSlice(ctx, outputName, rangeHigh, rangeLow, RHSexprNode, assignLoc);
 
         if (!ctx.is_sequential) {
-            ctx.combDrivers[outputName] = targetNode->in[0].node;
+            if (auto* targetNode = lookupTargetNode(ctx, outputName); targetNode && !targetNode->in.empty()) {
+                ctx.combDrivers[outputName] = targetNode->in[0].node;
+            }
         }
     } else {
         // Normal (non-range) assign path
@@ -1887,14 +2405,26 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             outputName = baseName + indexSuffix;
         }
 
+        bool usePartialAggregate = ctx.partial_drivers.contains(outputName) &&
+                                   isPackedAggregateTarget(baseName, indexSuffix, ctx);
         if (!ctx.subroutine_locals.count(outputName))
             recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
-        // Connect driver to existing output or signal node (checks local_signals first)
-        connectNode(outputName, RHSexprNode);
 
-        // Track the current driver so subsequent reads in this block see it
-        if (!ctx.is_sequential) {
-            ctx.combDrivers[outputName] = RHSexprNode;
+        if (usePartialAggregate) {
+            writeWholeTargetAsPartial(ctx, outputName, RHSexprNode, assignLoc);
+            if (!ctx.is_sequential) {
+                if (auto* targetNode = lookupTargetNode(ctx, outputName); targetNode && !targetNode->in.empty()) {
+                    ctx.combDrivers[outputName] = targetNode->in[0].node;
+                }
+            }
+        } else {
+            // Connect driver to existing output or signal node (checks local_signals first)
+            connectNode(outputName, RHSexprNode);
+
+            // Track the current driver so subsequent reads in this block see it
+            if (!ctx.is_sequential) {
+                ctx.combDrivers[outputName] = RHSexprNode;
+            }
         }
     }
 
@@ -2158,21 +2688,25 @@ void resolveConditionalStatementInPlace(
     const auto baselineDrivers = snapshotDrivers(ctx);
 
     std::optional<DriverMap> elseDrivers;
+    std::optional<PartialDriverMap> elsePartialDrivers;
     if (conditionalStatement->elseClause) {
         const auto& elseClause = conditionalStatement->elseClause->clause;
         restoreDrivers(ctx, baselineDrivers);
         executeConditionalBranch(elseClause->as<StatementSyntax>(), ctx);
         elseDrivers = modifiedDriversSince(ctx, baselineDrivers);
+        elsePartialDrivers = modifiedPartialDriversSince(ctx, baselineDrivers);
     }
 
     restoreDrivers(ctx, baselineDrivers);
     executeConditionalBranch(*conditionalStatement->statement, ctx);
     DriverMap ifDrivers = modifiedDriversSince(ctx, baselineDrivers);
+    PartialDriverMap ifPartialDrivers = modifiedPartialDriversSince(ctx, baselineDrivers);
 
     restoreDrivers(ctx, baselineDrivers);
     mergeIfBranches(ctx,
-                    {{conditionNode, std::move(ifDrivers)}},
+                    {{conditionNode, std::move(ifDrivers), std::move(ifPartialDrivers)}},
                     elseDrivers,
+                    elsePartialDrivers,
                     baselineDrivers,
                     condLoc);
 }
@@ -2203,6 +2737,7 @@ void resolveCaseStatementInPlace(
     std::vector<ConditionalBranch> normalCases;
     std::set<int64_t> explicitCaseValues;
     std::optional<DriverMap> defaultDrivers;
+    std::optional<PartialDriverMap> defaultPartialDrivers;
 
     for (const auto* item : caseStatement->items) {
         if (item->kind == SyntaxKind::DefaultCaseItem) {
@@ -2210,6 +2745,7 @@ void resolveCaseStatementInPlace(
             restoreDrivers(ctx, baselineDrivers);
             executeConditionalBranch(defaultItem.clause->as<StatementSyntax>(), ctx);
             defaultDrivers = modifiedDriversSince(ctx, baselineDrivers);
+            defaultPartialDrivers = modifiedPartialDriversSince(ctx, baselineDrivers);
         } else if (item->kind == SyntaxKind::StandardCaseItem) {
             const auto& caseItem = item->as<StandardCaseItemSyntax>();
 
@@ -2228,7 +2764,11 @@ void resolveCaseStatementInPlace(
 
             restoreDrivers(ctx, baselineDrivers);
             executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
-            normalCases.push_back({conditionNode, modifiedDriversSince(ctx, baselineDrivers)});
+            normalCases.push_back({
+                conditionNode,
+                modifiedDriversSince(ctx, baselineDrivers),
+                modifiedPartialDriversSince(ctx, baselineDrivers)
+            });
         } else {
             throw CompilerError(
                 "Unsupported case item kind: " + std::string(toString(item->kind)),
@@ -2241,6 +2781,7 @@ void resolveCaseStatementInPlace(
                       selectorNode,
                       normalCases,
                       defaultDrivers,
+                      defaultPartialDrivers,
                       baselineDrivers,
                       explicitCaseValues,
                       caseLoc);
@@ -2310,12 +2851,13 @@ void resolveForLoopStatementInPlace(
             ctx.instance_path, ctx.local_signals, ctx.local_flop_names,
             ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
             ctx.moduleLookup, ctx.globalImports,
-            ctx.current_write_origin, ctx.write_states,
+            ctx.current_write_origin, ctx.partial_drivers, ctx.write_states,
             ctx.subroutineRegistry, ctx.subroutine_locals,
             ctx.currently_inlining, ctx.is_subroutine_scope
         };
         resolveStatementInPlace(forLoop->statement.get(), iterBodyCtx);
         ctx.combDrivers = iterBodyCtx.combDrivers;
+        ctx.partial_drivers = iterBodyCtx.partial_drivers;
         ctx.write_states = iterBodyCtx.write_states;
 
         iterCtx.values[loopVar] =
@@ -3156,7 +3698,7 @@ void resolveGenerateMemberInPlace(
                     ctx.sm, false, {}, {}, childPath, ctx.local_signals, {},
                     ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
                     ctx.moduleLookup, ctx.globalImports,
-                    ctx.current_write_origin, ctx.write_states};
+                    ctx.current_write_origin, ctx.partial_drivers, ctx.write_states};
 
                 if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
                     resolveGenerateMembersInPlace(
@@ -3603,7 +4145,11 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context
-    ResolutionContext resCtx{graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {}, "", {}, {}, enumRegistry, enumMemberValues, pkgRegistry, moduleLookup, globalImports, "", {}, subroutineRegistry};
+    ResolutionContext resCtx{
+        graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {},
+        "", {}, {}, enumRegistry, enumMemberValues, pkgRegistry,
+        moduleLookup, globalImports, "", {}, {}, subroutineRegistry
+    };
 
     for (const auto& block : unresolved.proceduralComboBlocks) {
         resolveProceduralComboInPlace(block, resCtx);

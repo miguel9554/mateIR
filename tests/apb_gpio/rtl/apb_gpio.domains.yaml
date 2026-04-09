@@ -10,5 +10,12 @@ clock_domains:
     inputs_outputs:
       - dft_cg_enable_i
       - P*
-      - gpio_*
+      - gpio_in_sync
+      - gpio_out
+      - gpio_dir
+      - gpio_padcfg
       - interrupt
+
+async_domain:
+  - gpio_in:
+      synchronized_into: HCLK

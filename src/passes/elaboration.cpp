@@ -1618,6 +1618,53 @@ static void writeWholeTargetAsPartial(ResolutionContext& ctx,
     materializePartialTarget(ctx, targetName, state, loc);
 }
 
+static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
+                                            DFGNode* expr,
+                                            const std::optional<ResolvedType>& targetType,
+                                            const std::optional<SourceLoc>& loc) {
+    int targetWidth = targetType ? targetType->width : 0;
+    bool targetSigned = targetType ? targetType->isSigned() : false;
+    if (!expr || targetWidth <= 0) return expr;
+
+    if (expr->op == DFGOp::CONST) {
+        expr->type = targetType ? *targetType : ResolvedType::makeInteger(targetWidth, targetSigned);
+        return expr;
+    }
+
+    if (!expr->hasType()) return expr;
+    if (targetType && expr->type->kind == targetType->kind &&
+        expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
+        return expr;
+    }
+
+    if (expr->type->width > targetWidth) {
+        auto* highNode = ctx.graph.constant(targetWidth - 1);
+        auto* lowNode = ctx.graph.constant(0);
+        if (loc) {
+            highNode->loc = *loc;
+            lowNode->loc = *loc;
+        }
+        auto* truncated = ctx.graph.index(expr, highNode, lowNode);
+        truncated->type = ResolvedType::makeInteger(targetWidth, targetSigned);
+        if (loc) truncated->loc = *loc;
+        expr = truncated;
+    }
+
+    if (targetType && targetType->isEnum()) {
+        if (expr->type->width != targetWidth) return expr;
+        auto* castNode = ctx.graph.cast(expr);
+        castNode->type = *targetType;
+        if (loc) castNode->loc = *loc;
+        return castNode;
+    }
+
+    if (expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
+        return expr;
+    }
+
+    return expr;
+}
+
 DFGNode* tryBuildConstantExprNode(const ExpressionSyntax* expr, ResolutionContext& ctx) {
     try {
         auto value = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr);
@@ -2462,6 +2509,20 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                     resolveSourceLoc(assignExpr, ctx.sm));
             }
         }
+    }
+
+    std::optional<ResolvedType> assignmentTargetType;
+    if (hasRangeSelect) {
+        if (currentSelectedType) {
+            assignmentTargetType = *currentSelectedType;
+            assignmentTargetType->width =
+                static_cast<int>(std::max(rangeHigh, rangeLow) - std::min(rangeHigh, rangeLow) + 1);
+        }
+    } else if (currentSelectedType) {
+        assignmentTargetType = *currentSelectedType;
+    }
+    if (assignmentTargetType && assignmentTargetType->width > 0) {
+        RHSexprNode = coerceAssignmentExprToWidth(ctx, RHSexprNode, assignmentTargetType, assignLoc);
     }
 
     // Range-select on LHS: build CONCAT_ALIGN -> CONCAT -> target

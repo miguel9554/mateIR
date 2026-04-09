@@ -1708,6 +1708,12 @@ DFGNode* buildExprDFG(
             }
             const auto selectors = &name.selectors;
             auto indexedSignalNode = node;
+            std::optional<ResolvedType> currentSelectedType;
+            if (const auto* declaredType = lookupDeclaredType(baseName, ctx)) {
+                currentSelectedType = *declaredType;
+            } else if (node && node->hasType()) {
+                currentSelectedType = *node->type;
+            }
 
             if (selectors){
                 for (const auto& elemSelect: *selectors){
@@ -1723,17 +1729,45 @@ DFGNode* buildExprDFG(
                         // This avoids INDEX(aggregate) which would create a combinational loop.
                         try {
                             int64_t idx = evaluateConstantExpr(bitSelect.expr, ctx.params);
-                            std::string elemKey = baseName + "[" + std::to_string(idx) + "]";
-                            auto elemIt = ctx.local_signals.find(elemKey);
-                            if (elemIt != ctx.local_signals.end()) {
-                                indexedSignalNode = elemIt->second;
-                                continue;
+                            if (currentSelectedType && !currentSelectedType->unpacked_dims.empty()) {
+                                std::string elemKey = baseName + "[" + std::to_string(idx) + "]";
+                                auto elemIt = ctx.local_signals.find(elemKey);
+                                if (elemIt != ctx.local_signals.end()) {
+                                    indexedSignalNode = elemIt->second;
+                                    if (elemIt->second->hasType()) {
+                                        currentSelectedType = *elemIt->second->type;
+                                    } else {
+                                        currentSelectedType.reset();
+                                    }
+                                    continue;
+                                }
+                                // Also check module-level DFG for array elements not in local_signals
+                                // (e.g. lane_sum[i] where lane_sum is a module-scope unpacked array).
+                                DFGNode* globalElem = ctx.graph.lookupSignal("", elemKey);
+                                if (globalElem) {
+                                    indexedSignalNode = globalElem;
+                                    if (globalElem->hasType()) {
+                                        currentSelectedType = *globalElem->type;
+                                    } else {
+                                        currentSelectedType.reset();
+                                    }
+                                    continue;
+                                }
                             }
-                            // Also check module-level DFG for array elements not in local_signals
-                            // (e.g. lane_sum[i] where lane_sum is a module-scope unpacked array).
-                            DFGNode* globalElem = ctx.graph.lookupSignal("", elemKey);
-                            if (globalElem) {
-                                indexedSignalNode = globalElem;
+
+                            if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
+                                const auto& dim = currentSelectedType->packed_dims.front();
+                                int64_t elemWidth = packedSuffixWidth(*currentSelectedType, 1);
+                                int64_t offset = packedIndexOffsetFromLsb(dim, idx) * elemWidth;
+                                auto* lowNode = ctx.graph.constant(offset);
+                                auto* highNode = ctx.graph.constant(offset + elemWidth - 1);
+                                indexedSignalNode = ctx.graph.index(indexedSignalNode, highNode, lowNode);
+                                indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+
+                                ResolvedType narrowed = *currentSelectedType;
+                                narrowed.width = static_cast<int>(elemWidth);
+                                narrowed.packed_dims.erase(narrowed.packed_dims.begin());
+                                currentSelectedType = narrowed;
                                 continue;
                             }
                         } catch (const std::runtime_error&) {
@@ -1742,12 +1776,21 @@ DFGNode* buildExprDFG(
                         auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
                         indexedSignalNode = ctx.graph.index(indexedSignalNode, selectorExprNode, selectorExprNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
+                            ResolvedType narrowed = *currentSelectedType;
+                            narrowed.width = static_cast<int>(packedSuffixWidth(*currentSelectedType, 1));
+                            narrowed.packed_dims.erase(narrowed.packed_dims.begin());
+                            currentSelectedType = narrowed;
+                        } else if (currentSelectedType && !currentSelectedType->unpacked_dims.empty()) {
+                            currentSelectedType->unpacked_dims.erase(currentSelectedType->unpacked_dims.begin());
+                        }
                     } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect){
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* leftNode = buildExprDFG(rangeSelect.left, ctx);
                         auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
                         indexedSignalNode = ctx.graph.index(indexedSignalNode, leftNode, rightNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        currentSelectedType.reset();
                     } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
                         // [base +: width] → [base+width-1 : base]
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
@@ -1759,6 +1802,7 @@ DFGNode* buildExprDFG(
                         high->loc = resolveSourceLoc(*expr, ctx.sm);
                         indexedSignalNode = ctx.graph.index(indexedSignalNode, high, baseNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        currentSelectedType.reset();
                     } else {
                         throw CompilerError(
                             "Only BitSelect and RangeSelect supported, got: " +

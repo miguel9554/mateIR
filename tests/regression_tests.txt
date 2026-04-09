@@ -1,0 +1,30 @@
+# One test per line:
+#   <test-name> PASS
+#   <test-name> FAIL <expected error substring>
+#
+# Comment out a line to skip that test.
+
+apb_gpio PASS
+axi_spi_slave PASS
+const_only_dynamic_fail FAIL DIV operation requires constant operands
+const_only_ops PASS
+cordic PASS
+counter_top PASS
+enum_local_test PASS
+enum_top_test PASS
+full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'
+func_test PASS
+generate_test PASS
+inout_arg_fail FAIL inout ports not supported
+multiple_always_comb_assign FAIL Multiple drivers for target 'z'
+multiple_continuous_assign FAIL Multiple drivers for target 'n'
+multiple_seq_writers_same_flop FAIL Multiple drivers for target 'q.d'
+multiple_submodule_output_drivers FAIL Multiple drivers for target 'n'
+overlapping_partial_writes FAIL Overlapping partial writes for target 'bus'
+partial_then_full_write_conflict FAIL Multiple drivers for target 'bus'
+pkg_scope_test PASS
+ref_arg_fail FAIL ref ports not supported
+static_func_fail FAIL Only 'automatic' functions/tasks are supported
+subword_assign PASS
+task_func_test PASS
+uart PASS

@@ -1,0 +1,18 @@
+module_name: const_only_ops
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - a
+      - b
+      - sel
+      - div_out
+      - mod_out
+      - pow_out
+      - mix_out
+      - accum_out

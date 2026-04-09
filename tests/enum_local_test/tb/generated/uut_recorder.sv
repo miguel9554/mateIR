@@ -7,12 +7,14 @@ module uut_recorder(
 
     // Async recorders
     async_recorder#(
-        .filepath(path("clk.txt"))
+        .filepath(path("clk.txt")),
+        .TYPE(logic)
     ) u_clk_recorder(
         .data(_if.clk)
     );
     async_recorder#(
-        .filepath(path("rst_n.txt"))
+        .filepath(path("rst_n.txt")),
+        .TYPE(logic)
     ) u_rst_recorder(
         .data(_if.rst_n)
     );

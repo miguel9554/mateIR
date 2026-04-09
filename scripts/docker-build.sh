@@ -9,3 +9,8 @@ if ! docker image inspect custom-hdl-slang:latest >/dev/null 2>&1; then
 fi
 docker build --network=host -t custom-hdl-compiler .
 docker build --network=host -t custom-hdl-compiler:claude -f Dockerfile.claude .
+
+# Extract slang from the image into external/slang-install for host-side LSP.
+CID=$(docker create custom-hdl-compiler:latest)
+docker cp "$CID":/opt/slang/. external/slang-install/
+docker rm "$CID"

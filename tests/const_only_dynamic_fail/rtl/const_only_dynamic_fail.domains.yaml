@@ -1,0 +1,6 @@
+module_name: const_only_dynamic_fail
+
+async_domain:
+  - a
+  - b
+  - y

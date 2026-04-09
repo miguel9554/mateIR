@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ir/resolved.h"
+#include "sim/sim_value.h"
 #include "vcd_tracer.hpp"
 
 #include <fstream>
@@ -13,6 +14,27 @@
 namespace custom_hdl {
 
 struct ModuleInstance;  // forward declaration
+
+class SimVcdValue : public vcd_tracer::value_base {
+public:
+    explicit SimVcdValue(unsigned int bit_size);
+
+    void set(const SimValue& value);
+    void unknown() override;
+    void undriven() override;
+    void set_uint64(uint64_t v) override;
+    void set_double(double v) override;
+    void elaborate(vcd_tracer::scope_fn::add_fn add_fn,
+                   std::string_view var_name) override;
+
+private:
+    unsigned int bit_size_;
+    vcd_tracer::value_state state_ = vcd_tracer::value_state::unknown_x;
+    std::string value_;
+    bool dirty_ = false;
+
+    vcd_tracer::scope_fn::dump_sequence_t dump(std::ostream& out, bool start);
+};
 
 class VcdWriter {
 public:
@@ -39,8 +61,8 @@ private:
     // Merged maps: each vector holds value objects for BOTH hier and flat.
     // Vectors because after inlining one DFG node may appear in multiple
     // hierarchy scopes (e.g. top input aliased to submodule input).
-    std::map<const DFGNode*, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> values_;
-    std::map<std::string, std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>>> async_values_;
+    std::map<const DFGNode*, std::vector<std::unique_ptr<SimVcdValue>>> values_;
+    std::map<std::string, std::vector<std::unique_ptr<SimVcdValue>>> async_values_;
 
     // Static param values (set once at setup, never updated).
     std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>> params_;

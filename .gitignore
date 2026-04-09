@@ -39,7 +39,7 @@ __pycache__/
 .clangd
 **/*.vcd
 tests/**/*.txt
-!tests/**/stimuli/*.txt
+!tests/regression_tests.txt
 tests/**/obj_dir
 **/*.gtkw
 tests/*/work/custom-sim/debug_output

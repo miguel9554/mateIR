@@ -1,10 +1,11 @@
 module async_recorder#(
-    string filepath
+    string filepath,
+    type TYPE
 )(
-    input logic data
+    input TYPE data
 );
     // Keep old value to detect changes
-    logic old_data;
+    TYPE old_data;
 
     // File handle
     integer file;
@@ -21,14 +22,14 @@ module async_recorder#(
 
         // Initialize old_data and write initial value
         #0 old_data = data;
-        $fwrite(file, "%0t %0d\n", $realtime, data);
+        $fwrite(file, "%0t 0x%h (%d)\n", $realtime, data, data);
     end
 
     // Whenever data changes, write to file
     always @(data) begin
         // Only write if value actually changed
         if (data !== old_data) begin
-            $fwrite(file, "%0t %0d\n", $realtime, data);
+            $fwrite(file, "%0t 0x%h (%d)\n", $realtime, data, data);
             old_data = data;
         end
     end

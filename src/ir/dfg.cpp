@@ -54,7 +54,6 @@ std::string DFG::renderDot(const std::string& graphName,
             case DFGOp::ADD: ss << "+"; break;
             case DFGOp::SUB: ss << "-"; break;
             case DFGOp::MUL: ss << "*"; break;
-            case DFGOp::DIV: ss << "/"; break;
             case DFGOp::EQ:  ss << "=="; break;
             case DFGOp::LT:  ss << "<"; break;
             case DFGOp::LE:  ss << "<="; break;
@@ -62,7 +61,6 @@ std::string DFG::renderDot(const std::string& graphName,
             case DFGOp::GE:  ss << ">="; break;
             case DFGOp::SHL: ss << "<<<"; break;
             case DFGOp::ASR: ss << ">>>"; break;
-            case DFGOp::POWER: ss << "**"; break;
             case DFGOp::MUX: ss << "MUX"; break;
             case DFGOp::MUX_N: ss << "MUX_N"; break;
             case DFGOp::MODULE:

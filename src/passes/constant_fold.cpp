@@ -82,23 +82,6 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
 }
 
 // ---------------------------------------------------------------------------
-// Integer power helper
-// ---------------------------------------------------------------------------
-
-static int64_t intPow(int64_t base, int64_t exp,
-                      const DFGNode* node = nullptr) {
-    if (exp < 0)
-        throw CompilerError("Constant fold: negative exponent not supported", node);
-    if (base == 0 && exp == 0)
-        throw CompilerError("Constant fold: 0**0 is undefined", node);
-    int64_t result = 1;
-    for (int64_t i = 0; i < exp; i++) {
-        result *= base;
-    }
-    return result;
-}
-
-// ---------------------------------------------------------------------------
 // Constant folding: evaluate nodes where ALL inputs are constants
 // ---------------------------------------------------------------------------
 
@@ -142,13 +125,6 @@ static bool tryConstantFold(DFGNode* node) {
         case DFGOp::MUL:
             result = getConst(node->in[0].node) * getConst(node->in[1].node);
             break;
-        case DFGOp::DIV: {
-            int64_t divisor = getConst(node->in[1].node);
-            if (divisor == 0)
-                throw CompilerError("Constant fold: division by zero", node);
-            result = getConst(node->in[0].node) / divisor;
-            break;
-        }
         case DFGOp::EQ:
             result = (getConst(node->in[0].node) == getConst(node->in[1].node)) ? 1 : 0;
             break;
@@ -169,9 +145,6 @@ static bool tryConstantFold(DFGNode* node) {
             break;
         case DFGOp::ASR:
             result = getConst(node->in[0].node) >> getConst(node->in[1].node);
-            break;
-        case DFGOp::POWER:
-            result = intPow(getConst(node->in[0].node), getConst(node->in[1].node), node);
             break;
         case DFGOp::MUX: {
             int64_t sel = getConst(node->in[0].node);
@@ -356,31 +329,6 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             }
             break;
         }
-        case DFGOp::DIV: {
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
-            // Const-zero divisor -> throw
-            if (isConst(rhs) && getConst(rhs) == 0) {
-                throw CompilerError("Constant fold: division by zero", node);
-            }
-            // x / 1 -> x
-            if (isConst(rhs) && getConst(rhs) == 1) {
-                redirectConsumers(graph, node, lhs);
-                return true;
-            }
-            // x / -1 -> UNARY_NEGATE(x)
-            if (isConst(rhs) && getConst(rhs) == -1) {
-                node->op = DFGOp::UNARY_NEGATE;
-                node->in = {DFGOutput(lhs)};
-                return true;
-            }
-            // 0 / x -> 0 (only if x is non-zero const)
-            if (isConst(lhs) && getConst(lhs) == 0 && isConst(rhs) && getConst(rhs) != 0) {
-                makeConst(node, 0);
-                return true;
-            }
-            break;
-        }
         case DFGOp::EQ: {
             if (node->in[0].node == node->in[1].node) {
                 makeConst(node, 1);
@@ -442,33 +390,6 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             // 0 >>> x -> 0
             if (isConst(lhs) && getConst(lhs) == 0) {
                 makeConst(node, 0);
-                return true;
-            }
-            break;
-        }
-        case DFGOp::POWER: {
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
-            // x ** 0 -> 1 (throw if x is const 0)
-            if (isConst(rhs) && getConst(rhs) == 0) {
-                if (isConst(lhs) && getConst(lhs) == 0)
-                    throw CompilerError("Constant fold: 0**0 is undefined", node);
-                makeConst(node, 1);
-                return true;
-            }
-            // x ** 1 -> x
-            if (isConst(rhs) && getConst(rhs) == 1) {
-                redirectConsumers(graph, node, lhs);
-                return true;
-            }
-            // 0 ** x -> 0 (only if x is const > 0)
-            if (isConst(lhs) && getConst(lhs) == 0 && isConst(rhs) && getConst(rhs) > 0) {
-                makeConst(node, 0);
-                return true;
-            }
-            // 1 ** x -> 1
-            if (isConst(lhs) && getConst(lhs) == 1) {
-                makeConst(node, 1);
                 return true;
             }
             break;

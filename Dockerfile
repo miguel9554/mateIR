@@ -16,20 +16,19 @@ RUN apt-get update && apt-get install -y \
     python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
+ENV VIRTUAL_ENV=/opt/compiler-venv
+ENV PATH="${VIRTUAL_ENV}/bin:/usr/local/bin:${PATH}"
 ENV POETRY_HOME=/usr/local
-ENV POETRY_CACHE_DIR=/opt/pypoetry-cache
-ENV POETRY_VIRTUALENVS_IN_PROJECT=false
+ENV POETRY_VIRTUALENVS_CREATE=false
 RUN curl -sSL https://install.python-poetry.org | python3 -
 
 ENV CC=clang-18
 ENV CXX=clang++-18
 
-WORKDIR /workspace
-
-# Pre-install Python packages.
+RUN python3 -m venv "${VIRTUAL_ENV}"
+WORKDIR /tmp/poetry-install
 COPY pyproject.toml poetry.lock ./
-RUN poetry install --no-root && \
-    chmod -R a+rX /opt/pypoetry-cache
+RUN poetry install --no-root
 
 RUN git config --global --add safe.directory /workspace
 

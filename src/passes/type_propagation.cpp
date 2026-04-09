@@ -138,8 +138,7 @@ bool inferNodeType(DFGNode* node) {
         // Arithmetic binary ops: result = max(operand widths), signed if both signed
         case DFGOp::ADD:
         case DFGOp::MUL:
-        case DFGOp::DIV:
-        case DFGOp::POWER: {
+        {
             if (node->in.size() < 2) {
                 throw CompilerError(std::format(
                     "Type propagation: binary op {} has {} inputs (expected 2)",
@@ -470,7 +469,7 @@ bool propagateTypes(DFG& graph) {
     {
         static const auto isArithOp = [](DFGOp op) {
             return op == DFGOp::ADD || op == DFGOp::SUB ||
-                   op == DFGOp::MUL || op == DFGOp::DIV || op == DFGOp::POWER;
+                   op == DFGOp::MUL;
         };
         bool backwardChanged;
         do {

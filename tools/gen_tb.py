@@ -177,10 +177,26 @@ class DomainConfig:
     async_domain: list[str]              # async port names (wildcards expanded)
 
 
-def _expand_patterns(patterns: list[str], port_names: set[str]) -> list[str]:
-    """Expand a list of exact names and wildcard prefixes against known port names."""
+def _normalize_signal_refs(signal_refs: list[object]) -> list[str]:
+    """Extract signal names from schema-valid string and single-key mapping forms."""
     result = []
-    for pattern in patterns:
+    for signal_ref in signal_refs:
+        if isinstance(signal_ref, str):
+            result.append(signal_ref)
+            continue
+        if isinstance(signal_ref, dict):
+            if len(signal_ref) != 1:
+                raise ValueError(f"Expected single-key signal mapping, got: {signal_ref!r}")
+            result.extend(signal_ref.keys())
+            continue
+        raise ValueError(f"Expected signal reference string or mapping, got: {signal_ref!r}")
+    return result
+
+
+def _expand_patterns(signal_refs: list[object], port_names: set[str]) -> list[str]:
+    """Expand exact names and wildcard prefixes against known port names."""
+    result = []
+    for pattern in _normalize_signal_refs(signal_refs):
         if pattern.endswith('*'):
             prefix = pattern[:-1]
             result.extend(n for n in port_names if n.startswith(prefix))
@@ -416,8 +432,10 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
             # Shorten reset instance name
             if sig in all_resets:
                 inst_name = f'u_{sig.replace("_n", "").replace("rst", "rst")}_recorder'
+            type_str = port_type_str(input_ports[sig], use_resolved=True)
             lines.append(f'    async_recorder#(')
-            lines.append(f'        .filepath(path("{sig}.txt"))')
+            lines.append(f'        .filepath(path("{sig}.txt")),')
+            lines.append(f'        .TYPE({type_str})')
             lines.append(f'    ) {inst_name}(')
             lines.append(f'        .data(_if.{sig})')
             lines.append(f'    );')
@@ -457,12 +475,14 @@ def main():
     module_name = sys.argv[1]
     project_root = Path(__file__).resolve().parent.parent
 
-    rtl_path = project_root / 'tests' / module_name / 'rtl' / f'{module_name}.v'
-    domains_path = project_root / 'tests' / module_name / 'rtl' / f'{module_name}.domains.yaml'
+    rtl_dir = project_root / 'tests' / module_name / 'rtl'
+    rtl_path = next((rtl_dir / f'{module_name}{ext}' for ext in ('.sv', '.v')
+                     if (rtl_dir / f'{module_name}{ext}').exists()), None)
+    domains_path = rtl_dir / f'{module_name}.domains.yaml'
     output_dir = project_root / 'tests' / module_name / 'tb' / 'generated'
 
-    if not rtl_path.exists():
-        raise FileNotFoundError(f"RTL file not found: {rtl_path}")
+    if rtl_path is None:
+        raise FileNotFoundError(f"RTL file not found: {rtl_dir / module_name}(.sv|.v)")
     if not domains_path.exists():
         raise FileNotFoundError(f"Domains file not found: {domains_path}")
 

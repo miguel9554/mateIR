@@ -4,8 +4,8 @@
 #
 # Comment out a line to skip that test.
 
-# apb_gpio PASS
-# axi_spi_slave PASS
+apb_gpio PASS
+axi_spi_slave PASS
 const_only_dynamic_fail FAIL DIV operation requires constant operands
 const_only_ops PASS
 cordic PASS

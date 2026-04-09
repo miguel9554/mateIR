@@ -64,30 +64,44 @@ module uut_tb(
         end
 
         gpio_pattern = 32'h0000_0000;
-        #11ns _if.gpio_in = gpio_pattern;
+        #11ns;
+        @(posedge _if.HCLK);
+        #1ns _if.gpio_in = gpio_pattern;
         #29ns;
 
         gpio_pattern = 32'hFFFF_0000;
-        #7ns _if.gpio_in = gpio_pattern;
+        #7ns;
+        @(posedge _if.HCLK);
+        #1ns _if.gpio_in = gpio_pattern;
         #33ns;
 
         gpio_pattern = 32'h0000_FFFF;
-        #19ns _if.gpio_in = gpio_pattern;
+        #19ns;
+        @(posedge _if.HCLK);
+        #1ns _if.gpio_in = gpio_pattern;
         #21ns;
 
         gpio_pattern = 32'hA5A5_5A5A;
-        #5ns _if.gpio_in = gpio_pattern;
+        #5ns;
+        @(posedge _if.HCLK);
+        #1ns _if.gpio_in = gpio_pattern;
         #35ns;
 
         gpio_pattern = 32'h5A5A_A5A5;
-        #23ns _if.gpio_in = gpio_pattern;
+        #23ns;
+        @(posedge _if.HCLK);
+        #1ns _if.gpio_in = gpio_pattern;
         #17ns;
 
         for (int stress_idx = 0; stress_idx < 24; stress_idx++) begin
             lfsr = next_lfsr(lfsr);
             gpio_pattern = lfsr ^ {16'hA55A, stress_idx[15:0]};
-            #9ns _if.gpio_in = gpio_pattern;
-            #14ns _if.gpio_in = ~gpio_pattern;
+            #9ns;
+            @(posedge _if.HCLK);
+            #1ns _if.gpio_in = gpio_pattern;
+            #14ns;
+            @(posedge _if.HCLK);
+            #1ns _if.gpio_in = ~gpio_pattern;
             #8ns;
         end
     end

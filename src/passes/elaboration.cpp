@@ -299,6 +299,220 @@ static DFGNode* inlineSubroutineCall(
 //   SimplePropertyExpr → SimpleSequenceExpr → ExpressionSyntax
 const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr);
 
+using DriverMap = std::unordered_map<std::string, DFGNode*>;
+
+struct ConditionalBranch {
+    DFGNode* condition;
+    DriverMap modifiedDrivers;
+};
+
+struct DriverSnapshot {
+    DriverMap visibleDrivers;
+    std::map<std::string, DFGNode*> combDrivers;
+};
+
+static DriverSnapshot snapshotDrivers(const ResolutionContext& ctx) {
+    DriverSnapshot snapshot;
+    snapshot.combDrivers = ctx.combDrivers;
+    DriverMap drivers;
+    if (!ctx.is_subroutine_scope) {
+        for (const auto& [outName, outNode] : ctx.graph.getOutputsMap()) {
+            if (outNode->in.size() == 1) {
+                drivers[outName] = outNode->in[0].node;
+            }
+        }
+        for (const auto& [sigName, sigNode] : ctx.graph.getSignalsMap()) {
+            if (sigNode->in.size() == 1) {
+                drivers[sigName] = sigNode->in[0].node;
+            }
+        }
+        for (const auto& [name, node] : ctx.local_signals) {
+            if (node->in.size() == 1) {
+                drivers[name] = node->in[0].node;
+            }
+        }
+    }
+    for (const auto& [name, node] : ctx.combDrivers) {
+        if (ctx.subroutine_locals.count(name)) drivers[name] = node;
+    }
+    snapshot.visibleDrivers = std::move(drivers);
+    return snapshot;
+}
+
+static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNode* driver) {
+    if (ctx.subroutine_locals.count(name)) {
+        ctx.combDrivers[name] = driver;
+        return;
+    }
+    if (auto localIt = ctx.local_signals.find(name); localIt != ctx.local_signals.end()) {
+        localIt->second->in = {driver};
+        return;
+    }
+    if (ctx.graph.hasOutput("", name)) {
+        ctx.graph.connectOutput("", name, driver);
+    } else if (ctx.graph.hasSignal("", name)) {
+        ctx.graph.connectSignal("", name, driver);
+    }
+}
+
+static void restoreDrivers(ResolutionContext& ctx, const DriverSnapshot& snapshot) {
+    ctx.combDrivers = snapshot.combDrivers;
+    for (const auto& [name, driver] : snapshot.visibleDrivers) {
+        connectDriver(ctx, name, driver);
+    }
+    if (!ctx.is_subroutine_scope) {
+        for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
+            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name)) {
+                node->in.clear();
+            }
+        }
+        for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
+            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name)) {
+                node->in.clear();
+            }
+        }
+        for (const auto& [name, node] : ctx.local_signals) {
+            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name)) {
+                node->in.clear();
+            }
+        }
+    }
+}
+
+static DriverMap modifiedDriversSince(const ResolutionContext& ctx, const DriverSnapshot& baseline) {
+    DriverMap modified;
+    if (!ctx.is_subroutine_scope) {
+        for (const auto& [outName, outNode] : ctx.graph.getOutputsMap()) {
+            if (outNode->in.size() == 1) {
+                auto it = baseline.visibleDrivers.find(outName);
+                if (it == baseline.visibleDrivers.end() || it->second != outNode->in[0].node) {
+                    modified[outName] = outNode->in[0].node;
+                }
+            }
+        }
+        for (const auto& [sigName, sigNode] : ctx.graph.getSignalsMap()) {
+            if (sigNode->in.size() == 1) {
+                auto it = baseline.visibleDrivers.find(sigName);
+                if (it == baseline.visibleDrivers.end() || it->second != sigNode->in[0].node) {
+                    modified[sigName] = sigNode->in[0].node;
+                }
+            }
+        }
+        for (const auto& [name, node] : ctx.local_signals) {
+            if (node->in.size() == 1) {
+                auto it = baseline.visibleDrivers.find(name);
+                if (it == baseline.visibleDrivers.end() || it->second != node->in[0].node) {
+                    modified[name] = node->in[0].node;
+                }
+            }
+        }
+    }
+    for (const auto& [name, node] : ctx.combDrivers) {
+        if (!ctx.subroutine_locals.count(name)) continue;
+        auto it = baseline.visibleDrivers.find(name);
+        if (it == baseline.visibleDrivers.end() || it->second != node) {
+            modified[name] = node;
+        }
+    }
+    return modified;
+}
+
+static void executeConditionalBranch(const StatementSyntax& stmt, ResolutionContext& ctx) {
+    try {
+        resolveStatementInPlace(&stmt, ctx);
+    } catch (const ReturnSignal& r) {
+        if (ctx.current_return_var.empty()) throw;
+        if (r.value) ctx.combDrivers[ctx.current_return_var] = r.value;
+    }
+}
+
+static DFGNode* getRetainedDriver(ResolutionContext& ctx,
+                                  const std::string& targetName,
+                                  const DriverSnapshot& baseline,
+                                  const std::optional<SourceLoc>& loc) {
+    if (auto it = baseline.visibleDrivers.find(targetName); it != baseline.visibleDrivers.end()) {
+        return it->second;
+    }
+    if (!ctx.is_sequential) return nullptr;
+
+    std::string qName = targetName;
+    if (qName.ends_with(".d")) {
+        qName = qName.substr(0, qName.length() - 2) + ".q";
+    }
+    DFGNode* qNode = nullptr;
+    if (auto localIt = ctx.local_signals.find(qName); localIt != ctx.local_signals.end()) {
+        qNode = localIt->second;
+    } else {
+        qNode = ctx.graph.lookupSignal("", qName);
+    }
+    if (!qNode) {
+        throw CompilerError("Could not find .q signal: " + qName, loc);
+    }
+    return qNode;
+}
+
+static DFGNode* buildMergedDriver(ResolutionContext& ctx,
+                                  const std::string& targetName,
+                                  const std::vector<ConditionalBranch>& branches,
+                                  const std::optional<DriverMap>& fallbackBranch,
+                                  const DriverSnapshot& baseline,
+                                  const std::optional<SourceLoc>& loc) {
+    DFGNode* retained = getRetainedDriver(ctx, targetName, baseline, loc);
+    auto branchValue = [&](const DriverMap& modified) -> DFGNode* {
+        if (auto it = modified.find(targetName); it != modified.end()) {
+            return it->second;
+        }
+        return retained;
+    };
+
+    DFGNode* result = fallbackBranch ? branchValue(*fallbackBranch) : retained;
+    if (!result) {
+        throw CompilerError(
+            "Signal '" + targetName + "' not assigned in all branches and has no default/fallback",
+            loc);
+    }
+
+    for (auto it = branches.rbegin(); it != branches.rend(); ++it) {
+        DFGNode* selected = branchValue(it->modifiedDrivers);
+        if (!selected) {
+            throw CompilerError(
+                "Signal '" + targetName + "' not assigned in all branches and has no default/fallback",
+                loc);
+        }
+        if (selected == result) continue;
+        auto* mux = ctx.graph.mux(it->condition, selected, result);
+        mux->loc = loc;
+        result = mux;
+    }
+    return result;
+}
+
+static void mergeConditionalBranches(ResolutionContext& ctx,
+                                     const std::vector<ConditionalBranch>& branches,
+                                     const std::optional<DriverMap>& fallbackBranch,
+                                     const DriverSnapshot& baseline,
+                                     const std::optional<SourceLoc>& loc) {
+    std::set<std::string> assignedSignals;
+    for (const auto& branch : branches) {
+        for (const auto& [name, _] : branch.modifiedDrivers) {
+            assignedSignals.insert(name);
+        }
+    }
+    if (fallbackBranch) {
+        for (const auto& [name, _] : *fallbackBranch) {
+            assignedSignals.insert(name);
+        }
+    }
+
+    for (const auto& signalName : assignedSignals) {
+        DFGNode* merged = buildMergedDriver(ctx, signalName, branches, fallbackBranch, baseline, loc);
+        connectDriver(ctx, signalName, merged);
+        if (!ctx.is_sequential) {
+            ctx.combDrivers[signalName] = merged;
+        }
+    }
+}
+
 
 // Evaluate a constant expression given a parameter context
 // Throws if a referenced parameter is not in the context
@@ -1839,27 +2053,19 @@ void resolveConditionalStatementInPlace(
                             resolveSourceLoc(*conditionalStatement, ctx.sm));
     }
     const auto& predicateExpr = predicate->conditions[0]->expr;
+    const auto condLoc = resolveSourceLoc(*conditionalStatement, ctx.sm);
 
     // If the predicate is statically known in the current elaboration context,
     // only elaborate the reachable branch.
-    auto executeBranchStmt = [&ctx](const StatementSyntax& stmt) {
-        try {
-            resolveStatementInPlace(&stmt, ctx);
-        } catch (const ReturnSignal& r) {
-            if (ctx.current_return_var.empty()) throw;
-            if (r.value) ctx.combDrivers[ctx.current_return_var] = r.value;
-        }
-    };
-
     try {
         int64_t predicateValue =
             evaluateConstantExpr(predicateExpr, ctx.params, ctx.sm, *conditionalStatement);
         if (predicateValue) {
-            executeBranchStmt(*conditionalStatement->statement);
+            executeConditionalBranch(*conditionalStatement->statement, ctx);
         } else if (conditionalStatement->elseClause) {
             const auto& elseClause = conditionalStatement->elseClause->clause;
             const auto& elseStatement = elseClause->as<StatementSyntax>();
-            executeBranchStmt(elseStatement);
+            executeConditionalBranch(elseStatement, ctx);
         }
         return;
     } catch (const std::runtime_error&) {
@@ -1868,180 +2074,26 @@ void resolveConditionalStatementInPlace(
 
     // construct the signal node for the predicate expression
     auto conditionNode = buildExprDFG(predicateExpr, ctx);
+    const auto baselineDrivers = snapshotDrivers(ctx);
 
-    // Extract driver nodes from outputs, signals, and combDrivers for subroutine locals.
-    // In subroutine scope, skip module-level graph nodes — only track subroutine locals.
-    auto getDrivers = [&ctx](const DFG& g) {
-        std::unordered_map<std::string, DFGNode*> drivers;
-        if (!ctx.is_subroutine_scope) {
-            for (const auto& [outName, outNode] : g.getOutputsMap()) {
-                if (outNode->in.size() == 1) {
-                    drivers[outName] = outNode->in[0].node;
-                }
-            }
-            for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
-                if (sigNode->in.size() == 1) {
-                    drivers[sigName] = sigNode->in[0].node;
-                }
-            }
-        }
-        for (const auto& [name, node] : ctx.combDrivers) {
-            if (ctx.subroutine_locals.count(name)) drivers[name] = node;
-        }
-        return drivers;
-    };
-
-    const auto oldDrivers = getDrivers(ctx.graph);
-
+    std::optional<DriverMap> elseDrivers;
     if (conditionalStatement->elseClause) {
         const auto& elseClause = conditionalStatement->elseClause->clause;
-        const auto& elseStatement = elseClause->as<StatementSyntax>();
-        executeBranchStmt(elseStatement);
+        restoreDrivers(ctx, baselineDrivers);
+        executeConditionalBranch(elseClause->as<StatementSyntax>(), ctx);
+        elseDrivers = modifiedDriversSince(ctx, baselineDrivers);
     }
 
-    const auto elseDrivers = getDrivers(ctx.graph);
+    restoreDrivers(ctx, baselineDrivers);
+    executeConditionalBranch(*conditionalStatement->statement, ctx);
+    DriverMap ifDrivers = modifiedDriversSince(ctx, baselineDrivers);
 
-    executeBranchStmt(*conditionalStatement->statement);
-
-    // Helper to connect a signal (output, signal, or subroutine local via combDrivers)
-    auto connectSignalOrOutput = [&ctx](const std::string& name, DFGNode* driver) {
-        if (ctx.subroutine_locals.count(name)) {
-            ctx.combDrivers[name] = driver;
-            return;
-        }
-        if (ctx.graph.hasOutput("", name)) {
-            ctx.graph.connectOutput("", name, driver);
-        } else if (ctx.graph.hasSignal("", name)) {
-            ctx.graph.connectSignal("", name, driver);
-        }
-    };
-
-    // Helper to get current driver for a signal or subroutine local
-    auto getCurrentDriver = [&ctx](const std::string& name) -> DFGNode* {
-        if (ctx.subroutine_locals.count(name)) {
-            auto it = ctx.combDrivers.find(name);
-            return it != ctx.combDrivers.end() ? it->second : nullptr;
-        }
-        if (auto* n = ctx.graph.getOutputNode("", name)) {
-            return n->in.size() == 1 ? n->in[0].node : nullptr;
-        }
-        if (auto* n = ctx.graph.getSignalNode("", name)) {
-            return n->in.size() == 1 ? n->in[0].node : nullptr;
-        }
-        return nullptr;
-    };
-
-    // Collect all signals that were assigned (including subroutine locals in combDrivers).
-    // In subroutine scope, skip module-level graph iteration — only check subroutine locals.
-    std::set<std::string> assignedSignals;
-    if (!ctx.is_subroutine_scope) {
-        for (const auto& [name, _] : ctx.graph.getOutputsMap()) {
-            if (getCurrentDriver(name) != nullptr) {
-                assignedSignals.insert(name);
-            }
-        }
-        for (const auto& [name, _] : ctx.graph.getSignalsMap()) {
-            if (getCurrentDriver(name) != nullptr) {
-                assignedSignals.insert(name);
-            }
-        }
-    }
-    for (const auto& [name, _] : ctx.combDrivers) {
-        if (ctx.subroutine_locals.count(name)) assignedSignals.insert(name);
-    }
-
-    // Assign MUXes for signals that ARE assigned on IF branch
-    for (const auto& outName : assignedSignals) {
-        DFGNode* oldDriver;
-        DFGNode* newDriver = getCurrentDriver(outName);
-        if (!newDriver) continue;
-
-        // First, check if signal is assigned in ELSE clause
-        auto it = elseDrivers.find(outName);
-        if (it != elseDrivers.end()) {
-            oldDriver = it->second;
-        } else {
-            auto it2 = oldDrivers.find(outName);
-            if (it2 != oldDrivers.end()) {
-                oldDriver = it2->second;
-            } else if (ctx.is_sequential) {
-                // In sequential blocks, use .q as fallback (flop retains value)
-                std::string qName = outName;
-                if (qName.ends_with(".d")) {
-                    qName = qName.substr(0, qName.length() - 2) + ".q";
-                }
-                // Look up the .q signal node
-                DFGNode* qNode = ctx.graph.lookupSignal("", qName);
-                if (!qNode) {
-                    throw CompilerError("Could not find .q signal: " + qName,
-                                        resolveSourceLoc(*conditionalStatement, ctx.sm));
-                }
-                oldDriver = qNode;
-            } else {
-                throw CompilerError(
-                    "Signal is not assigned in IF branch but not other: " + outName,
-                    resolveSourceLoc(*conditionalStatement, ctx.sm));
-            }
-        }
-
-        if (oldDriver != newDriver) {
-            // Add the mux!
-            auto* muxOut = ctx.graph.mux(conditionNode, newDriver, oldDriver);
-            muxOut->loc = resolveSourceLoc(*conditionalStatement, ctx.sm);
-            connectSignalOrOutput(outName, muxOut);
-            if (!ctx.is_sequential) ctx.combDrivers[outName] = muxOut;
-        }
-    }
-
-    // Handle signals that are assigned in ELSE branch but NOT in IF branch
-    for (const auto& [elseName, elseDriver] : elseDrivers) {
-        auto oldIt = oldDrivers.find(elseName);
-        DFGNode* oldDriver = (oldIt != oldDrivers.end()) ? oldIt->second : nullptr;
-
-        // Skip if ELSE didn't actually modify this signal
-        if (elseDriver == oldDriver) {
-            continue;
-        }
-
-        // Check if IF modified this signal
-        DFGNode* currentDriver = getCurrentDriver(elseName);
-        bool if_modified = (currentDriver != nullptr && currentDriver != elseDriver);
-
-        // IF already handled this signal in the loop above
-        if (if_modified) {
-            continue;
-        }
-
-        // Signal is only in ELSE, not in OLD and not in IF
-        if (!oldDriver) {
-            if (ctx.is_sequential) {
-                // In sequential blocks, use .q as fallback (flop retains value)
-                std::string qName = elseName;
-                if (qName.ends_with(".d")) {
-                    qName = qName.substr(0, qName.length() - 2) + ".q";
-                }
-                // Look up the .q signal node
-                DFGNode* qNode = ctx.graph.lookupSignal("", qName);
-                if (!qNode) {
-                    throw CompilerError("Could not find .q signal: " + qName,
-                                        resolveSourceLoc(*conditionalStatement, ctx.sm));
-                }
-                oldDriver = qNode;
-            } else {
-                throw CompilerError(
-                    "Signal '" + elseName + "' is only assigned in ELSE branch, not supported",
-                    resolveSourceLoc(*conditionalStatement, ctx.sm));
-            }
-        }
-
-        // Signal is in ELSE and OLD but not IF → add MUX
-        // TRUE (condition true, IF branch): use oldDriver (IF didn't change it)
-        // FALSE (condition false, ELSE branch): use elseDriver
-        auto* muxOut = ctx.graph.mux(conditionNode, oldDriver, elseDriver);
-        muxOut->loc = resolveSourceLoc(*conditionalStatement, ctx.sm);
-        connectSignalOrOutput(elseName, muxOut);
-        if (!ctx.is_sequential) ctx.combDrivers[elseName] = muxOut;
-    }
+    restoreDrivers(ctx, baselineDrivers);
+    mergeConditionalBranches(ctx,
+                             {{conditionNode, std::move(ifDrivers)}},
+                             elseDrivers,
+                             baselineDrivers,
+                             condLoc);
 }
 
 void resolveCaseStatementInPlace(
@@ -2062,132 +2114,20 @@ void resolveCaseStatementInPlace(
 
     // Build the selector expression node
     auto selectorNode = buildExprDFG(caseStatement->expr, ctx);
-
-    // Helper to connect a signal (output, signal, or subroutine local via combDrivers)
-    auto connectSignalOrOutput = [&ctx](const std::string& name, DFGNode* driver) {
-        if (ctx.subroutine_locals.count(name)) {
-            ctx.combDrivers[name] = driver;
-            return;
-        }
-        if (ctx.graph.hasOutput("", name)) {
-            ctx.graph.connectOutput("", name, driver);
-        } else if (ctx.graph.hasSignal("", name)) {
-            ctx.graph.connectSignal("", name, driver);
-        }
-    };
-
-    // Snapshot current drivers: DFG signals/outputs + combDrivers for subroutine locals.
-    // In subroutine scope, skip module-level graph nodes to avoid spurious bulk operations.
-    auto getDrivers = [&ctx](const DFG& g) {
-        std::unordered_map<std::string, DFGNode*> drivers;
-        if (!ctx.is_subroutine_scope) {
-            for (const auto& [outName, outNode] : g.getOutputsMap()) {
-                if (outNode->in.size() == 1) {
-                    drivers[outName] = outNode->in[0].node;
-                }
-            }
-            for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
-                if (sigNode->in.size() == 1) {
-                    drivers[sigName] = sigNode->in[0].node;
-                }
-            }
-        }
-        for (const auto& [name, node] : ctx.combDrivers) {
-            if (ctx.subroutine_locals.count(name))
-                drivers[name] = node;
-        }
-        return drivers;
-    };
-
-    // Diff against baseline: DFG changes + combDrivers changes for subroutine locals.
-    // In subroutine scope, only diff subroutine locals.
-    auto getModifiedDrivers = [&ctx](const DFG& g,
-            const std::unordered_map<std::string, DFGNode*>& baseline) {
-        std::unordered_map<std::string, DFGNode*> modified;
-        if (!ctx.is_subroutine_scope) {
-            for (const auto& [outName, outNode] : g.getOutputsMap()) {
-                if (outNode->in.size() == 1) {
-                    auto it = baseline.find(outName);
-                    if (it == baseline.end() || it->second != outNode->in[0].node) {
-                        modified[outName] = outNode->in[0].node;
-                    }
-                }
-            }
-            for (const auto& [sigName, sigNode] : g.getSignalsMap()) {
-                if (sigNode->in.size() == 1) {
-                    auto it = baseline.find(sigName);
-                    if (it == baseline.end() || it->second != sigNode->in[0].node) {
-                        modified[sigName] = sigNode->in[0].node;
-                    }
-                }
-            }
-        }
-        for (const auto& [name, node] : ctx.combDrivers) {
-            if (!ctx.subroutine_locals.count(name)) continue;
-            auto it = baseline.find(name);
-            if (it == baseline.end() || it->second != node) {
-                modified[name] = node;
-            }
-        }
-        return modified;
-    };
-
-    // Restore drivers to fallback state, including combDrivers for subroutine locals.
-    // In subroutine scope, skip module-level graph operations.
-    auto restoreDrivers = [&connectSignalOrOutput, &ctx](const std::unordered_map<std::string, DFGNode*>& drivers) {
-        for (const auto& [name, driver] : drivers) {
-            connectSignalOrOutput(name, driver);
-        }
-        if (!ctx.is_subroutine_scope) {
-            for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
-                if (node->in.size() == 1 && !drivers.contains(name)) {
-                    node->in.clear();
-                }
-            }
-            for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
-                if (node->in.size() == 1 && !drivers.contains(name)) {
-                    node->in.clear();
-                }
-            }
-        }
-        // Clear subroutine locals that weren't in the fallback snapshot
-        for (auto it = ctx.combDrivers.begin(); it != ctx.combDrivers.end(); ) {
-            if (ctx.subroutine_locals.count(it->first) && !drivers.count(it->first))
-                it = ctx.combDrivers.erase(it);
-            else
-                ++it;
-        }
-    };
-
-    const auto fallbackDrivers = getDrivers(ctx.graph);
-
-    // Execute a case arm statement, catching 'return expr' and converting it to a
-    // combDrivers assignment so that case-MUX building works correctly.
-    auto executeArmStmt = [&ctx](const StatementSyntax& stmt) {
-        try {
-            resolveStatementInPlace(&stmt, ctx);
-        } catch (const ReturnSignal& r) {
-            if (ctx.current_return_var.empty()) throw;
-            if (r.value) ctx.combDrivers[ctx.current_return_var] = r.value;
-        }
-    };
+    const auto caseLoc = resolveSourceLoc(*caseStatement, ctx.sm);
+    const auto baselineDrivers = snapshotDrivers(ctx);
 
     // Collect info for each case branch — drivers only contains signals
     // actually modified in that branch (diff against fallback)
-    struct CaseInfo {
-        DFGNode* condition;  // selector == value
-        std::unordered_map<std::string, DFGNode*> drivers;  // only modified signals
-    };
-    std::vector<CaseInfo> normalCases;
-    std::set<int64_t> explicitCaseValues;
-    std::optional<std::unordered_map<std::string, DFGNode*>> defaultDrivers;
+    std::vector<ConditionalBranch> normalCases;
+    std::optional<DriverMap> defaultDrivers;
 
     for (const auto* item : caseStatement->items) {
         if (item->kind == SyntaxKind::DefaultCaseItem) {
             const auto& defaultItem = item->as<DefaultCaseItemSyntax>();
-            restoreDrivers(fallbackDrivers);
-            executeArmStmt(defaultItem.clause->as<StatementSyntax>());
-            defaultDrivers = getModifiedDrivers(ctx.graph, fallbackDrivers);
+            restoreDrivers(ctx, baselineDrivers);
+            executeConditionalBranch(defaultItem.clause->as<StatementSyntax>(), ctx);
+            defaultDrivers = modifiedDriversSince(ctx, baselineDrivers);
         } else if (item->kind == SyntaxKind::StandardCaseItem) {
             const auto& caseItem = item->as<StandardCaseItemSyntax>();
 
@@ -2199,16 +2139,11 @@ void resolveCaseStatementInPlace(
             // Build condition: selector == case_value
             auto* caseValueNode = buildExprDFG(caseItem.expressions[0], ctx);
             auto* conditionNode = ctx.graph.eq(selectorNode, caseValueNode);
-            conditionNode->loc = resolveSourceLoc(*caseStatement, ctx.sm);
+            conditionNode->loc = caseLoc;
 
-            // Track explicit case value for computing uncovered values
-            if (caseValueNode->op == DFGOp::CONST) {
-                explicitCaseValues.insert(std::get<int64_t>(caseValueNode->data));
-            }
-
-            restoreDrivers(fallbackDrivers);
-            executeArmStmt(caseItem.clause->as<StatementSyntax>());
-            normalCases.push_back({conditionNode, getModifiedDrivers(ctx.graph, fallbackDrivers)});
+            restoreDrivers(ctx, baselineDrivers);
+            executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
+            normalCases.push_back({conditionNode, modifiedDriversSince(ctx, baselineDrivers)});
         } else {
             throw CompilerError(
                 "Unsupported case item kind: " + std::string(toString(item->kind)),
@@ -2216,100 +2151,8 @@ void resolveCaseStatementInPlace(
         }
     }
 
-    // Collect all signals that were assigned in any branch
-    std::set<std::string> assignedSignals;
-    for (const auto& c : normalCases) {
-        for (const auto& [name, _] : c.drivers) {
-            assignedSignals.insert(name);
-        }
-    }
-    if (defaultDrivers) {
-        for (const auto& [name, _] : *defaultDrivers) {
-            assignedSignals.insert(name);
-        }
-    }
-
-    // Build MUX for each assigned signal
-    for (const auto& signalName : assignedSignals) {
-        std::vector<DFGNode*> selectors;
-        std::vector<DFGNode*> dataValues;
-
-        // Determine default value: explicit default branch, pre-case assignment, then .q fallback for sequential
-        DFGNode* defaultValue = nullptr;
-        if (defaultDrivers) {
-            auto it = defaultDrivers->find(signalName);
-            if (it != defaultDrivers->end()) {
-                defaultValue = it->second;
-            }
-        }
-        if (!defaultValue) {
-            // A signal assigned before the case statement serves as the fallback
-            // for branches that don't reassign it (captured in fallbackDrivers).
-            auto it = fallbackDrivers.find(signalName);
-            if (it != fallbackDrivers.end()) {
-                defaultValue = it->second;
-            }
-        }
-        if (!defaultValue && ctx.is_sequential) {
-            std::string qName = signalName;
-            if (qName.ends_with(".d")) {
-                qName = qName.substr(0, qName.length() - 2) + ".q";
-            }
-            DFGNode* qNode = ctx.graph.lookupSignal("", qName);
-            if (!qNode) {
-                throw CompilerError("Could not find .q signal: " + qName,
-                                    resolveSourceLoc(*caseStatement, ctx.sm));
-            }
-            defaultValue = qNode;
-        }
-
-        // Collect selectors and data values from each case
-        for (const auto& c : normalCases) {
-            auto it = c.drivers.find(signalName);
-            DFGNode* caseValue;
-            if (it != c.drivers.end()) {
-                caseValue = it->second;
-            } else if (defaultValue) {
-                caseValue = defaultValue;
-            } else {
-                throw CompilerError(
-                    "Signal '" + signalName + "' not assigned in all case branches and has no default/fallback",
-                    resolveSourceLoc(*caseStatement, ctx.sm));
-            }
-
-            selectors.push_back(c.condition);
-            dataValues.push_back(caseValue);
-        }
-
-        DFGNode* result;
-        auto caseLoc = resolveSourceLoc(*caseStatement, ctx.sm);
-
-        // Add selectors for uncovered case values (values not in any explicit branch)
-        if (defaultValue && selectorNode->hasType()) {
-            int width = selectorNode->type->width;
-            int64_t numValues = int64_t(1) << width;
-            for (int64_t v = 0; v < numValues; ++v) {
-                if (explicitCaseValues.contains(v)) continue;
-                auto* missingConst = ctx.graph.constant(v);
-                missingConst->type = selectorNode->type;  // inherit selector type (e.g. enum)
-                missingConst->loc = caseLoc;
-                auto* missingSel = ctx.graph.eq(selectorNode, missingConst);
-                missingSel->loc = caseLoc;
-                selectors.push_back(missingSel);
-                dataValues.push_back(defaultValue);
-            }
-        }
-
-        if (selectors.size() == 1) {
-            result = dataValues[0];
-        } else {
-            result = ctx.graph.muxN(selectors, dataValues);
-            result->loc = caseLoc;
-        }
-
-        connectSignalOrOutput(signalName, result);
-        if (!ctx.is_sequential) ctx.combDrivers[signalName] = result;
-    }
+    restoreDrivers(ctx, baselineDrivers);
+    mergeConditionalBranches(ctx, normalCases, defaultDrivers, baselineDrivers, caseLoc);
 }
 
 void resolveSequentialBlockStatementInPlace(

@@ -597,9 +597,56 @@ static DFGNode* getRetainedDriver(ResolutionContext& ctx,
 
 static PartialTargetState makeWholeDriverState(const ResolvedType& type, DFGNode* driver) {
     PartialTargetState state{type, {}};
-    if (driver && type.width > 0) {
-        state.slices.push_back({0, type.width - 1, driver});
+    if (!driver || type.width <= 0) {
+        return state;
     }
+
+    if (driver->op == DFGOp::CONCAT && !driver->in.empty()) {
+        std::vector<PartialSliceDriver> slices;
+        slices.reserve(driver->in.size());
+        int64_t nextHigh = type.width - 1;
+        bool ok = true;
+
+        for (const auto& input : driver->in) {
+            DFGNode* part = input.node;
+            if (!part) {
+                ok = false;
+                break;
+            }
+
+            if (part->op == DFGOp::CONCAT_ALIGN && part->in.size() == 3 &&
+                part->in[1].node && part->in[2].node &&
+                part->in[1].node->op == DFGOp::CONST &&
+                part->in[2].node->op == DFGOp::CONST) {
+                int64_t high = std::get<int64_t>(part->in[1].node->data);
+                int64_t low = std::get<int64_t>(part->in[2].node->data);
+                if (high < low) std::swap(high, low);
+                slices.push_back({low, high, part->in[0].node});
+                nextHigh = low - 1;
+                continue;
+            }
+
+            int partWidth = 0;
+            if (part->type.has_value()) {
+                partWidth = part->type->width;
+            }
+            if (partWidth <= 0 || nextHigh - partWidth + 1 < 0) {
+                ok = false;
+                break;
+            }
+            int64_t low = nextHigh - partWidth + 1;
+            slices.push_back({low, nextHigh, part});
+            nextHigh = low - 1;
+        }
+
+        if (ok && nextHigh == -1) {
+            state.slices = std::move(slices);
+            sortSlices(state);
+            return state;
+        }
+    }
+
+    state.slices.push_back({0, type.width - 1, driver});
     return state;
 }
 

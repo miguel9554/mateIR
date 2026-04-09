@@ -432,8 +432,10 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
             # Shorten reset instance name
             if sig in all_resets:
                 inst_name = f'u_{sig.replace("_n", "").replace("rst", "rst")}_recorder'
+            type_str = port_type_str(input_ports[sig], use_resolved=True)
             lines.append(f'    async_recorder#(')
-            lines.append(f'        .filepath(path("{sig}.txt"))')
+            lines.append(f'        .filepath(path("{sig}.txt")),')
+            lines.append(f'        .TYPE({type_str})')
             lines.append(f'    ) {inst_name}(')
             lines.append(f'        .data(_if.{sig})')
             lines.append(f'    );')

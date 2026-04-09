@@ -232,8 +232,8 @@ void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
 // Async event processing (edge detection + d->q / reset)
 // ============================================================================
 
-void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newValue) {
-    int64_t oldValue = 0;
+void ModuleInstance::setAsyncEvent(const std::string& signalName, const SimValue& newValue) {
+    SimValue oldValue = SimValue::zero(newValue.width(), newValue.isSigned());
     if (auto it = async_values.find(signalName); it != async_values.end()) {
         oldValue = it->second;
     }
@@ -241,12 +241,12 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
     // Update stored value and INPUT node
     async_values[signalName] = newValue;
     if (auto* inputNode = module_def.dfg->getInputNode("", signalName)) {
-        values[inputNode] = simValueFromInt(newValue, inputNode);
+        values[inputNode] = newValue;
     }
 
     // Detect edges
-    bool posedge = (oldValue == 0 && newValue == 1);
-    bool negedge = (oldValue == 1 && newValue == 0);
+    bool posedge = oldValue.isZero() && !newValue.isZero() && newValue.lowU64() == 1;
+    bool negedge = !oldValue.isZero() && oldValue.lowU64() == 1 && newValue.isZero();
 
     // Clock edges -> d->q propagation (skipped if async reset is currently asserted)
     if (auto it = flops_by_clock.find(signalName); it != flops_by_clock.end()) {
@@ -256,12 +256,12 @@ void ModuleInstance::setAsyncEvent(const std::string& signalName, int64_t newVal
                 (flop->clock.edge == NEGEDGE && negedge)) {
                 // Async reset has priority: skip d->q if reset is active
                 if (flop->reset.has_value() && collected.reset_name.has_value()) {
-                    int64_t rst_val = 0;
+                    SimValue rst_val = SimValue::zero(1, false);
                     if (auto rit = async_values.find(*collected.reset_name); rit != async_values.end()) {
                         rst_val = rit->second;
                     }
-                    bool rst_active = (flop->reset->edge == POSEDGE && rst_val == 1) ||
-                                      (flop->reset->edge == NEGEDGE && rst_val == 0);
+                    bool rst_active = (flop->reset->edge == POSEDGE && !rst_val.isZero() && rst_val.lowU64() == 1) ||
+                                      (flop->reset->edge == NEGEDGE && rst_val.isZero());
                     if (rst_active) continue;
                 }
                 if (flop->q_node && flop->d_node) {
@@ -544,7 +544,7 @@ void Simulator::buildTimeline() {
         }
     }
 
-    // Parse async input files: "time value" format per line
+        // Parse async input files: "time value" format per line
     for (const auto& name : async_inputs_) {
         std::string path = config_.inputs_dir + "/" + name + ".txt";
 
@@ -559,20 +559,31 @@ void Simulator::buildTimeline() {
             if (line.empty() || line[0] == '#') continue;
             std::istringstream iss(line);
             std::string time_token;
-            int64_t value;
-            if (!(iss >> time_token >> value)) {
+            std::string value_token;
+            if (!(iss >> time_token >> value_token)) {
                 throw CompilerError(std::format(
                     "Simulator: bad line in async file '{}': {}", path, line));
             }
-            // Validate no extra tokens on the line
-            std::string extra;
-            if (iss >> extra) {
+            SimValue parsedValue;
+            try {
+                auto inputIt = module_.inputs.find(name);
+                if (inputIt == module_.inputs.end()) {
+                    throw CompilerError(std::format(
+                        "Simulator: unknown async input '{}'", name));
+                }
+                const auto& input = inputIt->second;
+                parsedValue = SimValue::fromHexString(
+                    value_token,
+                    input.type.width > 0 ? input.type.width : 64,
+                    input.type.isSigned());
+            } catch (const std::invalid_argument&) {
                 throw CompilerError(std::format(
-                    "Simulator: async file '{}' line has extra data "
-                    "(expected '<time> <value>'): {}", path, line));
+                    "Simulator: async file '{}' has bad value "
+                    "(expected leading token like 0x1a2b, optional trailing debug text): {}",
+                    path, line));
             }
             int64_t time = parseTimeWithUnit(time_token, path, line);
-            timeline_.push_back({time, name, value});
+            timeline_.push_back({time, name, std::move(parsedValue)});
         }
     }
 
@@ -719,7 +730,7 @@ void Simulator::run() {
     }
 
     // 2. Set async input values from first event in their timeline (must be at time 0)
-    std::map<std::string, int64_t> async_prev;
+    std::map<std::string, SimValue> async_prev;
     for (const auto& name : async_inputs_) {
         bool found = false;
         for (const auto& evt : timeline_) {
@@ -731,7 +742,7 @@ void Simulator::run() {
                 }
                 async_prev[name] = evt.value;
                 if (auto* inputNode = module_.dfg->getInputNode("", name)) {
-                    root_->values[inputNode] = simValueFromInt(evt.value, inputNode);
+                    root_->values[inputNode] = evt.value;
                 }
                 // Also initialize the root's async_values for edge detection
                 root_->async_values[name] = evt.value;
@@ -754,11 +765,11 @@ void Simulator::run() {
 
     // 4. If any reset is asserted at time 0 (level check), apply it
     for (const auto& [rst_name, flops] : root_->flops_by_reset) {
-        int64_t rst_val = async_prev[rst_name];
+        const SimValue& rst_val = async_prev[rst_name];
         for (const auto& collected : flops) {
             const auto* flop = collected.flop;
-            bool asserted = (flop->reset->edge == POSEDGE && rst_val == 1) ||
-                            (flop->reset->edge == NEGEDGE && rst_val == 0);
+            bool asserted = (flop->reset->edge == POSEDGE && !rst_val.isZero() && rst_val.lowU64() == 1) ||
+                            (flop->reset->edge == NEGEDGE && rst_val.isZero());
             if (asserted && flop->reset_value.has_value() && flop->q_node) {
                 root_->values[flop->q_node] = simValueFromType(flop->reset_value.value(), flop->type.type);
             }
@@ -790,7 +801,7 @@ void Simulator::run() {
         }
 
         // Deduplicate: keep the last event per signal at this timestamp.
-        std::map<std::string, int64_t> new_async;
+        std::map<std::string, SimValue> new_async;
         for (const auto* evt : batch) {
             new_async[evt->signal_name] = evt->value;
         }
@@ -801,16 +812,16 @@ void Simulator::run() {
         std::set<std::string> active_edge_resets;
 
         for (const auto& [name, new_val] : new_async) {
-            int64_t old_val = async_prev[name];
+            const SimValue& old_val = async_prev[name];
 
             root_->async_values[name] = new_val;
             if (auto* inputNode = module_.dfg->getInputNode("", name)) {
-                root_->values[inputNode] = simValueFromInt(new_val, inputNode);
+                root_->values[inputNode] = new_val;
             }
 
-            if (old_val != new_val) {
-                bool posedge = (old_val == 0 && new_val == 1);
-                bool negedge = (old_val == 1 && new_val == 0);
+            if (!old_val.eq(new_val)) {
+                bool posedge = old_val.isZero() && !new_val.isZero() && new_val.lowU64() == 1;
+                bool negedge = !old_val.isZero() && old_val.lowU64() == 1 && new_val.isZero();
                 auto edge_it = clock_active_edge_.find(name);
                 if (clock_inputs_.count(name) && edge_it != clock_active_edge_.end()) {
                     if ((edge_it->second == POSEDGE && posedge) ||
@@ -844,9 +855,9 @@ void Simulator::run() {
             for (const auto& collected : root_->flops_by_clock[clock_name]) {
                 const auto* flop = collected.flop;
                 if (flop->reset.has_value() && collected.reset_name.has_value()) {
-                    int64_t rst_val = root_->async_values[*collected.reset_name];
-                    bool rst_active = (flop->reset->edge == POSEDGE && rst_val == 1) ||
-                                      (flop->reset->edge == NEGEDGE && rst_val == 0);
+                    const SimValue& rst_val = root_->async_values[*collected.reset_name];
+                    bool rst_active = (flop->reset->edge == POSEDGE && !rst_val.isZero() && rst_val.lowU64() == 1) ||
+                                      (flop->reset->edge == NEGEDGE && rst_val.isZero());
                     if (rst_active) continue;
                 }
                 if (flop->q_node && flop->d_node) {

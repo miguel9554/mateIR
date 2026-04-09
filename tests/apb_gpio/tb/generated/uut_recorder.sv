@@ -7,17 +7,20 @@ module uut_recorder(
 
     // Async recorders
     async_recorder#(
-        .filepath(path("HCLK.txt"))
+        .filepath(path("HCLK.txt")),
+        .TYPE(logic)
     ) u_HCLK_recorder(
         .data(_if.HCLK)
     );
     async_recorder#(
-        .filepath(path("HRESETn.txt"))
+        .filepath(path("HRESETn.txt")),
+        .TYPE(logic)
     ) u_HRESETn_recorder(
         .data(_if.HRESETn)
     );
     async_recorder#(
-        .filepath(path("gpio_in.txt"))
+        .filepath(path("gpio_in.txt")),
+        .TYPE(logic [32-1:0])
     ) u_gpio_in_recorder(
         .data(_if.gpio_in)
     );
@@ -29,27 +32,6 @@ module uut_recorder(
     ) u_dft_cg_enable_i_recorder(
         .clk(_if.HCLK),
         .data(_if.dft_cg_enable_i)
-    );
-    sync_recorder#(
-        .filepath(path("PSEL.txt")),
-        .TYPE(logic)
-    ) u_PSEL_recorder(
-        .clk(_if.HCLK),
-        .data(_if.PSEL)
-    );
-    sync_recorder#(
-        .filepath(path("PENABLE.txt")),
-        .TYPE(logic)
-    ) u_PENABLE_recorder(
-        .clk(_if.HCLK),
-        .data(_if.PENABLE)
-    );
-    sync_recorder#(
-        .filepath(path("PWRITE.txt")),
-        .TYPE(logic)
-    ) u_PWRITE_recorder(
-        .clk(_if.HCLK),
-        .data(_if.PWRITE)
     );
     sync_recorder#(
         .filepath(path("PADDR.txt")),
@@ -64,6 +46,27 @@ module uut_recorder(
     ) u_PWDATA_recorder(
         .clk(_if.HCLK),
         .data(_if.PWDATA)
+    );
+    sync_recorder#(
+        .filepath(path("PWRITE.txt")),
+        .TYPE(logic)
+    ) u_PWRITE_recorder(
+        .clk(_if.HCLK),
+        .data(_if.PWRITE)
+    );
+    sync_recorder#(
+        .filepath(path("PSEL.txt")),
+        .TYPE(logic)
+    ) u_PSEL_recorder(
+        .clk(_if.HCLK),
+        .data(_if.PSEL)
+    );
+    sync_recorder#(
+        .filepath(path("PENABLE.txt")),
+        .TYPE(logic)
+    ) u_PENABLE_recorder(
+        .clk(_if.HCLK),
+        .data(_if.PENABLE)
     );
 
 endmodule

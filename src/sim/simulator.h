@@ -35,7 +35,7 @@ struct SimConfig {
 struct AsyncEvent {
     int64_t time;
     std::string signal_name;
-    int64_t value;
+    SimValue value;
 };
 
 struct CollectedFlop {
@@ -55,7 +55,7 @@ struct ModuleInstance {
     std::map<const DFGNode*, SimValue> values;
 
     // Async signal state for edge detection (port_name -> current value)
-    std::map<std::string, int64_t> async_values;
+    std::map<std::string, SimValue> async_values;
 
     // Flat topology and flop maps (cover all submodules after inlining)
     std::vector<const DFGNode*> topo_order;
@@ -73,7 +73,7 @@ struct ModuleInstance {
     void initFlops(FlopsInitial mode, std::mt19937_64& rng);
 
     // Stateful: processes an async event, detects edges, does d->q / reset
-    void setAsyncEvent(const std::string& signalName, int64_t newValue);
+    void setAsyncEvent(const std::string& signalName, const SimValue& newValue);
 
     // Single-pass combinational evaluation (no fixpoint — flat DAG has no cycles)
     void evaluateCombinational();

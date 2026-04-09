@@ -391,7 +391,7 @@ void VcdWriter::update(const ModuleInstance& root, int64_t time_ns) {
     for (auto& [name, vcd_vals] : async_values_) {
         auto it = root.async_values.find(name);
         if (it != root.async_values.end())
-            for (auto& vcd_val : vcd_vals) vcd_val->set_uint64(static_cast<uint64_t>(it->second));
+            for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
     }
 }
 

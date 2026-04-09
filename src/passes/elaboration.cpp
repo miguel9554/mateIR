@@ -487,11 +487,8 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
     return result;
 }
 
-static void mergeConditionalBranches(ResolutionContext& ctx,
-                                     const std::vector<ConditionalBranch>& branches,
-                                     const std::optional<DriverMap>& fallbackBranch,
-                                     const DriverSnapshot& baseline,
-                                     const std::optional<SourceLoc>& loc) {
+static std::set<std::string> collectAssignedSignals(const std::vector<ConditionalBranch>& branches,
+                                                    const std::optional<DriverMap>& fallbackBranch) {
     std::set<std::string> assignedSignals;
     for (const auto& branch : branches) {
         for (const auto& [name, _] : branch.modifiedDrivers) {
@@ -503,12 +500,96 @@ static void mergeConditionalBranches(ResolutionContext& ctx,
             assignedSignals.insert(name);
         }
     }
+    return assignedSignals;
+}
+
+static void mergeIfBranches(ResolutionContext& ctx,
+                            const std::vector<ConditionalBranch>& branches,
+                            const std::optional<DriverMap>& fallbackBranch,
+                            const DriverSnapshot& baseline,
+                            const std::optional<SourceLoc>& loc) {
+    std::set<std::string> assignedSignals = collectAssignedSignals(branches, fallbackBranch);
 
     for (const auto& signalName : assignedSignals) {
         DFGNode* merged = buildMergedDriver(ctx, signalName, branches, fallbackBranch, baseline, loc);
         connectDriver(ctx, signalName, merged);
         if (!ctx.is_sequential) {
             ctx.combDrivers[signalName] = merged;
+        }
+    }
+}
+
+static void mergeCaseBranches(ResolutionContext& ctx,
+                              DFGNode* selectorNode,
+                              const std::vector<ConditionalBranch>& branches,
+                              const std::optional<DriverMap>& fallbackBranch,
+                              const DriverSnapshot& baseline,
+                              const std::set<int64_t>& explicitCaseValues,
+                              const std::optional<SourceLoc>& loc) {
+    std::set<std::string> assignedSignals = collectAssignedSignals(branches, fallbackBranch);
+
+    auto branchValue = [&](const std::string& targetName, const DriverMap& modified, DFGNode* retained) -> DFGNode* {
+        if (auto it = modified.find(targetName); it != modified.end()) {
+            return it->second;
+        }
+        return retained;
+    };
+
+    for (const auto& signalName : assignedSignals) {
+        DFGNode* retained = getRetainedDriver(ctx, signalName, baseline, loc);
+        DFGNode* defaultValue = nullptr;
+        if (fallbackBranch) {
+            defaultValue = branchValue(signalName, *fallbackBranch, retained);
+        } else {
+            defaultValue = retained;
+        }
+
+        std::vector<DFGNode*> selectors;
+        std::vector<DFGNode*> dataValues;
+        for (const auto& branch : branches) {
+            DFGNode* value = branchValue(signalName, branch.modifiedDrivers, defaultValue);
+            if (!value) {
+                throw CompilerError(
+                    "Signal '" + signalName + "' not assigned in all branches and has no default/fallback",
+                    loc);
+            }
+            selectors.push_back(branch.condition);
+            dataValues.push_back(value);
+        }
+
+        if (defaultValue && selectorNode->hasType()) {
+            int width = selectorNode->type->width;
+            int64_t numValues = int64_t(1) << width;
+            for (int64_t v = 0; v < numValues; ++v) {
+                if (explicitCaseValues.contains(v)) continue;
+                auto* missingConst = ctx.graph.constant(v);
+                missingConst->type = selectorNode->type;
+                missingConst->loc = loc;
+                auto* missingSel = ctx.graph.eq(selectorNode, missingConst);
+                missingSel->loc = loc;
+                selectors.push_back(missingSel);
+                dataValues.push_back(defaultValue);
+            }
+        }
+
+        DFGNode* result = nullptr;
+        if (selectors.empty()) {
+            if (!defaultValue) {
+                throw CompilerError(
+                    "Signal '" + signalName + "' not assigned in any case branch and has no default/fallback",
+                    loc);
+            }
+            result = defaultValue;
+        } else if (selectors.size() == 1) {
+            result = dataValues[0];
+        } else {
+            result = ctx.graph.muxN(selectors, dataValues);
+            result->loc = loc;
+        }
+
+        connectDriver(ctx, signalName, result);
+        if (!ctx.is_sequential) {
+            ctx.combDrivers[signalName] = result;
         }
     }
 }
@@ -2089,11 +2170,11 @@ void resolveConditionalStatementInPlace(
     DriverMap ifDrivers = modifiedDriversSince(ctx, baselineDrivers);
 
     restoreDrivers(ctx, baselineDrivers);
-    mergeConditionalBranches(ctx,
-                             {{conditionNode, std::move(ifDrivers)}},
-                             elseDrivers,
-                             baselineDrivers,
-                             condLoc);
+    mergeIfBranches(ctx,
+                    {{conditionNode, std::move(ifDrivers)}},
+                    elseDrivers,
+                    baselineDrivers,
+                    condLoc);
 }
 
 void resolveCaseStatementInPlace(
@@ -2120,6 +2201,7 @@ void resolveCaseStatementInPlace(
     // Collect info for each case branch — drivers only contains signals
     // actually modified in that branch (diff against fallback)
     std::vector<ConditionalBranch> normalCases;
+    std::set<int64_t> explicitCaseValues;
     std::optional<DriverMap> defaultDrivers;
 
     for (const auto* item : caseStatement->items) {
@@ -2140,6 +2222,9 @@ void resolveCaseStatementInPlace(
             auto* caseValueNode = buildExprDFG(caseItem.expressions[0], ctx);
             auto* conditionNode = ctx.graph.eq(selectorNode, caseValueNode);
             conditionNode->loc = caseLoc;
+            if (caseValueNode->op == DFGOp::CONST) {
+                explicitCaseValues.insert(std::get<int64_t>(caseValueNode->data));
+            }
 
             restoreDrivers(ctx, baselineDrivers);
             executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
@@ -2152,7 +2237,13 @@ void resolveCaseStatementInPlace(
     }
 
     restoreDrivers(ctx, baselineDrivers);
-    mergeConditionalBranches(ctx, normalCases, defaultDrivers, baselineDrivers, caseLoc);
+    mergeCaseBranches(ctx,
+                      selectorNode,
+                      normalCases,
+                      defaultDrivers,
+                      baselineDrivers,
+                      explicitCaseValues,
+                      caseLoc);
 }
 
 void resolveSequentialBlockStatementInPlace(

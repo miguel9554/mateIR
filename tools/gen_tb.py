@@ -457,12 +457,14 @@ def main():
     module_name = sys.argv[1]
     project_root = Path(__file__).resolve().parent.parent
 
-    rtl_path = project_root / 'tests' / module_name / 'rtl' / f'{module_name}.v'
-    domains_path = project_root / 'tests' / module_name / 'rtl' / f'{module_name}.domains.yaml'
+    rtl_dir = project_root / 'tests' / module_name / 'rtl'
+    rtl_path = next((rtl_dir / f'{module_name}{ext}' for ext in ('.sv', '.v')
+                     if (rtl_dir / f'{module_name}{ext}').exists()), None)
+    domains_path = rtl_dir / f'{module_name}.domains.yaml'
     output_dir = project_root / 'tests' / module_name / 'tb' / 'generated'
 
-    if not rtl_path.exists():
-        raise FileNotFoundError(f"RTL file not found: {rtl_path}")
+    if rtl_path is None:
+        raise FileNotFoundError(f"RTL file not found: {rtl_dir / module_name}(.sv|.v)")
     if not domains_path.exists():
         raise FileNotFoundError(f"Domains file not found: {domains_path}")
 

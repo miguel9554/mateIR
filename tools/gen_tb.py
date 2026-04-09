@@ -177,10 +177,26 @@ class DomainConfig:
     async_domain: list[str]              # async port names (wildcards expanded)
 
 
-def _expand_patterns(patterns: list[str], port_names: set[str]) -> list[str]:
-    """Expand a list of exact names and wildcard prefixes against known port names."""
+def _normalize_signal_refs(signal_refs: list[object]) -> list[str]:
+    """Extract signal names from schema-valid string and single-key mapping forms."""
     result = []
-    for pattern in patterns:
+    for signal_ref in signal_refs:
+        if isinstance(signal_ref, str):
+            result.append(signal_ref)
+            continue
+        if isinstance(signal_ref, dict):
+            if len(signal_ref) != 1:
+                raise ValueError(f"Expected single-key signal mapping, got: {signal_ref!r}")
+            result.extend(signal_ref.keys())
+            continue
+        raise ValueError(f"Expected signal reference string or mapping, got: {signal_ref!r}")
+    return result
+
+
+def _expand_patterns(signal_refs: list[object], port_names: set[str]) -> list[str]:
+    """Expand exact names and wildcard prefixes against known port names."""
+    result = []
+    for pattern in _normalize_signal_refs(signal_refs):
         if pattern.endswith('*'):
             prefix = pattern[:-1]
             result.extend(n for n in port_names if n.startswith(prefix))

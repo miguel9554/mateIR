@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run validation for all test cases and report results."""
+"""Run regression tests defined in a plain-text manifest."""
 import shlex
 import subprocess
 import sys
@@ -9,22 +9,74 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
 SIMULATOR = REPO_ROOT / "build" / "diagnostic-relwithdebinfo" / "custom_hdl_compiler"
+MANIFEST = TESTS_DIR / "regression_tests.txt"
 
 GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"
 
 
-def find_test_cases():
-    """Find all validate and expected-failure test cases."""
+def load_test_cases():
+    """Load test cases from the manifest.
+
+    Manifest format:
+      - blank lines and lines starting with '#' are ignored
+      - PASS entries: <test-name> PASS
+      - FAIL entries: <test-name> FAIL <expected-substring>
+    """
+    if not MANIFEST.exists():
+        raise RuntimeError(f"Manifest not found: {MANIFEST}")
+
     cases = []
-    for d in sorted(TESTS_DIR.iterdir()):
-        if not d.is_dir():
+    seen = set()
+
+    for lineno, raw_line in enumerate(MANIFEST.read_text().splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
             continue
-        if (d / "expected_failure.txt").exists():
-            cases.append((d.name, "expected_failure"))
-        elif (d / "work" / "validate" / "Makefile").exists():
-            cases.append((d.name, "validate"))
+
+        parts = line.split(maxsplit=2)
+        if len(parts) < 2:
+            raise RuntimeError(
+                f"{MANIFEST}:{lineno}: expected '<test-name> PASS' or "
+                f"'<test-name> FAIL <expected-substring>'"
+            )
+
+        name, expected = parts[0], parts[1]
+        test_dir = TESTS_DIR / name
+
+        if name in seen:
+            raise RuntimeError(f"{MANIFEST}:{lineno}: duplicate test entry for '{name}'")
+        if not test_dir.is_dir():
+            raise RuntimeError(f"{MANIFEST}:{lineno}: unknown test directory '{name}'")
+        if expected not in {"PASS", "FAIL"}:
+            raise RuntimeError(
+                f"{MANIFEST}:{lineno}: invalid expected result '{expected}', expected PASS or FAIL"
+            )
+
+        if expected == "PASS":
+            if len(parts) != 2:
+                raise RuntimeError(f"{MANIFEST}:{lineno}: PASS entries cannot include extra fields")
+            if not (test_dir / "work" / "validate" / "Makefile").exists():
+                raise RuntimeError(
+                    f"{MANIFEST}:{lineno}: PASS test '{name}' is missing work/validate/Makefile"
+                )
+            cases.append({"name": name, "kind": "validate"})
+        else:
+            if len(parts) != 3 or not parts[2].strip():
+                raise RuntimeError(
+                    f"{MANIFEST}:{lineno}: FAIL entries require an expected error substring"
+                )
+            cases.append(
+                {
+                    "name": name,
+                    "kind": "expected_failure",
+                    "expected_error": parts[2].strip(),
+                }
+            )
+
+        seen.add(name)
+
     return cases
 
 
@@ -63,10 +115,9 @@ def ensure_simulator():
     return result.returncode == 0, output
 
 
-def run_expected_failure(name):
+def run_expected_failure(name, expected):
     """Run an expected-failure compile test. Returns (success, output)."""
     test_dir = TESTS_DIR / name
-    expected = (test_dir / "expected_failure.txt").read_text().strip()
     extra_args_path = test_dir / "custom-sim.args"
     extra_args = shlex.split(extra_args_path.read_text()) if extra_args_path.exists() else []
 
@@ -106,12 +157,17 @@ def run_expected_failure(name):
 
 
 def main():
-    cases = find_test_cases()
+    try:
+        cases = load_test_cases()
+    except RuntimeError as exc:
+        print(f"{RED}{exc}{RESET}")
+        sys.exit(1)
+
     if not cases:
         print("No test cases found.")
         sys.exit(1)
 
-    has_expected_failure = any(kind == "expected_failure" for _, kind in cases)
+    has_expected_failure = any(case["kind"] == "expected_failure" for case in cases)
     if has_expected_failure:
         print("Building diagnostic simulator for expected-failure tests...", flush=True)
         ok, output = ensure_simulator()
@@ -121,13 +177,15 @@ def main():
             sys.exit(1)
 
     results = {}
-    for name, kind in cases:
+    for case in cases:
+        name = case["name"]
+        kind = case["kind"]
         print(f"Running {name}...", flush=True)
         if kind == "validate":
             # run_clean(name)
             ok, output = run_validate(name)
         else:
-            ok, output = run_expected_failure(name)
+            ok, output = run_expected_failure(name, case["expected_error"])
         results[name] = (ok, output)
         if ok:
             print(f"  {GREEN}PASS{RESET}")
@@ -145,7 +203,7 @@ def main():
                 print(f"  {line}")
 
     # Print summary table last
-    case_names = [name for name, _ in cases]
+    case_names = [case["name"] for case in cases]
     max_name = max(len(n) for n in case_names)
     sep = "+" + "-" * (max_name + 2) + "+" + "-" * 8 + "+"
     print()

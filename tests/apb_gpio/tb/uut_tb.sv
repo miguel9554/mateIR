@@ -43,7 +43,7 @@ module uut_tb(
     initial begin
         _if.HRESETn = 1'b1;
         #1ns _if.HRESETn = 1'b0;
-        #34ns _if.HRESETn = 1'b1;
+        #35ns _if.HRESETn = 1'b1;
     end
 
     initial begin : drive_gpio_async
@@ -54,7 +54,7 @@ module uut_tb(
 
         wait (_if.HRESETn == 1'b0);
         wait (_if.HRESETn == 1'b1);
-        #17ns;
+        #18ns;
 
         lfsr = 32'h1ACE_B00C;
         repeat (19) begin

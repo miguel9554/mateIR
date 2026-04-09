@@ -46,11 +46,56 @@ module uut_tb(
         #34ns _if.HRESETn = 1'b1;
     end
 
+    initial begin : drive_gpio_async
+        logic [31:0] lfsr;
+        logic [31:0] gpio_pattern;
+
+        _if.gpio_in = '0;
+
+        wait (_if.HRESETn == 1'b0);
+        wait (_if.HRESETn == 1'b1);
+        #17ns;
+
+        lfsr = 32'h1ACE_B00C;
+        repeat (19) begin
+            lfsr = next_lfsr(lfsr);
+            #13ns _if.gpio_in = lfsr;
+            #7ns;
+        end
+
+        gpio_pattern = 32'h0000_0000;
+        #11ns _if.gpio_in = gpio_pattern;
+        #29ns;
+
+        gpio_pattern = 32'hFFFF_0000;
+        #7ns _if.gpio_in = gpio_pattern;
+        #33ns;
+
+        gpio_pattern = 32'h0000_FFFF;
+        #19ns _if.gpio_in = gpio_pattern;
+        #21ns;
+
+        gpio_pattern = 32'hA5A5_5A5A;
+        #5ns _if.gpio_in = gpio_pattern;
+        #35ns;
+
+        gpio_pattern = 32'h5A5A_A5A5;
+        #23ns _if.gpio_in = gpio_pattern;
+        #17ns;
+
+        for (int stress_idx = 0; stress_idx < 24; stress_idx++) begin
+            lfsr = next_lfsr(lfsr);
+            gpio_pattern = lfsr ^ {16'hA55A, stress_idx[15:0]};
+            #9ns _if.gpio_in = gpio_pattern;
+            #14ns _if.gpio_in = ~gpio_pattern;
+            #8ns;
+        end
+    end
+
     always @(posedge _if.HCLK) begin : drive_sync
         logic [31:0] lfsr;
         logic [11:0] apb_addr;
         logic [31:0] apb_data;
-        logic [31:0] gpio_pattern;
 
         lfsr = 32'h1ACE_B00C;
 
@@ -61,7 +106,6 @@ module uut_tb(
             _if.PWRITE          <= 1'b0;
             _if.PSEL            <= 1'b0;
             _if.PENABLE         <= 1'b0;
-            _if.gpio_in         <= '0;
         end
 
         wait (_if.HRESETn == 1'b0);
@@ -77,7 +121,6 @@ module uut_tb(
             _if.PWRITE          <= 1'b1;
             _if.PSEL            <= 1'b1;
             _if.PENABLE         <= 1'b0;
-            _if.gpio_in         <= '0;
         end
         @(posedge _if.HCLK) begin
             _if.PADDR   <= apb_addr;
@@ -529,7 +572,6 @@ module uut_tb(
                 _if.PWRITE          <= 1'b0;
                 _if.PSEL            <= 1'b1;
                 _if.PENABLE         <= 1'b0;
-                _if.gpio_in         <= lfsr;
             end
             @(posedge _if.HCLK) begin
                 _if.PADDR   <= apb_addr;
@@ -548,34 +590,14 @@ module uut_tb(
             end
         end
 
-        gpio_pattern = 32'h0000_0000;
-        @(posedge _if.HCLK) begin
-            _if.gpio_in <= gpio_pattern;
-        end
         repeat (4) @(posedge _if.HCLK);
 
-        gpio_pattern = 32'hFFFF_0000;
-        @(posedge _if.HCLK) begin
-            _if.gpio_in <= gpio_pattern;
-        end
         repeat (4) @(posedge _if.HCLK);
 
-        gpio_pattern = 32'h0000_FFFF;
-        @(posedge _if.HCLK) begin
-            _if.gpio_in <= gpio_pattern;
-        end
         repeat (4) @(posedge _if.HCLK);
 
-        gpio_pattern = 32'hA5A5_5A5A;
-        @(posedge _if.HCLK) begin
-            _if.gpio_in <= gpio_pattern;
-        end
         repeat (4) @(posedge _if.HCLK);
 
-        gpio_pattern = 32'h5A5A_A5A5;
-        @(posedge _if.HCLK) begin
-            _if.gpio_in <= gpio_pattern;
-        end
         repeat (4) @(posedge _if.HCLK);
 
         for (int int_rd_idx = 0; int_rd_idx < 4; int_rd_idx++) begin
@@ -643,10 +665,8 @@ module uut_tb(
                 default: apb_addr = REG_UNUSED;
             endcase
             apb_data = lfsr ^ 32'hC3C3_5A5A;
-            gpio_pattern = lfsr ^ {16'hA55A, stress_idx[15:0]};
             @(posedge _if.HCLK) begin
                 _if.dft_cg_enable_i <= lfsr[7];
-                _if.gpio_in         <= gpio_pattern;
                 _if.PADDR           <= apb_addr;
                 _if.PWDATA          <= apb_data;
                 _if.PWRITE          <= lfsr[5];

@@ -529,18 +529,14 @@ void Simulator::buildTimeline() {
             input.sync_kind == SyncKind::Reset ||
             input.sync_kind == SyncKind::Async) {
             async_inputs_.insert(name);
-            if (input.sync_kind == SyncKind::Clock) {
-                clock_inputs_.insert(name);
-            }
         }
     }
 
-    // Map each sync input to its clock domain and build per-clock active edge
+    // Map each sync input to its clock domain.
     for (const auto& [name, input] : module_.inputs) {
         if (async_inputs_.count(name)) continue;
         if (input.clock_domain && input.clock_edge.has_value()) {
             sync_input_clock_[name] = input.clock_domain->name;
-            clock_active_edge_[input.clock_domain->name] = *input.clock_edge;
         }
     }
 
@@ -822,11 +818,14 @@ void Simulator::run() {
             if (!old_val.eq(new_val)) {
                 bool posedge = old_val.isZero() && !new_val.isZero() && new_val.lowU64() == 1;
                 bool negedge = !old_val.isZero() && old_val.lowU64() == 1 && new_val.isZero();
-                auto edge_it = clock_active_edge_.find(name);
-                if (clock_inputs_.count(name) && edge_it != clock_active_edge_.end()) {
-                    if ((edge_it->second == POSEDGE && posedge) ||
-                        (edge_it->second == NEGEDGE && negedge)) {
-                        active_edge_clocks.insert(name);
+                if (auto clock_it = root_->flops_by_clock.find(name);
+                    clock_it != root_->flops_by_clock.end()) {
+                    for (const auto& collected : clock_it->second) {
+                        if ((collected.flop->clock.edge == POSEDGE && posedge) ||
+                            (collected.flop->clock.edge == NEGEDGE && negedge)) {
+                            active_edge_clocks.insert(name);
+                            break;
+                        }
                     }
                 }
                 if (auto reset_it = root_->flops_by_reset.find(name);

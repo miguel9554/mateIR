@@ -39,6 +39,10 @@ SimValue boolValue(bool value) {
     return SimValue::fromU64(value ? 1 : 0, 1, false);
 }
 
+SimValue widenForArithmetic(const SimValue& value, const DFGNode* result_node) {
+    return value.resized(nodeWidth(result_node), value.isSigned());
+}
+
 bool useSignedCompare(const DFGNode* lhs, const DFGNode* rhs) {
     return nodeSigned(lhs) && nodeSigned(rhs);
 }
@@ -317,9 +321,21 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             if (node->in.empty()) return checkedGet(node);
             return getVal(0);
 
-        case DFGOp::ADD:   return getVal(0).add(getVal(1));
-        case DFGOp::SUB:   return getVal(0).sub(getVal(1));
-        case DFGOp::MUL:   return getVal(0).mul(getVal(1));
+        case DFGOp::ADD: {
+            SimValue lhs = widenForArithmetic(getVal(0), node);
+            SimValue rhs = widenForArithmetic(getVal(1), node);
+            return maskToWidth(lhs.add(rhs), node);
+        }
+        case DFGOp::SUB: {
+            SimValue lhs = widenForArithmetic(getVal(0), node);
+            SimValue rhs = widenForArithmetic(getVal(1), node);
+            return maskToWidth(lhs.sub(rhs), node);
+        }
+        case DFGOp::MUL: {
+            SimValue lhs = widenForArithmetic(getVal(0), node);
+            SimValue rhs = widenForArithmetic(getVal(1), node);
+            return maskToWidth(lhs.mul(rhs), node);
+        }
 
         case DFGOp::EQ:  return boolValue(getVal(0).eq(getVal(1)));
         case DFGOp::LT: {

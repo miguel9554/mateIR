@@ -777,7 +777,7 @@ void Simulator::run() {
             new_async[evt->signal_name] = evt->value;
         }
 
-        if (batch.size() > 1) {
+        if (batch_time != 0 && batch.size() > 1) {
             throw CompilerError(std::format(
                 "Simulator: multiple async events share timestamp {} ps; this is unsupported",
                 batch_time));

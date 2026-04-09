@@ -390,15 +390,22 @@ static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNo
 }
 
 static void clearVisibleDrivers(ResolutionContext& ctx) {
+    auto clearNodeDriver = [](DFGNode* node) {
+        if (node->type && !node->type->unpacked_dims.empty() && node->in.size() > 1) {
+            // Preserve aggregate unpacked-array wiring used for dynamic element reads.
+            return;
+        }
+        node->in.clear();
+    };
     if (ctx.is_subroutine_scope) return;
     for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
-        node->in.clear();
+        clearNodeDriver(node);
     }
     for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
-        node->in.clear();
+        clearNodeDriver(node);
     }
     for (const auto& [name, node] : ctx.local_signals) {
-        node->in.clear();
+        clearNodeDriver(node);
     }
 }
 
@@ -2286,7 +2293,14 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 try {
                     int64_t idx = evaluateConstantExpr(selectorExpr, ctx.params);
 
-                    if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
+                    if (currentSelectedType && !currentSelectedType->unpacked_dims.empty()) {
+                        indexSuffix += "[" + std::to_string(idx) + "]";
+                        if (const auto* indexedType = lookupDeclaredTypeWithSuffix(baseName, indexSuffix, ctx)) {
+                            currentSelectedType = *indexedType;
+                        } else {
+                            currentSelectedType.reset();
+                        }
+                    } else if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
                         const auto& dim = currentSelectedType->packed_dims.front();
                         int64_t elemWidth = packedSuffixWidth(*currentSelectedType, 1);
                         int64_t offset = packedIndexOffsetFromLsb(dim, idx) * elemWidth;

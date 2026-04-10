@@ -21,7 +21,7 @@ enum class DFGOp {
     OUTPUT,     // Primary output (module port)
     SIGNAL,     // Internal signal (named placeholder)
     CONST,      // Constant value (data: int64_t)
-    INDEX,      // Indexing: in[0]=source, in[1]=high, in[2]=low
+    SLICE,      // Static bit-slice: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
     CONCAT,       // Concatenation: in[0..N-1] = parts, MSB-first
     CONCAT_ALIGN, // Temporary: in[0]=expr, in[1]=high_idx, in[2]=low_idx
     CAST,         // Type cast: in[0]=source, type set at elaboration (e.g. integer → enum)
@@ -36,8 +36,7 @@ enum class DFGOp {
     GE,         // Greater or equal (>=)
     SHL,        // Arithmetic shift left (<<<)
     ASR,        // Arithmetic shift right (>>>)
-    MUX,        // 2:1 mux: in[0]=sel, in[1]=true_val, in[2]=false_val
-    MUX_N,      // N:1 mux: in[0..N-1]=selectors, in[N..2N-1]=data values (one-hot select)
+    MUX,        // Exhaustive value mux: in[0]=sel, in[1..]=data arms keyed by mux_values
     MODULE,     // Submodule instance: name=instance_name, data=module_type_name, in=input_port_drivers
     // Unary ops (single input)
     UNARY_PLUS,
@@ -65,7 +64,7 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::OUTPUT: return "OUTPUT";
         case DFGOp::SIGNAL: return "SIGNAL";
         case DFGOp::CONST: return "CONST";
-        case DFGOp::INDEX: return "INDEX";
+        case DFGOp::SLICE: return "SLICE";
         case DFGOp::CONCAT: return "CONCAT";
         case DFGOp::CONCAT_ALIGN: return "CONCAT_ALIGN";
         case DFGOp::CAST: return "CAST";
@@ -80,7 +79,6 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::SHL: return "SHL";
         case DFGOp::ASR: return "ASR";
         case DFGOp::MUX: return "MUX";
-        case DFGOp::MUX_N: return "MUX_N";
         case DFGOp::MODULE: return "MODULE";
         case DFGOp::UNARY_PLUS: return "UNARY_PLUS";
         case DFGOp::UNARY_NEGATE: return "UNARY_NEGATE";
@@ -114,10 +112,10 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::SIGNAL: return -1;
         // MODULE: variable input count (depends on ports)
         case DFGOp::MODULE: return -1;
-        // MUX_N: variable (even, >= 2) — validated separately
-        case DFGOp::MUX_N:  return -1;
+        // MUX: variable input count, validated separately
+        case DFGOp::MUX:    return -1;
 
-        case DFGOp::INDEX:  return 3;
+        case DFGOp::SLICE:  return 3;
         case DFGOp::CONCAT: return -1; // variable
         case DFGOp::CONCAT_ALIGN: return 3;
         case DFGOp::CAST:   return 1;
@@ -131,7 +129,6 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::GE:     return 2;
         case DFGOp::SHL:    return 2;
         case DFGOp::ASR:    return 2;
-        case DFGOp::MUX:    return 3;
 
         case DFGOp::UNARY_PLUS:      return 1;
         case DFGOp::UNARY_NEGATE:    return 1;
@@ -203,6 +200,9 @@ struct DFGNode {
     // Input port names (MODULE nodes only): parallel to in vector
     std::vector<std::string> input_names;
 
+    // MUX metadata: selector code for each data arm in in[1..].
+    std::vector<int64_t> mux_values;
+
     bool hasType() const { return type.has_value(); }
 
     int num_outputs() const {
@@ -223,6 +223,31 @@ struct DFGNode {
 
     DFGOutput output(int port = 0) { return {this, port}; }
     DFGOutput output(const std::string& oname) { return {this, output_index(oname)}; }
+
+    bool isMux() const { return op == DFGOp::MUX; }
+    DFGOutput muxSelector() const { return in.at(0); }
+    size_t muxArmCount() const { return in.empty() ? 0 : in.size() - 1; }
+    int64_t muxArmValue(size_t index) const { return mux_values.at(index); }
+    DFGOutput muxArmData(size_t index) const { return in.at(index + 1); }
+
+    int muxArmIndexForValue(int64_t value) const {
+        for (size_t i = 0; i < mux_values.size(); ++i) {
+            if (mux_values[i] == value) return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    DFGNode* muxDataForValue(int64_t value) const {
+        int index = muxArmIndexForValue(value);
+        return index >= 0 ? in.at(static_cast<size_t>(index) + 1).node : nullptr;
+    }
+
+    bool isBinaryMux() const {
+        return op == DFGOp::MUX && in.size() == 3 &&
+               mux_values.size() == 2 &&
+               muxArmIndexForValue(0) >= 0 &&
+               muxArmIndexForValue(1) >= 0;
+    }
 
     DFGNode(DFGOp o) : op(o) {}
     DFGNode(DFGOp o, std::string name) : op(o), name(std::move(name)) {}
@@ -379,11 +404,12 @@ public:
         return nodes.back().get();
     }
 
-    // Create an INDEX node: source[high:low] (single-element: high == low)
-    DFGNode* index(DFGNode* source, DFGNode* high, DFGNode* low, const std::string& name = "") {
+    // Create a SLICE node: source[high:low]. high and low MUST be CONST nodes
+    // (static bit extraction only). Dynamic indexing must be lowered to MUX instead.
+    DFGNode* slice(DFGNode* source, DFGNode* high, DFGNode* low, const std::string& name = "") {
         auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGOp::INDEX)
-            : std::make_unique<DFGNode>(DFGOp::INDEX, name);
+            ? std::make_unique<DFGNode>(DFGOp::SLICE)
+            : std::make_unique<DFGNode>(DFGOp::SLICE, name);
         n->in = {source, high, low};
         nodes.push_back(std::move(n));
         if (!name.empty()) {
@@ -603,11 +629,23 @@ public:
         return nodes.back().get();
     }
 
-    DFGNode* mux(DFGNode* sel, DFGNode* t, DFGNode* f, const std::string& name = "") {
+    DFGNode* mux(DFGNode* sel,
+                 const std::vector<int64_t>& selectorValues,
+                 const std::vector<DFGNode*>& data,
+                 const std::string& name = "") {
+        if (selectorValues.size() != data.size()) {
+            throw CompilerError("mux: selectorValues and data must have same size");
+        }
+        if (selectorValues.size() < 2) {
+            throw CompilerError("mux: must have at least two data arms");
+        }
         auto n = name.empty()
             ? std::make_unique<DFGNode>(DFGOp::MUX)
             : std::make_unique<DFGNode>(DFGOp::MUX, name);
-        n->in = {sel, t, f};
+        n->in.reserve(data.size() + 1);
+        n->in.push_back(sel);
+        for (auto* d : data) n->in.push_back(d);
+        n->mux_values = selectorValues;
         nodes.push_back(std::move(n));
         if (!name.empty()) {
             signals[name] = nodes.back().get();
@@ -615,29 +653,8 @@ public:
         return nodes.back().get();
     }
 
-    // N:1 mux with one-hot selectors
-    // selectors[i] active => output = data[i]
-    DFGNode* muxN(const std::vector<DFGNode*>& selectors,
-                  const std::vector<DFGNode*>& data,
-                  const std::string& name = "") {
-        if (selectors.size() != data.size()) {
-            throw CompilerError("muxN: selectors and data must have same size");
-        }
-        if (selectors.empty()) {
-            throw CompilerError("muxN: must have at least one input");
-        }
-        auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGOp::MUX_N)
-            : std::make_unique<DFGNode>(DFGOp::MUX_N, name);
-        // Layout: selectors first, then data
-        n->in.reserve(selectors.size() + data.size());
-        for (auto* s : selectors) n->in.push_back(s);
-        for (auto* d : data) n->in.push_back(d);
-        nodes.push_back(std::move(n));
-        if (!name.empty()) {
-            signals[name] = nodes.back().get();
-        }
-        return nodes.back().get();
+    DFGNode* mux(DFGNode* sel, DFGNode* t, DFGNode* f, const std::string& name = "") {
+        return mux(sel, {1, 0}, {t, f}, name);
     }
 
     // Create a MODULE instance node
@@ -761,11 +778,44 @@ public:
                     "DFG validate: OUTPUT {} has {} inputs (expected 0 or 1)",
                     node->name, actual), node.get());
             }
-            if (node->op == DFGOp::MUX_N) {
-                if (actual < 2 || actual % 2 != 0) {
+            if (node->op == DFGOp::MUX) {
+                if (actual < 3) {
                     throw CompilerError(std::format(
-                        "DFG validate: MUX_N {} has {} inputs (expected even, >= 2)",
+                        "DFG validate: MUX {} has {} inputs (expected selector + at least 2 arms)",
                         node->str(), actual), node.get());
+                }
+                if (node->mux_values.size() + 1 != node->in.size()) {
+                    throw CompilerError(std::format(
+                        "DFG validate: MUX {} has {} arms but {} mux_values",
+                        node->str(), actual - 1, node->mux_values.size()), node.get());
+                }
+                std::set<int64_t> seenValues(node->mux_values.begin(), node->mux_values.end());
+                if (seenValues.size() != node->mux_values.size()) {
+                    throw CompilerError(std::format(
+                        "DFG validate: MUX {} has duplicate selector values", node->str()), node.get());
+                }
+                auto* selector = node->in[0].node;
+                if (!selector || !selector->hasType()) {
+                    continue;
+                }
+                int width = selector->type->width;
+                if (width <= 0 || width >= 63) {
+                    throw CompilerError(std::format(
+                        "DFG validate: MUX {} has unsupported selector width {}",
+                        node->str(), width), node.get());
+                }
+                int64_t expectedArms = int64_t(1) << width;
+                if (static_cast<int64_t>(node->mux_values.size()) != expectedArms) {
+                    throw CompilerError(std::format(
+                        "DFG validate: MUX {} has {} arms for selector width {} (expected {})",
+                        node->str(), node->mux_values.size(), width, expectedArms), node.get());
+                }
+                for (int64_t value = 0; value < expectedArms; ++value) {
+                    if (!seenValues.contains(value)) {
+                        throw CompilerError(std::format(
+                            "DFG validate: MUX {} is missing selector value {}",
+                            node->str(), value), node.get());
+                    }
                 }
             }
         }

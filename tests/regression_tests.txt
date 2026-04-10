@@ -5,6 +5,7 @@
 # Comment out a line to skip that test.
 
 apb_gpio PASS
+array_indexing PASS
 axi_spi_slave PASS
 const_only_dynamic_fail FAIL DIV operation requires constant operands
 const_only_ops PASS
@@ -28,3 +29,9 @@ static_func_fail FAIL Only 'automatic' functions/tasks are supported
 subword_assign PASS
 task_func_test PASS
 uart PASS
+unpacked_array_copy PASS
+unpacked_reverse_index PASS
+unique_if_fail FAIL unique/unique0 modifiers are not supported on if
+unique0_if_fail FAIL unique/unique0 modifiers are not supported on if
+unique_case_fail FAIL unique/unique0 modifiers are not supported on case
+unique0_case_fail FAIL unique/unique0 modifiers are not supported on case

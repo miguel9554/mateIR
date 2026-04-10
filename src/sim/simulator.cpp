@@ -17,9 +17,13 @@ namespace custom_hdl {
 
 namespace {
 
-int nodeWidth(const DFGNode* node, int fallback = 64) {
-    if (node && node->type.has_value() && node->type->width > 0) return node->type->width;
-    return fallback;
+int nodeWidth(const DFGNode* node) {
+    if (!node || !node->type.has_value() || node->type->width <= 0)
+        throw CompilerError(std::format(
+            "Simulator: node {} has no resolved type width (type_propagation incomplete?)",
+            node ? node->str() : "<null>"),
+            node);
+    return node->type->width;
 }
 
 bool nodeSigned(const DFGNode* node) {
@@ -31,8 +35,10 @@ SimValue simValueFromInt(int64_t value, const DFGNode* node) {
 }
 
 SimValue simValueFromType(int64_t value, const ResolvedType& type) {
-    int width = type.width > 0 ? type.width : 64;
-    return SimValue::fromI64(value, width, type.isSigned());
+    if (type.width <= 0)
+        throw CompilerError(std::format(
+            "Simulator: ResolvedType has no resolved width (type_propagation incomplete?)"));
+    return SimValue::fromI64(value, type.width, type.isSigned());
 }
 
 SimValue boolValue(bool value) {
@@ -67,8 +73,10 @@ ModuleInstance::ModuleInstance(const std::string& name, const ResolvedModule& mo
 
 SimValue ModuleInstance::maskToWidth(const SimValue& val, const DFGNode* node) {
     if (!node->type.has_value() || node->type->width <= 0)
-        return val;
-
+        throw CompilerError(std::format(
+            "Simulator: node {} has no resolved type width for masking (type_propagation incomplete?)",
+            node->str()),
+            node);
     return val.resized(node->type->width, node->type->isSigned());
 }
 
@@ -202,63 +210,6 @@ void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
 }
 
 // ============================================================================
-// Async event processing (edge detection + d->q / reset)
-// ============================================================================
-
-void ModuleInstance::setAsyncEvent(const std::string& signalName, const SimValue& newValue) {
-    SimValue oldValue = SimValue::zero(newValue.width(), newValue.isSigned());
-    if (auto it = async_values.find(signalName); it != async_values.end()) {
-        oldValue = it->second;
-    }
-
-    // Update stored value and INPUT node
-    async_values[signalName] = newValue;
-    if (auto* inputNode = module_def.dfg->getInputNode("", signalName)) {
-        values[inputNode] = newValue;
-    }
-
-    // Detect edges
-    bool posedge = oldValue.isZero() && !newValue.isZero() && newValue.lowU64() == 1;
-    bool negedge = !oldValue.isZero() && oldValue.lowU64() == 1 && newValue.isZero();
-
-    // Clock edges -> d->q propagation (skipped if async reset is currently asserted)
-    if (auto it = flops_by_clock.find(signalName); it != flops_by_clock.end()) {
-        for (const auto& collected : it->second) {
-            const auto* flop = collected.flop;
-            if ((flop->clock.edge == POSEDGE && posedge) ||
-                (flop->clock.edge == NEGEDGE && negedge)) {
-                // Async reset has priority: skip d->q if reset is active
-                if (flop->reset.has_value() && collected.reset_name.has_value()) {
-                    SimValue rst_val = SimValue::zero(1, false);
-                    if (auto rit = async_values.find(*collected.reset_name); rit != async_values.end()) {
-                        rst_val = rit->second;
-                    }
-                    bool rst_active = (flop->reset->edge == POSEDGE && !rst_val.isZero() && rst_val.lowU64() == 1) ||
-                                      (flop->reset->edge == NEGEDGE && rst_val.isZero());
-                    if (rst_active) continue;
-                }
-                if (flop->q_node && flop->d_node) {
-                    values[flop->q_node] = checkedGet(flop->d_node);
-                }
-            }
-        }
-    }
-
-    // Reset edges -> apply reset value
-    if (auto it = flops_by_reset.find(signalName); it != flops_by_reset.end()) {
-        for (const auto& collected : it->second) {
-            const auto* flop = collected.flop;
-            if ((flop->reset->edge == POSEDGE && posedge) ||
-                (flop->reset->edge == NEGEDGE && negedge)) {
-                if (flop->reset_value.has_value() && flop->q_node) {
-                    values[flop->q_node] = simValueFromType(flop->reset_value.value(), flop->type.type);
-                }
-            }
-        }
-    }
-}
-
-// ============================================================================
 // Node evaluation
 // ============================================================================
 
@@ -342,16 +293,16 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::ASR:  return getVal(0).shr(getVal(1).lowU64(), true);
 
         case DFGOp::MUX:
-            return getVal(0).isZero() ? getVal(2) : getVal(1);
-
-        case DFGOp::MUX_N: {
-            int n = static_cast<int>(node->in.size()) / 2;
-            for (int i = 0; i < n; i++) {
-                if (!checkedGet(node->in[i].node, node).isZero()) {
-                    return checkedGet(node->in[n + i].node, node);
-                }
+        {
+            int64_t selectorValue = static_cast<int64_t>(getVal(0).lowU64());
+            int armIndex = node->muxArmIndexForValue(selectorValue);
+            if (armIndex < 0) {
+                throw CompilerError(
+                    std::format("Simulator: MUX {} has no arm for selector value {}",
+                        node->str(), selectorValue),
+                    node);
             }
-            return checkedGet(node->in[2 * n - 1].node, node);
+            return checkedGet(node->in[static_cast<size_t>(armIndex) + 1].node, node);
         }
 
         case DFGOp::UNARY_PLUS:    return getVal(0);
@@ -378,14 +329,26 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::REDUCTION_XNOR:
             return boolValue(!getVal(0).reductionXor());
 
-        case DFGOp::INDEX: {
+        case DFGOp::SLICE: {
+            // SLICE has CONST high/low. Dynamic indexing is lowered to MUX during
+            // elaboration. However, constant-indexed unpacked array access uses the
+            // pattern SLICE(aggregate_signal, i, i) where i is the element index and
+            // aggregate_signal.in[i] holds the actual element node.
             const DFGNode* source_node = node->in[0].node;
 
             if (source_node->type.has_value() && !source_node->type->unpacked_dims.empty()) {
                 int64_t index = static_cast<int64_t>(getVal(1).lowU64());
                 int64_t n = static_cast<int64_t>(source_node->in.size());
-                index = ((index % n) + n) % n;
-                return checkedGet(source_node->in[index].node, node);
+                const auto& dim = source_node->type->unpacked_dims[0];
+                int64_t lo = std::min((int64_t)dim.left, (int64_t)dim.right);
+                int64_t hi = std::max((int64_t)dim.left, (int64_t)dim.right);
+                if (index < lo || index > hi)
+                    throw CompilerError(std::format(
+                        "Simulator: SLICE array index out of bounds: index={}, "
+                        "array size={} in node {}",
+                        index, n, node->str()), node);
+                int64_t pos = dim.left <= dim.right ? (index - dim.left) : (dim.left - index);
+                return checkedGet(source_node->in.at(static_cast<size_t>(pos)).node, node);
             }
 
             int64_t high = static_cast<int64_t>(getVal(1).lowU64());
@@ -401,6 +364,9 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
                     bit_pos = dim.right - high;
                 }
             } else {
+                // Source is a flat bit-vector (no packed_dims): 0-indexed, bit_pos = low.
+                // This is correct — CONCAT results and range-select SLICE results
+                // are intentionally flat, with no explicit dimension descriptor.
                 bit_pos = low;
             }
 
@@ -543,9 +509,12 @@ void Simulator::buildTimeline() {
                         "Simulator: unknown async input '{}'", name));
                 }
                 const auto& input = inputIt->second;
+                if (input.type.width <= 0)
+                    throw CompilerError(std::format(
+                        "Simulator: async input '{}' has no resolved type width", name));
                 parsedValue = SimValue::fromHexString(
                     value_token,
-                    input.type.width > 0 ? input.type.width : 64,
+                    input.type.width,
                     input.type.isSigned());
             } catch (const std::invalid_argument&) {
                 throw CompilerError(std::format(
@@ -591,9 +560,12 @@ void Simulator::loadSyncInputs() {
                     "Simulator: sync file '{}' has unparseable line: {}", path, line));
             }
             try {
+                if (input.type.width <= 0)
+                    throw CompilerError(std::format(
+                        "Simulator: sync input '{}' has no resolved type width", name));
                 values.push_back(SimValue::fromHexString(
                     hex_text,
-                    input.type.width > 0 ? input.type.width : 64,
+                    input.type.width,
                     input.type.isSigned()));
             } catch (const std::invalid_argument&) {
                 throw CompilerError(std::format(

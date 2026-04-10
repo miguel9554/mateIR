@@ -62,7 +62,6 @@ std::string DFG::renderDot(const std::string& graphName,
             case DFGOp::SHL: ss << "<<<"; break;
             case DFGOp::ASR: ss << ">>>"; break;
             case DFGOp::MUX: ss << "MUX"; break;
-            case DFGOp::MUX_N: ss << "MUX_N"; break;
             case DFGOp::MODULE:
                 ss << "MODULE\\n" << node->name;
                 if (std::holds_alternative<std::string>(node->data))
@@ -75,7 +74,7 @@ std::string DFG::renderDot(const std::string& graphName,
                     }
                 }
                 break;
-            case DFGOp::INDEX: ss << "INDEX"; break;
+            case DFGOp::SLICE: ss << "SLICE"; break;
             case DFGOp::CONCAT: ss << "CONCAT"; break;
             case DFGOp::CONCAT_ALIGN: ss << "CONCAT_ALIGN"; break;
             case DFGOp::CAST: ss << "CAST"; break;
@@ -118,15 +117,16 @@ std::string DFG::renderDot(const std::string& graphName,
 
     ss << "\n";
 
-    // Returns the label for the j-th input edge of a MUX/MUX_N node
-    auto inputLabel = [](DFGOp op, size_t j, size_t totalInputs) -> std::string {
-        switch (op) {
+    // Returns the label for the j-th input edge of a positional node.
+    auto inputLabel = [](const DFGNode* node, size_t j) -> std::string {
+        switch (node->op) {
             case DFGOp::MUX:
                 if (j == 0) return "sel";
-                if (j == 1) return "T";
-                if (j == 2) return "F";
+                if (j > 0 && j - 1 < node->mux_values.size()) {
+                    return "d[" + std::to_string(node->mux_values[j - 1]) + "]";
+                }
                 break;
-            case DFGOp::INDEX:
+            case DFGOp::SLICE:
                 if (j == 0) return "src";
                 if (j == 1) return "hi";
                 if (j == 2) return "lo";
@@ -136,11 +136,6 @@ std::string DFG::renderDot(const std::string& graphName,
                 if (j == 1) return "hi";
                 if (j == 2) return "lo";
                 break;
-            case DFGOp::MUX_N: {
-                size_t nSel = totalInputs / 2;
-                if (j < nSel) return "sel" + std::to_string(j);
-                return "d" + std::to_string(j - nSel);
-            }
             default:
                 break;
         }
@@ -156,7 +151,7 @@ std::string DFG::renderDot(const std::string& graphName,
             const auto& input = node->in[j];
             if (filter && !filter->count(input.node)) continue;
             ss << "  n" << nodeIndex.at(input.node) << " -> n" << i;
-            std::string label = inputLabel(node->op, j, node->in.size());
+            std::string label = inputLabel(node.get(), j);
             if (input.port != 0) {
                 label = label.empty()
                     ? "port " + std::to_string(input.port)
@@ -253,6 +248,15 @@ std::string DFG::renderJson(int indent, const std::set<const DFGNode*>* filter) 
         // Add source location if available
         if (node->loc) {
             ss << indentStr(indent + 3) << "\"loc\": \"" << node->loc->str() << "\",\n";
+        }
+
+        if (node->op == DFGOp::MUX && !node->mux_values.empty()) {
+            ss << indentStr(indent + 3) << "\"mux_selector_values\": [";
+            for (size_t j = 0; j < node->mux_values.size(); ++j) {
+                if (j > 0) ss << ", ";
+                ss << node->mux_values[j];
+            }
+            ss << "],\n";
         }
 
         // Add inputs

@@ -329,6 +329,12 @@ struct ConditionalBranch {
     PartialDriverMap modifiedPartialDrivers;
 };
 
+struct CaseBranch {
+    std::vector<int64_t> selectorValues;
+    DriverMap modifiedDrivers;
+    PartialDriverMap modifiedPartialDrivers;
+};
+
 struct DriverSnapshot {
     DriverMap visibleDrivers;
     PartialDriverMap partialDrivers;
@@ -442,7 +448,7 @@ static DFGNode* buildRelativeSliceExpr(ResolutionContext& ctx,
         relHigh->loc = *loc;
         relLow->loc = *loc;
     }
-    auto* idx = ctx.graph.index(slice.expr, relHigh, relLow);
+    auto* idx = ctx.graph.slice(slice.expr, relHigh, relLow);
     if (loc) idx->loc = *loc;
     return idx;
 }
@@ -855,6 +861,52 @@ static std::set<std::string> collectAssignedSignals(const std::vector<Conditiona
     return assignedSignals;
 }
 
+static std::set<std::string> collectAssignedSignals(const std::vector<CaseBranch>& branches,
+                                                    const std::optional<DriverMap>& fallbackBranch,
+                                                    const std::optional<PartialDriverMap>& fallbackPartialBranch) {
+    std::set<std::string> assignedSignals;
+    for (const auto& branch : branches) {
+        for (const auto& [name, _] : branch.modifiedDrivers) {
+            assignedSignals.insert(name);
+        }
+        for (const auto& [name, _] : branch.modifiedPartialDrivers) {
+            assignedSignals.insert(name);
+        }
+    }
+    if (fallbackBranch) {
+        for (const auto& [name, _] : *fallbackBranch) {
+            assignedSignals.insert(name);
+        }
+    }
+    if (fallbackPartialBranch) {
+        for (const auto& [name, _] : *fallbackPartialBranch) {
+            assignedSignals.insert(name);
+        }
+    }
+    return assignedSignals;
+}
+
+static int64_t selectorCodeCountOrThrow(DFGNode* selectorNode,
+                                        const std::optional<SourceLoc>& loc) {
+    if (!selectorNode || !selectorNode->hasType()) {
+        throw CompilerError("Case selector must have a known type during elaboration", loc);
+    }
+    int width = selectorNode->type->width;
+    if (width <= 0 || width >= 63) {
+        throw CompilerError(
+            "Case selector width " + std::to_string(width) + " is unsupported for mux lowering",
+            loc);
+    }
+    return int64_t(1) << width;
+}
+
+static int64_t normalizeSelectorCode(int64_t value,
+                                     DFGNode* selectorNode,
+                                     const std::optional<SourceLoc>& loc) {
+    int64_t numValues = selectorCodeCountOrThrow(selectorNode, loc);
+    return value & (numValues - 1);
+}
+
 static void mergeIfBranches(ResolutionContext& ctx,
                             const std::vector<ConditionalBranch>& branches,
                             const std::optional<DriverMap>& fallbackBranch,
@@ -898,14 +950,14 @@ static void mergeIfBranches(ResolutionContext& ctx,
 
 static void mergeCaseBranches(ResolutionContext& ctx,
                               DFGNode* selectorNode,
-                              const std::vector<ConditionalBranch>& branches,
+                              const std::vector<CaseBranch>& branches,
                               const std::optional<DriverMap>& fallbackBranch,
                               const std::optional<PartialDriverMap>& fallbackPartialBranch,
                               const DriverSnapshot& baseline,
-                              const std::set<int64_t>& explicitCaseValues,
                               const std::optional<SourceLoc>& loc) {
     std::set<std::string> assignedSignals = collectAssignedSignals(
         branches, fallbackBranch, fallbackPartialBranch);
+    int64_t numValues = selectorCodeCountOrThrow(selectorNode, loc);
 
     auto branchValue = [&](const std::string& targetName, const DriverMap& modified, DFGNode* retained) -> DFGNode* {
         if (auto it = modified.find(targetName); it != modified.end()) {
@@ -918,7 +970,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
         bool partialTarget = baseline.partialDrivers.contains(signalName);
         if (!partialTarget) {
             partialTarget = std::any_of(branches.begin(), branches.end(),
-                [&](const ConditionalBranch& branch) {
+                [&](const CaseBranch& branch) {
                     return branch.modifiedPartialDrivers.contains(signalName);
                 });
         }
@@ -930,10 +982,21 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             auto retained = getRetainedPartialState(ctx, signalName, baseline, loc);
             auto defaultValue = fallbackPartialStateValue(
                 ctx, signalName, fallbackBranch, fallbackPartialBranch, retained, loc);
-            std::vector<std::optional<PartialTargetState>> states;
-            states.push_back(defaultValue);
+            std::vector<std::optional<PartialTargetState>> states(static_cast<size_t>(numValues), defaultValue);
+            std::vector<bool> assigned(static_cast<size_t>(numValues), false);
             for (const auto& branch : branches) {
-                states.push_back(branchPartialStateValue(ctx, signalName, branch, retained, loc));
+                auto branchState = branchPartialStateValue(
+                    ctx,
+                    signalName,
+                    ConditionalBranch{nullptr, branch.modifiedDrivers, branch.modifiedPartialDrivers},
+                    retained,
+                    loc);
+                for (int64_t selectorValue : branch.selectorValues) {
+                    size_t index = static_cast<size_t>(selectorValue);
+                    if (assigned[index]) continue;
+                    states[index] = branchState;
+                    assigned[index] = true;
+                }
             }
             auto intervals = computeSlicePartition(states);
             PartialTargetState merged;
@@ -942,48 +1005,23 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             else merged.type = lookupTargetTypeOrThrow(signalName, ctx, loc);
 
             for (const auto& [low, high] : intervals) {
-                DFGNode* defaultExpr = defaultValue ? exprForSliceInterval(ctx, *defaultValue, low, high, loc) : nullptr;
-                std::vector<DFGNode*> selectors;
+                std::vector<int64_t> selectorValues;
                 std::vector<DFGNode*> dataValues;
-                for (const auto& branch : branches) {
-                    auto branchState = branchPartialStateValue(ctx, signalName, branch, retained, loc);
-                    DFGNode* value = branchState ? exprForSliceInterval(ctx, *branchState, low, high, loc) : defaultExpr;
+                selectorValues.reserve(static_cast<size_t>(numValues));
+                dataValues.reserve(static_cast<size_t>(numValues));
+                for (int64_t selectorValue = 0; selectorValue < numValues; ++selectorValue) {
+                    const auto& state = states[static_cast<size_t>(selectorValue)];
+                    DFGNode* value = state ? exprForSliceInterval(ctx, *state, low, high, loc) : nullptr;
                     if (!value) {
                         throw CompilerError(
-                            "Signal '" + signalName + "' not assigned in all branches and has no default/fallback",
+                            "Signal '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
                             loc);
                     }
-                    selectors.push_back(branch.condition);
+                    selectorValues.push_back(selectorValue);
                     dataValues.push_back(value);
                 }
-                DFGNode* result = nullptr;
-                if (selectors.empty()) {
-                    result = defaultExpr;
-                } else if (selectors.size() == 1) {
-                    result = dataValues[0];
-                } else {
-                    if (!defaultExpr) {
-                        throw CompilerError(
-                            "Signal '" + signalName + "' not assigned in any case branch and has no default/fallback",
-                            loc);
-                    }
-                    if (selectorNode->hasType()) {
-                        int width = selectorNode->type->width;
-                        int64_t numValues = int64_t(1) << width;
-                        for (int64_t v = 0; v < numValues; ++v) {
-                            if (explicitCaseValues.contains(v)) continue;
-                            auto* missingConst = ctx.graph.constant(v);
-                            missingConst->type = selectorNode->type;
-                            missingConst->loc = loc;
-                            auto* missingSel = ctx.graph.eq(selectorNode, missingConst);
-                            missingSel->loc = loc;
-                            selectors.push_back(missingSel);
-                            dataValues.push_back(defaultExpr);
-                        }
-                    }
-                    result = ctx.graph.muxN(selectors, dataValues);
-                    result->loc = loc;
-                }
+                DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
+                result->loc = loc;
                 if (result) merged.slices.push_back({low, high, result});
             }
             sortSlices(merged);
@@ -1005,48 +1043,30 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             defaultValue = retained;
         }
 
-        std::vector<DFGNode*> selectors;
+        std::vector<int64_t> selectorValues;
         std::vector<DFGNode*> dataValues;
-        for (const auto& branch : branches) {
-            DFGNode* value = branchValue(signalName, branch.modifiedDrivers, defaultValue);
+        selectorValues.reserve(static_cast<size_t>(numValues));
+        dataValues.reserve(static_cast<size_t>(numValues));
+        for (int64_t selectorValue = 0; selectorValue < numValues; ++selectorValue) {
+            DFGNode* value = defaultValue;
+            for (const auto& branch : branches) {
+                if (std::find(branch.selectorValues.begin(), branch.selectorValues.end(), selectorValue) !=
+                        branch.selectorValues.end()) {
+                    value = branchValue(signalName, branch.modifiedDrivers, defaultValue);
+                    break;
+                }
+            }
             if (!value) {
                 throw CompilerError(
-                    "Signal '" + signalName + "' not assigned in all branches and has no default/fallback",
+                    "Signal '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
                     loc);
             }
-            selectors.push_back(branch.condition);
+            selectorValues.push_back(selectorValue);
             dataValues.push_back(value);
         }
 
-        if (defaultValue && selectorNode->hasType()) {
-            int width = selectorNode->type->width;
-            int64_t numValues = int64_t(1) << width;
-            for (int64_t v = 0; v < numValues; ++v) {
-                if (explicitCaseValues.contains(v)) continue;
-                auto* missingConst = ctx.graph.constant(v);
-                missingConst->type = selectorNode->type;
-                missingConst->loc = loc;
-                auto* missingSel = ctx.graph.eq(selectorNode, missingConst);
-                missingSel->loc = loc;
-                selectors.push_back(missingSel);
-                dataValues.push_back(defaultValue);
-            }
-        }
-
-        DFGNode* result = nullptr;
-        if (selectors.empty()) {
-            if (!defaultValue) {
-                throw CompilerError(
-                    "Signal '" + signalName + "' not assigned in any case branch and has no default/fallback",
-                    loc);
-            }
-            result = defaultValue;
-        } else if (selectors.size() == 1) {
-            result = dataValues[0];
-        } else {
-            result = ctx.graph.muxN(selectors, dataValues);
-            result->loc = loc;
-        }
+        DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
+        result->loc = loc;
 
         connectDriver(ctx, signalName, result);
         if (!ctx.is_sequential) {
@@ -1059,6 +1079,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
 // Evaluate a constant expression given a parameter context
 // Throws if a referenced parameter is not in the context
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
+                              const PackageRegistry* pkgRegistry = nullptr,
                               std::source_location caller = std::source_location::current()) {
     if (!expr) {
         throw CompilerError(
@@ -1089,53 +1110,53 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 
         case SyntaxKind::ParenthesizedExpression: {
             auto& paren = expr->as<ParenthesizedExpressionSyntax>();
-            return evaluateConstantExpr(paren.expression, ctx);
+            return evaluateConstantExpr(paren.expression, ctx, pkgRegistry);
         }
 
         case SyntaxKind::UnaryPlusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            return evaluateConstantExpr(unary.operand, ctx);
+            return evaluateConstantExpr(unary.operand, ctx, pkgRegistry);
         }
 
         case SyntaxKind::UnaryMinusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            return -evaluateConstantExpr(unary.operand, ctx);
+            return -evaluateConstantExpr(unary.operand, ctx, pkgRegistry);
         }
 
         case SyntaxKind::AddExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) +
-                   evaluateConstantExpr(binary.right, ctx);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) +
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
         }
 
         case SyntaxKind::SubtractExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) -
-                   evaluateConstantExpr(binary.right, ctx);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) -
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
         }
 
         case SyntaxKind::MultiplyExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) *
-                   evaluateConstantExpr(binary.right, ctx);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) *
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
         }
 
         case SyntaxKind::DivideExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto divisor = evaluateConstantExpr(binary.right, ctx);
+            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry);
             if (divisor == 0) {
                 throw CompilerError("Division by zero in constant expression");
             }
-            return evaluateConstantExpr(binary.left, ctx) / divisor;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) / divisor;
         }
 
         case SyntaxKind::ModExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto divisor = evaluateConstantExpr(binary.right, ctx);
+            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry);
             if (divisor == 0) {
                 throw CompilerError("Modulo by zero in constant expression");
             }
-            return evaluateConstantExpr(binary.left, ctx) % divisor;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) % divisor;
         }
 
         case SyntaxKind::IntegerVectorExpression: {
@@ -1143,43 +1164,61 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             return parseIntegerVectorExpression(vecExpr).value;
         }
 
+        case SyntaxKind::ScopedName: {
+            if (!pkgRegistry) {
+                throw CompilerError("Package-qualified constant requires package registry");
+            }
+            auto& scoped = expr->as<ScopedNameSyntax>();
+            std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string itemName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            auto pkgIt = pkgRegistry->find(pkgName);
+            if (pkgIt == pkgRegistry->end()) {
+                throw CompilerError("Unknown package: " + pkgName);
+            }
+            auto memberIt = pkgIt->second.enumMembers.find(itemName);
+            if (memberIt == pkgIt->second.enumMembers.end()) {
+                throw CompilerError("Unknown package member: " + pkgName + "::" + itemName);
+            }
+            return memberIt->second.first;
+        }
+
         case SyntaxKind::EqualityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) == evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) == evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::InequalityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) != evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) != evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::LessThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) < evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) < evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::LessThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) <= evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) <= evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::GreaterThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) > evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) > evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::GreaterThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) >= evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) >= evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::LogicalAndExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return (evaluateConstantExpr(binary.left, ctx) && evaluateConstantExpr(binary.right, ctx)) ? 1 : 0;
+            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry) && evaluateConstantExpr(binary.right, ctx, pkgRegistry)) ? 1 : 0;
         }
         case SyntaxKind::LogicalOrExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return (evaluateConstantExpr(binary.left, ctx) || evaluateConstantExpr(binary.right, ctx)) ? 1 : 0;
+            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry) || evaluateConstantExpr(binary.right, ctx, pkgRegistry)) ? 1 : 0;
         }
 
         case SyntaxKind::PowerExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return intPowConst(evaluateConstantExpr(binary.left, ctx),
-                               evaluateConstantExpr(binary.right, ctx));
+            return intPowConst(evaluateConstantExpr(binary.left, ctx, pkgRegistry),
+                               evaluateConstantExpr(binary.right, ctx, pkgRegistry));
         }
 
         default:
@@ -1192,12 +1231,13 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 // Overload with source location: reports where the null/bad expression came from.
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
                               const slang::SourceManager& sm,
-                              const slang::syntax::SyntaxNode& contextNode) {
+                              const slang::syntax::SyntaxNode& contextNode,
+                              const PackageRegistry* pkgRegistry = nullptr) {
     if (!expr) {
         throw CompilerError("Cannot evaluate null expression",
                             resolveSourceLoc(contextNode, sm));
     }
-    return evaluateConstantExpr(expr, ctx);
+    return evaluateConstantExpr(expr, ctx, pkgRegistry);
 }
 
 // IntegerType
@@ -1644,7 +1684,7 @@ static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
             highNode->loc = *loc;
             lowNode->loc = *loc;
         }
-        auto* truncated = ctx.graph.index(expr, highNode, lowNode);
+        auto* truncated = ctx.graph.slice(expr, highNode, lowNode);
         truncated->type = ResolvedType::makeInteger(targetWidth, targetSigned);
         if (loc) truncated->loc = *loc;
         expr = truncated;
@@ -1835,6 +1875,17 @@ DFGNode* buildExprDFG(
                                     }
                                     continue;
                                 }
+                                std::string qElemKey = elemKey + ".q";
+                                auto qElemIt = ctx.local_signals.find(qElemKey);
+                                if (qElemIt != ctx.local_signals.end()) {
+                                    indexedSignalNode = qElemIt->second;
+                                    if (qElemIt->second->hasType()) {
+                                        currentSelectedType = *qElemIt->second->type;
+                                    } else {
+                                        currentSelectedType.reset();
+                                    }
+                                    continue;
+                                }
                                 // Also check module-level DFG for array elements not in local_signals
                                 // (e.g. lane_sum[i] where lane_sum is a module-scope unpacked array).
                                 DFGNode* globalElem = ctx.graph.lookupSignal("", elemKey);
@@ -1847,6 +1898,22 @@ DFGNode* buildExprDFG(
                                     }
                                     continue;
                                 }
+                                DFGNode* globalQElem = ctx.graph.lookupSignal("", qElemKey);
+                                if (globalQElem) {
+                                    indexedSignalNode = globalQElem;
+                                    if (globalQElem->hasType()) {
+                                        currentSelectedType = *globalQElem->type;
+                                    } else {
+                                        currentSelectedType.reset();
+                                    }
+                                    continue;
+                                }
+
+                                baseName = elemKey;
+                                ResolvedType narrowed = *currentSelectedType;
+                                narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                                currentSelectedType = narrowed;
+                                continue;
                             }
 
                             if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
@@ -1855,7 +1922,7 @@ DFGNode* buildExprDFG(
                                 int64_t offset = packedIndexOffsetFromLsb(dim, idx) * elemWidth;
                                 auto* lowNode = ctx.graph.constant(offset);
                                 auto* highNode = ctx.graph.constant(offset + elemWidth - 1);
-                                indexedSignalNode = ctx.graph.index(indexedSignalNode, highNode, lowNode);
+                                indexedSignalNode = ctx.graph.slice(indexedSignalNode, highNode, lowNode);
                                 indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
 
                                 ResolvedType narrowed = *currentSelectedType;
@@ -1865,38 +1932,218 @@ DFGNode* buildExprDFG(
                                 continue;
                             }
                         } catch (const std::runtime_error&) {
-                            // not constant — fall through to INDEX
+                            // not constant — emit MUX for unpacked array, throw for packed
                         }
                         auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
-                        indexedSignalNode = ctx.graph.index(indexedSignalNode, selectorExprNode, selectorExprNode);
-                        indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
-                            ResolvedType narrowed = *currentSelectedType;
-                            narrowed.width = static_cast<int>(packedSuffixWidth(*currentSelectedType, 1));
-                            narrowed.packed_dims.erase(narrowed.packed_dims.begin());
-                            currentSelectedType = narrowed;
-                        } else if (currentSelectedType && !currentSelectedType->unpacked_dims.empty()) {
-                            currentSelectedType->unpacked_dims.erase(currentSelectedType->unpacked_dims.begin());
+                        if (!currentSelectedType || currentSelectedType->unpacked_dims.empty()) {
+                            throw CompilerError(
+                                "Dynamic bit-select on packed vector is not yet supported",
+                                resolveSourceLoc(*expr, ctx.sm));
                         }
+                        // Dynamic unpacked array indexing → MUX.
+                        // Per IEEE 1800-2023 §11.5.2, out-of-bounds access returns x (4-state)
+                        // or 0 (2-state). We return 0 to match Verilator's 2-state behavior.
+                        // TODO: Return don't-care once the IR supports it — using 0 pessimizes
+                        //       synthesis results for designs with out-of-bounds-free guarantees.
+                        auto lookupUnpackedElem = [&](int64_t idx) -> DFGNode* {
+                            std::string elemKey = baseName + "[" + std::to_string(idx) + "]";
+                            if (ctx.local_signals.count(elemKey))
+                                return ctx.local_signals.at(elemKey);
+                            if (auto* elemNode = ctx.graph.lookupSignal("", elemKey))
+                                return elemNode;
+                            std::string qKey = elemKey + ".q";
+                            if (ctx.local_signals.count(qKey))
+                                return ctx.local_signals.at(qKey);
+                            if (auto* qNode = ctx.graph.lookupSignal("", qKey))
+                                return qNode;
+                            return nullptr;
+                        };
+
+                        const auto& dim = currentSelectedType->unpacked_dims.front();
+                        int64_t lo = std::min((int64_t)dim.left, (int64_t)dim.right);
+                        int64_t hi = std::max((int64_t)dim.left, (int64_t)dim.right);
+                        int64_t N  = hi - lo + 1;
+
+                        if (N == 1) {
+                            // Degenerate single-element array: no MUX needed.
+                            DFGNode* elemNode = lookupUnpackedElem(lo);
+                            if (!elemNode)
+                                throw CompilerError(
+                                    "Dynamic index: element not found: " +
+                                        baseName + "[" + std::to_string(lo) + "]",
+                                    resolveSourceLoc(*expr, ctx.sm));
+                            indexedSignalNode = elemNode;
+                        } else {
+                            // Selector width S = ceil(log2(N)).
+                            int S = 0;
+                            while ((1LL << S) < N) ++S;
+                            int64_t totalCodes = 1LL << S;
+
+                            // Adjust selector: adjusted = raw - lo (arm 0 → index lo, etc.).
+                            // Skip subtraction for the common lo == 0 case.
+                            DFGNode* adjustedSel = selectorExprNode;
+                            if (lo != 0) {
+                                adjustedSel = ctx.graph.sub(
+                                    selectorExprNode, ctx.graph.constant(lo));
+                                adjustedSel->loc = resolveSourceLoc(*expr, ctx.sm);
+                            }
+                            // Truncate to S bits so the selector covers exactly [0, 2^S - 1].
+                            DFGNode* truncSel = ctx.graph.slice(
+                                adjustedSel,
+                                ctx.graph.constant(S - 1),
+                                ctx.graph.constant(0));
+                            truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
+
+                            std::vector<int64_t> armValues;
+                            std::vector<DFGNode*> armData;
+                            DFGNode* zeroNode = ctx.graph.constant(0);
+
+                            for (int64_t v = 0; v < totalCodes; v++) {
+                                armValues.push_back(v);
+                                if (v < N) {
+                                    int64_t idx = lo + v;
+                                    DFGNode* elemNode = lookupUnpackedElem(idx);
+                                    if (!elemNode)
+                                        throw CompilerError(
+                                            "Dynamic index: element not found: " +
+                                                baseName + "[" + std::to_string(idx) + "]",
+                                            resolveSourceLoc(*expr, ctx.sm));
+                                    armData.push_back(elemNode);
+                                } else {
+                                    // Out-of-bounds → 0 (see TODO above)
+                                    armData.push_back(zeroNode);
+                                }
+                            }
+
+                            indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
+                        }
+                        indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        currentSelectedType->unpacked_dims.erase(
+                            currentSelectedType->unpacked_dims.begin());
                     } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect){
+                        // Per SV spec, both bounds must be constant expressions.
+                        // If non-constant bounds somehow reach here, type_propagation
+                        // will reject the SLICE with a [BUG] message.
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* leftNode = buildExprDFG(rangeSelect.left, ctx);
                         auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
-                        indexedSignalNode = ctx.graph.index(indexedSignalNode, leftNode, rightNode);
+                        indexedSignalNode = ctx.graph.slice(indexedSignalNode, leftNode, rightNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
                         currentSelectedType.reset();
                     } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
                         // [base +: width] → [base+width-1 : base]
+                        // Per SV spec, width must be constant; base may be dynamic.
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
-                        auto* widthNode = buildExprDFG(rangeSelect.right, ctx);
-                        auto* one  = ctx.graph.constant(1);
-                        auto* sum  = ctx.graph.add(baseNode, widthNode);
-                        auto* high = ctx.graph.sub(sum, one);
-                        high->loc = resolveSourceLoc(*expr, ctx.sm);
-                        indexedSignalNode = ctx.graph.index(indexedSignalNode, high, baseNode);
-                        indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        currentSelectedType.reset();
+                        int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                             ctx.sm, *rangeSelect.right);
+                        try {
+                            int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                                ctx.sm, *rangeSelect.left);
+                            auto* high = ctx.graph.constant(base + width - 1);
+                            auto* low  = ctx.graph.constant(base);
+                            indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
+                            indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        } catch (const std::runtime_error&) {
+                            if (!currentSelectedType || !currentSelectedType->unpacked_dims.empty()) {
+                                throw CompilerError(
+                                    "Indexed part-select [base +: width] requires a packed source",
+                                    resolveSourceLoc(*expr, ctx.sm));
+                            }
+
+                            int64_t sourceWidth = currentSelectedType->width;
+                            int64_t maxLow = sourceWidth - width;
+                            int selBits = 0;
+                            while ((1LL << selBits) < sourceWidth) ++selBits;
+                            if (selBits == 0) selBits = 1;
+
+                            auto* truncSel = ctx.graph.slice(
+                                baseNode,
+                                ctx.graph.constant(selBits - 1),
+                                ctx.graph.constant(0));
+                            truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
+
+                            std::vector<int64_t> armValues;
+                            std::vector<DFGNode*> armData;
+                            DFGNode* zeroNode = ctx.graph.constant(0);
+                            zeroNode->type = ResolvedType::makeInteger(
+                                static_cast<int>(width), currentSelectedType->isSigned());
+
+                            for (int64_t v = 0; v < (1LL << selBits); ++v) {
+                                armValues.push_back(v);
+                                if (v <= maxLow) {
+                                    auto* high = ctx.graph.constant(v + width - 1);
+                                    auto* low  = ctx.graph.constant(v);
+                                    auto* slice = ctx.graph.slice(indexedSignalNode, high, low);
+                                    slice->loc = resolveSourceLoc(*expr, ctx.sm);
+                                    armData.push_back(slice);
+                                } else {
+                                    armData.push_back(zeroNode);
+                                }
+                            }
+
+                            indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
+                            indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        }
+                        currentSelectedType = ResolvedType::makeInteger(
+                            static_cast<int>(width),
+                            currentSelectedType ? currentSelectedType->isSigned() : false);
+                    } else if (elemSelect->selector->kind == SyntaxKind::DescendingRangeSelect) {
+                        // [base -: width] → [base : base-width+1]
+                        const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
+                        auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
+                        int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                             ctx.sm, *rangeSelect.right);
+                        try {
+                            int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                                ctx.sm, *rangeSelect.left);
+                            auto* high = ctx.graph.constant(base);
+                            auto* low  = ctx.graph.constant(base - width + 1);
+                            indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
+                            indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        } catch (const std::runtime_error&) {
+                            if (!currentSelectedType || !currentSelectedType->unpacked_dims.empty()) {
+                                throw CompilerError(
+                                    "Indexed part-select [base -: width] requires a packed source",
+                                    resolveSourceLoc(*expr, ctx.sm));
+                            }
+
+                            int64_t sourceWidth = currentSelectedType->width;
+                            int selBits = 0;
+                            while ((1LL << selBits) < sourceWidth) ++selBits;
+                            if (selBits == 0) selBits = 1;
+
+                            auto* truncSel = ctx.graph.slice(
+                                baseNode,
+                                ctx.graph.constant(selBits - 1),
+                                ctx.graph.constant(0));
+                            truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
+
+                            std::vector<int64_t> armValues;
+                            std::vector<DFGNode*> armData;
+                            DFGNode* zeroNode = ctx.graph.constant(0);
+                            zeroNode->type = ResolvedType::makeInteger(
+                                static_cast<int>(width), currentSelectedType->isSigned());
+
+                            for (int64_t v = 0; v < (1LL << selBits); ++v) {
+                                armValues.push_back(v);
+                                if (v >= width - 1 && v < sourceWidth) {
+                                    auto* high = ctx.graph.constant(v);
+                                    auto* low  = ctx.graph.constant(v - width + 1);
+                                    auto* slice = ctx.graph.slice(indexedSignalNode, high, low);
+                                    slice->loc = resolveSourceLoc(*expr, ctx.sm);
+                                    armData.push_back(slice);
+                                } else {
+                                    armData.push_back(zeroNode);
+                                }
+                            }
+
+                            indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
+                            indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        }
+                        currentSelectedType = ResolvedType::makeInteger(
+                            static_cast<int>(width),
+                            currentSelectedType ? currentSelectedType->isSigned() : false);
                     } else {
                         throw CompilerError(
                             "Only BitSelect and RangeSelect supported, got: " +
@@ -2302,6 +2549,140 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
     };
 
+    auto enumerateIndices = [](const ResolvedDimension& dim) {
+        std::vector<int64_t> indices;
+        int64_t step = dim.left <= dim.right ? 1 : -1;
+        for (int64_t idx = dim.left;; idx += step) {
+            indices.push_back(idx);
+            if (idx == dim.right) break;
+        }
+        return indices;
+    };
+
+    auto connectWholeUnpackedArray = [&](const std::string& baseName,
+                                         const ResolvedType& arrayType,
+                                         const std::vector<DFGNode*>& elementDrivers) {
+        if (arrayType.unpacked_dims.size() != 1) {
+            throw CompilerError("Only 1-D unpacked whole-array assignments are supported",
+                                assignLoc);
+        }
+
+        const auto indices = enumerateIndices(arrayType.unpacked_dims.front());
+        if (indices.size() != elementDrivers.size()) {
+            throw CompilerError("Whole-array assignment element count mismatch", assignLoc);
+        }
+
+        ResolvedType elementType = arrayType;
+        elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+
+        for (size_t i = 0; i < indices.size(); ++i) {
+            DFGNode* elemNode = coerceAssignmentExprToWidth(ctx, elementDrivers[i],
+                                                            elementType, assignLoc);
+            std::string outputName;
+            if (ctx.is_sequential) {
+                if (!isFlopName(baseName)) {
+                    throw CompilerError(
+                        std::format("{} NOT a flop and assigned on seq. block", baseName),
+                        assignLoc);
+                }
+                outputName = std::format("{}[{}].d", baseName, indices[i]);
+            } else {
+                outputName = std::format("{}[{}]", baseName, indices[i]);
+            }
+
+            if (!ctx.subroutine_locals.count(outputName))
+                recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+            connectNode(outputName, elemNode);
+
+            if (!ctx.is_sequential) {
+                ctx.combDrivers[outputName] = elemNode;
+            }
+        }
+
+        if (ctx.is_sequential) {
+            ctx.thisModule->flopsTriggers[flopTriggersKey(baseName)] = ctx.triggers;
+        }
+    };
+
+    if (right->kind == SyntaxKind::AssignmentPatternExpression) {
+        if (left->kind != SyntaxKind::IdentifierName) {
+            throw CompilerError(
+                "Assignment patterns are only supported for whole-array assignments",
+                assignLoc);
+        }
+
+        std::string baseName(left->as<IdentifierNameSyntax>().identifier.valueText());
+        const auto* declaredType = lookupDeclaredType(baseName, ctx);
+        if (!declaredType || declaredType->unpacked_dims.size() != 1) {
+            throw CompilerError(
+                "Assignment patterns are only supported for 1-D unpacked arrays",
+                assignLoc);
+        }
+
+        const auto indices = enumerateIndices(declaredType->unpacked_dims.front());
+        std::vector<DFGNode*> elementDrivers(indices.size(), nullptr);
+        auto& patternExpr = right->as<AssignmentPatternExpressionSyntax>();
+
+        if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
+            auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
+            if (pattern.items.size() != indices.size()) {
+                throw CompilerError(
+                    std::format("Assignment pattern for '{}' requires {} elements but {} were provided",
+                                baseName, indices.size(), pattern.items.size()),
+                    assignLoc);
+            }
+            for (size_t i = 0; i < indices.size(); ++i) {
+                elementDrivers[i] = buildExprDFG(pattern.items[i], ctx);
+            }
+        } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+            auto& pattern = patternExpr.pattern->as<StructuredAssignmentPatternSyntax>();
+            std::map<int64_t, DFGNode*> keyedDrivers;
+            DFGNode* defaultDriver = nullptr;
+
+            for (const auto* item : pattern.items) {
+                if (item->key->kind == SyntaxKind::DefaultPatternKeyExpression ||
+                    (item->key->kind == SyntaxKind::IdentifierName &&
+                     item->key->as<IdentifierNameSyntax>().identifier.valueText() == "default")) {
+                    if (defaultDriver) {
+                        throw CompilerError("Assignment pattern has multiple default keys",
+                                            assignLoc);
+                    }
+                    defaultDriver = buildExprDFG(item->expr, ctx);
+                    continue;
+                }
+
+                int64_t idx = evaluateConstantExpr(item->key, ctx.params, ctx.sm, *item->key,
+                                                   &ctx.pkgRegistry);
+                if (keyedDrivers.contains(idx)) {
+                    throw CompilerError(
+                        std::format("Assignment pattern has multiple keys for index {}", idx),
+                        assignLoc);
+                }
+                keyedDrivers[idx] = buildExprDFG(item->expr, ctx);
+            }
+
+            for (size_t i = 0; i < indices.size(); ++i) {
+                auto it = keyedDrivers.find(indices[i]);
+                if (it != keyedDrivers.end()) {
+                    elementDrivers[i] = it->second;
+                } else if (defaultDriver) {
+                    elementDrivers[i] = defaultDriver;
+                } else {
+                    throw CompilerError(
+                        std::format("Assignment pattern for '{}' does not cover index {}",
+                                    baseName, indices[i]),
+                        assignLoc);
+                }
+            }
+        } else {
+            throw CompilerError("Replicated assignment patterns are not yet supported",
+                                assignLoc);
+        }
+
+        connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
+        return;
+    }
+
     // Build the Expr graph of the RHS
     auto* RHSexprNode = buildExprDFG(right, ctx);
 
@@ -2359,7 +2740,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             highConst->loc = resolveSourceLoc(assignExpr, ctx.sm);
             auto* lowConst = ctx.graph.constant(low);
             lowConst->loc = resolveSourceLoc(assignExpr, ctx.sm);
-            auto* sliceNode = ctx.graph.index(RHSexprNode, highConst, lowConst);
+            auto* sliceNode = ctx.graph.slice(RHSexprNode, highConst, lowConst);
             sliceNode->loc = resolveSourceLoc(assignExpr, ctx.sm);
 
             std::string outputName;
@@ -2405,6 +2786,54 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         throw CompilerError(
         "Left can only be variable name: " + std::string(toString(left->kind)),
         resolveSourceLoc(assignExpr, ctx.sm));
+    }
+
+    if (!selectors) {
+        if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
+            declaredType && declaredType->unpacked_dims.size() == 1 &&
+            right->kind == SyntaxKind::IdentifierName) {
+            std::string rhsBase(right->as<IdentifierNameSyntax>().identifier.valueText());
+            if (const auto* rhsType = lookupDeclaredType(rhsBase, ctx);
+                rhsType && rhsType->unpacked_dims.size() == 1 &&
+                rhsType->unpacked_dims.front().size() == declaredType->unpacked_dims.front().size()) {
+                std::vector<DFGNode*> elementDrivers;
+                for (int64_t idx : enumerateIndices(rhsType->unpacked_dims.front())) {
+                    std::string elemName = rhsBase + "[" + std::to_string(idx) + "]";
+                    DFGNode* elemNode = nullptr;
+                    if (!ctx.is_sequential) {
+                        auto it = ctx.combDrivers.find(elemName);
+                        if (it != ctx.combDrivers.end()) elemNode = it->second;
+                    }
+                    if (!elemNode) elemNode = lookupTargetNode(ctx, elemName);
+                    if (!elemNode) elemNode = ctx.graph.getInputNode("", elemName + ".q");
+                    if (!elemNode) {
+                        auto localIt = ctx.local_signals.find(elemName + ".q");
+                        if (localIt != ctx.local_signals.end()) elemNode = localIt->second;
+                    }
+                    if (!elemNode) {
+                        throw CompilerError("Whole-array assignment element not found: " + elemName,
+                                            assignLoc);
+                    }
+                    elementDrivers.push_back(elemNode);
+                }
+                connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
+                return;
+            }
+        }
+
+        if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
+            declaredType && declaredType->unpacked_dims.size() == 1 &&
+            RHSexprNode && RHSexprNode->type && !RHSexprNode->type->unpacked_dims.empty()) {
+            std::vector<DFGNode*> elementDrivers;
+            elementDrivers.reserve(RHSexprNode->in.size());
+            for (const auto& edge : RHSexprNode->in) {
+                elementDrivers.push_back(edge.node);
+            }
+            if (!elementDrivers.empty()) {
+                connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
+                return;
+            }
+        }
     }
 
     // Build the full element name for LHS by evaluating selectors statically.
@@ -2822,8 +3251,12 @@ void resolveConditionalStatementInPlace(
         ResolutionContext& ctx){
     const auto& predicate = conditionalStatement->predicate;
     if (conditionalStatement->uniqueOrPriority){
-        throw CompilerError("Unique/priority not supported on if",
-                            resolveSourceLoc(*conditionalStatement, ctx.sm));
+        auto keyword = conditionalStatement->uniqueOrPriority.kind;
+        if (keyword == slang::parsing::TokenKind::UniqueKeyword ||
+                keyword == slang::parsing::TokenKind::Unique0Keyword) {
+            throw CompilerError("unique/unique0 modifiers are not supported on if",
+                                resolveSourceLoc(*conditionalStatement, ctx.sm));
+        }
     }
     if (predicate->conditions.size()>1){
         throw CompilerError("Support for single predicate on if",
@@ -2881,7 +3314,15 @@ void resolveCaseStatementInPlace(
         const CaseStatementSyntax* caseStatement,
         ResolutionContext& ctx) {
 
-    // unique/priority qualifiers are synthesis hints; semantically equivalent to plain case
+    if (caseStatement->uniqueOrPriority) {
+        auto keyword = caseStatement->uniqueOrPriority.kind;
+        if (keyword == slang::parsing::TokenKind::UniqueKeyword ||
+                keyword == slang::parsing::TokenKind::Unique0Keyword) {
+            throw CompilerError("unique/unique0 modifiers are not supported on case",
+                                resolveSourceLoc(*caseStatement, ctx.sm));
+        }
+    }
+
     // Only support basic 'case', not casez/casex
     auto caseKeyword = caseStatement->caseKeyword.kind;
     if (caseKeyword == slang::parsing::TokenKind::CaseZKeyword) {
@@ -2900,8 +3341,7 @@ void resolveCaseStatementInPlace(
 
     // Collect info for each case branch — drivers only contains signals
     // actually modified in that branch (diff against fallback)
-    std::vector<ConditionalBranch> normalCases;
-    std::set<int64_t> explicitCaseValues;
+    std::vector<CaseBranch> normalCases;
     std::optional<DriverMap> defaultDrivers;
     std::optional<PartialDriverMap> defaultPartialDrivers;
 
@@ -2920,18 +3360,15 @@ void resolveCaseStatementInPlace(
                                     resolveSourceLoc(*caseStatement, ctx.sm));
             }
 
-            // Build condition: selector == case_value
-            auto* caseValueNode = buildExprDFG(caseItem.expressions[0], ctx);
-            auto* conditionNode = ctx.graph.eq(selectorNode, caseValueNode);
-            conditionNode->loc = caseLoc;
-            if (caseValueNode->op == DFGOp::CONST) {
-                explicitCaseValues.insert(std::get<int64_t>(caseValueNode->data));
-            }
+            int64_t caseValue = normalizeSelectorCode(
+                evaluateConstantExpr(caseItem.expressions[0], ctx.params, ctx.sm, *caseStatement, &ctx.pkgRegistry),
+                selectorNode,
+                caseLoc);
 
             restoreDrivers(ctx, baselineDrivers);
             executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
             normalCases.push_back({
-                conditionNode,
+                {caseValue},
                 modifiedDriversSince(ctx, baselineDrivers),
                 modifiedPartialDriversSince(ctx, baselineDrivers)
             });
@@ -2949,7 +3386,6 @@ void resolveCaseStatementInPlace(
                       defaultDrivers,
                       defaultPartialDrivers,
                       baselineDrivers,
-                      explicitCaseValues,
                       caseLoc);
 }
 

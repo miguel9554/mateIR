@@ -72,9 +72,6 @@ struct ModuleInstance {
     void initConsts();
     void initFlops(FlopsInitial mode, std::mt19937_64& rng);
 
-    // Stateful: processes an async event, detects edges, does d->q / reset
-    void setAsyncEvent(const std::string& signalName, const SimValue& newValue);
-
     // Single-pass combinational evaluation (no fixpoint — flat DAG has no cycles)
     void evaluateCombinational();
 

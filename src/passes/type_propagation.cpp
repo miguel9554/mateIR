@@ -65,7 +65,7 @@ static ResolvedType widenTypes(const ResolvedType& a, const ResolvedType& b) {
     return ResolvedType::makeInteger(width, is_signed);
 }
 
-// Validate that two enum types are compatible for a MUX/MUX_N branch.
+// Validate that two enum types are compatible for a MUX branch.
 // Returns the enum type if both match, or the widened integer type if neither is enum.
 // Throws on mismatch.
 static ResolvedType mergeDataTypes(const ResolvedType& a, const ResolvedType& b,
@@ -74,7 +74,7 @@ static ResolvedType mergeDataTypes(const ResolvedType& a, const ResolvedType& b,
         if (!a.isEnum() || !b.isEnum() ||
             a.enumInfo().type_name != b.enumInfo().type_name)
             throw CompilerError(
-                std::format("Type error: MUX/MUX_N branches have incompatible types '{}' and '{}'",
+                std::format("Type error: MUX branches have incompatible types '{}' and '{}'",
                     a.isEnum() ? a.enumInfo().type_name : "integer",
                     b.isEnum() ? b.enumInfo().type_name : "integer"), loc);
         return a;  // same enum type
@@ -212,29 +212,14 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::MUX: {
             if (node->in.size() < 3) {
                 throw CompilerError(std::format(
-                    "Type propagation: MUX {} has {} inputs (expected 3)",
+                    "Type propagation: MUX {} has {} inputs (expected selector + at least 2 arms)",
                     node->str(), node->in.size()), node->loc);
             }
-            auto* tval = node->in[1].node;
-            auto* fval = node->in[2].node;
-            if (!tval->hasType() || !fval->hasType()) return false;
-            node->type = mergeDataTypes(*tval->type, *fval->type, node->loc);
-            return true;
-        }
-
-        // MUX_N: result = type of data inputs (must all be same enum type or all integer)
-        case DFGOp::MUX_N: {
-            size_t n = node->in.size() / 2;
-            if (n == 0) {
-                throw CompilerError(std::format(
-                    "Type propagation: MUX_N {} has no inputs", node->str()), node->loc);
-            }
-            // Data values are in[n..2n-1]
-            for (size_t i = n; i < node->in.size(); ++i) {
+            for (size_t i = 1; i < node->in.size(); ++i) {
                 if (!node->in[i].node->hasType()) return false;
             }
-            ResolvedType result = *node->in[n].node->type;
-            for (size_t i = n + 1; i < node->in.size(); ++i) {
+            ResolvedType result = *node->in[1].node->type;
+            for (size_t i = 2; i < node->in.size(); ++i) {
                 result = mergeDataTypes(result, *node->in[i].node->type, node->loc);
             }
             node->type = result;
@@ -351,11 +336,13 @@ bool inferNodeType(DFGNode* node) {
             return true;
         }
 
-        // INDEX: in[0]=source, in[1]=high, in[2]=low
-        case DFGOp::INDEX: {
+        // SLICE: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
+        // Dynamic indexing must be lowered to MUX during elaboration; a SLICE
+        // node with non-constant indices is a compiler bug.
+        case DFGOp::SLICE: {
             if (node->in.size() < 3) {
                 throw CompilerError(std::format(
-                    "Type propagation: INDEX {} has {} inputs (expected 3)",
+                    "Type propagation: SLICE {} has {} inputs (expected 3)",
                     node->str(), node->in.size()), node->loc);
             }
             auto* source = node->in[0].node;
@@ -365,44 +352,19 @@ bool inferNodeType(DFGNode* node) {
 
             const auto& atype = *source->type;
 
-            // Unpacked dimension indexing (vector select): peel one unpacked dim,
-            // keep packed dims and width unchanged.
-            if (!atype.unpacked_dims.empty()) {
-                std::vector<ResolvedDimension> remaining_unpacked(
-                    atype.unpacked_dims.begin() + 1, atype.unpacked_dims.end());
-                node->type = ResolvedType::makeInteger(
-                    atype.width, atype.isSigned(), atype.packed_dims, remaining_unpacked);
-                return true;
-            }
-
             // Packed dimension indexing
             if (!atype.packed_dims.empty()) {
-                // Dynamic bit select (high and low are the same node):
-                // peel one packed dim regardless of constness.
-                if (highNode == lowNode) {
-                    std::vector<ResolvedDimension> remaining(
-                        atype.packed_dims.begin() + 1, atype.packed_dims.end());
-                    int new_width = 1;
-                    for (const auto& d : remaining) {
-                        new_width *= d.size();
-                    }
-                    node->type = ResolvedType::makeInteger(
-                        new_width, atype.isSigned(), remaining);
-                    return true;
-                }
-
-                // Range select requires constant indices to determine width
                 if (highNode->op != DFGOp::CONST || lowNode->op != DFGOp::CONST) {
                     throw CompilerError(std::format(
-                        "Type propagation: INDEX {} has non-constant packed range indices "
-                        "(dynamic range selects not supported)",
+                        "[BUG] SLICE {} has non-constant packed indices — dynamic indexing "
+                        "should have been lowered to MUX during elaboration",
                         node->str()), node->loc);
                 }
                 int64_t high_val = std::get<int64_t>(highNode->data);
                 int64_t low_val = std::get<int64_t>(lowNode->data);
 
                 if (high_val == low_val) {
-                    // Constant single-element bit-select: peel one packed dim
+                    // Single-element bit-select: peel one packed dim
                     std::vector<ResolvedDimension> remaining(
                         atype.packed_dims.begin() + 1, atype.packed_dims.end());
                     int new_width = 1;
@@ -420,23 +382,18 @@ bool inferNodeType(DFGNode* node) {
                 return true;
             }
 
-            // No packed/unpacked dims — flat bit-vector.
-            // Dynamic bit-select (hi and lo are the same node) → 1 bit.
-            // Constant range select → |hi - lo| + 1 bits.
-            // Non-constant range → not supported.
-            if (highNode == lowNode) {
-                node->type = ResolvedType::makeInteger(1, false);
-            } else if (highNode->op != DFGOp::CONST || lowNode->op != DFGOp::CONST) {
+            // No packed dims — flat bit-vector.
+            if (highNode->op != DFGOp::CONST || lowNode->op != DFGOp::CONST) {
                 throw CompilerError(std::format(
-                    "Type propagation: INDEX {} on flat vector has non-constant range indices "
-                    "(dynamic range selects not supported)",
+                    "[BUG] SLICE {} on flat vector has non-constant indices — dynamic "
+                    "indexing should have been lowered to MUX during elaboration",
                     node->str()), node->loc);
-            } else {
-                int64_t high_val = std::get<int64_t>(highNode->data);
-                int64_t low_val  = std::get<int64_t>(lowNode->data);
-                node->type = ResolvedType::makeInteger(
-                    static_cast<int>(std::abs(high_val - low_val)) + 1, false);
             }
+            int64_t high_val = std::get<int64_t>(highNode->data);
+            int64_t low_val  = std::get<int64_t>(lowNode->data);
+            node->type = ResolvedType::makeInteger(
+                static_cast<int>(std::abs(high_val - low_val)) + 1,
+                high_val == low_val ? false : atype.isSigned());
             return true;
         }
     }

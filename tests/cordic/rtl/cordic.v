@@ -26,6 +26,9 @@ module cordic #(
     // Stores precomputed arctan(2^-i) values in Q1.14 format
     //--------------------------------------------------------------------------
     wire signed [WL-1:0] atan_table [0:N_ITER-1];
+    wire signed [WL-1:0] atan_table_current;
+
+    assign atan_table_current = atan_table[i];  // Current arctan value for iteration i
 
     //--------------------------------------------------------------------------
     // Internal registers
@@ -127,13 +130,13 @@ module cordic #(
                         // Positive angle: rotate counter-clockwise
                         x <= x - (y >>> i);
                         y <= y + (x >>> i);
-                        z <= z - atan_table[i];
+                        z <= z - atan_table_current;
                     end
                     else begin
                         // Negative angle: rotate clockwise
                         x <= x + (y >>> i);
                         y <= y - (x >>> i);
-                        z <= z + atan_table[i];
+                        z <= z + atan_table_current;
                     end
                     i <= i + 1;  // Increment iteration counter
                 end

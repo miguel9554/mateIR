@@ -1,0 +1,16 @@
+module_name: unpacked_array_copy
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - stim
+      - sel
+      - src_flat
+      - dst_flat
+      - dst_elem_const
+      - dst_elem_var

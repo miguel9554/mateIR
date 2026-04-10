@@ -56,7 +56,7 @@ module pkg_ctrl_unit
     // ALU: case on op_t using module-header-imported enum values directly
     logic [7:0] alu_res;
     always_comb begin
-        unique case (op_in)
+        case (op_in)
             OP_NOP:   alu_res = 8'h00;
             OP_LOAD:  alu_res = data_in;
             OP_STORE: alu_res = data_in;

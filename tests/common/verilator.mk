@@ -26,6 +26,7 @@ $(info GEN_SRCS=$(GEN_SRCS))
 
 # Compiled file name
 OUT = obj_dir/V$(TOP_MODULE)
+CUSTOM_SIM_DIR = $(ROOT_DIR)/work/custom-sim
 
 VERILATOR_WARNS ?= -Wno-TIMESCALEMOD -Wno-WIDTHTRUNC
 # Per-test extra warnings suppression (place -Wno-XXX flags in verilator.warns)
@@ -50,6 +51,7 @@ $(OUT): $(SRCS) $(GEN_DIR)/tb.sv
 
 # Generate waves database
 $(WAVES): $(OUT) force
+	mkdir -p $(CUSTOM_SIM_DIR)/stimuli
 	./obj_dir/V$(TOP_MODULE) +WAVES=$(WAVES) $(SEED_ARG)
 
 simulate:

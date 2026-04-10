@@ -30,7 +30,7 @@ module pkg_datapath
     // Direction cycle N→E→S→W→N using qualified constants
     types_pkg::dir_t dir_next;
     always_comb begin
-        unique case (dir_in)
+        case (dir_in)
             types_pkg::DIR_N: dir_next = types_pkg::DIR_E;
             types_pkg::DIR_E: dir_next = types_pkg::DIR_S;
             types_pkg::DIR_S: dir_next = types_pkg::DIR_W;
@@ -42,7 +42,7 @@ module pkg_datapath
     // Phase FSM — qualified constants throughout; op_t imported so cast op_t'() works
     types_pkg::phase_t phase_next;
     always_comb begin
-        unique case (phase_reg)
+        case (phase_reg)
             types_pkg::PHASE_INIT: phase_next = (op_in != op_t'(0))
                                                 ? types_pkg::PHASE_WARM
                                                 : types_pkg::PHASE_INIT;
@@ -74,7 +74,7 @@ module pkg_datapath
     // so we use ctrl_pkg::OP_NOP etc. for the enum values.
     logic [7:0] dp_result;
     always_comb begin
-        unique case (op_in)
+        case (op_in)
             ctrl_pkg::OP_NOP:   dp_result = 8'h00;
             ctrl_pkg::OP_LOAD:  dp_result = data_in;
             ctrl_pkg::OP_STORE: dp_result = data_in ^ 8'hA5;

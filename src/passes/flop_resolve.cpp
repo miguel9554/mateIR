@@ -41,10 +41,9 @@ std::vector<std::string> allElements(const ResolvedSignal& signal) {
 
     for (const auto& dimension : signal.type.unpacked_dims) {
         std::vector<std::string> next;
-        int start = std::min(dimension.left, dimension.right);
-        int end = std::max(dimension.left, dimension.right);
+        int step = (dimension.left <= dimension.right) ? 1 : -1;
         for (const auto& prefix : current) {
-            for (int i = start; i <= end; i++) {
+            for (int i = dimension.left; step > 0 ? i <= dimension.right : i >= dimension.right; i += step) {
                 next.push_back(prefix + "[" + std::to_string(i) + "]");
             }
         }
@@ -69,7 +68,7 @@ bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
     if (node->op == DFGOp::INPUT) {
         return node->name == flop_name + ".q";
     }
-    if (node->op != DFGOp::INDEX) {
+    if (node->op != DFGOp::SLICE) {
         return false;
     }
     auto* source = node->in[0].node;
@@ -86,7 +85,7 @@ std::optional<int64_t> constantValueOfNode(const DFGNode* node) {
     if (node->op == DFGOp::CONST) {
         return std::get<int64_t>(node->data);
     }
-    if (node->op == DFGOp::INDEX) {
+    if (node->op == DFGOp::SLICE) {
         auto src = constantValueOfNode(node->in[0].node);
         if (!src) return std::nullopt;
         auto hi = constantValueOfNode(node->in[1].node);
@@ -133,8 +132,13 @@ bool extract_reset_from_concat(
                 flop_name, to_string(firstMux->op)),
             firstMux->loc);
     }
+    if (!firstMux->isBinaryMux()) {
+        throw CompilerError(
+            std::format("flop '{}' reset CONCAT input MUX is not binary", flop_name),
+            firstMux->loc);
+    }
 
-    auto* mux_sel = firstMux->in[0].node;
+    auto* mux_sel = firstMux->muxSelector().node;
     if (nodeForTrigger(resolved, triggers[0]) == mux_sel) {
         reset = triggers[0];
         clock = triggers[1];
@@ -162,14 +166,19 @@ bool extract_reset_from_concat(
                     flop_name, to_string(mux->op)),
                 mux->loc);
         }
-        if (mux->in[0].node != mux_sel) {
+        if (!mux->isBinaryMux()) {
+            throw CompilerError(
+                std::format("flop '{}' reset CONCAT contains non-binary MUX", flop_name),
+                mux->loc);
+        }
+        if (mux->muxSelector().node != mux_sel) {
             throw CompilerError(
                 std::format("flop '{}' reset CONCAT mixes different selectors", flop_name),
                 mux->loc);
         }
 
-        auto* resetBranch = reset.edge == edge_t::POSEDGE ? mux->in[1].node : mux->in[2].node;
-        auto* functionalBranch = reset.edge == edge_t::POSEDGE ? mux->in[2].node : mux->in[1].node;
+        auto* resetBranch = mux->muxDataForValue(reset.edge == edge_t::POSEDGE ? 1 : 0);
+        auto* functionalBranch = mux->muxDataForValue(reset.edge == edge_t::POSEDGE ? 0 : 1);
         functionalParts.push_back(functionalBranch);
 
         int partWidth = mux->type ? mux->type->width : (resetBranch->type ? resetBranch->type->width : 0);
@@ -235,10 +244,15 @@ bool extract_reset(
             "flop '{}' has 2 triggers but its .d driver is neither MUX nor CONCAT-of-MUX (op={})",
             flop_name, to_string(dNodeDriver->op)), dNodeDriver->loc);
     }
+    if (!dNodeDriver->isBinaryMux()) {
+        throw CompilerError(
+            std::format("flop '{}' has 2 triggers but its .d driver MUX is not binary", flop_name),
+            dNodeDriver->loc);
+    }
 
-    auto* mux_sel = dNodeDriver->in[0].node;
-    auto* mux_true = dNodeDriver->in[1].node;
-    auto* mux_else = dNodeDriver->in[2].node;
+    auto* mux_sel = dNodeDriver->muxSelector().node;
+    auto* mux_true = dNodeDriver->muxDataForValue(1);
+    auto* mux_else = dNodeDriver->muxDataForValue(0);
     DFGNode* expectedResetAssign;
 
     // Match the MUX selector to one of the triggers (the reset). Compare by node identity

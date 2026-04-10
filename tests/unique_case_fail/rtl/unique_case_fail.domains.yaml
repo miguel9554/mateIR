@@ -1,0 +1,10 @@
+module_name: unique_case_fail
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs: []

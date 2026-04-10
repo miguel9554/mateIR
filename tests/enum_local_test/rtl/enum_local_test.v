@@ -122,7 +122,7 @@ module enum_local_test (
     status_t    alu_status;
 
     always_comb begin
-        unique case (op)
+        case (op)
             OP_NOP: begin
                 alu_result = 8'b0;
                 alu_status = STATUS_ZERO;
@@ -156,7 +156,7 @@ module enum_local_test (
     logic [7:0] shift_amount;
 
     always_comb begin
-        unique case (shift)
+        case (shift)
             SHIFT_1: shift_amount = 8'd1;
             SHIFT_2: shift_amount = 8'd2;
             SHIFT_4: shift_amount = 8'd4;
@@ -171,7 +171,7 @@ module enum_local_test (
     logic [7:0] mode_result;
 
     always_comb begin
-        unique case (mode)
+        case (mode)
             MODE_PASS:  mode_result = alu_result;
             MODE_INV:   mode_result = ~alu_result;
             MODE_XOR:   mode_result = alu_result ^ data_a;
@@ -204,7 +204,7 @@ module enum_local_test (
     end
 
     always_comb begin
-        unique case (state)
+        case (state)
             ST_IDLE:  next_state = (op != DEFAULT_OP)          ? ST_LOAD  : ST_IDLE;
             ST_LOAD:  next_state =                               ST_EXEC;
             ST_EXEC:  next_state = (alu_status == STATUS_ERR)  ? ST_ERR   :

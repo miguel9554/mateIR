@@ -45,7 +45,7 @@ module enum_alu (
     status_t    raw_status;
 
     always_comb begin
-        unique case (cmd_in)
+        case (cmd_in)
             CMD_NOP: begin
                 computed   = 8'b0;
                 raw_status = STATUS_ZERO;
@@ -79,7 +79,7 @@ module enum_alu (
     logic [7:0] mode_adjusted;
 
     always_comb begin
-        unique case (mode_in)
+        case (mode_in)
             MODE_A:  mode_adjusted = computed;
             MODE_B:  mode_adjusted = ~computed;
             MODE_C:  mode_adjusted = computed ^ data_a;

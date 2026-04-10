@@ -75,7 +75,7 @@ module enum_top_test (
     end
 
     always_comb begin
-        unique case (state)
+        case (state)
             ST_IDLE: next_state = (cmd_in == CMD_NOP)          ? ST_IDLE : ST_LOAD;
             ST_LOAD: next_state =                                ST_EXEC;
             ST_EXEC: next_state = (alu_status == STATUS_ERR)   ? ST_ERR  : ST_DONE;

@@ -41,10 +41,9 @@ std::vector<std::string> allElements(const ResolvedSignal& signal) {
 
     for (const auto& dimension : signal.type.unpacked_dims) {
         std::vector<std::string> next;
-        int start = std::min(dimension.left, dimension.right);
-        int end = std::max(dimension.left, dimension.right);
+        int step = (dimension.left <= dimension.right) ? 1 : -1;
         for (const auto& prefix : current) {
-            for (int i = start; i <= end; i++) {
+            for (int i = dimension.left; step > 0 ? i <= dimension.right : i >= dimension.right; i += step) {
                 next.push_back(prefix + "[" + std::to_string(i) + "]");
             }
         }

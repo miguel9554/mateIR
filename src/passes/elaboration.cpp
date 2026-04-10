@@ -1875,6 +1875,17 @@ DFGNode* buildExprDFG(
                                     }
                                     continue;
                                 }
+                                std::string qElemKey = elemKey + ".q";
+                                auto qElemIt = ctx.local_signals.find(qElemKey);
+                                if (qElemIt != ctx.local_signals.end()) {
+                                    indexedSignalNode = qElemIt->second;
+                                    if (qElemIt->second->hasType()) {
+                                        currentSelectedType = *qElemIt->second->type;
+                                    } else {
+                                        currentSelectedType.reset();
+                                    }
+                                    continue;
+                                }
                                 // Also check module-level DFG for array elements not in local_signals
                                 // (e.g. lane_sum[i] where lane_sum is a module-scope unpacked array).
                                 DFGNode* globalElem = ctx.graph.lookupSignal("", elemKey);
@@ -1882,6 +1893,16 @@ DFGNode* buildExprDFG(
                                     indexedSignalNode = globalElem;
                                     if (globalElem->hasType()) {
                                         currentSelectedType = *globalElem->type;
+                                    } else {
+                                        currentSelectedType.reset();
+                                    }
+                                    continue;
+                                }
+                                DFGNode* globalQElem = ctx.graph.lookupSignal("", qElemKey);
+                                if (globalQElem) {
+                                    indexedSignalNode = globalQElem;
+                                    if (globalQElem->hasType()) {
+                                        currentSelectedType = *globalQElem->type;
                                     } else {
                                         currentSelectedType.reset();
                                     }
@@ -2776,11 +2797,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 rhsType && rhsType->unpacked_dims.size() == 1 &&
                 rhsType->unpacked_dims.front().size() == declaredType->unpacked_dims.front().size()) {
                 std::vector<DFGNode*> elementDrivers;
-                int64_t rhsLo = std::min((int64_t)rhsType->unpacked_dims.front().left,
-                                         (int64_t)rhsType->unpacked_dims.front().right);
-                int64_t rhsHi = std::max((int64_t)rhsType->unpacked_dims.front().left,
-                                         (int64_t)rhsType->unpacked_dims.front().right);
-                for (int64_t idx = rhsLo; idx <= rhsHi; ++idx) {
+                for (int64_t idx : enumerateIndices(rhsType->unpacked_dims.front())) {
                     std::string elemName = rhsBase + "[" + std::to_string(idx) + "]";
                     DFGNode* elemNode = nullptr;
                     if (!ctx.is_sequential) {
@@ -2788,7 +2805,11 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                         if (it != ctx.combDrivers.end()) elemNode = it->second;
                     }
                     if (!elemNode) elemNode = lookupTargetNode(ctx, elemName);
-                    if (!elemNode) elemNode = lookupTargetNode(ctx, elemName + ".q");
+                    if (!elemNode) elemNode = ctx.graph.getInputNode("", elemName + ".q");
+                    if (!elemNode) {
+                        auto localIt = ctx.local_signals.find(elemName + ".q");
+                        if (localIt != ctx.local_signals.end()) elemNode = localIt->second;
+                    }
                     if (!elemNode) {
                         throw CompilerError("Whole-array assignment element not found: " + elemName,
                                             assignLoc);

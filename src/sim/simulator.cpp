@@ -339,12 +339,16 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             if (source_node->type.has_value() && !source_node->type->unpacked_dims.empty()) {
                 int64_t index = static_cast<int64_t>(getVal(1).lowU64());
                 int64_t n = static_cast<int64_t>(source_node->in.size());
-                if (index < 0 || index >= n)
+                const auto& dim = source_node->type->unpacked_dims[0];
+                int64_t lo = std::min((int64_t)dim.left, (int64_t)dim.right);
+                int64_t hi = std::max((int64_t)dim.left, (int64_t)dim.right);
+                if (index < lo || index > hi)
                     throw CompilerError(std::format(
                         "Simulator: SLICE array index out of bounds: index={}, "
                         "array size={} in node {}",
                         index, n, node->str()), node);
-                return checkedGet(source_node->in[index].node, node);
+                int64_t pos = dim.left <= dim.right ? (index - dim.left) : (dim.left - index);
+                return checkedGet(source_node->in.at(static_cast<size_t>(pos)).node, node);
             }
 
             int64_t high = static_cast<int64_t>(getVal(1).lowU64());

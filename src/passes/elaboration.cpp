@@ -1079,6 +1079,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
 // Evaluate a constant expression given a parameter context
 // Throws if a referenced parameter is not in the context
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
+                              const PackageRegistry* pkgRegistry = nullptr,
                               std::source_location caller = std::source_location::current()) {
     if (!expr) {
         throw CompilerError(
@@ -1109,53 +1110,53 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 
         case SyntaxKind::ParenthesizedExpression: {
             auto& paren = expr->as<ParenthesizedExpressionSyntax>();
-            return evaluateConstantExpr(paren.expression, ctx);
+            return evaluateConstantExpr(paren.expression, ctx, pkgRegistry);
         }
 
         case SyntaxKind::UnaryPlusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            return evaluateConstantExpr(unary.operand, ctx);
+            return evaluateConstantExpr(unary.operand, ctx, pkgRegistry);
         }
 
         case SyntaxKind::UnaryMinusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            return -evaluateConstantExpr(unary.operand, ctx);
+            return -evaluateConstantExpr(unary.operand, ctx, pkgRegistry);
         }
 
         case SyntaxKind::AddExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) +
-                   evaluateConstantExpr(binary.right, ctx);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) +
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
         }
 
         case SyntaxKind::SubtractExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) -
-                   evaluateConstantExpr(binary.right, ctx);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) -
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
         }
 
         case SyntaxKind::MultiplyExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) *
-                   evaluateConstantExpr(binary.right, ctx);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) *
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
         }
 
         case SyntaxKind::DivideExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto divisor = evaluateConstantExpr(binary.right, ctx);
+            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry);
             if (divisor == 0) {
                 throw CompilerError("Division by zero in constant expression");
             }
-            return evaluateConstantExpr(binary.left, ctx) / divisor;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) / divisor;
         }
 
         case SyntaxKind::ModExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto divisor = evaluateConstantExpr(binary.right, ctx);
+            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry);
             if (divisor == 0) {
                 throw CompilerError("Modulo by zero in constant expression");
             }
-            return evaluateConstantExpr(binary.left, ctx) % divisor;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) % divisor;
         }
 
         case SyntaxKind::IntegerVectorExpression: {
@@ -1163,43 +1164,61 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             return parseIntegerVectorExpression(vecExpr).value;
         }
 
+        case SyntaxKind::ScopedName: {
+            if (!pkgRegistry) {
+                throw CompilerError("Package-qualified constant requires package registry");
+            }
+            auto& scoped = expr->as<ScopedNameSyntax>();
+            std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string itemName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            auto pkgIt = pkgRegistry->find(pkgName);
+            if (pkgIt == pkgRegistry->end()) {
+                throw CompilerError("Unknown package: " + pkgName);
+            }
+            auto memberIt = pkgIt->second.enumMembers.find(itemName);
+            if (memberIt == pkgIt->second.enumMembers.end()) {
+                throw CompilerError("Unknown package member: " + pkgName + "::" + itemName);
+            }
+            return memberIt->second.first;
+        }
+
         case SyntaxKind::EqualityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) == evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) == evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::InequalityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) != evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) != evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::LessThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) < evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) < evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::LessThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) <= evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) <= evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::GreaterThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) > evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) > evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::GreaterThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx) >= evaluateConstantExpr(binary.right, ctx) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) >= evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
         }
         case SyntaxKind::LogicalAndExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return (evaluateConstantExpr(binary.left, ctx) && evaluateConstantExpr(binary.right, ctx)) ? 1 : 0;
+            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry) && evaluateConstantExpr(binary.right, ctx, pkgRegistry)) ? 1 : 0;
         }
         case SyntaxKind::LogicalOrExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return (evaluateConstantExpr(binary.left, ctx) || evaluateConstantExpr(binary.right, ctx)) ? 1 : 0;
+            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry) || evaluateConstantExpr(binary.right, ctx, pkgRegistry)) ? 1 : 0;
         }
 
         case SyntaxKind::PowerExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return intPowConst(evaluateConstantExpr(binary.left, ctx),
-                               evaluateConstantExpr(binary.right, ctx));
+            return intPowConst(evaluateConstantExpr(binary.left, ctx, pkgRegistry),
+                               evaluateConstantExpr(binary.right, ctx, pkgRegistry));
         }
 
         default:
@@ -1212,12 +1231,13 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 // Overload with source location: reports where the null/bad expression came from.
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
                               const slang::SourceManager& sm,
-                              const slang::syntax::SyntaxNode& contextNode) {
+                              const slang::syntax::SyntaxNode& contextNode,
+                              const PackageRegistry* pkgRegistry = nullptr) {
     if (!expr) {
         throw CompilerError("Cannot evaluate null expression",
                             resolveSourceLoc(contextNode, sm));
     }
-    return evaluateConstantExpr(expr, ctx);
+    return evaluateConstantExpr(expr, ctx, pkgRegistry);
 }
 
 // IntegerType
@@ -2952,7 +2972,7 @@ void resolveCaseStatementInPlace(
             }
 
             int64_t caseValue = normalizeSelectorCode(
-                evaluateConstantExpr(caseItem.expressions[0], ctx.params, ctx.sm, *caseStatement),
+                evaluateConstantExpr(caseItem.expressions[0], ctx.params, ctx.sm, *caseStatement, &ctx.pkgRegistry),
                 selectorNode,
                 caseLoc);
 

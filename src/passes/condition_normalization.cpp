@@ -143,11 +143,17 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
 
     // Rule 4: MUX selector normalization
     if (node->op == DFGOp::MUX) {
+        if (!node->isBinaryMux()) {
+            return false;
+        }
         auto* sel = node->in[0].node;
         if (sel->op == DFGOp::BITWISE_NOT) {
-            // Swap true/false arms, use inner operand as selector
+            // Swap binary 1/0 arms, use inner operand as selector
             node->in[0] = DFGOutput(sel->in[0].node);
-            std::swap(node->in[1], node->in[2]);
+            int trueIndex = node->muxArmIndexForValue(1);
+            int falseIndex = node->muxArmIndexForValue(0);
+            std::swap(node->in[static_cast<size_t>(trueIndex) + 1],
+                      node->in[static_cast<size_t>(falseIndex) + 1]);
             return true;
         }
     }

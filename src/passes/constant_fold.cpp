@@ -148,23 +148,13 @@ static bool tryConstantFold(DFGNode* node) {
             break;
         case DFGOp::MUX: {
             int64_t sel = getConst(node->in[0].node);
-            // All inputs are const, so just pick the right value
-            result = sel ? getConst(node->in[1].node) : getConst(node->in[2].node);
-            break;
-        }
-        case DFGOp::MUX_N: {
-            size_t n = node->in.size() / 2;
-            // Find which selector is 1
-            int64_t selectedIdx = -1;
-            for (size_t i = 0; i < n; i++) {
-                if (getConst(node->in[i].node) != 0) {
-                    selectedIdx = static_cast<int64_t>(i);
-                    break;
-                }
+            auto* selected = node->muxDataForValue(sel);
+            if (!selected) {
+                throw CompilerError(
+                    std::format("Constant fold: MUX {} has no arm for selector value {}", node->str(), sel),
+                    node);
             }
-            if (selectedIdx < 0)
-                throw CompilerError("Constant fold: MUX_N with no active selector", node);
-            result = getConst(node->in[n + selectedIdx].node);
+            result = getConst(selected);
             break;
         }
         case DFGOp::UNARY_PLUS:
@@ -396,59 +386,31 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
         }
         case DFGOp::MUX: {
             auto* sel = node->in[0].node;
-            auto* tval = node->in[1].node;
-            auto* fval = node->in[2].node;
-            // MUX(1, t, f) -> t
-            if (isConst(sel) && getConst(sel) != 0) {
-                redirectConsumers(graph, node, tval);
-                return true;
-            }
-            // MUX(0, t, f) -> f
-            if (isConst(sel) && getConst(sel) == 0) {
-                redirectConsumers(graph, node, fval);
-                return true;
-            }
-            // MUX(s, x, x) -> x
-            if (tval == fval) {
-                redirectConsumers(graph, node, tval);
-                return true;
-            }
-            break;
-        }
-        case DFGOp::MUX_N: {
-            size_t n = node->in.size() / 2;
-            // Check if all data inputs are the same node
-            if (n > 0) {
-                DFGNode* first = node->in[n].node;
-                bool allSame = true;
-                for (size_t i = 1; i < n; i++) {
-                    if (node->in[n + i].node != first) {
-                        allSame = false;
-                        break;
-                    }
-                }
-                if (allSame) {
-                    redirectConsumers(graph, node, first);
+            if (isConst(sel)) {
+                if (auto* selected = node->muxDataForValue(getConst(sel))) {
+                    redirectConsumers(graph, node, selected);
                     return true;
                 }
             }
-            // Check if exactly one selector is const-1 and rest const-0
-            {
-                int activeIdx = -1;
-                bool allSelectorsConst = true;
-                bool valid = true;
-                for (size_t i = 0; i < n; i++) {
-                    if (!isConst(node->in[i].node)) {
-                        allSelectorsConst = false;
-                        break;
-                    }
-                    if (getConst(node->in[i].node) != 0) {
-                        if (activeIdx >= 0) { valid = false; break; } // multiple active
-                        activeIdx = static_cast<int>(i);
-                    }
+
+            DFGNode* first = node->muxArmData(0).node;
+            bool allSame = true;
+            for (size_t i = 1; i < node->muxArmCount(); ++i) {
+                if (node->muxArmData(i).node != first) {
+                    allSame = false;
+                    break;
                 }
-                if (allSelectorsConst && valid && activeIdx >= 0) {
-                    redirectConsumers(graph, node, node->in[n + activeIdx].node);
+            }
+            if (allSame) {
+                redirectConsumers(graph, node, first);
+                return true;
+            }
+
+            if (node->isBinaryMux()) {
+                auto* tval = node->muxDataForValue(1);
+                auto* fval = node->muxDataForValue(0);
+                if (tval && fval && tval == fval) {
+                    redirectConsumers(graph, node, tval);
                     return true;
                 }
             }

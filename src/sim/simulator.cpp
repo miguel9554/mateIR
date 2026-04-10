@@ -342,16 +342,16 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::ASR:  return getVal(0).shr(getVal(1).lowU64(), true);
 
         case DFGOp::MUX:
-            return getVal(0).isZero() ? getVal(2) : getVal(1);
-
-        case DFGOp::MUX_N: {
-            int n = static_cast<int>(node->in.size()) / 2;
-            for (int i = 0; i < n; i++) {
-                if (!checkedGet(node->in[i].node, node).isZero()) {
-                    return checkedGet(node->in[n + i].node, node);
-                }
+        {
+            int64_t selectorValue = static_cast<int64_t>(getVal(0).lowU64());
+            int armIndex = node->muxArmIndexForValue(selectorValue);
+            if (armIndex < 0) {
+                throw CompilerError(
+                    std::format("Simulator: MUX {} has no arm for selector value {}",
+                        node->str(), selectorValue),
+                    node);
             }
-            return checkedGet(node->in[2 * n - 1].node, node);
+            return checkedGet(node->in[static_cast<size_t>(armIndex) + 1].node, node);
         }
 
         case DFGOp::UNARY_PLUS:    return getVal(0);

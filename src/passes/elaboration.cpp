@@ -329,6 +329,12 @@ struct ConditionalBranch {
     PartialDriverMap modifiedPartialDrivers;
 };
 
+struct CaseBranch {
+    std::vector<int64_t> selectorValues;
+    DriverMap modifiedDrivers;
+    PartialDriverMap modifiedPartialDrivers;
+};
+
 struct DriverSnapshot {
     DriverMap visibleDrivers;
     PartialDriverMap partialDrivers;
@@ -855,6 +861,52 @@ static std::set<std::string> collectAssignedSignals(const std::vector<Conditiona
     return assignedSignals;
 }
 
+static std::set<std::string> collectAssignedSignals(const std::vector<CaseBranch>& branches,
+                                                    const std::optional<DriverMap>& fallbackBranch,
+                                                    const std::optional<PartialDriverMap>& fallbackPartialBranch) {
+    std::set<std::string> assignedSignals;
+    for (const auto& branch : branches) {
+        for (const auto& [name, _] : branch.modifiedDrivers) {
+            assignedSignals.insert(name);
+        }
+        for (const auto& [name, _] : branch.modifiedPartialDrivers) {
+            assignedSignals.insert(name);
+        }
+    }
+    if (fallbackBranch) {
+        for (const auto& [name, _] : *fallbackBranch) {
+            assignedSignals.insert(name);
+        }
+    }
+    if (fallbackPartialBranch) {
+        for (const auto& [name, _] : *fallbackPartialBranch) {
+            assignedSignals.insert(name);
+        }
+    }
+    return assignedSignals;
+}
+
+static int64_t selectorCodeCountOrThrow(DFGNode* selectorNode,
+                                        const std::optional<SourceLoc>& loc) {
+    if (!selectorNode || !selectorNode->hasType()) {
+        throw CompilerError("Case selector must have a known type during elaboration", loc);
+    }
+    int width = selectorNode->type->width;
+    if (width <= 0 || width >= 63) {
+        throw CompilerError(
+            "Case selector width " + std::to_string(width) + " is unsupported for mux lowering",
+            loc);
+    }
+    return int64_t(1) << width;
+}
+
+static int64_t normalizeSelectorCode(int64_t value,
+                                     DFGNode* selectorNode,
+                                     const std::optional<SourceLoc>& loc) {
+    int64_t numValues = selectorCodeCountOrThrow(selectorNode, loc);
+    return value & (numValues - 1);
+}
+
 static void mergeIfBranches(ResolutionContext& ctx,
                             const std::vector<ConditionalBranch>& branches,
                             const std::optional<DriverMap>& fallbackBranch,
@@ -898,14 +950,14 @@ static void mergeIfBranches(ResolutionContext& ctx,
 
 static void mergeCaseBranches(ResolutionContext& ctx,
                               DFGNode* selectorNode,
-                              const std::vector<ConditionalBranch>& branches,
+                              const std::vector<CaseBranch>& branches,
                               const std::optional<DriverMap>& fallbackBranch,
                               const std::optional<PartialDriverMap>& fallbackPartialBranch,
                               const DriverSnapshot& baseline,
-                              const std::set<int64_t>& explicitCaseValues,
                               const std::optional<SourceLoc>& loc) {
     std::set<std::string> assignedSignals = collectAssignedSignals(
         branches, fallbackBranch, fallbackPartialBranch);
+    int64_t numValues = selectorCodeCountOrThrow(selectorNode, loc);
 
     auto branchValue = [&](const std::string& targetName, const DriverMap& modified, DFGNode* retained) -> DFGNode* {
         if (auto it = modified.find(targetName); it != modified.end()) {
@@ -918,7 +970,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
         bool partialTarget = baseline.partialDrivers.contains(signalName);
         if (!partialTarget) {
             partialTarget = std::any_of(branches.begin(), branches.end(),
-                [&](const ConditionalBranch& branch) {
+                [&](const CaseBranch& branch) {
                     return branch.modifiedPartialDrivers.contains(signalName);
                 });
         }
@@ -930,10 +982,21 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             auto retained = getRetainedPartialState(ctx, signalName, baseline, loc);
             auto defaultValue = fallbackPartialStateValue(
                 ctx, signalName, fallbackBranch, fallbackPartialBranch, retained, loc);
-            std::vector<std::optional<PartialTargetState>> states;
-            states.push_back(defaultValue);
+            std::vector<std::optional<PartialTargetState>> states(static_cast<size_t>(numValues), defaultValue);
+            std::vector<bool> assigned(static_cast<size_t>(numValues), false);
             for (const auto& branch : branches) {
-                states.push_back(branchPartialStateValue(ctx, signalName, branch, retained, loc));
+                auto branchState = branchPartialStateValue(
+                    ctx,
+                    signalName,
+                    ConditionalBranch{nullptr, branch.modifiedDrivers, branch.modifiedPartialDrivers},
+                    retained,
+                    loc);
+                for (int64_t selectorValue : branch.selectorValues) {
+                    size_t index = static_cast<size_t>(selectorValue);
+                    if (assigned[index]) continue;
+                    states[index] = branchState;
+                    assigned[index] = true;
+                }
             }
             auto intervals = computeSlicePartition(states);
             PartialTargetState merged;
@@ -942,48 +1005,23 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             else merged.type = lookupTargetTypeOrThrow(signalName, ctx, loc);
 
             for (const auto& [low, high] : intervals) {
-                DFGNode* defaultExpr = defaultValue ? exprForSliceInterval(ctx, *defaultValue, low, high, loc) : nullptr;
-                std::vector<DFGNode*> selectors;
+                std::vector<int64_t> selectorValues;
                 std::vector<DFGNode*> dataValues;
-                for (const auto& branch : branches) {
-                    auto branchState = branchPartialStateValue(ctx, signalName, branch, retained, loc);
-                    DFGNode* value = branchState ? exprForSliceInterval(ctx, *branchState, low, high, loc) : defaultExpr;
+                selectorValues.reserve(static_cast<size_t>(numValues));
+                dataValues.reserve(static_cast<size_t>(numValues));
+                for (int64_t selectorValue = 0; selectorValue < numValues; ++selectorValue) {
+                    const auto& state = states[static_cast<size_t>(selectorValue)];
+                    DFGNode* value = state ? exprForSliceInterval(ctx, *state, low, high, loc) : nullptr;
                     if (!value) {
                         throw CompilerError(
-                            "Signal '" + signalName + "' not assigned in all branches and has no default/fallback",
+                            "Signal '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
                             loc);
                     }
-                    selectors.push_back(branch.condition);
+                    selectorValues.push_back(selectorValue);
                     dataValues.push_back(value);
                 }
-                DFGNode* result = nullptr;
-                if (selectors.empty()) {
-                    result = defaultExpr;
-                } else if (selectors.size() == 1) {
-                    result = dataValues[0];
-                } else {
-                    if (!defaultExpr) {
-                        throw CompilerError(
-                            "Signal '" + signalName + "' not assigned in any case branch and has no default/fallback",
-                            loc);
-                    }
-                    if (selectorNode->hasType()) {
-                        int width = selectorNode->type->width;
-                        int64_t numValues = int64_t(1) << width;
-                        for (int64_t v = 0; v < numValues; ++v) {
-                            if (explicitCaseValues.contains(v)) continue;
-                            auto* missingConst = ctx.graph.constant(v);
-                            missingConst->type = selectorNode->type;
-                            missingConst->loc = loc;
-                            auto* missingSel = ctx.graph.eq(selectorNode, missingConst);
-                            missingSel->loc = loc;
-                            selectors.push_back(missingSel);
-                            dataValues.push_back(defaultExpr);
-                        }
-                    }
-                    result = ctx.graph.muxN(selectors, dataValues);
-                    result->loc = loc;
-                }
+                DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
+                result->loc = loc;
                 if (result) merged.slices.push_back({low, high, result});
             }
             sortSlices(merged);
@@ -1005,48 +1043,30 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             defaultValue = retained;
         }
 
-        std::vector<DFGNode*> selectors;
+        std::vector<int64_t> selectorValues;
         std::vector<DFGNode*> dataValues;
-        for (const auto& branch : branches) {
-            DFGNode* value = branchValue(signalName, branch.modifiedDrivers, defaultValue);
+        selectorValues.reserve(static_cast<size_t>(numValues));
+        dataValues.reserve(static_cast<size_t>(numValues));
+        for (int64_t selectorValue = 0; selectorValue < numValues; ++selectorValue) {
+            DFGNode* value = defaultValue;
+            for (const auto& branch : branches) {
+                if (std::find(branch.selectorValues.begin(), branch.selectorValues.end(), selectorValue) !=
+                        branch.selectorValues.end()) {
+                    value = branchValue(signalName, branch.modifiedDrivers, defaultValue);
+                    break;
+                }
+            }
             if (!value) {
                 throw CompilerError(
-                    "Signal '" + signalName + "' not assigned in all branches and has no default/fallback",
+                    "Signal '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
                     loc);
             }
-            selectors.push_back(branch.condition);
+            selectorValues.push_back(selectorValue);
             dataValues.push_back(value);
         }
 
-        if (defaultValue && selectorNode->hasType()) {
-            int width = selectorNode->type->width;
-            int64_t numValues = int64_t(1) << width;
-            for (int64_t v = 0; v < numValues; ++v) {
-                if (explicitCaseValues.contains(v)) continue;
-                auto* missingConst = ctx.graph.constant(v);
-                missingConst->type = selectorNode->type;
-                missingConst->loc = loc;
-                auto* missingSel = ctx.graph.eq(selectorNode, missingConst);
-                missingSel->loc = loc;
-                selectors.push_back(missingSel);
-                dataValues.push_back(defaultValue);
-            }
-        }
-
-        DFGNode* result = nullptr;
-        if (selectors.empty()) {
-            if (!defaultValue) {
-                throw CompilerError(
-                    "Signal '" + signalName + "' not assigned in any case branch and has no default/fallback",
-                    loc);
-            }
-            result = defaultValue;
-        } else if (selectors.size() == 1) {
-            result = dataValues[0];
-        } else {
-            result = ctx.graph.muxN(selectors, dataValues);
-            result->loc = loc;
-        }
+        DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
+        result->loc = loc;
 
         connectDriver(ctx, signalName, result);
         if (!ctx.is_sequential) {
@@ -2822,8 +2842,12 @@ void resolveConditionalStatementInPlace(
         ResolutionContext& ctx){
     const auto& predicate = conditionalStatement->predicate;
     if (conditionalStatement->uniqueOrPriority){
-        throw CompilerError("Unique/priority not supported on if",
-                            resolveSourceLoc(*conditionalStatement, ctx.sm));
+        auto keyword = conditionalStatement->uniqueOrPriority.kind;
+        if (keyword == slang::parsing::TokenKind::UniqueKeyword ||
+                keyword == slang::parsing::TokenKind::Unique0Keyword) {
+            throw CompilerError("unique/unique0 modifiers are not supported on if",
+                                resolveSourceLoc(*conditionalStatement, ctx.sm));
+        }
     }
     if (predicate->conditions.size()>1){
         throw CompilerError("Support for single predicate on if",
@@ -2881,7 +2905,15 @@ void resolveCaseStatementInPlace(
         const CaseStatementSyntax* caseStatement,
         ResolutionContext& ctx) {
 
-    // unique/priority qualifiers are synthesis hints; semantically equivalent to plain case
+    if (caseStatement->uniqueOrPriority) {
+        auto keyword = caseStatement->uniqueOrPriority.kind;
+        if (keyword == slang::parsing::TokenKind::UniqueKeyword ||
+                keyword == slang::parsing::TokenKind::Unique0Keyword) {
+            throw CompilerError("unique/unique0 modifiers are not supported on case",
+                                resolveSourceLoc(*caseStatement, ctx.sm));
+        }
+    }
+
     // Only support basic 'case', not casez/casex
     auto caseKeyword = caseStatement->caseKeyword.kind;
     if (caseKeyword == slang::parsing::TokenKind::CaseZKeyword) {
@@ -2900,8 +2932,7 @@ void resolveCaseStatementInPlace(
 
     // Collect info for each case branch — drivers only contains signals
     // actually modified in that branch (diff against fallback)
-    std::vector<ConditionalBranch> normalCases;
-    std::set<int64_t> explicitCaseValues;
+    std::vector<CaseBranch> normalCases;
     std::optional<DriverMap> defaultDrivers;
     std::optional<PartialDriverMap> defaultPartialDrivers;
 
@@ -2920,18 +2951,15 @@ void resolveCaseStatementInPlace(
                                     resolveSourceLoc(*caseStatement, ctx.sm));
             }
 
-            // Build condition: selector == case_value
-            auto* caseValueNode = buildExprDFG(caseItem.expressions[0], ctx);
-            auto* conditionNode = ctx.graph.eq(selectorNode, caseValueNode);
-            conditionNode->loc = caseLoc;
-            if (caseValueNode->op == DFGOp::CONST) {
-                explicitCaseValues.insert(std::get<int64_t>(caseValueNode->data));
-            }
+            int64_t caseValue = normalizeSelectorCode(
+                evaluateConstantExpr(caseItem.expressions[0], ctx.params, ctx.sm, *caseStatement),
+                selectorNode,
+                caseLoc);
 
             restoreDrivers(ctx, baselineDrivers);
             executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
             normalCases.push_back({
-                conditionNode,
+                {caseValue},
                 modifiedDriversSince(ctx, baselineDrivers),
                 modifiedPartialDriversSince(ctx, baselineDrivers)
             });
@@ -2949,7 +2977,6 @@ void resolveCaseStatementInPlace(
                       defaultDrivers,
                       defaultPartialDrivers,
                       baselineDrivers,
-                      explicitCaseValues,
                       caseLoc);
 }
 

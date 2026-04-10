@@ -65,7 +65,7 @@ static ResolvedType widenTypes(const ResolvedType& a, const ResolvedType& b) {
     return ResolvedType::makeInteger(width, is_signed);
 }
 
-// Validate that two enum types are compatible for a MUX/MUX_N branch.
+// Validate that two enum types are compatible for a MUX branch.
 // Returns the enum type if both match, or the widened integer type if neither is enum.
 // Throws on mismatch.
 static ResolvedType mergeDataTypes(const ResolvedType& a, const ResolvedType& b,
@@ -74,7 +74,7 @@ static ResolvedType mergeDataTypes(const ResolvedType& a, const ResolvedType& b,
         if (!a.isEnum() || !b.isEnum() ||
             a.enumInfo().type_name != b.enumInfo().type_name)
             throw CompilerError(
-                std::format("Type error: MUX/MUX_N branches have incompatible types '{}' and '{}'",
+                std::format("Type error: MUX branches have incompatible types '{}' and '{}'",
                     a.isEnum() ? a.enumInfo().type_name : "integer",
                     b.isEnum() ? b.enumInfo().type_name : "integer"), loc);
         return a;  // same enum type
@@ -212,29 +212,14 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::MUX: {
             if (node->in.size() < 3) {
                 throw CompilerError(std::format(
-                    "Type propagation: MUX {} has {} inputs (expected 3)",
+                    "Type propagation: MUX {} has {} inputs (expected selector + at least 2 arms)",
                     node->str(), node->in.size()), node->loc);
             }
-            auto* tval = node->in[1].node;
-            auto* fval = node->in[2].node;
-            if (!tval->hasType() || !fval->hasType()) return false;
-            node->type = mergeDataTypes(*tval->type, *fval->type, node->loc);
-            return true;
-        }
-
-        // MUX_N: result = type of data inputs (must all be same enum type or all integer)
-        case DFGOp::MUX_N: {
-            size_t n = node->in.size() / 2;
-            if (n == 0) {
-                throw CompilerError(std::format(
-                    "Type propagation: MUX_N {} has no inputs", node->str()), node->loc);
-            }
-            // Data values are in[n..2n-1]
-            for (size_t i = n; i < node->in.size(); ++i) {
+            for (size_t i = 1; i < node->in.size(); ++i) {
                 if (!node->in[i].node->hasType()) return false;
             }
-            ResolvedType result = *node->in[n].node->type;
-            for (size_t i = n + 1; i < node->in.size(); ++i) {
+            ResolvedType result = *node->in[1].node->type;
+            for (size_t i = 2; i < node->in.size(); ++i) {
                 result = mergeDataTypes(result, *node->in[i].node->type, node->loc);
             }
             node->type = result;

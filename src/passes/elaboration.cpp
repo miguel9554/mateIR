@@ -448,7 +448,7 @@ static DFGNode* buildRelativeSliceExpr(ResolutionContext& ctx,
         relHigh->loc = *loc;
         relLow->loc = *loc;
     }
-    auto* idx = ctx.graph.index(slice.expr, relHigh, relLow);
+    auto* idx = ctx.graph.slice(slice.expr, relHigh, relLow);
     if (loc) idx->loc = *loc;
     return idx;
 }
@@ -1684,7 +1684,7 @@ static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
             highNode->loc = *loc;
             lowNode->loc = *loc;
         }
-        auto* truncated = ctx.graph.index(expr, highNode, lowNode);
+        auto* truncated = ctx.graph.slice(expr, highNode, lowNode);
         truncated->type = ResolvedType::makeInteger(targetWidth, targetSigned);
         if (loc) truncated->loc = *loc;
         expr = truncated;
@@ -1895,7 +1895,7 @@ DFGNode* buildExprDFG(
                                 int64_t offset = packedIndexOffsetFromLsb(dim, idx) * elemWidth;
                                 auto* lowNode = ctx.graph.constant(offset);
                                 auto* highNode = ctx.graph.constant(offset + elemWidth - 1);
-                                indexedSignalNode = ctx.graph.index(indexedSignalNode, highNode, lowNode);
+                                indexedSignalNode = ctx.graph.slice(indexedSignalNode, highNode, lowNode);
                                 indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
 
                                 ResolvedType narrowed = *currentSelectedType;
@@ -1905,36 +1905,115 @@ DFGNode* buildExprDFG(
                                 continue;
                             }
                         } catch (const std::runtime_error&) {
-                            // not constant — fall through to INDEX
+                            // not constant — emit MUX for unpacked array, throw for packed
                         }
                         auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
-                        indexedSignalNode = ctx.graph.index(indexedSignalNode, selectorExprNode, selectorExprNode);
-                        indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
-                            ResolvedType narrowed = *currentSelectedType;
-                            narrowed.width = static_cast<int>(packedSuffixWidth(*currentSelectedType, 1));
-                            narrowed.packed_dims.erase(narrowed.packed_dims.begin());
-                            currentSelectedType = narrowed;
-                        } else if (currentSelectedType && !currentSelectedType->unpacked_dims.empty()) {
-                            currentSelectedType->unpacked_dims.erase(currentSelectedType->unpacked_dims.begin());
+                        if (!currentSelectedType || currentSelectedType->unpacked_dims.empty()) {
+                            throw CompilerError(
+                                "Dynamic bit-select on packed vector is not yet supported",
+                                resolveSourceLoc(*expr, ctx.sm));
                         }
+                        // Dynamic unpacked array indexing → MUX.
+                        // Per IEEE 1800-2023 §11.5.2, out-of-bounds access returns x (4-state)
+                        // or 0 (2-state). We return 0 to match Verilator's 2-state behavior.
+                        // TODO: Return don't-care once the IR supports it — using 0 pessimizes
+                        //       synthesis results for designs with out-of-bounds-free guarantees.
+                        const auto& dim = currentSelectedType->unpacked_dims.front();
+                        int64_t lo = std::min((int64_t)dim.left, (int64_t)dim.right);
+                        int64_t hi = std::max((int64_t)dim.left, (int64_t)dim.right);
+                        int64_t N  = hi - lo + 1;
+
+                        if (N == 1) {
+                            // Degenerate single-element array: no MUX needed.
+                            std::string elemKey = baseName + "[" + std::to_string(lo) + "]";
+                            DFGNode* elemNode = ctx.local_signals.count(elemKey)
+                                ? ctx.local_signals.at(elemKey)
+                                : ctx.graph.lookupSignal("", elemKey);
+                            if (!elemNode)
+                                throw CompilerError(
+                                    "Dynamic index: element not found: " + elemKey,
+                                    resolveSourceLoc(*expr, ctx.sm));
+                            indexedSignalNode = elemNode;
+                        } else {
+                            // Selector width S = ceil(log2(N)).
+                            int S = 0;
+                            while ((1LL << S) < N) ++S;
+                            int64_t totalCodes = 1LL << S;
+
+                            // Adjust selector: adjusted = raw - lo (arm 0 → index lo, etc.).
+                            // Skip subtraction for the common lo == 0 case.
+                            DFGNode* adjustedSel = selectorExprNode;
+                            if (lo != 0) {
+                                adjustedSel = ctx.graph.sub(
+                                    selectorExprNode, ctx.graph.constant(lo));
+                                adjustedSel->loc = resolveSourceLoc(*expr, ctx.sm);
+                            }
+                            // Truncate to S bits so the selector covers exactly [0, 2^S - 1].
+                            DFGNode* truncSel = ctx.graph.slice(
+                                adjustedSel,
+                                ctx.graph.constant(S - 1),
+                                ctx.graph.constant(0));
+                            truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
+
+                            std::vector<int64_t> armValues;
+                            std::vector<DFGNode*> armData;
+                            DFGNode* zeroNode = ctx.graph.constant(0);
+
+                            for (int64_t v = 0; v < totalCodes; v++) {
+                                armValues.push_back(v);
+                                if (v < N) {
+                                    int64_t idx = lo + v;
+                                    std::string elemKey =
+                                        baseName + "[" + std::to_string(idx) + "]";
+                                    DFGNode* elemNode = ctx.local_signals.count(elemKey)
+                                        ? ctx.local_signals.at(elemKey)
+                                        : ctx.graph.lookupSignal("", elemKey);
+                                    if (!elemNode)
+                                        throw CompilerError(
+                                            "Dynamic index: element not found: " + elemKey,
+                                            resolveSourceLoc(*expr, ctx.sm));
+                                    armData.push_back(elemNode);
+                                } else {
+                                    // Out-of-bounds → 0 (see TODO above)
+                                    armData.push_back(zeroNode);
+                                }
+                            }
+
+                            indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
+                        }
+                        indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        currentSelectedType->unpacked_dims.erase(
+                            currentSelectedType->unpacked_dims.begin());
                     } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect){
+                        // Per SV spec, both bounds must be constant expressions.
+                        // If non-constant bounds somehow reach here, type_propagation
+                        // will reject the SLICE with a [BUG] message.
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* leftNode = buildExprDFG(rangeSelect.left, ctx);
                         auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
-                        indexedSignalNode = ctx.graph.index(indexedSignalNode, leftNode, rightNode);
+                        indexedSignalNode = ctx.graph.slice(indexedSignalNode, leftNode, rightNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
                         currentSelectedType.reset();
                     } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
                         // [base +: width] → [base+width-1 : base]
+                        // Per SV spec, width must be constant; base may be dynamic.
+                        // Dynamic base is not yet supported (would require a MUX).
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
                         auto* widthNode = buildExprDFG(rangeSelect.right, ctx);
+                        try {
+                            evaluateConstantExpr(rangeSelect.left, ctx.params);
+                        } catch (const std::runtime_error&) {
+                            throw CompilerError(
+                                "Dynamic indexed part-select [base +: width] with variable "
+                                "base is not supported",
+                                resolveSourceLoc(*expr, ctx.sm));
+                        }
                         auto* one  = ctx.graph.constant(1);
                         auto* sum  = ctx.graph.add(baseNode, widthNode);
                         auto* high = ctx.graph.sub(sum, one);
                         high->loc = resolveSourceLoc(*expr, ctx.sm);
-                        indexedSignalNode = ctx.graph.index(indexedSignalNode, high, baseNode);
+                        indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, baseNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
                         currentSelectedType.reset();
                     } else {
@@ -2399,7 +2478,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             highConst->loc = resolveSourceLoc(assignExpr, ctx.sm);
             auto* lowConst = ctx.graph.constant(low);
             lowConst->loc = resolveSourceLoc(assignExpr, ctx.sm);
-            auto* sliceNode = ctx.graph.index(RHSexprNode, highConst, lowConst);
+            auto* sliceNode = ctx.graph.slice(RHSexprNode, highConst, lowConst);
             sliceNode->loc = resolveSourceLoc(assignExpr, ctx.sm);
 
             std::string outputName;

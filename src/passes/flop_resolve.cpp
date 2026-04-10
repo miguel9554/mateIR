@@ -69,7 +69,7 @@ bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
     if (node->op == DFGOp::INPUT) {
         return node->name == flop_name + ".q";
     }
-    if (node->op != DFGOp::INDEX) {
+    if (node->op != DFGOp::SLICE) {
         return false;
     }
     auto* source = node->in[0].node;
@@ -86,7 +86,7 @@ std::optional<int64_t> constantValueOfNode(const DFGNode* node) {
     if (node->op == DFGOp::CONST) {
         return std::get<int64_t>(node->data);
     }
-    if (node->op == DFGOp::INDEX) {
+    if (node->op == DFGOp::SLICE) {
         auto src = constantValueOfNode(node->in[0].node);
         if (!src) return std::nullopt;
         auto hi = constantValueOfNode(node->in[1].node);

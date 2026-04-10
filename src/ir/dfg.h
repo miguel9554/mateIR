@@ -21,7 +21,7 @@ enum class DFGOp {
     OUTPUT,     // Primary output (module port)
     SIGNAL,     // Internal signal (named placeholder)
     CONST,      // Constant value (data: int64_t)
-    INDEX,      // Indexing: in[0]=source, in[1]=high, in[2]=low
+    SLICE,      // Static bit-slice: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
     CONCAT,       // Concatenation: in[0..N-1] = parts, MSB-first
     CONCAT_ALIGN, // Temporary: in[0]=expr, in[1]=high_idx, in[2]=low_idx
     CAST,         // Type cast: in[0]=source, type set at elaboration (e.g. integer → enum)
@@ -64,7 +64,7 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::OUTPUT: return "OUTPUT";
         case DFGOp::SIGNAL: return "SIGNAL";
         case DFGOp::CONST: return "CONST";
-        case DFGOp::INDEX: return "INDEX";
+        case DFGOp::SLICE: return "SLICE";
         case DFGOp::CONCAT: return "CONCAT";
         case DFGOp::CONCAT_ALIGN: return "CONCAT_ALIGN";
         case DFGOp::CAST: return "CAST";
@@ -115,7 +115,7 @@ inline int expectedInputs(DFGOp op) {
         // MUX: variable input count, validated separately
         case DFGOp::MUX:    return -1;
 
-        case DFGOp::INDEX:  return 3;
+        case DFGOp::SLICE:  return 3;
         case DFGOp::CONCAT: return -1; // variable
         case DFGOp::CONCAT_ALIGN: return 3;
         case DFGOp::CAST:   return 1;
@@ -404,11 +404,12 @@ public:
         return nodes.back().get();
     }
 
-    // Create an INDEX node: source[high:low] (single-element: high == low)
-    DFGNode* index(DFGNode* source, DFGNode* high, DFGNode* low, const std::string& name = "") {
+    // Create a SLICE node: source[high:low]. high and low MUST be CONST nodes
+    // (static bit extraction only). Dynamic indexing must be lowered to MUX instead.
+    DFGNode* slice(DFGNode* source, DFGNode* high, DFGNode* low, const std::string& name = "") {
         auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGOp::INDEX)
-            : std::make_unique<DFGNode>(DFGOp::INDEX, name);
+            ? std::make_unique<DFGNode>(DFGOp::SLICE)
+            : std::make_unique<DFGNode>(DFGOp::SLICE, name);
         n->in = {source, high, low};
         nodes.push_back(std::move(n));
         if (!name.empty()) {

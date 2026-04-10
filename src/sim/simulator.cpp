@@ -329,7 +329,11 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::REDUCTION_XNOR:
             return boolValue(!getVal(0).reductionXor());
 
-        case DFGOp::INDEX: {
+        case DFGOp::SLICE: {
+            // SLICE has CONST high/low. Dynamic indexing is lowered to MUX during
+            // elaboration. However, constant-indexed unpacked array access uses the
+            // pattern SLICE(aggregate_signal, i, i) where i is the element index and
+            // aggregate_signal.in[i] holds the actual element node.
             const DFGNode* source_node = node->in[0].node;
 
             if (source_node->type.has_value() && !source_node->type->unpacked_dims.empty()) {
@@ -337,9 +341,9 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
                 int64_t n = static_cast<int64_t>(source_node->in.size());
                 if (index < 0 || index >= n)
                     throw CompilerError(std::format(
-                        "Simulator: INDEX out of bounds: index={}, array size={} in node {}",
-                        index, n, node->str()),
-                        node);
+                        "Simulator: SLICE array index out of bounds: index={}, "
+                        "array size={} in node {}",
+                        index, n, node->str()), node);
                 return checkedGet(source_node->in[index].node, node);
             }
 
@@ -357,7 +361,7 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
                 }
             } else {
                 // Source is a flat bit-vector (no packed_dims): 0-indexed, bit_pos = low.
-                // This is correct — CONCAT results and range-select INDEX results
+                // This is correct — CONCAT results and range-select SLICE results
                 // are intentionally flat, with no explicit dimension descriptor.
                 bit_pos = low;
             }

@@ -88,7 +88,7 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
 static bool tryConstantFold(DFGNode* node) {
     // Skip nodes that are already constants or have no inputs
     if (node->op == DFGOp::CONST || node->op == DFGOp::INPUT ||
-        node->op == DFGOp::INDEX ||
+        node->op == DFGOp::SLICE ||
         node->op == DFGOp::CONCAT_ALIGN)
         return false;
 

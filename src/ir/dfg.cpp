@@ -74,7 +74,7 @@ std::string DFG::renderDot(const std::string& graphName,
                     }
                 }
                 break;
-            case DFGOp::INDEX: ss << "INDEX"; break;
+            case DFGOp::SLICE: ss << "SLICE"; break;
             case DFGOp::CONCAT: ss << "CONCAT"; break;
             case DFGOp::CONCAT_ALIGN: ss << "CONCAT_ALIGN"; break;
             case DFGOp::CAST: ss << "CAST"; break;
@@ -126,7 +126,7 @@ std::string DFG::renderDot(const std::string& graphName,
                     return "d[" + std::to_string(node->mux_values[j - 1]) + "]";
                 }
                 break;
-            case DFGOp::INDEX:
+            case DFGOp::SLICE:
                 if (j == 0) return "src";
                 if (j == 1) return "hi";
                 if (j == 2) return "lo";

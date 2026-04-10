@@ -1,0 +1,18 @@
+module_name: unpacked_reverse_index
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - stim
+      - sel
+      - rev_flat
+      - rev_idx0
+      - rev_idx1
+      - rev_idx2
+      - rev_idx3
+      - rev_var

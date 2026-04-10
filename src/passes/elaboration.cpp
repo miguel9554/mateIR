@@ -1887,6 +1887,12 @@ DFGNode* buildExprDFG(
                                     }
                                     continue;
                                 }
+
+                                baseName = elemKey;
+                                ResolvedType narrowed = *currentSelectedType;
+                                narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                                currentSelectedType = narrowed;
+                                continue;
                             }
 
                             if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
@@ -1918,6 +1924,20 @@ DFGNode* buildExprDFG(
                         // or 0 (2-state). We return 0 to match Verilator's 2-state behavior.
                         // TODO: Return don't-care once the IR supports it — using 0 pessimizes
                         //       synthesis results for designs with out-of-bounds-free guarantees.
+                        auto lookupUnpackedElem = [&](int64_t idx) -> DFGNode* {
+                            std::string elemKey = baseName + "[" + std::to_string(idx) + "]";
+                            if (ctx.local_signals.count(elemKey))
+                                return ctx.local_signals.at(elemKey);
+                            if (auto* elemNode = ctx.graph.lookupSignal("", elemKey))
+                                return elemNode;
+                            std::string qKey = elemKey + ".q";
+                            if (ctx.local_signals.count(qKey))
+                                return ctx.local_signals.at(qKey);
+                            if (auto* qNode = ctx.graph.lookupSignal("", qKey))
+                                return qNode;
+                            return nullptr;
+                        };
+
                         const auto& dim = currentSelectedType->unpacked_dims.front();
                         int64_t lo = std::min((int64_t)dim.left, (int64_t)dim.right);
                         int64_t hi = std::max((int64_t)dim.left, (int64_t)dim.right);
@@ -1925,13 +1945,11 @@ DFGNode* buildExprDFG(
 
                         if (N == 1) {
                             // Degenerate single-element array: no MUX needed.
-                            std::string elemKey = baseName + "[" + std::to_string(lo) + "]";
-                            DFGNode* elemNode = ctx.local_signals.count(elemKey)
-                                ? ctx.local_signals.at(elemKey)
-                                : ctx.graph.lookupSignal("", elemKey);
+                            DFGNode* elemNode = lookupUnpackedElem(lo);
                             if (!elemNode)
                                 throw CompilerError(
-                                    "Dynamic index: element not found: " + elemKey,
+                                    "Dynamic index: element not found: " +
+                                        baseName + "[" + std::to_string(lo) + "]",
                                     resolveSourceLoc(*expr, ctx.sm));
                             indexedSignalNode = elemNode;
                         } else {
@@ -1963,14 +1981,11 @@ DFGNode* buildExprDFG(
                                 armValues.push_back(v);
                                 if (v < N) {
                                     int64_t idx = lo + v;
-                                    std::string elemKey =
-                                        baseName + "[" + std::to_string(idx) + "]";
-                                    DFGNode* elemNode = ctx.local_signals.count(elemKey)
-                                        ? ctx.local_signals.at(elemKey)
-                                        : ctx.graph.lookupSignal("", elemKey);
+                                    DFGNode* elemNode = lookupUnpackedElem(idx);
                                     if (!elemNode)
                                         throw CompilerError(
-                                            "Dynamic index: element not found: " + elemKey,
+                                            "Dynamic index: element not found: " +
+                                                baseName + "[" + std::to_string(idx) + "]",
                                             resolveSourceLoc(*expr, ctx.sm));
                                     armData.push_back(elemNode);
                                 } else {
@@ -1997,25 +2012,117 @@ DFGNode* buildExprDFG(
                     } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
                         // [base +: width] → [base+width-1 : base]
                         // Per SV spec, width must be constant; base may be dynamic.
-                        // Dynamic base is not yet supported (would require a MUX).
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
-                        auto* widthNode = buildExprDFG(rangeSelect.right, ctx);
+                        int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                             ctx.sm, *rangeSelect.right);
                         try {
-                            evaluateConstantExpr(rangeSelect.left, ctx.params);
+                            int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                                ctx.sm, *rangeSelect.left);
+                            auto* high = ctx.graph.constant(base + width - 1);
+                            auto* low  = ctx.graph.constant(base);
+                            indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
+                            indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
                         } catch (const std::runtime_error&) {
-                            throw CompilerError(
-                                "Dynamic indexed part-select [base +: width] with variable "
-                                "base is not supported",
-                                resolveSourceLoc(*expr, ctx.sm));
+                            if (!currentSelectedType || !currentSelectedType->unpacked_dims.empty()) {
+                                throw CompilerError(
+                                    "Indexed part-select [base +: width] requires a packed source",
+                                    resolveSourceLoc(*expr, ctx.sm));
+                            }
+
+                            int64_t sourceWidth = currentSelectedType->width;
+                            int64_t maxLow = sourceWidth - width;
+                            int selBits = 0;
+                            while ((1LL << selBits) < sourceWidth) ++selBits;
+                            if (selBits == 0) selBits = 1;
+
+                            auto* truncSel = ctx.graph.slice(
+                                baseNode,
+                                ctx.graph.constant(selBits - 1),
+                                ctx.graph.constant(0));
+                            truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
+
+                            std::vector<int64_t> armValues;
+                            std::vector<DFGNode*> armData;
+                            DFGNode* zeroNode = ctx.graph.constant(0);
+                            zeroNode->type = ResolvedType::makeInteger(
+                                static_cast<int>(width), currentSelectedType->isSigned());
+
+                            for (int64_t v = 0; v < (1LL << selBits); ++v) {
+                                armValues.push_back(v);
+                                if (v <= maxLow) {
+                                    auto* high = ctx.graph.constant(v + width - 1);
+                                    auto* low  = ctx.graph.constant(v);
+                                    auto* slice = ctx.graph.slice(indexedSignalNode, high, low);
+                                    slice->loc = resolveSourceLoc(*expr, ctx.sm);
+                                    armData.push_back(slice);
+                                } else {
+                                    armData.push_back(zeroNode);
+                                }
+                            }
+
+                            indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
+                            indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
                         }
-                        auto* one  = ctx.graph.constant(1);
-                        auto* sum  = ctx.graph.add(baseNode, widthNode);
-                        auto* high = ctx.graph.sub(sum, one);
-                        high->loc = resolveSourceLoc(*expr, ctx.sm);
-                        indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, baseNode);
-                        indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        currentSelectedType.reset();
+                        currentSelectedType = ResolvedType::makeInteger(
+                            static_cast<int>(width),
+                            currentSelectedType ? currentSelectedType->isSigned() : false);
+                    } else if (elemSelect->selector->kind == SyntaxKind::DescendingRangeSelect) {
+                        // [base -: width] → [base : base-width+1]
+                        const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
+                        auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
+                        int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                             ctx.sm, *rangeSelect.right);
+                        try {
+                            int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                                ctx.sm, *rangeSelect.left);
+                            auto* high = ctx.graph.constant(base);
+                            auto* low  = ctx.graph.constant(base - width + 1);
+                            indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
+                            indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        } catch (const std::runtime_error&) {
+                            if (!currentSelectedType || !currentSelectedType->unpacked_dims.empty()) {
+                                throw CompilerError(
+                                    "Indexed part-select [base -: width] requires a packed source",
+                                    resolveSourceLoc(*expr, ctx.sm));
+                            }
+
+                            int64_t sourceWidth = currentSelectedType->width;
+                            int selBits = 0;
+                            while ((1LL << selBits) < sourceWidth) ++selBits;
+                            if (selBits == 0) selBits = 1;
+
+                            auto* truncSel = ctx.graph.slice(
+                                baseNode,
+                                ctx.graph.constant(selBits - 1),
+                                ctx.graph.constant(0));
+                            truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
+
+                            std::vector<int64_t> armValues;
+                            std::vector<DFGNode*> armData;
+                            DFGNode* zeroNode = ctx.graph.constant(0);
+                            zeroNode->type = ResolvedType::makeInteger(
+                                static_cast<int>(width), currentSelectedType->isSigned());
+
+                            for (int64_t v = 0; v < (1LL << selBits); ++v) {
+                                armValues.push_back(v);
+                                if (v >= width - 1 && v < sourceWidth) {
+                                    auto* high = ctx.graph.constant(v);
+                                    auto* low  = ctx.graph.constant(v - width + 1);
+                                    auto* slice = ctx.graph.slice(indexedSignalNode, high, low);
+                                    slice->loc = resolveSourceLoc(*expr, ctx.sm);
+                                    armData.push_back(slice);
+                                } else {
+                                    armData.push_back(zeroNode);
+                                }
+                            }
+
+                            indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
+                            indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                        }
+                        currentSelectedType = ResolvedType::makeInteger(
+                            static_cast<int>(width),
+                            currentSelectedType ? currentSelectedType->isSigned() : false);
                     } else {
                         throw CompilerError(
                             "Only BitSelect and RangeSelect supported, got: " +
@@ -2421,6 +2528,140 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
     };
 
+    auto enumerateIndices = [](const ResolvedDimension& dim) {
+        std::vector<int64_t> indices;
+        int64_t step = dim.left <= dim.right ? 1 : -1;
+        for (int64_t idx = dim.left;; idx += step) {
+            indices.push_back(idx);
+            if (idx == dim.right) break;
+        }
+        return indices;
+    };
+
+    auto connectWholeUnpackedArray = [&](const std::string& baseName,
+                                         const ResolvedType& arrayType,
+                                         const std::vector<DFGNode*>& elementDrivers) {
+        if (arrayType.unpacked_dims.size() != 1) {
+            throw CompilerError("Only 1-D unpacked whole-array assignments are supported",
+                                assignLoc);
+        }
+
+        const auto indices = enumerateIndices(arrayType.unpacked_dims.front());
+        if (indices.size() != elementDrivers.size()) {
+            throw CompilerError("Whole-array assignment element count mismatch", assignLoc);
+        }
+
+        ResolvedType elementType = arrayType;
+        elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+
+        for (size_t i = 0; i < indices.size(); ++i) {
+            DFGNode* elemNode = coerceAssignmentExprToWidth(ctx, elementDrivers[i],
+                                                            elementType, assignLoc);
+            std::string outputName;
+            if (ctx.is_sequential) {
+                if (!isFlopName(baseName)) {
+                    throw CompilerError(
+                        std::format("{} NOT a flop and assigned on seq. block", baseName),
+                        assignLoc);
+                }
+                outputName = std::format("{}[{}].d", baseName, indices[i]);
+            } else {
+                outputName = std::format("{}[{}]", baseName, indices[i]);
+            }
+
+            if (!ctx.subroutine_locals.count(outputName))
+                recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+            connectNode(outputName, elemNode);
+
+            if (!ctx.is_sequential) {
+                ctx.combDrivers[outputName] = elemNode;
+            }
+        }
+
+        if (ctx.is_sequential) {
+            ctx.thisModule->flopsTriggers[flopTriggersKey(baseName)] = ctx.triggers;
+        }
+    };
+
+    if (right->kind == SyntaxKind::AssignmentPatternExpression) {
+        if (left->kind != SyntaxKind::IdentifierName) {
+            throw CompilerError(
+                "Assignment patterns are only supported for whole-array assignments",
+                assignLoc);
+        }
+
+        std::string baseName(left->as<IdentifierNameSyntax>().identifier.valueText());
+        const auto* declaredType = lookupDeclaredType(baseName, ctx);
+        if (!declaredType || declaredType->unpacked_dims.size() != 1) {
+            throw CompilerError(
+                "Assignment patterns are only supported for 1-D unpacked arrays",
+                assignLoc);
+        }
+
+        const auto indices = enumerateIndices(declaredType->unpacked_dims.front());
+        std::vector<DFGNode*> elementDrivers(indices.size(), nullptr);
+        auto& patternExpr = right->as<AssignmentPatternExpressionSyntax>();
+
+        if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
+            auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
+            if (pattern.items.size() != indices.size()) {
+                throw CompilerError(
+                    std::format("Assignment pattern for '{}' requires {} elements but {} were provided",
+                                baseName, indices.size(), pattern.items.size()),
+                    assignLoc);
+            }
+            for (size_t i = 0; i < indices.size(); ++i) {
+                elementDrivers[i] = buildExprDFG(pattern.items[i], ctx);
+            }
+        } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+            auto& pattern = patternExpr.pattern->as<StructuredAssignmentPatternSyntax>();
+            std::map<int64_t, DFGNode*> keyedDrivers;
+            DFGNode* defaultDriver = nullptr;
+
+            for (const auto* item : pattern.items) {
+                if (item->key->kind == SyntaxKind::DefaultPatternKeyExpression ||
+                    (item->key->kind == SyntaxKind::IdentifierName &&
+                     item->key->as<IdentifierNameSyntax>().identifier.valueText() == "default")) {
+                    if (defaultDriver) {
+                        throw CompilerError("Assignment pattern has multiple default keys",
+                                            assignLoc);
+                    }
+                    defaultDriver = buildExprDFG(item->expr, ctx);
+                    continue;
+                }
+
+                int64_t idx = evaluateConstantExpr(item->key, ctx.params, ctx.sm, *item->key,
+                                                   &ctx.pkgRegistry);
+                if (keyedDrivers.contains(idx)) {
+                    throw CompilerError(
+                        std::format("Assignment pattern has multiple keys for index {}", idx),
+                        assignLoc);
+                }
+                keyedDrivers[idx] = buildExprDFG(item->expr, ctx);
+            }
+
+            for (size_t i = 0; i < indices.size(); ++i) {
+                auto it = keyedDrivers.find(indices[i]);
+                if (it != keyedDrivers.end()) {
+                    elementDrivers[i] = it->second;
+                } else if (defaultDriver) {
+                    elementDrivers[i] = defaultDriver;
+                } else {
+                    throw CompilerError(
+                        std::format("Assignment pattern for '{}' does not cover index {}",
+                                    baseName, indices[i]),
+                        assignLoc);
+                }
+            }
+        } else {
+            throw CompilerError("Replicated assignment patterns are not yet supported",
+                                assignLoc);
+        }
+
+        connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
+        return;
+    }
+
     // Build the Expr graph of the RHS
     auto* RHSexprNode = buildExprDFG(right, ctx);
 
@@ -2524,6 +2765,54 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         throw CompilerError(
         "Left can only be variable name: " + std::string(toString(left->kind)),
         resolveSourceLoc(assignExpr, ctx.sm));
+    }
+
+    if (!selectors) {
+        if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
+            declaredType && declaredType->unpacked_dims.size() == 1 &&
+            right->kind == SyntaxKind::IdentifierName) {
+            std::string rhsBase(right->as<IdentifierNameSyntax>().identifier.valueText());
+            if (const auto* rhsType = lookupDeclaredType(rhsBase, ctx);
+                rhsType && rhsType->unpacked_dims.size() == 1 &&
+                rhsType->unpacked_dims.front().size() == declaredType->unpacked_dims.front().size()) {
+                std::vector<DFGNode*> elementDrivers;
+                int64_t rhsLo = std::min((int64_t)rhsType->unpacked_dims.front().left,
+                                         (int64_t)rhsType->unpacked_dims.front().right);
+                int64_t rhsHi = std::max((int64_t)rhsType->unpacked_dims.front().left,
+                                         (int64_t)rhsType->unpacked_dims.front().right);
+                for (int64_t idx = rhsLo; idx <= rhsHi; ++idx) {
+                    std::string elemName = rhsBase + "[" + std::to_string(idx) + "]";
+                    DFGNode* elemNode = nullptr;
+                    if (!ctx.is_sequential) {
+                        auto it = ctx.combDrivers.find(elemName);
+                        if (it != ctx.combDrivers.end()) elemNode = it->second;
+                    }
+                    if (!elemNode) elemNode = lookupTargetNode(ctx, elemName);
+                    if (!elemNode) elemNode = lookupTargetNode(ctx, elemName + ".q");
+                    if (!elemNode) {
+                        throw CompilerError("Whole-array assignment element not found: " + elemName,
+                                            assignLoc);
+                    }
+                    elementDrivers.push_back(elemNode);
+                }
+                connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
+                return;
+            }
+        }
+
+        if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
+            declaredType && declaredType->unpacked_dims.size() == 1 &&
+            RHSexprNode && RHSexprNode->type && !RHSexprNode->type->unpacked_dims.empty()) {
+            std::vector<DFGNode*> elementDrivers;
+            elementDrivers.reserve(RHSexprNode->in.size());
+            for (const auto& edge : RHSexprNode->in) {
+                elementDrivers.push_back(edge.node);
+            }
+            if (!elementDrivers.empty()) {
+                connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
+                return;
+            }
+        }
     }
 
     // Build the full element name for LHS by evaluating selectors statically.

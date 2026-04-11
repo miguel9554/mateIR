@@ -175,26 +175,28 @@ void VcdWriter::addSignalEntries(vcd_tracer::module& scope, const std::string& n
                                  const ResolvedSignal& sig,
                                  const std::unordered_set<const DFGNode*>& alive) {
     if (sig.type.unpacked_dims.empty()) {
-        addEntry(scope, name, sig.dfg_node, alive);
+        addEntry(scope, name, scalarSignalNode(sig), alive);
         return;
     }
 
     auto suffixes = unpackedIndexSuffixes(sig.type);
-    for (size_t i = 0; i < suffixes.size() && i < sig.binding.leaves.size(); ++i) {
-        addEntry(scope, name + suffixes[i], sig.binding.leaves[i], alive);
+    const auto& leaves = signalLeaves(sig);
+    for (size_t i = 0; i < suffixes.size() && i < leaves.size(); ++i) {
+        addEntry(scope, name + suffixes[i], leaves[i], alive);
     }
 }
 
 void VcdWriter::addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
                                const std::unordered_set<const DFGNode*>& alive) {
     if (flop.type.type.unpacked_dims.empty()) {
-        addEntry(scope, flop.name, flop.q_node, alive);
+        addEntry(scope, flop.name, scalarFlopQNode(flop), alive);
         return;
     }
 
     auto suffixes = unpackedIndexSuffixes(flop.type.type);
-    for (size_t i = 0; i < suffixes.size() && i < flop.binding.q_leaves.size(); ++i) {
-        addEntry(scope, flop.name + suffixes[i], flop.binding.q_leaves[i], alive);
+    const auto& leaves = flopQLeaves(flop);
+    for (size_t i = 0; i < suffixes.size() && i < leaves.size(); ++i) {
+        addEntry(scope, flop.name + suffixes[i], leaves[i], alive);
     }
 }
 

@@ -178,7 +178,7 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
     for (const auto& [portName, inputSig] : mod.inputs) {
         if (inputSig.sync_kind != SyncKind::Sync) continue;
 
-        for (auto* leaf : inputSig.binding.leaves) {
+        for (auto* leaf : signalLeaves(inputSig)) {
             if (!leaf) continue;
             auto reached = forwardTraversal(leaf);
             for (const auto& [flopName, flopClk] : reached) {
@@ -199,7 +199,7 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
     for (const auto& [portName, inputSig] : mod.inputs) {
         if (inputSig.sync_kind != SyncKind::Async) continue;
 
-        for (auto* leaf : inputSig.binding.leaves) {
+        for (auto* leaf : signalLeaves(inputSig)) {
             if (!leaf) continue;
             auto reached = forwardTraversal(leaf);
             for (const auto& [flopName, flopClk] : reached) {

@@ -104,6 +104,46 @@ DFGNode* leafAt(const SignalBinding& binding,
     return binding.leaves[idx];
 }
 
+const std::vector<DFGNode*>& signalLeaves(const ResolvedSignal& signal) {
+    return signal.binding.leaves;
+}
+
+DFGNode* scalarSignalNode(const ResolvedSignal& signal) {
+    try {
+        return scalarLeaf(signal.binding);
+    } catch (const CompilerError&) {
+        throw CompilerError(std::format(
+            "scalarSignalNode: signal '{}' is not scalar-bound ({} leaves)",
+            signal.name, signal.binding.leaves.size()));
+    }
+}
+
+const std::vector<DFGNode*>& flopDLeaves(const FlopInfo& flop) {
+    return flop.binding.d_leaves;
+}
+
+const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop) {
+    return flop.binding.q_leaves;
+}
+
+DFGNode* scalarFlopDNode(const FlopInfo& flop) {
+    if (flop.binding.d_leaves.size() != 1) {
+        throw CompilerError(std::format(
+            "scalarFlopDNode: flop '{}' is not scalar-bound ({} d leaves)",
+            flop.name, flop.binding.d_leaves.size()));
+    }
+    return flop.binding.d_leaves[0];
+}
+
+DFGNode* scalarFlopQNode(const FlopInfo& flop) {
+    if (flop.binding.q_leaves.size() != 1) {
+        throw CompilerError(std::format(
+            "scalarFlopQNode: flop '{}' is not scalar-bound ({} q leaves)",
+            flop.name, flop.binding.q_leaves.size()));
+    }
+    return flop.binding.q_leaves[0];
+}
+
 // ============================================================================
 // ResolvedType implementation
 // ============================================================================

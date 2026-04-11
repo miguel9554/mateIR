@@ -41,59 +41,32 @@ SimValue simValueFromType(int64_t value, const ResolvedType& type) {
     return SimValue::fromI64(value, type.width, type.isSigned());
 }
 
-SimValue simValueFromAggregateType(int64_t value, const ResolvedType& type) {
-    if (type.unpacked_dims.empty()) {
-        return simValueFromType(value, type);
-    }
-    ResolvedType elementType = type;
-    auto dim = elementType.unpacked_dims.front();
-    elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
-    std::vector<SimValue> elements;
-    for (size_t i = 0; i < static_cast<size_t>(dim.size()); ++i) {
-        elements.push_back(simValueFromAggregateType(value, elementType));
-    }
-    return SimValue::aggregate(std::move(elements));
-}
-
 SimValue boolValue(bool value) {
     return SimValue::fromU64(value ? 1 : 0, 1, false);
 }
 
 void assignFlopResetLeaves(ModuleInstance& root, const FlopInfo& flop, int64_t resetValue) {
-    if (!flop.binding.q_leaves.empty()) {
-        for (auto* qLeaf : flop.binding.q_leaves) {
-            if (!qLeaf) continue;
-            const ResolvedType& type = qLeaf->type.value_or(flop.type.type);
-            root.values[qLeaf] = simValueFromType(resetValue, type);
-        }
-        return;
-    }
-
-    if (flop.q_node) {
-        root.values[flop.q_node] =
-            simValueFromAggregateType(resetValue, flop.type.type);
+    for (auto* qLeaf : flopQLeaves(flop)) {
+        if (!qLeaf) continue;
+        const ResolvedType& type = qLeaf->type.value_or(flop.type.type);
+        root.values[qLeaf] = simValueFromType(resetValue, type);
     }
 }
 
 void copyFlopDToQLeaves(ModuleInstance& root, const FlopInfo& flop) {
-    if (!flop.binding.q_leaves.empty() || !flop.binding.d_leaves.empty()) {
-        if (flop.binding.q_leaves.size() != flop.binding.d_leaves.size()) {
-            throw CompilerError(std::format(
-                "Simulator: flop '{}' has mismatched d/q leaf counts ({} vs {})",
-                flop.name, flop.binding.d_leaves.size(), flop.binding.q_leaves.size()));
-        }
-        for (size_t i = 0; i < flop.binding.q_leaves.size(); ++i) {
-            auto* qLeaf = flop.binding.q_leaves[i];
-            auto* dLeaf = flop.binding.d_leaves[i];
-            if (qLeaf && dLeaf) {
-                root.values[qLeaf] = root.checkedGet(dLeaf);
-            }
-        }
-        return;
+    const auto& qLeaves = flopQLeaves(flop);
+    const auto& dLeaves = flopDLeaves(flop);
+    if (qLeaves.size() != dLeaves.size()) {
+        throw CompilerError(std::format(
+            "Simulator: flop '{}' has mismatched d/q leaf counts ({} vs {})",
+            flop.name, dLeaves.size(), qLeaves.size()));
     }
-
-    if (flop.q_node && flop.d_node) {
-        root.values[flop.q_node] = root.checkedGet(flop.d_node);
+    for (size_t i = 0; i < qLeaves.size(); ++i) {
+        auto* qLeaf = qLeaves[i];
+        auto* dLeaf = dLeaves[i];
+        if (qLeaf && dLeaf) {
+            root.values[qLeaf] = root.checkedGet(dLeaf);
+        }
     }
 }
 
@@ -199,12 +172,8 @@ void ModuleInstance::buildFlopMaps() {
     std::function<void(const ResolvedModule&, const NameMap&)> collect =
         [&](const ResolvedModule& mod, const NameMap& translation) {
         for (const auto& flop : mod.flops) {
-            if (!flop.binding.q_leaves.empty()) {
-                for (auto* qLeaf : flop.binding.q_leaves) {
-                    if (qLeaf) flop_q_nodes[qLeaf] = &flop;
-                }
-            } else if (flop.q_node) {
-                flop_q_nodes[flop.q_node] = &flop;
+            for (auto* qLeaf : flopQLeaves(flop)) {
+                if (qLeaf) flop_q_nodes[qLeaf] = &flop;
             }
             CollectedFlop collected{
                 .flop = &flop,

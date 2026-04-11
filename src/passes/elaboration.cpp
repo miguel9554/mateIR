@@ -3988,7 +3988,7 @@ void prePopulateInput(DFG& graph, ResolvedSignal& sig) {
             node->type = leafType;
             sig.binding.leaves.push_back(node);
         }
-        sig.dfg_node = sig.binding.leaves.empty() ? nullptr : sig.binding.leaves.front();
+        sig.dfg_node = nullptr;
     }
 }
 
@@ -4010,7 +4010,7 @@ void prePopulateOutput(DFG& graph, ResolvedSignal& sig) {
             node->type = leafType;
             sig.binding.leaves.push_back(node);
         }
-        sig.dfg_node = sig.binding.leaves.empty() ? nullptr : sig.binding.leaves.front();
+        sig.dfg_node = nullptr;
     }
 }
 
@@ -4034,7 +4034,7 @@ void prePopulateSignal(DFG& graph, ResolvedSignal& sig) {
         node->type = leafType;
         sig.binding.leaves.push_back(node);
     }
-    sig.dfg_node = sig.binding.leaves.empty() ? nullptr : sig.binding.leaves.front();
+    sig.dfg_node = nullptr;
 }
 
 // Pre-populate the DFG .d/.q nodes for a single flop, derived entirely from
@@ -4072,9 +4072,9 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
         qElem->type = elemType;
         flop.binding.q_leaves.push_back(qElem);
     }
-    flop.d_node = flop.binding.d_leaves.empty() ? nullptr : flop.binding.d_leaves.front();
-    flop.q_node = flop.binding.q_leaves.empty() ? nullptr : flop.binding.q_leaves.front();
-    flop.type.dfg_node = flop.q_node;
+    flop.d_node = nullptr;
+    flop.q_node = nullptr;
+    flop.type.dfg_node = nullptr;
     flop.type.binding.leaves = flop.binding.q_leaves;
 }
 
@@ -4453,10 +4453,11 @@ static void resolveGenerateScopeDecls(
                 if (!ctx.instance_path.empty()) {
                     std::string qualName = ctx.instance_path + "." + name;
                     ResolvedSignal genSig;
-                    genSig.name     = qualName;
-                    genSig.type     = type;
-                    genSig.dfg_node = node;
-                    ctx.thisModule->signals[qualName] = genSig;
+                genSig.name     = qualName;
+                genSig.type     = type;
+                genSig.dfg_node = node;
+                genSig.binding.leaves = {node};
+                ctx.thisModule->signals[qualName] = genSig;
                 }
             } else {
                 ctx.local_array_types[name] = type;
@@ -4474,7 +4475,7 @@ static void resolveGenerateScopeDecls(
                     ctx.local_signals[name + suffix] = leaf;
                     genSig.binding.leaves.push_back(leaf);
                 }
-                genSig.dfg_node = genSig.binding.leaves.empty() ? nullptr : genSig.binding.leaves.front();
+                genSig.dfg_node = nullptr;
 
                 if (!ctx.instance_path.empty()) {
                     ctx.thisModule->signals[genSig.name] = genSig;
@@ -5063,16 +5064,25 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     for (auto& parameter : resolved.localparams)
         parameter.dfg_node = graph.lookupSignal("", parameter.name);
     for (auto& [name, input] : resolved.inputs)
-        input.dfg_node = input.binding.leaves.empty() ? graph.lookupSignal("", name) : input.binding.leaves.front();
+        input.dfg_node = input.type.unpacked_dims.empty()
+            ? scalarSignalNode(input)
+            : nullptr;
     for (auto& [name, output] : resolved.outputs)
-        output.dfg_node = output.binding.leaves.empty() ? graph.getOutputNode("", name) : output.binding.leaves.front();
+        output.dfg_node = output.type.unpacked_dims.empty()
+            ? scalarSignalNode(output)
+            : nullptr;
     for (auto& [name, sig] : resolved.signals)
-        sig.dfg_node = sig.binding.leaves.empty() ? graph.lookupSignal("", name) : sig.binding.leaves.front();
+        sig.dfg_node = sig.type.unpacked_dims.empty()
+            ? scalarSignalNode(sig)
+            : nullptr;
     for (auto& flop : resolved.flops) {
-        if (flop.binding.d_leaves.empty()) flop.d_node = graph.getOutputNode("", flop.name + ".d");
-        else flop.d_node = flop.binding.d_leaves.front();
-        if (flop.binding.q_leaves.empty()) flop.q_node = graph.getInputNode("", flop.name + ".q");
-        else flop.q_node = flop.binding.q_leaves.front();
+        if (flop.type.type.unpacked_dims.empty()) {
+            flop.d_node = scalarFlopDNode(flop);
+            flop.q_node = scalarFlopQNode(flop);
+        } else {
+            flop.d_node = nullptr;
+            flop.q_node = nullptr;
+        }
     }
 
     // === Resolve all blocks into the shared graph ===

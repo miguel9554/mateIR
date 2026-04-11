@@ -516,16 +516,14 @@ int main(int argc, char** argv) {
                 for (const auto& parameter : mod.localparams)
                     if (parameter.dfg_node) keepAlive.insert(parameter.dfg_node);
                 for (const auto& [name, sig] : mod.inputs)
-                    for (auto* leaf : sig.binding.leaves) if (leaf) keepAlive.insert(leaf);
+                    for (auto* leaf : signalLeaves(sig)) if (leaf) keepAlive.insert(leaf);
                 for (const auto& [name, sig] : mod.outputs)
-                    for (auto* leaf : sig.binding.leaves) if (leaf) keepAlive.insert(leaf);
+                    for (auto* leaf : signalLeaves(sig)) if (leaf) keepAlive.insert(leaf);
                 for (const auto& [name, sig] : mod.signals)
-                    for (auto* leaf : sig.binding.leaves) if (leaf) keepAlive.insert(leaf);
+                    for (auto* leaf : signalLeaves(sig)) if (leaf) keepAlive.insert(leaf);
                 for (const auto& flop : mod.flops) {
-                    for (auto* leaf : flop.binding.d_leaves) if (leaf) keepAlive.insert(leaf);
-                    for (auto* leaf : flop.binding.q_leaves) if (leaf) keepAlive.insert(leaf);
-                    if (flop.d_node) keepAlive.insert(flop.d_node);
-                    if (flop.q_node) keepAlive.insert(flop.q_node);
+                    for (auto* leaf : flopDLeaves(flop)) if (leaf) keepAlive.insert(leaf);
+                    for (auto* leaf : flopQLeaves(flop)) if (leaf) keepAlive.insert(leaf);
                 }
                 for (const auto& sub : mod.hierarchyInstantiation)
                     collect(sub);

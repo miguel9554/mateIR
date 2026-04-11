@@ -49,18 +49,28 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
             }
         }
 
-        // Update sig.dfg_node to the driver: subInputNode will be dead after rewiring
-        // and will be removed by DCE, leaving the old pointer dangling.
+        // Update scalar input binding metadata: subInputNode will be dead after
+        // rewiring and removed by DCE.
         if (auto it = sub->inputs.find(portName); it != sub->inputs.end()) {
-            it->second.dfg_node = driver.node;
+            for (auto*& leaf : it->second.binding.leaves) {
+                if (leaf == subInputNode) leaf = driver.node;
+            }
+            if (it->second.type.unpacked_dims.empty()) {
+                it->second.dfg_node = driver.node;
+            }
         }
 
-        // Recursively fix dfg_node in deeper descendants that were wired to subInputNode
-        // during a prior (inner) inlining pass. Without this, grandchild input dfg_nodes
-        // remain pointing to the now-dead subInputNode after DCE removes it.
+        // Recursively fix input bindings in deeper descendants that were wired to
+        // subInputNode during a prior inner inlining pass.
         std::function<void(ResolvedModule&)> fixDescendants = [&](ResolvedModule& mod) {
-            for (auto& [name, inp] : mod.inputs)
-                if (inp.dfg_node == subInputNode) inp.dfg_node = driver.node;
+            for (auto& [name, inp] : mod.inputs) {
+                for (auto*& leaf : inp.binding.leaves) {
+                    if (leaf == subInputNode) leaf = driver.node;
+                }
+                if (inp.type.unpacked_dims.empty() && inp.dfg_node == subInputNode) {
+                    inp.dfg_node = driver.node;
+                }
+            }
             for (auto& child : mod.hierarchyInstantiation)
                 fixDescendants(child);
         };
@@ -122,8 +132,8 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
             }),
         parentNodes.end());
 
-    // Step 7: Null sub DFG — all raw pointers (dfg_node, d_node, q_node) remain valid
-    // since the DFGNode objects now live in parent.dfg->nodes.
+    // Step 7: Null sub DFG — binding pointers remain valid since the DFGNode
+    // objects now live in parent.dfg->nodes.
     sub->dfg.reset();
 }
 

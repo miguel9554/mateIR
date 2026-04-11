@@ -45,6 +45,9 @@ struct FlopBinding {
     std::vector<DFGNode*> q_leaves;
 };
 
+struct ResolvedSignal;
+struct FlopInfo;
+
 // ============================================================================
 // Leaf layout helpers
 // ============================================================================
@@ -77,6 +80,14 @@ DFGNode* leafAt(const SignalBinding& binding,
                 const ResolvedType& type,
                 const std::vector<int64_t>& indices);
 
+// Authoritative signal/flop binding accessors.
+const std::vector<DFGNode*>& signalLeaves(const ResolvedSignal& signal);
+DFGNode* scalarSignalNode(const ResolvedSignal& signal);
+const std::vector<DFGNode*>& flopDLeaves(const FlopInfo& flop);
+const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop);
+DFGNode* scalarFlopDNode(const FlopInfo& flop);
+DFGNode* scalarFlopQNode(const FlopInfo& flop);
+
 // ============================================================================
 // Signal and parameter structures
 // ============================================================================
@@ -92,8 +103,8 @@ struct ResolvedSignal : ResolvedSignalBase{
     SyncKind sync_kind = SyncKind::Sync;
     ResolvedSignal* clock_domain = nullptr;
     std::optional<edge_t> clock_edge;
-    // Single leaf for scalars; kept for backward compatibility with consumers
-    // that haven't been migrated to use binding.leaves yet.
+    // Scalar-only compatibility pointer. For unpacked arrays this must be null;
+    // use binding.leaves for authoritative storage.
     DFGNode* dfg_node = nullptr;
     // Leaf bindings in declaration order. This is the authoritative source.
     SignalBinding binding;
@@ -129,7 +140,8 @@ struct FlopInfo {
     asyncTrigger_t clock;
     std::optional<asyncTrigger_t> reset;
     std::optional<int> reset_value;
-    // Kept for backward compatibility; use binding for new code.
+    // Scalar-only compatibility pointers. For unpacked array flops these must be
+    // null; use binding for authoritative storage.
     DFGNode* d_node = nullptr;
     DFGNode* q_node = nullptr;
     // Leaf bindings in declaration order.

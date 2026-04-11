@@ -1876,6 +1876,32 @@ DFGNode* buildExprDFG(
                         try {
                             int64_t idx = evaluateConstantExpr(bitSelect.expr, ctx.params);
                             if (currentSelectedType && !currentSelectedType->unpacked_dims.empty()) {
+                                std::string elemKey = baseName + "[" + std::to_string(idx) + "]";
+                                if (auto elemIt = ctx.local_signals.find(elemKey);
+                                        elemIt != ctx.local_signals.end()) {
+                                    indexedSignalNode = elemIt->second;
+                                    if (indexedSignalNode->hasType()) {
+                                        currentSelectedType = *indexedSignalNode->type;
+                                    } else {
+                                        ResolvedType narrowed = *currentSelectedType;
+                                        narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                                        currentSelectedType = narrowed;
+                                    }
+                                    baseName = elemKey;
+                                    continue;
+                                }
+                                if (auto* elemNode = ctx.graph.lookupSignal("", elemKey)) {
+                                    indexedSignalNode = elemNode;
+                                    if (indexedSignalNode->hasType()) {
+                                        currentSelectedType = *indexedSignalNode->type;
+                                    } else {
+                                        ResolvedType narrowed = *currentSelectedType;
+                                        narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                                        currentSelectedType = narrowed;
+                                    }
+                                    baseName = elemKey;
+                                    continue;
+                                }
                                 auto* idxConst = ctx.graph.constant(idx);
                                 ResolvedType narrowed = *currentSelectedType;
                                 narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());

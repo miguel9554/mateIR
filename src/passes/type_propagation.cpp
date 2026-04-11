@@ -73,14 +73,6 @@ static ResolvedType widenTypes(const ResolvedType& a, const ResolvedType& b) {
     return ResolvedType::makeInteger(width, is_signed);
 }
 
-static ResolvedType indexUnpackedType(const ResolvedType& aggregate) {
-    ResolvedType result = aggregate;
-    if (!result.unpacked_dims.empty()) {
-        result.unpacked_dims.erase(result.unpacked_dims.begin());
-    }
-    return result;
-}
-
 // Validate that two enum types are compatible for a MUX branch.
 // Returns the enum type if both match, or the widened integer type if neither is enum.
 // Throws on mismatch.
@@ -360,59 +352,6 @@ bool inferNodeType(DFGNode* node) {
             auto* expr = node->in[0].node;
             if (!expr->hasType()) return false;
             node->type = *expr->type;
-            return true;
-        }
-
-        case DFGOp::ARRAY_CONSTRUCT: {
-            if (node->in.empty()) {
-                throw CompilerError(std::format(
-                    "Type propagation: ARRAY_CONSTRUCT {} has no inputs", node->str()), node->loc);
-            }
-            for (const auto& input : node->in) {
-                if (!input.node->hasType()) return false;
-            }
-            if (node->type) {
-                return false;
-            }
-            ResolvedType elementType = *node->in[0].node->type;
-            ResolvedDimension dim{
-                .left = 0,
-                .right = static_cast<int>(node->in.size()) - 1,
-            };
-            node->type = elementType;
-            node->type->unpacked_dims.insert(node->type->unpacked_dims.begin(), dim);
-            return true;
-        }
-
-        case DFGOp::ARRAY_INDEX: {
-            if (node->in.size() < 2) {
-                throw CompilerError(std::format(
-                    "Type propagation: ARRAY_INDEX {} has {} inputs (expected 2)",
-                    node->str(), node->in.size()), node->loc);
-            }
-            auto* array = node->in[0].node;
-            auto* index = node->in[1].node;
-            if (!array->hasType()) return false;
-            if (array->type->unpacked_dims.empty()) {
-                throw CompilerError(std::format(
-                    "Type propagation: ARRAY_INDEX {} source is not an unpacked array",
-                    node->str()), node->loc);
-            }
-            if (index->op != DFGOp::CONST) {
-                throw CompilerError(std::format(
-                    "Type propagation: ARRAY_INDEX {} index is not CONST",
-                    node->str()), node->loc);
-            }
-            int64_t idx = std::get<int64_t>(index->data);
-            const auto& dim = array->type->unpacked_dims.front();
-            int64_t lo = std::min<int64_t>(dim.left, dim.right);
-            int64_t hi = std::max<int64_t>(dim.left, dim.right);
-            if (idx < lo || idx > hi) {
-                throw CompilerError(std::format(
-                    "Type propagation: ARRAY_INDEX {} index {} out of bounds [{}:{}]",
-                    node->str(), idx, dim.left, dim.right), node->loc);
-            }
-            node->type = indexUnpackedType(*array->type);
             return true;
         }
 

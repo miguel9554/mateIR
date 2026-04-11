@@ -83,6 +83,11 @@ private:
     void addEntry(vcd_tracer::module& scope, const std::string& name,
                   const DFGNode* node,
                   const std::unordered_set<const DFGNode*>& alive);
+    void addSignalEntries(vcd_tracer::module& scope, const std::string& name,
+                          const ResolvedSignal& sig,
+                          const std::unordered_set<const DFGNode*>& alive);
+    void addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
+                        const std::unordered_set<const DFGNode*>& alive);
 };
 
 } // namespace custom_hdl

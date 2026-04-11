@@ -13,28 +13,6 @@ namespace custom_hdl {
 
 namespace {
 
-// Generate all index suffixes for multi-dimensional arrays
-// For [0:1], returns ["[0]", "[1]"]
-// For [0:1][0:1], returns ["[0][0]", "[[0][1]", "[1][0]", "[1][1]"]
-std::vector<std::string> generateIndexSuffixes(const std::vector<ResolvedDimension>& dimensions) {
-    if (dimensions.empty()) {
-        return {""};
-    }
-
-    std::vector<std::string> result = {""};
-    for (const auto& dim : dimensions) {
-        std::vector<std::string> newResult;
-        int step = (dim.left <= dim.right) ? 1 : -1;
-        for (int i = dim.left; step > 0 ? i <= dim.right : i >= dim.right; i += step) {
-            for (const auto& prefix : result) {
-                newResult.push_back(prefix + "[" + std::to_string(i) + "]");
-            }
-        }
-        result = std::move(newResult);
-    }
-    return result;
-}
-
 // Return all leaf element names for a signal (expanding dimensions)
 std::vector<std::string> allElements(const ResolvedSignal& signal) {
     std::vector<std::string> current = {signal.name};
@@ -427,16 +405,13 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
                 output.dfg_node->in = {{qNode, 0}};
             }
         } else {
-            for (const auto& suffix : generateIndexSuffixes(output.type.unpacked_dims)) {
+            auto suffixes = unpackedIndexSuffixes(output.type);
+            for (size_t i = 0; i < suffixes.size(); ++i) {
+                const auto& suffix = suffixes[i];
                 DFGNode* qNode = graph.getInputNode(instance_path, outName + suffix + ".q");
-                // Individual element output nodes may also be in dfg outputs map
-                // or just exist as nodes in the flat DFG; use the map if available.
-                DFGNode* outNode = graph.getOutputNode(instance_path, outName + suffix);
-                if (!outNode) {
-                    // For submodule outputs not in flat DFG outputs map,
-                    // there's no per-element dfg_node stored; skip.
-                    continue;
-                }
+                DFGNode* outNode = i < output.binding.leaves.size()
+                    ? output.binding.leaves[i]
+                    : graph.getOutputNode(instance_path, outName + suffix);
                 if (qNode) {
                     outNode->in = {{qNode, 0}};
                 }
@@ -455,6 +430,12 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
             {
                 resolved_flops.back().d_node = graph.getOutputNode(instance_path, name + ".d");
                 resolved_flops.back().q_node = graph.getInputNode(instance_path, name + ".q");
+                resolved_flops.back().binding = FlopBinding{
+                    .d_leaves = {resolved_flops.back().d_node},
+                    .q_leaves = {resolved_flops.back().q_node},
+                };
+                resolved_flops.back().type.dfg_node = resolved_flops.back().q_node;
+                resolved_flops.back().type.binding.leaves = {resolved_flops.back().q_node};
             }
             DFGNode* output = resolved_flops.back().d_node;
             const asyncTrigger_t clock = resolved_flops.back().clock;

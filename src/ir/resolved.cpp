@@ -1,6 +1,7 @@
 #include "ir/resolved.h"
 #include "util/debug.h"
 
+#include <algorithm>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -9,6 +10,99 @@
 #include <set>
 
 namespace custom_hdl {
+
+// ============================================================================
+// Leaf layout helpers
+// ============================================================================
+
+size_t unpackedLeafCount(const ResolvedType& type) {
+    size_t count = 1;
+    for (const auto& dim : type.unpacked_dims) {
+        count *= static_cast<size_t>(dim.size());
+    }
+    return count;
+}
+
+size_t linearUnpackedIndex(const std::vector<ResolvedDimension>& dims,
+                           const std::vector<int64_t>& indices) {
+    if (indices.size() != dims.size()) {
+        throw CompilerError("unpacked index rank mismatch");
+    }
+
+    size_t linear = 0;
+    size_t stride = 1;
+
+    // Iterate from innermost (rightmost) dimension outward.
+    for (size_t rev = dims.size(); rev-- > 0;) {
+        const auto& dim = dims[rev];
+        int64_t idx = indices[rev];
+
+        int64_t lo = std::min<int64_t>(dim.left, dim.right);
+        int64_t hi = std::max<int64_t>(dim.left, dim.right);
+        if (idx < lo || idx > hi) {
+            throw CompilerError(std::format("unpacked index {} out of bounds [{}, {}]",
+                                            idx, lo, hi));
+        }
+
+        size_t pos = dim.left <= dim.right
+            ? static_cast<size_t>(idx - dim.left)
+            : static_cast<size_t>(dim.left - idx);
+
+        linear += pos * stride;
+        stride *= static_cast<size_t>(dim.size());
+    }
+
+    return linear;
+}
+
+std::vector<std::string> unpackedIndexSuffixes(const ResolvedType& type) {
+    if (type.unpacked_dims.empty()) {
+        return {""};
+    }
+
+    std::vector<std::string> result = {""};
+    for (const auto& dim : type.unpacked_dims) {
+        std::vector<std::string> newResult;
+        int step = (dim.left <= dim.right) ? 1 : -1;
+        for (const auto& prefix : result) {
+            for (int i = dim.left; step > 0 ? i <= dim.right : i >= dim.right; i += step) {
+                newResult.push_back(prefix + "[" + std::to_string(i) + "]");
+            }
+        }
+        result = std::move(newResult);
+    }
+    return result;
+}
+
+ResolvedType dropFirstUnpackedDim(ResolvedType type) {
+    if (!type.unpacked_dims.empty()) {
+        type.unpacked_dims.erase(type.unpacked_dims.begin());
+    }
+    return type;
+}
+
+ResolvedType unpackedElementType(const ResolvedType& type) {
+    return dropFirstUnpackedDim(type);
+}
+
+DFGNode* scalarLeaf(const SignalBinding& binding) {
+    if (binding.leaves.size() != 1) {
+        throw CompilerError(std::format(
+            "scalarLeaf: expected 1 leaf, got {}", binding.leaves.size()));
+    }
+    return binding.leaves[0];
+}
+
+DFGNode* leafAt(const SignalBinding& binding,
+                const ResolvedType& type,
+                const std::vector<int64_t>& indices) {
+    size_t idx = linearUnpackedIndex(type.unpacked_dims, indices);
+    if (idx >= binding.leaves.size()) {
+        throw CompilerError(std::format(
+            "leafAt: index {} out of range (binding has {} leaves)", idx, binding.leaves.size()));
+    }
+    return binding.leaves[idx];
+}
 
 // ============================================================================
 // ResolvedType implementation

@@ -171,6 +171,33 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
     values_[node].push_back(std::move(v));
 }
 
+void VcdWriter::addSignalEntries(vcd_tracer::module& scope, const std::string& name,
+                                 const ResolvedSignal& sig,
+                                 const std::unordered_set<const DFGNode*>& alive) {
+    if (sig.type.unpacked_dims.empty()) {
+        addEntry(scope, name, sig.dfg_node, alive);
+        return;
+    }
+
+    auto suffixes = unpackedIndexSuffixes(sig.type);
+    for (size_t i = 0; i < suffixes.size() && i < sig.binding.leaves.size(); ++i) {
+        addEntry(scope, name + suffixes[i], sig.binding.leaves[i], alive);
+    }
+}
+
+void VcdWriter::addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
+                               const std::unordered_set<const DFGNode*>& alive) {
+    if (flop.type.type.unpacked_dims.empty()) {
+        addEntry(scope, flop.name, flop.q_node, alive);
+        return;
+    }
+
+    auto suffixes = unpackedIndexSuffixes(flop.type.type);
+    for (size_t i = 0; i < suffixes.size() && i < flop.binding.q_leaves.size(); ++i) {
+        addEntry(scope, flop.name + suffixes[i], flop.binding.q_leaves[i], alive);
+    }
+}
+
 // ============================================================================
 // VcdWriter::setupHier — hierarchical VCD
 // ============================================================================
@@ -231,16 +258,16 @@ void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scop
 
     for (const auto& [name, sig] : mod.inputs) {
         if (name.ends_with(".q")) continue;  // shown in flops section
-        unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
-        auto v = std::make_unique<SimVcdValue>(w);
-        v->elaborate(inputs_mod.get_add_fn(), name);
         if (sig.sync_kind == SyncKind::Clock ||
             sig.sync_kind == SyncKind::Reset) {
+            unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
+            auto v = std::make_unique<SimVcdValue>(w);
+            v->elaborate(inputs_mod.get_add_fn(), name);
             auto it = translation.find(name);
             const std::string& key = it != translation.end() ? it->second : name;
             async_values_[key].push_back(std::move(v));
-        } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
-            values_[sig.dfg_node].push_back(std::move(v));
+        } else {
+            addSignalEntries(inputs_mod, name, sig, alive);
         }
     }
 
@@ -248,30 +275,28 @@ void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scop
         if (name.ends_with(".q") || name.ends_with(".d")) continue;
         auto dot = name.rfind('.');
         if (dot == std::string::npos) {
-            addEntry(signals_mod, name, sig.dfg_node, alive);
+            addSignalEntries(signals_mod, name, sig, alive);
         } else {
-            addEntry(getGenScope(name.substr(0, dot)).get_or_create_signals(),
-                     name.substr(dot + 1), sig.dfg_node, alive);
+            addSignalEntries(getGenScope(name.substr(0, dot)).get_or_create_signals(),
+                             name.substr(dot + 1), sig, alive);
         }
     }
 
     for (const auto& flop : mod.flops) {
-        if (!flop.q_node || !alive.count(flop.q_node)) continue;
-        unsigned int w = getWidth(flop.q_node);
-        auto v = std::make_unique<SimVcdValue>(w);
         auto dot = flop.name.rfind('.');
         if (dot == std::string::npos) {
-            v->elaborate(flops_mod.get_add_fn(), flop.name);
+            addFlopEntries(flops_mod, flop, alive);
         } else {
-            v->elaborate(getGenScope(flop.name.substr(0, dot)).get_or_create_flops().get_add_fn(),
-                         flop.name.substr(dot + 1));
+            FlopInfo localFlop = flop;
+            localFlop.name = flop.name.substr(dot + 1);
+            addFlopEntries(getGenScope(flop.name.substr(0, dot)).get_or_create_flops(),
+                           localFlop, alive);
         }
-        values_[flop.q_node].push_back(std::move(v));
     }
 
     for (const auto& [name, sig] : mod.outputs) {
         if (name.ends_with(".d")) continue;  // flop inputs, not module outputs
-        addEntry(outputs_mod, name, sig.dfg_node, alive);
+        addSignalEntries(outputs_mod, name, sig, alive);
     }
 
     for (const auto& sub : mod.hierarchyInstantiation) {
@@ -317,16 +342,16 @@ void VcdWriter::setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
 
     for (const auto& [name, sig] : mod.inputs) {
         if (name.ends_with(".q")) continue;
-        unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
-        auto v = std::make_unique<SimVcdValue>(w);
-        v->elaborate(scope.get_add_fn(), name);
         if (sig.sync_kind == SyncKind::Clock ||
             sig.sync_kind == SyncKind::Reset) {
+            unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
+            auto v = std::make_unique<SimVcdValue>(w);
+            v->elaborate(scope.get_add_fn(), name);
             auto it = translation.find(name);
             const std::string& key = it != translation.end() ? it->second : name;
             async_values_[key].push_back(std::move(v));
-        } else if (sig.dfg_node && alive.count(sig.dfg_node)) {
-            values_[sig.dfg_node].push_back(std::move(v));
+        } else {
+            addSignalEntries(scope, name, sig, alive);
         }
     }
 
@@ -334,30 +359,30 @@ void VcdWriter::setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
         if (name.ends_with(".q") || name.ends_with(".d")) continue;
         auto dot = name.rfind('.');
         if (dot == std::string::npos) {
-            addEntry(scope, name, sig.dfg_node, alive);
+            addSignalEntries(scope, name, sig, alive);
         } else {
-            addEntry(getGenScope(name.substr(0, dot)), name.substr(dot + 1), sig.dfg_node, alive);
+            addSignalEntries(getGenScope(name.substr(0, dot)), name.substr(dot + 1), sig, alive);
         }
     }
 
     for (const auto& flop : mod.flops) {
-        if (!flop.q_node || !alive.count(flop.q_node)) continue;
-        unsigned int w = getWidth(flop.q_node);
-        auto v = std::make_unique<SimVcdValue>(w);
         std::string vcd_name = flop.name;
         if (vcd_name.ends_with(".q")) vcd_name.resize(vcd_name.size() - 2);
         auto dot = vcd_name.rfind('.');
         if (dot == std::string::npos) {
-            v->elaborate(scope.get_add_fn(), vcd_name);
+            FlopInfo localFlop = flop;
+            localFlop.name = vcd_name;
+            addFlopEntries(scope, localFlop, alive);
         } else {
-            v->elaborate(getGenScope(vcd_name.substr(0, dot)).get_add_fn(), vcd_name.substr(dot + 1));
+            FlopInfo localFlop = flop;
+            localFlop.name = vcd_name.substr(dot + 1);
+            addFlopEntries(getGenScope(vcd_name.substr(0, dot)), localFlop, alive);
         }
-        values_[flop.q_node].push_back(std::move(v));
     }
 
     for (const auto& [name, sig] : mod.outputs) {
         if (name.ends_with(".d")) continue;
-        addEntry(scope, name, sig.dfg_node, alive);
+        addSignalEntries(scope, name, sig, alive);
     }
 
     for (const auto& sub : mod.hierarchyInstantiation) {

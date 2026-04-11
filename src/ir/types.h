@@ -14,6 +14,7 @@ struct ResolvedDimension {
     int right = 0;
 
     int size() const { return std::abs(left - right) + 1; }
+    bool operator==(const ResolvedDimension&) const = default;
 };
 
 enum class ResolvedTypeKind {

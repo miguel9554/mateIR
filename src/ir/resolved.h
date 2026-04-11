@@ -26,6 +26,61 @@ typedef struct {
     std::string name;
 } asyncTrigger_t;
 
+// ============================================================================
+// Leaf binding structures
+// ============================================================================
+
+// Declaration-order DFG leaves for a signal.
+// Scalars and packed vectors have exactly one leaf.
+// Unpacked arrays have one leaf per flattened element (declaration order,
+// outermost dimension first).
+struct SignalBinding {
+    std::vector<DFGNode*> leaves;
+};
+
+// Per-leaf .d (sink) and .q (source) bindings for a flop signal.
+// Scalar flops use the one-leaf case.
+struct FlopBinding {
+    std::vector<DFGNode*> d_leaves;
+    std::vector<DFGNode*> q_leaves;
+};
+
+// ============================================================================
+// Leaf layout helpers
+// ============================================================================
+
+// Number of DFG leaves for a type: product of all unpacked dimension sizes.
+// Scalars and packed vectors return 1.
+size_t unpackedLeafCount(const ResolvedType& type);
+
+// Linear leaf index for a multi-dimensional unpacked address.
+// indices[i] is the SV index value for dims[i]; declared order (outermost first).
+size_t linearUnpackedIndex(const std::vector<ResolvedDimension>& dims,
+                           const std::vector<int64_t>& indices);
+
+// All declaration-order index suffix strings for a type's unpacked dimensions.
+// E.g. type [0:1][0:1] → {"[0][0]", "[0][1]", "[1][0]", "[1][1]"}
+// Scalars return {""}.
+std::vector<std::string> unpackedIndexSuffixes(const ResolvedType& type);
+
+// Return the type with its first unpacked dimension removed.
+ResolvedType dropFirstUnpackedDim(ResolvedType type);
+
+// Return the element type of the first unpacked dimension (same as dropFirstUnpackedDim).
+ResolvedType unpackedElementType(const ResolvedType& type);
+
+// Return the single leaf for a scalar/packed-vector signal (asserts leaf count == 1).
+DFGNode* scalarLeaf(const SignalBinding& binding);
+
+// Return the leaf for a given set of unpacked indices.
+DFGNode* leafAt(const SignalBinding& binding,
+                const ResolvedType& type,
+                const std::vector<int64_t>& indices);
+
+// ============================================================================
+// Signal and parameter structures
+// ============================================================================
+
 struct ResolvedSignalBase {
     std::string name;
     ResolvedType type;
@@ -37,7 +92,11 @@ struct ResolvedSignal : ResolvedSignalBase{
     SyncKind sync_kind = SyncKind::Sync;
     ResolvedSignal* clock_domain = nullptr;
     std::optional<edge_t> clock_edge;
-    DFGNode* dfg_node = nullptr;  // direct pointer to the corresponding DFG node
+    // Single leaf for scalars; kept for backward compatibility with consumers
+    // that haven't been migrated to use binding.leaves yet.
+    DFGNode* dfg_node = nullptr;
+    // Leaf bindings in declaration order. This is the authoritative source.
+    SignalBinding binding;
     void print(std::ostream& os) const {
         ResolvedSignalBase::print(os);
         const char* sk = sync_kind == SyncKind::Sync  ? "Sync"  :
@@ -70,8 +129,11 @@ struct FlopInfo {
     asyncTrigger_t clock;
     std::optional<asyncTrigger_t> reset;
     std::optional<int> reset_value;
-    DFGNode* d_node = nullptr;  // pointer to .d signal node
-    DFGNode* q_node = nullptr;  // pointer to .q signal node
+    // Kept for backward compatibility; use binding for new code.
+    DFGNode* d_node = nullptr;
+    DFGNode* q_node = nullptr;
+    // Leaf bindings in declaration order.
+    FlopBinding binding;
 
     void print(std::ostream& os, int indent = 0) const;
 };

@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <utility>
 
 namespace custom_hdl {
@@ -14,8 +15,28 @@ SimVcdValue::SimVcdValue(unsigned int bit_size)
 {
 }
 
+SimVcdValue::SimVcdValue(unsigned int bit_size, std::vector<size_t> aggregate_path)
+    : value_base(bit_size),
+      bit_size_(bit_size),
+      aggregate_path_(std::move(aggregate_path)),
+      value_(bit_size == 0 ? "0" : std::string(bit_size, '0'))
+{
+}
+
 void SimVcdValue::set(const SimValue& value) {
-    std::string next = value.resized(static_cast<int>(bit_size_), false).toBinaryString();
+    const SimValue* selected = &value;
+    for (size_t index : aggregate_path_) {
+        if (!selected->isAggregate() || index >= selected->elements().size()) {
+            unknown();
+            return;
+        }
+        selected = &selected->element(index);
+    }
+    if (selected->isAggregate()) {
+        unknown();
+        return;
+    }
+    std::string next = selected->resized(static_cast<int>(bit_size_), false).toBinaryString();
     if (state_ != vcd_tracer::value_state::known || next != value_) {
         state_ = vcd_tracer::value_state::known;
         value_ = std::move(next);
@@ -115,22 +136,32 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
                          const std::unordered_set<const DFGNode*>& alive) {
     if (!node || !alive.count(node)) return;
 
-    // Unpacked array: node->in[i] are the individual element nodes.
-    // Register each element separately as name[idx] using the Verilog dimension indices.
-    if (node->type.has_value() && !node->type->unpacked_dims.empty() && !node->in.empty()) {
-        const auto& dim = node->type->unpacked_dims[0];
-        for (size_t i = 0; i < node->in.size(); ++i) {
-            const DFGNode* elem = node->in[i].node;
-            if (!elem || !alive.count(elem)) continue;
-            int64_t idx = (dim.left <= dim.right)
-                ? dim.left + static_cast<int64_t>(i)
-                : dim.left - static_cast<int64_t>(i);
-            std::string elem_name = name + "[" + std::to_string(idx) + "]";
-            unsigned int w = getWidth(elem);
-            auto v = std::make_unique<SimVcdValue>(w);
-            v->elaborate(scope.get_add_fn(), elem_name);
-            values_[elem].push_back(std::move(v));
-        }
+    if (node->type.has_value() && !node->type->unpacked_dims.empty()) {
+        std::function<void(const ResolvedType&, size_t, std::string, std::vector<size_t>)> addLeaves;
+        addLeaves = [&](const ResolvedType& type,
+                        size_t dimIndex,
+                        std::string leafName,
+                        std::vector<size_t> path) {
+            if (dimIndex == type.unpacked_dims.size()) {
+                unsigned int w = type.width > 0 ? static_cast<unsigned int>(type.width) : 1;
+                auto v = std::make_unique<SimVcdValue>(w, path);
+                v->elaborate(scope.get_add_fn(), leafName);
+                values_[node].push_back(std::move(v));
+                return;
+            }
+            const auto& dim = type.unpacked_dims[dimIndex];
+            int64_t step = dim.left <= dim.right ? 1 : -1;
+            size_t pos = 0;
+            for (int64_t idx = dim.left;; idx += step, ++pos) {
+                auto nextPath = path;
+                nextPath.push_back(pos);
+                addLeaves(type, dimIndex + 1,
+                          leafName + "[" + std::to_string(idx) + "]",
+                          std::move(nextPath));
+                if (idx == dim.right) break;
+            }
+        };
+        addLeaves(*node->type, 0, name, {});
         return;
     }
 

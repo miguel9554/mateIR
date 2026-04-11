@@ -298,7 +298,17 @@ FlopInfo extractFlopClockAndReset(
     DFGNode*& functionalLogic)
 {
     auto flop = flopIn;
-    DFGNode* dNode = flopIn.d_node ? flopIn.d_node : graph.getOutputNode(instance_path, flop_name + ".d");
+    DFGNode* dNode = nullptr;
+    if (!flopIn.type.type.unpacked_dims.empty() && flop_name != flopIn.name) {
+        dNode = graph.getOutputNode(instance_path, flop_name + ".d");
+    } else {
+        dNode = flopIn.d_node ? flopIn.d_node : graph.getOutputNode(instance_path, flop_name + ".d");
+    }
+    if (!dNode) {
+        throw CompilerError(std::format(
+            "Flop .d node not found: {}",
+            instance_path.empty() ? flop_name + ".d" : instance_path + "." + flop_name + ".d"));
+    }
     auto* dNodeDriver = dNode->in[0].node;
     const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
 

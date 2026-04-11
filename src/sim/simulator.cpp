@@ -41,6 +41,20 @@ SimValue simValueFromType(int64_t value, const ResolvedType& type) {
     return SimValue::fromI64(value, type.width, type.isSigned());
 }
 
+SimValue simValueFromAggregateType(int64_t value, const ResolvedType& type) {
+    if (type.unpacked_dims.empty()) {
+        return simValueFromType(value, type);
+    }
+    ResolvedType elementType = type;
+    auto dim = elementType.unpacked_dims.front();
+    elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+    std::vector<SimValue> elements;
+    for (size_t i = 0; i < static_cast<size_t>(dim.size()); ++i) {
+        elements.push_back(simValueFromAggregateType(value, elementType));
+    }
+    return SimValue::aggregate(std::move(elements));
+}
+
 SimValue boolValue(bool value) {
     return SimValue::fromU64(value ? 1 : 0, 1, false);
 }
@@ -72,6 +86,7 @@ ModuleInstance::ModuleInstance(const std::string& name, const ResolvedModule& mo
 // ============================================================================
 
 SimValue ModuleInstance::maskToWidth(const SimValue& val, const DFGNode* node) {
+    if (val.isAggregate()) return val;
     if (!node->type.has_value() || node->type->width <= 0)
         throw CompilerError(std::format(
             "Simulator: node {} has no resolved type width for masking (type_propagation incomplete?)",
@@ -200,11 +215,19 @@ void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
     for (const auto& [qnode, flop] : flop_q_nodes) {
         int w = flop->type.type.width;
         if (mode == FlopsInitial::Random) {
-            values[qnode] = SimValue::random(w, flop->type.type.isSigned(), rng);
+            if (!flop->type.type.unpacked_dims.empty()) {
+                values[qnode] = simValueFromAggregateType(0, flop->type.type);
+            } else {
+                values[qnode] = SimValue::random(w, flop->type.type.isSigned(), rng);
+            }
         } else if (mode == FlopsInitial::AllOnes) {
-            values[qnode] = SimValue::ones(w, flop->type.type.isSigned());
+            if (!flop->type.type.unpacked_dims.empty()) {
+                values[qnode] = simValueFromAggregateType(-1, flop->type.type);
+            } else {
+                values[qnode] = SimValue::ones(w, flop->type.type.isSigned());
+            }
         } else {
-            values[qnode] = SimValue::zero(w, flop->type.type.isSigned());
+            values[qnode] = simValueFromAggregateType(0, flop->type.type);
         }
     }
 }
@@ -380,6 +403,38 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
                 parts.push_back(checkedGet(node->in[i].node, node));
             }
             return SimValue::concat(parts);
+        }
+
+        case DFGOp::ARRAY_CONSTRUCT: {
+            std::vector<SimValue> elements;
+            elements.reserve(node->in.size());
+            for (const auto& input : node->in) {
+                elements.push_back(checkedGet(input.node, node));
+            }
+            return SimValue::aggregate(std::move(elements));
+        }
+
+        case DFGOp::ARRAY_INDEX: {
+            const DFGNode* source = node->in[0].node;
+            const DFGNode* indexNode = node->in[1].node;
+            int64_t index = static_cast<int64_t>(checkedGet(indexNode, node).lowU64());
+            const auto& sourceType = *source->type;
+            const auto& dim = sourceType.unpacked_dims.front();
+            int64_t lo = std::min<int64_t>(dim.left, dim.right);
+            int64_t hi = std::max<int64_t>(dim.left, dim.right);
+            if (index < lo || index > hi) {
+                throw CompilerError(std::format(
+                    "Simulator: ARRAY_INDEX out of bounds: index={}, bounds=[{}:{}] in node {}",
+                    index, dim.left, dim.right, node->str()), node);
+            }
+            int64_t pos = dim.left <= dim.right ? (index - dim.left) : (dim.left - index);
+            const SimValue& aggregate = checkedGet(source, node);
+            if (!aggregate.isAggregate()) {
+                throw CompilerError(std::format(
+                    "Simulator: ARRAY_INDEX {} source {} evaluated to scalar",
+                    node->str(), source->str()), node);
+            }
+            return aggregate.element(static_cast<size_t>(pos));
         }
 
         case DFGOp::CONCAT_ALIGN:
@@ -714,7 +769,8 @@ void Simulator::run() {
             bool asserted = (flop->reset->edge == POSEDGE && !rst_val.isZero() && rst_val.lowU64() == 1) ||
                             (flop->reset->edge == NEGEDGE && rst_val.isZero());
             if (asserted && flop->reset_value.has_value() && flop->q_node) {
-                root_->values[flop->q_node] = simValueFromType(flop->reset_value.value(), flop->type.type);
+                root_->values[flop->q_node] =
+                    simValueFromAggregateType(flop->reset_value.value(), flop->type.type);
             }
         }
     }
@@ -796,7 +852,8 @@ void Simulator::run() {
             for (const auto& collected : root_->flops_by_reset[reset_name]) {
                 const auto* flop = collected.flop;
                 if (flop->reset_value.has_value() && flop->q_node) {
-                    root_->values[flop->q_node] = simValueFromType(flop->reset_value.value(), flop->type.type);
+                    root_->values[flop->q_node] =
+                        simValueFromAggregateType(flop->reset_value.value(), flop->type.type);
                 }
             }
         }

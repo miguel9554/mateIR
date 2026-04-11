@@ -24,6 +24,8 @@ enum class DFGOp {
     SLICE,      // Static bit-slice: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
     CONCAT,       // Concatenation: in[0..N-1] = parts, MSB-first
     CONCAT_ALIGN, // Temporary: in[0]=expr, in[1]=high_idx, in[2]=low_idx
+    ARRAY_CONSTRUCT, // Unpacked array value: in[0..N-1] = elements in declaration order
+    ARRAY_INDEX,     // Static unpacked array index: in[0]=array, in[1]=index (CONST)
     CAST,         // Type cast: in[0]=source, type set at elaboration (e.g. integer → enum)
     // Binary ops
     ADD,
@@ -67,6 +69,8 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::SLICE: return "SLICE";
         case DFGOp::CONCAT: return "CONCAT";
         case DFGOp::CONCAT_ALIGN: return "CONCAT_ALIGN";
+        case DFGOp::ARRAY_CONSTRUCT: return "ARRAY_CONSTRUCT";
+        case DFGOp::ARRAY_INDEX: return "ARRAY_INDEX";
         case DFGOp::CAST: return "CAST";
         case DFGOp::ADD: return "ADD";
         case DFGOp::SUB: return "SUB";
@@ -118,6 +122,8 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::SLICE:  return 3;
         case DFGOp::CONCAT: return -1; // variable
         case DFGOp::CONCAT_ALIGN: return 3;
+        case DFGOp::ARRAY_CONSTRUCT: return -1; // variable
+        case DFGOp::ARRAY_INDEX: return 2;
         case DFGOp::CAST:   return 1;
         case DFGOp::ADD:    return 2;
         case DFGOp::SUB:    return 2;
@@ -445,6 +451,40 @@ public:
             ? std::make_unique<DFGNode>(DFGOp::CONCAT_ALIGN)
             : std::make_unique<DFGNode>(DFGOp::CONCAT_ALIGN, name);
         n->in = {expr, high, low};
+        nodes.push_back(std::move(n));
+        if (!name.empty()) {
+            signals[name] = nodes.back().get();
+        }
+        return nodes.back().get();
+    }
+
+    DFGNode* arrayConstruct(const std::vector<DFGNode*>& elements,
+                            ResolvedType type,
+                            const std::string& name = "") {
+        if (elements.empty()) {
+            throw CompilerError("arrayConstruct: must have at least one element");
+        }
+        if (type.unpacked_dims.empty()) {
+            throw CompilerError("arrayConstruct: result type must have unpacked dimensions");
+        }
+        auto n = name.empty()
+            ? std::make_unique<DFGNode>(DFGOp::ARRAY_CONSTRUCT)
+            : std::make_unique<DFGNode>(DFGOp::ARRAY_CONSTRUCT, name);
+        n->type = std::move(type);
+        n->in.reserve(elements.size());
+        for (auto* elem : elements) n->in.push_back(elem);
+        nodes.push_back(std::move(n));
+        if (!name.empty()) {
+            signals[name] = nodes.back().get();
+        }
+        return nodes.back().get();
+    }
+
+    DFGNode* arrayIndex(DFGNode* array, DFGNode* index, const std::string& name = "") {
+        auto n = name.empty()
+            ? std::make_unique<DFGNode>(DFGOp::ARRAY_INDEX)
+            : std::make_unique<DFGNode>(DFGOp::ARRAY_INDEX, name);
+        n->in = {array, index};
         nodes.push_back(std::move(n));
         if (!name.empty()) {
             signals[name] = nodes.back().get();
@@ -816,6 +856,33 @@ public:
                             "DFG validate: MUX {} is missing selector value {}",
                             node->str(), value), node.get());
                     }
+                }
+            }
+            if (node->op == DFGOp::ARRAY_CONSTRUCT) {
+                if (actual == 0) {
+                    throw CompilerError(std::format(
+                        "DFG validate: ARRAY_CONSTRUCT {} has no elements",
+                        node->str()), node.get());
+                }
+                if (node->type && !node->type->unpacked_dims.empty()) {
+                    int expectedElements = node->type->unpacked_dims.front().size();
+                    if (actual != expectedElements) {
+                        throw CompilerError(std::format(
+                            "DFG validate: ARRAY_CONSTRUCT {} has {} elements (expected {})",
+                            node->str(), actual, expectedElements), node.get());
+                    }
+                }
+            }
+            if (node->op == DFGOp::ARRAY_INDEX) {
+                if (actual != 2) {
+                    throw CompilerError(std::format(
+                        "DFG validate: ARRAY_INDEX {} has {} inputs (expected 2)",
+                        node->str(), actual), node.get());
+                }
+                if (node->in[1].node && node->in[1].node->op != DFGOp::CONST) {
+                    throw CompilerError(std::format(
+                        "DFG validate: ARRAY_INDEX {} index is not CONST",
+                        node->str()), node.get());
                 }
             }
         }

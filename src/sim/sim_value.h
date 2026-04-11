@@ -20,9 +20,13 @@ public:
     static SimValue fromHexString(const std::string& text, int width, bool is_signed = false);
     static SimValue random(int width, bool is_signed, std::mt19937_64& rng);
     static SimValue concat(std::span<const SimValue> parts);
+    static SimValue aggregate(std::vector<SimValue> elements);
 
     int width() const { return width_; }
     bool isSigned() const { return signed_; }
+    bool isAggregate() const { return aggregate_; }
+    const std::vector<SimValue>& elements() const { return elements_; }
+    const SimValue& element(size_t index) const;
     bool isZero() const;
     uint64_t lowU64() const;
 
@@ -58,7 +62,9 @@ public:
 private:
     int width_ = 0;
     bool signed_ = false;
+    bool aggregate_ = false;
     std::vector<uint64_t> words_;
+    std::vector<SimValue> elements_;
 
     explicit SimValue(int width, bool is_signed);
 

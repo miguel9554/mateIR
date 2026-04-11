@@ -302,6 +302,18 @@ struct ReturnSignal {
     DFGNode* value; // nullptr for void return
 };
 
+std::vector<std::string> generateIndexSuffixes(const std::vector<ResolvedDimension>& dimensions);
+static ResolvedType dropFirstUnpackedDim(ResolvedType type);
+static std::vector<int64_t> enumerateDimensionIndices(const ResolvedDimension& dim);
+static DFGNode* zeroValueForType(DFG& graph, const ResolvedType& type);
+static DFGNode* buildArrayConstructFromLeaves(
+        DFG& graph,
+        const std::string& instance_path,
+        const std::string& baseName,
+        const ResolvedType& type,
+        const std::function<DFGNode*(const std::string&)>& leafLookup,
+        const std::string& suffix = "");
+
 // Forward declarations
 void resolveStatementInPlace(
         const slang::syntax::StatementSyntax* statement,
@@ -397,8 +409,8 @@ static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNo
 
 static void clearVisibleDrivers(ResolutionContext& ctx) {
     auto clearNodeDriver = [](DFGNode* node) {
-        if (node->type && !node->type->unpacked_dims.empty() && node->in.size() > 1) {
-            // Preserve aggregate unpacked-array wiring used for dynamic element reads.
+        if (node->type && !node->type->unpacked_dims.empty()) {
+            // Preserve the aggregate ARRAY_CONSTRUCT driver for unpacked arrays.
             return;
         }
         node->in.clear();
@@ -494,19 +506,22 @@ static void restoreDrivers(ResolutionContext& ctx, const DriverSnapshot& snapsho
     }
     if (!ctx.is_subroutine_scope) {
         for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
-            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
+            if ((!node->type || node->type->unpacked_dims.empty()) &&
+                    node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
                 node->in.clear();
             }
         }
         for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
-            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
+            if ((!node->type || node->type->unpacked_dims.empty()) &&
+                    node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
                 node->in.clear();
             }
         }
         for (const auto& [name, node] : ctx.local_signals) {
-            if (node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
+            if ((!node->type || node->type->unpacked_dims.empty()) &&
+                    node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
                 node->in.clear();
             }
@@ -1858,60 +1873,16 @@ DFGNode* buildExprDFG(
                     }
                     if (elemSelect->selector->kind == SyntaxKind::BitSelect){
                         const auto& bitSelect = elemSelect->selector->as<BitSelectSyntax>();
-                        // If the selector is a constant, try a direct element lookup in
-                        // local_signals (e.g. or_tree[0] inside a generate block).
-                        // This avoids INDEX(aggregate) which would create a combinational loop.
                         try {
                             int64_t idx = evaluateConstantExpr(bitSelect.expr, ctx.params);
                             if (currentSelectedType && !currentSelectedType->unpacked_dims.empty()) {
-                                std::string elemKey = baseName + "[" + std::to_string(idx) + "]";
-                                auto elemIt = ctx.local_signals.find(elemKey);
-                                if (elemIt != ctx.local_signals.end()) {
-                                    indexedSignalNode = elemIt->second;
-                                    if (elemIt->second->hasType()) {
-                                        currentSelectedType = *elemIt->second->type;
-                                    } else {
-                                        currentSelectedType.reset();
-                                    }
-                                    continue;
-                                }
-                                std::string qElemKey = elemKey + ".q";
-                                auto qElemIt = ctx.local_signals.find(qElemKey);
-                                if (qElemIt != ctx.local_signals.end()) {
-                                    indexedSignalNode = qElemIt->second;
-                                    if (qElemIt->second->hasType()) {
-                                        currentSelectedType = *qElemIt->second->type;
-                                    } else {
-                                        currentSelectedType.reset();
-                                    }
-                                    continue;
-                                }
-                                // Also check module-level DFG for array elements not in local_signals
-                                // (e.g. lane_sum[i] where lane_sum is a module-scope unpacked array).
-                                DFGNode* globalElem = ctx.graph.lookupSignal("", elemKey);
-                                if (globalElem) {
-                                    indexedSignalNode = globalElem;
-                                    if (globalElem->hasType()) {
-                                        currentSelectedType = *globalElem->type;
-                                    } else {
-                                        currentSelectedType.reset();
-                                    }
-                                    continue;
-                                }
-                                DFGNode* globalQElem = ctx.graph.lookupSignal("", qElemKey);
-                                if (globalQElem) {
-                                    indexedSignalNode = globalQElem;
-                                    if (globalQElem->hasType()) {
-                                        currentSelectedType = *globalQElem->type;
-                                    } else {
-                                        currentSelectedType.reset();
-                                    }
-                                    continue;
-                                }
-
-                                baseName = elemKey;
+                                auto* idxConst = ctx.graph.constant(idx);
                                 ResolvedType narrowed = *currentSelectedType;
                                 narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                                indexedSignalNode = ctx.graph.arrayIndex(indexedSignalNode, idxConst);
+                                indexedSignalNode->type = narrowed;
+                                indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
+                                baseName += "[" + std::to_string(idx) + "]";
                                 currentSelectedType = narrowed;
                                 continue;
                             }
@@ -1945,20 +1916,6 @@ DFGNode* buildExprDFG(
                         // or 0 (2-state). We return 0 to match Verilator's 2-state behavior.
                         // TODO: Return don't-care once the IR supports it — using 0 pessimizes
                         //       synthesis results for designs with out-of-bounds-free guarantees.
-                        auto lookupUnpackedElem = [&](int64_t idx) -> DFGNode* {
-                            std::string elemKey = baseName + "[" + std::to_string(idx) + "]";
-                            if (ctx.local_signals.count(elemKey))
-                                return ctx.local_signals.at(elemKey);
-                            if (auto* elemNode = ctx.graph.lookupSignal("", elemKey))
-                                return elemNode;
-                            std::string qKey = elemKey + ".q";
-                            if (ctx.local_signals.count(qKey))
-                                return ctx.local_signals.at(qKey);
-                            if (auto* qNode = ctx.graph.lookupSignal("", qKey))
-                                return qNode;
-                            return nullptr;
-                        };
-
                         const auto& dim = currentSelectedType->unpacked_dims.front();
                         int64_t lo = std::min((int64_t)dim.left, (int64_t)dim.right);
                         int64_t hi = std::max((int64_t)dim.left, (int64_t)dim.right);
@@ -1966,13 +1923,11 @@ DFGNode* buildExprDFG(
 
                         if (N == 1) {
                             // Degenerate single-element array: no MUX needed.
-                            DFGNode* elemNode = lookupUnpackedElem(lo);
-                            if (!elemNode)
-                                throw CompilerError(
-                                    "Dynamic index: element not found: " +
-                                        baseName + "[" + std::to_string(lo) + "]",
-                                    resolveSourceLoc(*expr, ctx.sm));
-                            indexedSignalNode = elemNode;
+                            auto* idxConst = ctx.graph.constant(lo);
+                            ResolvedType narrowed = *currentSelectedType;
+                            narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                            indexedSignalNode = ctx.graph.arrayIndex(indexedSignalNode, idxConst);
+                            indexedSignalNode->type = narrowed;
                         } else {
                             // Selector width S = ceil(log2(N)).
                             int S = 0;
@@ -1996,19 +1951,18 @@ DFGNode* buildExprDFG(
 
                             std::vector<int64_t> armValues;
                             std::vector<DFGNode*> armData;
-                            DFGNode* zeroNode = ctx.graph.constant(0);
+                            ResolvedType armType = *currentSelectedType;
+                            armType.unpacked_dims.erase(armType.unpacked_dims.begin());
+                            DFGNode* zeroNode = zeroValueForType(ctx.graph, armType);
 
                             for (int64_t v = 0; v < totalCodes; v++) {
                                 armValues.push_back(v);
                                 if (v < N) {
                                     int64_t idx = lo + v;
-                                    DFGNode* elemNode = lookupUnpackedElem(idx);
-                                    if (!elemNode)
-                                        throw CompilerError(
-                                            "Dynamic index: element not found: " +
-                                                baseName + "[" + std::to_string(idx) + "]",
-                                            resolveSourceLoc(*expr, ctx.sm));
-                                    armData.push_back(elemNode);
+                                    auto* idxConst = ctx.graph.constant(idx);
+                                    auto* arm = ctx.graph.arrayIndex(indexedSignalNode, idxConst);
+                                    arm->type = armType;
+                                    armData.push_back(arm);
                                 } else {
                                     // Out-of-bounds → 0 (see TODO above)
                                     armData.push_back(zeroNode);
@@ -2562,20 +2516,15 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     auto connectWholeUnpackedArray = [&](const std::string& baseName,
                                          const ResolvedType& arrayType,
                                          const std::vector<DFGNode*>& elementDrivers) {
-        if (arrayType.unpacked_dims.size() != 1) {
-            throw CompilerError("Only 1-D unpacked whole-array assignments are supported",
-                                assignLoc);
-        }
-
-        const auto indices = enumerateIndices(arrayType.unpacked_dims.front());
-        if (indices.size() != elementDrivers.size()) {
+        const auto suffixes = generateIndexSuffixes(arrayType.unpacked_dims);
+        if (suffixes.size() != elementDrivers.size()) {
             throw CompilerError("Whole-array assignment element count mismatch", assignLoc);
         }
 
         ResolvedType elementType = arrayType;
-        elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+        elementType.unpacked_dims.clear();
 
-        for (size_t i = 0; i < indices.size(); ++i) {
+        for (size_t i = 0; i < suffixes.size(); ++i) {
             DFGNode* elemNode = coerceAssignmentExprToWidth(ctx, elementDrivers[i],
                                                             elementType, assignLoc);
             std::string outputName;
@@ -2585,9 +2534,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                         std::format("{} NOT a flop and assigned on seq. block", baseName),
                         assignLoc);
                 }
-                outputName = std::format("{}[{}].d", baseName, indices[i]);
+                outputName = baseName + suffixes[i] + ".d";
             } else {
-                outputName = std::format("{}[{}]", baseName, indices[i]);
+                outputName = baseName + suffixes[i];
             }
 
             if (!ctx.subroutine_locals.count(outputName))
@@ -2601,6 +2550,24 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
         if (ctx.is_sequential) {
             ctx.thisModule->flopsTriggers[flopTriggersKey(baseName)] = ctx.triggers;
+        }
+    };
+
+    std::function<void(DFGNode*, const ResolvedType&, std::vector<DFGNode*>&)> collectAggregateLeaves;
+    collectAggregateLeaves = [&](DFGNode* aggregate,
+                                 const ResolvedType& type,
+                                 std::vector<DFGNode*>& out) {
+        if (type.unpacked_dims.empty()) {
+            out.push_back(aggregate);
+            return;
+        }
+        ResolvedType childType = dropFirstUnpackedDim(type);
+        for (int64_t idx : enumerateDimensionIndices(type.unpacked_dims.front())) {
+            auto* idxConst = ctx.graph.constant(idx);
+            auto* indexed = ctx.graph.arrayIndex(aggregate, idxConst);
+            indexed->type = childType;
+            indexed->loc = assignLoc;
+            collectAggregateLeaves(indexed, childType, out);
         }
     };
 
@@ -2797,25 +2764,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 rhsType && rhsType->unpacked_dims.size() == 1 &&
                 rhsType->unpacked_dims.front().size() == declaredType->unpacked_dims.front().size()) {
                 std::vector<DFGNode*> elementDrivers;
-                for (int64_t idx : enumerateIndices(rhsType->unpacked_dims.front())) {
-                    std::string elemName = rhsBase + "[" + std::to_string(idx) + "]";
-                    DFGNode* elemNode = nullptr;
-                    if (!ctx.is_sequential) {
-                        auto it = ctx.combDrivers.find(elemName);
-                        if (it != ctx.combDrivers.end()) elemNode = it->second;
-                    }
-                    if (!elemNode) elemNode = lookupTargetNode(ctx, elemName);
-                    if (!elemNode) elemNode = ctx.graph.getInputNode("", elemName + ".q");
-                    if (!elemNode) {
-                        auto localIt = ctx.local_signals.find(elemName + ".q");
-                        if (localIt != ctx.local_signals.end()) elemNode = localIt->second;
-                    }
-                    if (!elemNode) {
-                        throw CompilerError("Whole-array assignment element not found: " + elemName,
-                                            assignLoc);
-                    }
-                    elementDrivers.push_back(elemNode);
-                }
+                collectAggregateLeaves(RHSexprNode, *rhsType, elementDrivers);
                 connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
                 return;
             }
@@ -2825,10 +2774,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             declaredType && declaredType->unpacked_dims.size() == 1 &&
             RHSexprNode && RHSexprNode->type && !RHSexprNode->type->unpacked_dims.empty()) {
             std::vector<DFGNode*> elementDrivers;
-            elementDrivers.reserve(RHSexprNode->in.size());
-            for (const auto& edge : RHSexprNode->in) {
-                elementDrivers.push_back(edge.node);
-            }
+            collectAggregateLeaves(RHSexprNode, *RHSexprNode->type, elementDrivers);
             if (!elementDrivers.empty()) {
                 connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
                 return;
@@ -2842,8 +2788,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     bool hasRangeSelect = false;
     int64_t rangeHigh = 0, rangeLow = 0;
     std::optional<ResolvedType> currentSelectedType;
-    if (const auto* declaredType = lookupDeclaredType(baseName, ctx)) {
-        currentSelectedType = *declaredType;
+    const ResolvedType* targetDeclaredType = lookupDeclaredType(baseName, ctx);
+    if (targetDeclaredType) {
+        currentSelectedType = *targetDeclaredType;
     }
 
     if (selectors) {
@@ -2941,7 +2888,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     }
 
     std::optional<ResolvedType> assignmentTargetType;
-    if (hasRangeSelect) {
+        if (hasRangeSelect) {
         if (currentSelectedType) {
             assignmentTargetType = *currentSelectedType;
             assignmentTargetType->width =
@@ -3664,6 +3611,128 @@ std::vector<std::string> generateIndexSuffixes(const std::vector<ResolvedDimensi
     return result;
 }
 
+static ResolvedType dropFirstUnpackedDim(ResolvedType type) {
+    if (!type.unpacked_dims.empty()) {
+        type.unpacked_dims.erase(type.unpacked_dims.begin());
+    }
+    return type;
+}
+
+static std::vector<int64_t> enumerateDimensionIndices(const ResolvedDimension& dim) {
+    std::vector<int64_t> indices;
+    int64_t step = dim.left <= dim.right ? 1 : -1;
+    for (int64_t idx = dim.left;; idx += step) {
+        indices.push_back(idx);
+        if (idx == dim.right) break;
+    }
+    return indices;
+}
+
+static DFGNode* createSignalNode(DFG& graph,
+                                 const std::string& instance_path,
+                                 const std::string& name,
+                                 const ResolvedType& type) {
+    auto* node = graph.signal(instance_path, name);
+    node->type = type;
+    return node;
+}
+
+static DFGNode* zeroValueForType(DFG& graph, const ResolvedType& type) {
+    if (type.unpacked_dims.empty()) {
+        auto* zero = graph.constant(0);
+        zero->type = type;
+        return zero;
+    }
+    ResolvedType childType = dropFirstUnpackedDim(type);
+    std::vector<DFGNode*> children;
+    for (size_t i = 0; i < static_cast<size_t>(type.unpacked_dims.front().size()); ++i) {
+        children.push_back(zeroValueForType(graph, childType));
+    }
+    return graph.arrayConstruct(children, type);
+}
+
+static DFGNode* buildArrayConstructFromLeaves(
+        DFG& graph,
+        const std::string& instance_path,
+        const std::string& baseName,
+        const ResolvedType& type,
+        const std::function<DFGNode*(const std::string&)>& leafLookup,
+        const std::string& suffix) {
+    if (type.unpacked_dims.empty()) {
+        auto* leaf = leafLookup(baseName + suffix);
+        if (!leaf) {
+            throw CompilerError("Array construct leaf not found: " + baseName + suffix);
+        }
+        return leaf;
+    }
+
+    ResolvedType childType = dropFirstUnpackedDim(type);
+    std::vector<DFGNode*> children;
+    for (int64_t idx : enumerateDimensionIndices(type.unpacked_dims.front())) {
+        children.push_back(buildArrayConstructFromLeaves(
+            graph, instance_path, baseName, childType, leafLookup,
+            suffix + "[" + std::to_string(idx) + "]"));
+    }
+    auto* construct = graph.arrayConstruct(children, type);
+    construct->instance_path = instance_path;
+    return construct;
+}
+
+static DFGNode* createWritableArrayConstructTree(
+        DFG& graph,
+        const std::string& instance_path,
+        const std::string& baseName,
+        DFGNode* aggregateNode,
+        const ResolvedType& aggregateType,
+        std::map<std::string, DFGNode*>* localSignals = nullptr) {
+    std::function<void(DFGNode*, const std::string&, const ResolvedType&)> build;
+    build = [&](DFGNode* target, const std::string& prefix, const ResolvedType& type) {
+        if (type.unpacked_dims.empty()) return;
+
+        ResolvedType childType = dropFirstUnpackedDim(type);
+        std::vector<DFGNode*> children;
+        for (int64_t idx : enumerateDimensionIndices(type.unpacked_dims.front())) {
+            std::string childName = prefix + "[" + std::to_string(idx) + "]";
+            auto* child = createSignalNode(graph, instance_path, childName, childType);
+            if (localSignals) (*localSignals)[childName] = child;
+            children.push_back(child);
+            build(child, childName, childType);
+        }
+        auto* construct = graph.arrayConstruct(children, type, baseName.empty() ? "" : "");
+        target->in = {construct};
+    };
+
+    build(aggregateNode, baseName, aggregateType);
+    return aggregateNode;
+}
+
+static void createArrayReadAliasTree(
+        DFG& graph,
+        const std::string& instance_path,
+        const std::string& baseName,
+        DFGNode* aggregateNode,
+        const ResolvedType& aggregateType,
+        std::map<std::string, DFGNode*>* localSignals = nullptr) {
+    std::function<void(DFGNode*, const std::string&, const ResolvedType&)> build;
+    build = [&](DFGNode* parent, const std::string& prefix, const ResolvedType& type) {
+        if (type.unpacked_dims.empty()) return;
+
+        ResolvedType childType = dropFirstUnpackedDim(type);
+        for (int64_t idx : enumerateDimensionIndices(type.unpacked_dims.front())) {
+            std::string childName = prefix + "[" + std::to_string(idx) + "]";
+            auto* idxConst = graph.constant(idx);
+            auto* projection = graph.arrayIndex(parent, idxConst);
+            projection->type = childType;
+            auto* alias = createSignalNode(graph, instance_path, childName, childType);
+            alias->in = {projection};
+            if (localSignals) (*localSignals)[childName] = alias;
+            build(alias, childName, childType);
+        }
+    };
+
+    build(aggregateNode, baseName, aggregateType);
+}
+
 // Pre-populate module input (port) with all bit indices
 // For vector inputs, creates base node + individual element nodes
 void prePopulateInput(DFG& graph, const ResolvedSignal& sig) {
@@ -3671,15 +3740,9 @@ void prePopulateInput(DFG& graph, const ResolvedSignal& sig) {
         auto* node = graph.input("", sig.name);
         node->type = sig.type;
     } else {
-        // Create base node for dynamic read access
         auto* base = graph.input("", sig.name);
         base->type = sig.type;
-        // Create individual element nodes (no unpacked dims on elements)
-        for (const auto& suffix : generateIndexSuffixes(sig.type.unpacked_dims)) {
-            auto* elem = graph.input("", sig.name + suffix);
-            elem->type = sig.type;
-            elem->type->unpacked_dims = {};
-        }
+        createArrayReadAliasTree(graph, "", sig.name, base, sig.type);
     }
 }
 
@@ -3690,14 +3753,9 @@ void prePopulateOutput(DFG& graph, const ResolvedSignal& sig) {
     if (sig.type.unpacked_dims.empty()) {
         graph.outputPlaceholder("", sig.name)->type = sig.type;
     } else {
-        // Create base node for dynamic read access
-        graph.outputPlaceholder("", sig.name)->type = sig.type;
-        // Create individual element nodes (no unpacked dims on elements)
-        for (const auto& suffix : generateIndexSuffixes(sig.type.unpacked_dims)) {
-            auto elemType = sig.type;
-            elemType.unpacked_dims = {};
-            graph.outputPlaceholder("", sig.name + suffix)->type = elemType;
-        }
+        auto* aggregate = graph.outputPlaceholder("", sig.name);
+        aggregate->type = sig.type;
+        createWritableArrayConstructTree(graph, "", sig.name, aggregate, sig.type);
     }
 }
 
@@ -3710,15 +3768,9 @@ void prePopulateSignal(DFG& graph, const ResolvedSignal& sig) {
         return;
     }
 
-    // Array: aggregate node for dynamic read access + individual element nodes.
     auto* aggregate = graph.signal("", sig.name);
     aggregate->type = sig.type;
-    for (const auto& idxSuffix : generateIndexSuffixes(sig.type.unpacked_dims)) {
-        auto* elem = graph.signal("", sig.name + idxSuffix);
-        elem->type = sig.type;
-        elem->type->unpacked_dims = {};
-        aggregate->in.push_back(elem);
-    }
+    createWritableArrayConstructTree(graph, "", sig.name, aggregate, sig.type);
 }
 
 // Pre-populate the DFG .d/.q nodes for a single flop, derived entirely from
@@ -3734,21 +3786,32 @@ void prePopulateFlopNodes(DFG& graph, const FlopInfo& flop) {
         return;
     }
 
-    // Array flop: element-wise .d sinks (no aggregate — write-only) and
-    // an aggregate .q source with individual element INPUT nodes.
-    auto* qAggregate = graph.signal("", name + ".q");
-    qAggregate->type = type;
-
     for (const auto& idxSuffix : generateIndexSuffixes(type.unpacked_dims)) {
         auto elemType = type;
-        elemType.unpacked_dims = {};
+        elemType.unpacked_dims.clear();
 
-        graph.outputPlaceholder("", name + idxSuffix + ".d")->type = elemType;
+        auto* dElem = graph.outputPlaceholder("", name + idxSuffix + ".d");
+        dElem->type = elemType;
 
         auto* qElem = graph.input("", name + idxSuffix + ".q");
         qElem->type = elemType;
-        qAggregate->in.push_back(qElem);
     }
+
+    auto* dAggregate = graph.outputPlaceholder("", name + ".d");
+    dAggregate->type = type;
+    dAggregate->in = {buildArrayConstructFromLeaves(
+        graph, "", name, type,
+        [&](const std::string& leafName) {
+            return graph.getOutputNode("", leafName + ".d");
+        })};
+
+    auto* qAggregate = graph.signal("", name + ".q");
+    qAggregate->type = type;
+    qAggregate->in = {buildArrayConstructFromLeaves(
+        graph, "", name, type,
+        [&](const std::string& leafName) {
+            return graph.getInputNode("", leafName + ".q");
+        })};
 }
 
 ParameterContext parseParameterValueAssignment(
@@ -4146,13 +4209,8 @@ static void resolveGenerateScopeDecls(
                     genSig.dfg_node = aggregate;
                     ctx.thisModule->signals[qualName] = genSig;
                 }
-                for (const auto& suffix : generateIndexSuffixes(type.unpacked_dims)) {
-                    auto* elem = ctx.graph.signal(ctx.instance_path, name + suffix);
-                    elem->type = type;
-                    elem->type->unpacked_dims = {};
-                    aggregate->in.push_back(elem);
-                    ctx.local_signals[name + suffix] = elem;
-                }
+                createWritableArrayConstructTree(
+                    ctx.graph, ctx.instance_path, name, aggregate, type, &ctx.local_signals);
             }
         }
     };

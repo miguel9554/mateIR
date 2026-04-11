@@ -18,6 +18,7 @@ struct ModuleInstance;  // forward declaration
 class SimVcdValue : public vcd_tracer::value_base {
 public:
     explicit SimVcdValue(unsigned int bit_size);
+    SimVcdValue(unsigned int bit_size, std::vector<size_t> aggregate_path);
 
     void set(const SimValue& value);
     void unknown() override;
@@ -29,6 +30,7 @@ public:
 
 private:
     unsigned int bit_size_;
+    std::vector<size_t> aggregate_path_;
     vcd_tracer::value_state state_ = vcd_tracer::value_state::unknown_x;
     std::string value_;
     bool dirty_ = false;

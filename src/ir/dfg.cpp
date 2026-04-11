@@ -77,6 +77,8 @@ std::string DFG::renderDot(const std::string& graphName,
             case DFGOp::SLICE: ss << "SLICE"; break;
             case DFGOp::CONCAT: ss << "CONCAT"; break;
             case DFGOp::CONCAT_ALIGN: ss << "CONCAT_ALIGN"; break;
+            case DFGOp::ARRAY_CONSTRUCT: ss << "ARRAY_CONSTRUCT"; break;
+            case DFGOp::ARRAY_INDEX: ss << "ARRAY_INDEX"; break;
             case DFGOp::CAST: ss << "CAST"; break;
             case DFGOp::UNARY_PLUS: ss << "+"; break;
             case DFGOp::UNARY_NEGATE: ss << "-"; break;
@@ -136,6 +138,12 @@ std::string DFG::renderDot(const std::string& graphName,
                 if (j == 1) return "hi";
                 if (j == 2) return "lo";
                 break;
+            case DFGOp::ARRAY_INDEX:
+                if (j == 0) return "array";
+                if (j == 1) return "idx";
+                break;
+            case DFGOp::ARRAY_CONSTRUCT:
+                return "elem[" + std::to_string(j) + "]";
             default:
                 break;
         }

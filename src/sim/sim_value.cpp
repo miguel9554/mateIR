@@ -130,6 +130,19 @@ SimValue SimValue::concat(std::span<const SimValue> parts) {
     return result;
 }
 
+SimValue SimValue::aggregate(std::vector<SimValue> elements) {
+    SimValue value;
+    value.aggregate_ = true;
+    value.elements_ = std::move(elements);
+    return value;
+}
+
+const SimValue& SimValue::element(size_t index) const {
+    if (!aggregate_) throw std::runtime_error("SimValue is not an aggregate");
+    if (index >= elements_.size()) throw std::out_of_range("aggregate element index");
+    return elements_[index];
+}
+
 void SimValue::maskTopWord() {
     if (words_.empty()) return;
     int used = width_ % 64;
@@ -139,10 +152,15 @@ void SimValue::maskTopWord() {
 }
 
 bool SimValue::isZero() const {
+    if (aggregate_) {
+        return std::all_of(elements_.begin(), elements_.end(),
+            [](const SimValue& element) { return element.isZero(); });
+    }
     return std::all_of(words_.begin(), words_.end(), [](uint64_t word) { return word == 0; });
 }
 
 uint64_t SimValue::lowU64() const {
+    if (aggregate_) return elements_.empty() ? 0 : elements_.front().lowU64();
     return words_.empty() ? 0 : words_[0];
 }
 
@@ -347,6 +365,13 @@ bool SimValue::reductionXor() const {
 }
 
 std::string SimValue::toBinaryString() const {
+    if (aggregate_) {
+        std::string result;
+        for (const auto& element : elements_) {
+            result += element.toBinaryString();
+        }
+        return result.empty() ? "0" : result;
+    }
     if (width_ <= 0) return "0";
     std::string result;
     result.reserve(static_cast<size_t>(width_));

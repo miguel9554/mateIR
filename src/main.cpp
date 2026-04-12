@@ -516,11 +516,15 @@ int main(int argc, char** argv) {
                 for (const auto& parameter : mod.localparams)
                     if (parameter.dfg_node) keepAlive.insert(parameter.dfg_node);
                 for (const auto& [name, sig] : mod.inputs)
-                    if (sig.dfg_node) keepAlive.insert(sig.dfg_node);
+                    for (auto* leaf : signalLeaves(sig)) if (leaf) keepAlive.insert(leaf);
                 for (const auto& [name, sig] : mod.outputs)
-                    if (sig.dfg_node) keepAlive.insert(sig.dfg_node);
+                    for (auto* leaf : signalLeaves(sig)) if (leaf) keepAlive.insert(leaf);
                 for (const auto& [name, sig] : mod.signals)
-                    if (sig.dfg_node) keepAlive.insert(sig.dfg_node);
+                    for (auto* leaf : signalLeaves(sig)) if (leaf) keepAlive.insert(leaf);
+                for (const auto& flop : mod.flops) {
+                    for (auto* leaf : flopDLeaves(flop)) if (leaf) keepAlive.insert(leaf);
+                    for (auto* leaf : flopQLeaves(flop)) if (leaf) keepAlive.insert(leaf);
+                }
                 for (const auto& sub : mod.hierarchyInstantiation)
                     collect(sub);
             };

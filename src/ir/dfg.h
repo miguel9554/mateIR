@@ -17,35 +17,40 @@
 namespace custom_hdl {
 
 enum class DFGOp {
+    // Identity ops
     INPUT,      // Primary input (module port)
     OUTPUT,     // Primary output (module port)
     SIGNAL,     // Internal signal (named placeholder)
     CONST,      // Constant value (data: int64_t)
-    SLICE,      // Static bit-slice: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
-    CONCAT,       // Concatenation: in[0..N-1] = parts, MSB-first
-    CONCAT_ALIGN, // Temporary: in[0]=expr, in[1]=high_idx, in[2]=low_idx
-    CAST,         // Type cast: in[0]=source, type set at elaboration (e.g. integer → enum)
-    // Binary ops
+    // TMP ops
+    CONCAT_ALIGN,   // Temporary: in[0]=expr, in[1]=high_idx, in[2]=low_idx
+    MODULE,         // Submodule instance: name=instance_name, data=module_type_name, in=input_port_drivers
+    CAST,           // Type cast: in[0]=source, type set at elaboration (e.g. integer → enum)
+    UNARY_PLUS,
+    UNARY_NEGATE,
+    LOGICAL_NOT,
+    LOGICAL_AND,
+    LOGICAL_OR,
+    // Arithmetic ops
     ADD,
     SUB,
     MUL,
+    // Bit extraction / concatenation ops
+    SLICE,      // Static bit-slice: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
+    CONCAT,     // Concatenation: in[0..N-1] = parts, MSB-first
+    // MUX
+    MUX,        // Exhaustive value mux: in[0]=sel, in[1..]=data arms keyed by mux_values
+    // Comparison ops
     EQ,         // Equal (==)
     LT,         // Less than (<)
     LE,         // Less or equal (<=)
     GT,         // Greater than (>)
     GE,         // Greater or equal (>=)
+    // Shift ops
     SHL,        // Arithmetic shift left (<<<)
     ASR,        // Arithmetic shift right (>>>)
-    MUX,        // Exhaustive value mux: in[0]=sel, in[1..]=data arms keyed by mux_values
-    MODULE,     // Submodule instance: name=instance_name, data=module_type_name, in=input_port_drivers
-    // Unary ops (single input)
-    UNARY_PLUS,
-    UNARY_NEGATE,
-    BITWISE_NOT,
-    LOGICAL_NOT,
     // Binary bitwise/logical ops
-    LOGICAL_AND,
-    LOGICAL_OR,
+    BITWISE_NOT,
     BITWISE_AND,
     BITWISE_OR,
     BITWISE_XOR,

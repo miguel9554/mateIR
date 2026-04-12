@@ -45,6 +45,31 @@ SimValue boolValue(bool value) {
     return SimValue::fromU64(value ? 1 : 0, 1, false);
 }
 
+void assignFlopResetLeaves(ModuleInstance& root, const FlopInfo& flop, int64_t resetValue) {
+    for (auto* qLeaf : flopQLeaves(flop)) {
+        if (!qLeaf) continue;
+        const ResolvedType& type = qLeaf->type.value_or(flop.type.type);
+        root.values[qLeaf] = simValueFromType(resetValue, type);
+    }
+}
+
+void copyFlopDToQLeaves(ModuleInstance& root, const FlopInfo& flop) {
+    const auto& qLeaves = flopQLeaves(flop);
+    const auto& dLeaves = flopDLeaves(flop);
+    if (qLeaves.size() != dLeaves.size()) {
+        throw CompilerError(std::format(
+            "Simulator: flop '{}' has mismatched d/q leaf counts ({} vs {})",
+            flop.name, dLeaves.size(), qLeaves.size()));
+    }
+    for (size_t i = 0; i < qLeaves.size(); ++i) {
+        auto* qLeaf = qLeaves[i];
+        auto* dLeaf = dLeaves[i];
+        if (qLeaf && dLeaf) {
+            root.values[qLeaf] = root.checkedGet(dLeaf);
+        }
+    }
+}
+
 SimValue widenForArithmetic(const SimValue& value, const DFGNode* result_node) {
     return value.resized(nodeWidth(result_node), value.isSigned());
 }
@@ -72,6 +97,7 @@ ModuleInstance::ModuleInstance(const std::string& name, const ResolvedModule& mo
 // ============================================================================
 
 SimValue ModuleInstance::maskToWidth(const SimValue& val, const DFGNode* node) {
+    if (val.isAggregate()) return val;
     if (!node->type.has_value() || node->type->width <= 0)
         throw CompilerError(std::format(
             "Simulator: node {} has no resolved type width for masking (type_propagation incomplete?)",
@@ -132,7 +158,7 @@ void ModuleInstance::buildTopology() {
 
 void ModuleInstance::buildFlopMaps() {
     // Collect flops from the entire hierarchy (all submodules, bottom-up).
-    // After DFG inlining, d_node/q_node pointers are valid in the flat top DFG.
+    // After DFG inlining, flop binding pointers are valid in the flat top DFG.
     //
     // translation: maps this module's async port names -> top-level signal names.
     // At the top level it is empty (identity). For each submodule it is composed
@@ -146,8 +172,8 @@ void ModuleInstance::buildFlopMaps() {
     std::function<void(const ResolvedModule&, const NameMap&)> collect =
         [&](const ResolvedModule& mod, const NameMap& translation) {
         for (const auto& flop : mod.flops) {
-            if (flop.q_node) {
-                flop_q_nodes[flop.q_node] = &flop;
+            for (auto* qLeaf : flopQLeaves(flop)) {
+                if (qLeaf) flop_q_nodes[qLeaf] = &flop;
             }
             CollectedFlop collected{
                 .flop = &flop,
@@ -198,13 +224,14 @@ void ModuleInstance::initConsts() {
 void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
     // flop_q_nodes already covers all flops from all submodules (built by buildFlopMaps)
     for (const auto& [qnode, flop] : flop_q_nodes) {
-        int w = flop->type.type.width;
+        const ResolvedType& type = qnode->type.value_or(flop->type.type);
+        int w = type.width;
         if (mode == FlopsInitial::Random) {
-            values[qnode] = SimValue::random(w, flop->type.type.isSigned(), rng);
+            values[qnode] = SimValue::random(w, type.isSigned(), rng);
         } else if (mode == FlopsInitial::AllOnes) {
-            values[qnode] = SimValue::ones(w, flop->type.type.isSigned());
+            values[qnode] = SimValue::ones(w, type.isSigned());
         } else {
-            values[qnode] = SimValue::zero(w, flop->type.type.isSigned());
+            values[qnode] = simValueFromType(0, type);
         }
     }
 }
@@ -713,8 +740,8 @@ void Simulator::run() {
             const auto* flop = collected.flop;
             bool asserted = (flop->reset->edge == POSEDGE && !rst_val.isZero() && rst_val.lowU64() == 1) ||
                             (flop->reset->edge == NEGEDGE && rst_val.isZero());
-            if (asserted && flop->reset_value.has_value() && flop->q_node) {
-                root_->values[flop->q_node] = simValueFromType(flop->reset_value.value(), flop->type.type);
+            if (asserted && flop->reset_value.has_value()) {
+                assignFlopResetLeaves(*root_, *flop, flop->reset_value.value());
             }
         }
     }
@@ -795,8 +822,8 @@ void Simulator::run() {
         for (const auto& reset_name : active_edge_resets) {
             for (const auto& collected : root_->flops_by_reset[reset_name]) {
                 const auto* flop = collected.flop;
-                if (flop->reset_value.has_value() && flop->q_node) {
-                    root_->values[flop->q_node] = simValueFromType(flop->reset_value.value(), flop->type.type);
+                if (flop->reset_value.has_value()) {
+                    assignFlopResetLeaves(*root_, *flop, flop->reset_value.value());
                 }
             }
         }
@@ -810,9 +837,7 @@ void Simulator::run() {
                                       (flop->reset->edge == NEGEDGE && rst_val.isZero());
                     if (rst_active) continue;
                 }
-                if (flop->q_node && flop->d_node) {
-                    root_->values[flop->q_node] = root_->checkedGet(flop->d_node);
-                }
+                copyFlopDToQLeaves(*root_, *flop);
             }
         }
 

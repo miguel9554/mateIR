@@ -13,28 +13,6 @@ namespace custom_hdl {
 
 namespace {
 
-// Generate all index suffixes for multi-dimensional arrays
-// For [0:1], returns ["[0]", "[1]"]
-// For [0:1][0:1], returns ["[0][0]", "[[0][1]", "[1][0]", "[1][1]"]
-std::vector<std::string> generateIndexSuffixes(const std::vector<ResolvedDimension>& dimensions) {
-    if (dimensions.empty()) {
-        return {""};
-    }
-
-    std::vector<std::string> result = {""};
-    for (const auto& dim : dimensions) {
-        std::vector<std::string> newResult;
-        int step = (dim.left <= dim.right) ? 1 : -1;
-        for (int i = dim.left; step > 0 ? i <= dim.right : i >= dim.right; i += step) {
-            for (const auto& prefix : result) {
-                newResult.push_back(prefix + "[" + std::to_string(i) + "]");
-            }
-        }
-        result = std::move(newResult);
-    }
-    return result;
-}
-
 // Return all leaf element names for a signal (expanding dimensions)
 std::vector<std::string> allElements(const ResolvedSignal& signal) {
     std::vector<std::string> current = {signal.name};
@@ -61,7 +39,7 @@ std::string inDFG(const std::string& instance_path, const std::string& name) {
 
 DFGNode* nodeForTrigger(const ResolvedModule& resolved, const asyncTrigger_t& trigger) {
     auto it = resolved.inputs.find(trigger.name);
-    return it != resolved.inputs.end() ? it->second.dfg_node : nullptr;
+    return it != resolved.inputs.end() ? scalarSignalNode(it->second) : nullptr;
 }
 
 bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
@@ -257,8 +235,8 @@ bool extract_reset(
 
     // Match the MUX selector to one of the triggers (the reset). Compare by node identity
     // rather than name, because after DFG inlining the trigger's INPUT node is replaced
-    // by the parent's signal node (with a different name), but resolved.inputs[name].dfg_node
-    // is updated to track that replacement.
+    // by the parent's signal node (with a different name), and the input binding tracks
+    // that replacement.
     if (nodeForTrigger(resolved, triggers[0]) == mux_sel) {
         reset = triggers[0];
         clock = triggers[1];
@@ -298,7 +276,17 @@ FlopInfo extractFlopClockAndReset(
     DFGNode*& functionalLogic)
 {
     auto flop = flopIn;
-    DFGNode* dNode = flopIn.d_node ? flopIn.d_node : graph.getOutputNode(instance_path, flop_name + ".d");
+    DFGNode* dNode = nullptr;
+    if (!flopIn.type.type.unpacked_dims.empty() && flop_name != flopIn.name) {
+        dNode = graph.getOutputNode(instance_path, flop_name + ".d");
+    } else {
+        dNode = scalarFlopDNode(flopIn);
+    }
+    if (!dNode) {
+        throw CompilerError(std::format(
+            "Flop .d node not found: {}",
+            instance_path.empty() ? flop_name + ".d" : instance_path + "." + flop_name + ".d"));
+    }
     auto* dNodeDriver = dNode->in[0].node;
     const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
 
@@ -407,27 +395,25 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
     }
 
     // Connect flop output port nodes to their .q INPUT nodes.
-    // Uses dfg_node pointer directly since after DFG inlining, submodule output ports
-    // may not be in the flat top DFG's outputs map (only .d nodes are adopted).
+    // Uses output bindings directly since after DFG inlining submodule output
+    // ports may not be in the flat top DFG's outputs map (only .d nodes are adopted).
     for (auto& [outName, output] : resolved.outputs) {
         if (!resolved.flopsTriggers.contains(outName)) continue;
         if (output.type.unpacked_dims.empty()) {
             DFGNode* qNode = graph.getInputNode(instance_path, outName + ".q");
-            if (qNode && output.dfg_node) {
-                output.dfg_node->in = {{qNode, 0}};
+            if (qNode) {
+                scalarSignalNode(output)->in = {{qNode, 0}};
             }
         } else {
-            for (const auto& suffix : generateIndexSuffixes(output.type.unpacked_dims)) {
+            auto suffixes = unpackedIndexSuffixes(output.type);
+            const auto& leaves = signalLeaves(output);
+            for (size_t i = 0; i < suffixes.size(); ++i) {
+                const auto& suffix = suffixes[i];
                 DFGNode* qNode = graph.getInputNode(instance_path, outName + suffix + ".q");
-                // Individual element output nodes may also be in dfg outputs map
-                // or just exist as nodes in the flat DFG; use the map if available.
-                DFGNode* outNode = graph.getOutputNode(instance_path, outName + suffix);
-                if (!outNode) {
-                    // For submodule outputs not in flat DFG outputs map,
-                    // there's no per-element dfg_node stored; skip.
-                    continue;
-                }
-                if (qNode) {
+                DFGNode* outNode = i < leaves.size()
+                    ? leaves[i]
+                    : graph.getOutputNode(instance_path, outName + suffix);
+                if (qNode && outNode) {
                     outNode->in = {{qNode, 0}};
                 }
             }
@@ -441,12 +427,17 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
             DFGNode* functional_logic;
             resolved_flops.push_back(
                 extractFlopClockAndReset(graph, resolved, name, instance_path, flop, functional_logic));
-            // Set per-element d_node/q_node (the copy from flopIn may be null for vectorized)
+            // After flop_resolve, every FlopInfo represents one physical flop leaf.
             {
-                resolved_flops.back().d_node = graph.getOutputNode(instance_path, name + ".d");
-                resolved_flops.back().q_node = graph.getInputNode(instance_path, name + ".q");
+                auto* dNode = graph.getOutputNode(instance_path, name + ".d");
+                auto* qNode = graph.getInputNode(instance_path, name + ".q");
+                resolved_flops.back().binding = FlopBinding{
+                    .d_leaves = {dNode},
+                    .q_leaves = {qNode},
+                };
+                resolved_flops.back().type.binding.leaves = {qNode};
             }
-            DFGNode* output = resolved_flops.back().d_node;
+            DFGNode* output = scalarFlopDNode(resolved_flops.back());
             const asyncTrigger_t clock = resolved_flops.back().clock;
             const std::optional<asyncTrigger_t> reset = resolved_flops.back().reset;
 

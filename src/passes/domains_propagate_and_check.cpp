@@ -177,37 +177,41 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
     // Validate sync domain inputs
     for (const auto& [portName, inputSig] : mod.inputs) {
         if (inputSig.sync_kind != SyncKind::Sync) continue;
-        if (!inputSig.dfg_node) continue;
 
-        auto reached = forwardTraversal(inputSig.dfg_node);
-        for (const auto& [flopName, flopClk] : reached) {
-            if (flopClk == inputSig.clock_domain) continue;
-            // Declared CDC crossing via synchronized_into
-            auto syncIt = mod.synchronizedSignals.find(portName);
-            if (syncIt != mod.synchronizedSignals.end() &&
-                flopClk == findClockSig(syncIt->second)) continue;
-            throw CompilerError(std::format(
-                "domains_propagate_and_check: module '{}': sync input '{}' "
-                "feeds flop '{}' in a different clock domain — cross-domain violation",
-                mod.name, portName, flopName));
+        for (auto* leaf : signalLeaves(inputSig)) {
+            if (!leaf) continue;
+            auto reached = forwardTraversal(leaf);
+            for (const auto& [flopName, flopClk] : reached) {
+                if (flopClk == inputSig.clock_domain) continue;
+                // Declared CDC crossing via synchronized_into
+                auto syncIt = mod.synchronizedSignals.find(portName);
+                if (syncIt != mod.synchronizedSignals.end() &&
+                    flopClk == findClockSig(syncIt->second)) continue;
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: module '{}': sync input '{}' "
+                    "feeds flop '{}' in a different clock domain — cross-domain violation",
+                    mod.name, portName, flopName));
+            }
         }
     }
 
     // Validate async domain inputs
     for (const auto& [portName, inputSig] : mod.inputs) {
         if (inputSig.sync_kind != SyncKind::Async) continue;
-        if (!inputSig.dfg_node) continue;
 
-        auto reached = forwardTraversal(inputSig.dfg_node);
-        for (const auto& [flopName, flopClk] : reached) {
-            // Declared CDC crossing via synchronized_into
-            auto syncIt = mod.synchronizedSignals.find(portName);
-            if (syncIt != mod.synchronizedSignals.end() &&
-                flopClk == findClockSig(syncIt->second)) continue;
-            throw CompilerError(std::format(
-                "domains_propagate_and_check: module '{}': async input '{}' "
-                "feeds flop '{}' without a declared synchronizer",
-                mod.name, portName, flopName));
+        for (auto* leaf : signalLeaves(inputSig)) {
+            if (!leaf) continue;
+            auto reached = forwardTraversal(leaf);
+            for (const auto& [flopName, flopClk] : reached) {
+                // Declared CDC crossing via synchronized_into
+                auto syncIt = mod.synchronizedSignals.find(portName);
+                if (syncIt != mod.synchronizedSignals.end() &&
+                    flopClk == findClockSig(syncIt->second)) continue;
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: module '{}': async input '{}' "
+                    "feeds flop '{}' without a declared synchronizer",
+                    mod.name, portName, flopName));
+            }
         }
     }
 

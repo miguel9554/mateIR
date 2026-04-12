@@ -49,6 +49,14 @@ static ResolvedType makeOneBitUnsigned() {
     return ResolvedType::makeInteger(1, false);
 }
 
+static void rejectUnpacked(const DFGNode* node, const char* opName) {
+    if (node->hasType() && !node->type->unpacked_dims.empty()) {
+        throw CompilerError(std::format(
+            "Type error: unpacked array value cannot be used with operator {}",
+            opName), node->loc);
+    }
+}
+
 // Throw if the node has an enum type (enums cannot be used with arithmetic/bitwise ops)
 static void rejectEnum(const DFGNode* node, const char* opName) {
     if (node->hasType() && node->type->isEnum())
@@ -129,6 +137,7 @@ bool inferNodeType(DFGNode* node) {
             auto* lhs = node->in[0].node;
             auto* rhs = node->in[1].node;
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectUnpacked(lhs, "SUB"); rejectUnpacked(rhs, "SUB");
             rejectEnum(lhs, "SUB"); rejectEnum(rhs, "SUB");
             int width = std::max(lhs->type->width, rhs->type->width);
             node->type = ResolvedType::makeInteger(width, true);
@@ -147,6 +156,7 @@ bool inferNodeType(DFGNode* node) {
             auto* lhs = node->in[0].node;
             auto* rhs = node->in[1].node;
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectUnpacked(lhs, to_string(node->op)); rejectUnpacked(rhs, to_string(node->op));
             rejectEnum(lhs, to_string(node->op)); rejectEnum(rhs, to_string(node->op));
             node->type = widenTypes(*lhs->type, *rhs->type);
             return true;
@@ -162,6 +172,7 @@ bool inferNodeType(DFGNode* node) {
             auto* lhs = node->in[0].node;
             auto* rhs = node->in[1].node;
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectUnpacked(lhs, "EQ"); rejectUnpacked(rhs, "EQ");
             bool lhsEnum = lhs->type->isEnum(), rhsEnum = rhs->type->isEnum();
             if (lhsEnum || rhsEnum) {
                 if (!lhsEnum || !rhsEnum ||
@@ -188,6 +199,7 @@ bool inferNodeType(DFGNode* node) {
             auto* lhs = node->in[0].node;
             auto* rhs = node->in[1].node;
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectUnpacked(lhs, to_string(node->op)); rejectUnpacked(rhs, to_string(node->op));
             rejectEnum(lhs, to_string(node->op)); rejectEnum(rhs, to_string(node->op));
             node->type = makeOneBitUnsigned();
             return true;
@@ -203,6 +215,7 @@ bool inferNodeType(DFGNode* node) {
             }
             auto* lhs = node->in[0].node;
             if (!lhs->hasType()) return false;
+            rejectUnpacked(lhs, to_string(node->op));
             rejectEnum(lhs, to_string(node->op));
             node->type = *lhs->type;
             return true;
@@ -236,6 +249,7 @@ bool inferNodeType(DFGNode* node) {
             }
             auto* operand = node->in[0].node;
             if (!operand->hasType()) return false;
+            rejectUnpacked(operand, to_string(node->op));
             rejectEnum(operand, to_string(node->op));
             node->type = *operand->type;
             return true;
@@ -248,6 +262,7 @@ bool inferNodeType(DFGNode* node) {
                     "Type propagation: LOGICAL_NOT {} has no inputs", node->str()), node->loc);
             }
             if (!node->in[0].node->hasType()) return false;
+            rejectUnpacked(node->in[0].node, "LOGICAL_NOT");
             node->type = makeOneBitUnsigned();
             return true;
         }
@@ -260,6 +275,8 @@ bool inferNodeType(DFGNode* node) {
                     "Type propagation: LOGICAL_AND {} has fewer than 2 inputs", node->str()), node->loc);
             }
             if (!node->in[0].node->hasType() || !node->in[1].node->hasType()) return false;
+            rejectUnpacked(node->in[0].node, to_string(node->op));
+            rejectUnpacked(node->in[1].node, to_string(node->op));
             node->type = makeOneBitUnsigned();
             return true;
         }
@@ -273,6 +290,7 @@ bool inferNodeType(DFGNode* node) {
             auto* a = node->in[0].node;
             auto* b = node->in[1].node;
             if (!a->hasType() || !b->hasType()) return false;
+            rejectUnpacked(a, to_string(node->op)); rejectUnpacked(b, to_string(node->op));
             rejectEnum(a, to_string(node->op)); rejectEnum(b, to_string(node->op));
             int w = std::max(a->type->width, b->type->width);
             bool s = a->type->isSigned() && b->type->isSigned();
@@ -292,6 +310,7 @@ bool inferNodeType(DFGNode* node) {
                     "Type propagation: reduction op {} has no inputs", node->str()), node->loc);
             }
             if (!node->in[0].node->hasType()) return false;
+            rejectUnpacked(node->in[0].node, to_string(node->op));
             node->type = makeOneBitUnsigned();
             return true;
         }

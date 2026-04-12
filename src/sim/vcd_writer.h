@@ -18,6 +18,7 @@ struct ModuleInstance;  // forward declaration
 class SimVcdValue : public vcd_tracer::value_base {
 public:
     explicit SimVcdValue(unsigned int bit_size);
+    SimVcdValue(unsigned int bit_size, std::vector<size_t> aggregate_path);
 
     void set(const SimValue& value);
     void unknown() override;
@@ -29,6 +30,7 @@ public:
 
 private:
     unsigned int bit_size_;
+    std::vector<size_t> aggregate_path_;
     vcd_tracer::value_state state_ = vcd_tracer::value_state::unknown_x;
     std::string value_;
     bool dirty_ = false;
@@ -81,6 +83,11 @@ private:
     void addEntry(vcd_tracer::module& scope, const std::string& name,
                   const DFGNode* node,
                   const std::unordered_set<const DFGNode*>& alive);
+    void addSignalEntries(vcd_tracer::module& scope, const std::string& name,
+                          const ResolvedSignal& sig,
+                          const std::unordered_set<const DFGNode*>& alive);
+    void addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
+                        const std::unordered_set<const DFGNode*>& alive);
 };
 
 } // namespace custom_hdl

@@ -1,16 +1,12 @@
 #include "consumers/sim/simulator_consumer.h"
 #include "consumers/static_analysis/static_analysis.h"
 #include "frontends/systemverilog/systemverilog_frontend.h"
-#include "mateir/pipeline.h"
 #include "util/source_loc.h"
 
-#include "slang/syntax/SyntaxTree.h"
-
 #include <cstring>
-#include <filesystem>
 #include <iostream>
+#include <map>
 #include <memory>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -25,7 +21,6 @@ void printUsage(const char* progName) {
               << "  --frontend <name>         HDL frontend: systemverilog (default)\n"
               << "  --top <module>            Top module name (required for multi-file designs)\n"
               << "  --domains <f1> [f2 ...]   Domain YAML files (one per module)\n"
-              << "  --emit-mateir <file>      Serialize compiled mateIR JSON to file\n"
               << "  --analyze                 Run static analysis consumer on mateIR\n"
               << "  --simulate                Run cycle-based simulation consumer\n"
               << "  --inputs-dir <dir>        Directory containing input stimuli files\n"
@@ -90,7 +85,6 @@ int main(int argc, char** argv) {
     std::string flopsSeedStr;
     std::string debugNodesStr;
     std::string paramsStr;
-    std::string emitMateIRPath;
     std::vector<std::string> domainFiles;
     std::vector<std::string> sourceFiles;
 
@@ -106,8 +100,7 @@ int main(int argc, char** argv) {
                    std::strcmp(argv[i], "--flops-initial") == 0 ||
                    std::strcmp(argv[i], "--flops-seed") == 0 ||
                    std::strcmp(argv[i], "--debug-nodes") == 0 ||
-                   std::strcmp(argv[i], "--params") == 0 ||
-                   std::strcmp(argv[i], "--emit-mateir") == 0) {
+                   std::strcmp(argv[i], "--params") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "ERROR: " << argv[i] << " requires an argument\n";
                 printUsage(argv[0]);
@@ -123,7 +116,6 @@ int main(int argc, char** argv) {
             else if (opt == "--flops-seed") flopsSeedStr = value;
             else if (opt == "--debug-nodes") debugNodesStr = value;
             else if (opt == "--params") paramsStr = value;
-            else if (opt == "--emit-mateir") emitMateIRPath = value;
         } else if (std::strcmp(argv[i], "--domains") == 0) {
             while (i + 1 < argc && argv[i + 1][0] != '-') {
                 std::string_view arg(argv[i + 1]);
@@ -162,33 +154,22 @@ int main(int argc, char** argv) {
         std::cout << "mateIR compiler\n";
         std::cout << "========================================\n";
         std::cout << "Frontend: " << frontendName << "\n";
-        std::cout << "Parsing: ";
+        std::cout << "Sources: ";
         for (size_t i = 0; i < sourceFiles.size(); ++i) {
             if (i > 0) std::cout << ", ";
             std::cout << sourceFiles[i];
         }
         std::cout << "\n----------------------------------------\n";
 
+        FrontendOptions frontendOptions;
+        frontendOptions.source_files = sourceFiles;
+        if (!topModule.empty()) frontendOptions.top_module = topModule;
+        frontendOptions.domain_files = domainFiles;
+        frontendOptions.debug_dfg_nodes = parseDebugNodes(debugNodesStr);
+        parseParams(paramsStr, frontendOptions.parameters);
+
         auto frontend = makeFrontend(frontendName);
-        auto frontendOutput = frontend->parse({.source_files = sourceFiles});
-        std::cout << "Parsing successful\n";
-        std::cout << "----------------------------------------\n";
-
-        MateIRCompileOptions compileOptions;
-        if (!topModule.empty()) compileOptions.top_module = topModule;
-        compileOptions.domain_files = domainFiles;
-        compileOptions.debug_dfg_nodes = parseDebugNodes(debugNodesStr);
-        parseParams(paramsStr, compileOptions.parameters);
-
-        auto mateIR = compileToMateIR(frontendOutput.extracted_ir,
-                                      frontendOutput.systemverilog_syntax_tree->sourceManager(),
-                                      sourceFiles,
-                                      compileOptions);
-
-        if (!emitMateIRPath.empty()) {
-            mateIR.writeJson(emitMateIRPath);
-            std::cout << "Wrote mateIR: " << emitMateIRPath << "\n";
-        }
+        auto mateIR = frontend->compile(frontendOptions);
 
         std::cout << "----------------------------------------\n";
         std::cout << "\nResolved mateIR:\n";
@@ -210,8 +191,8 @@ int main(int argc, char** argv) {
             simConfig.top_module = topModule;
             simConfig.inputs_dir = inputsDir;
             simConfig.output_dir = outputDir;
-            simConfig.parameters = compileOptions.parameters;
-            simConfig.debug_dfg_nodes = compileOptions.debug_dfg_nodes;
+            simConfig.parameters = frontendOptions.parameters;
+            simConfig.debug_dfg_nodes = frontendOptions.debug_dfg_nodes;
 
             if (!flopsInitialStr.empty()) {
                 if (flopsInitialStr == "random") simConfig.flops_initial = FlopsInitial::Random;

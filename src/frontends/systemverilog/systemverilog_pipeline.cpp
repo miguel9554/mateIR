@@ -1,4 +1,4 @@
-#include "mateir/pipeline.h"
+#include "frontends/systemverilog/systemverilog_pipeline.h"
 
 #include "passes/combo_deps.h"
 #include "passes/concat_cleanup.h"
@@ -285,10 +285,9 @@ void runMateIRPipeline(ResolvedModule& topModule,
 
 } // namespace
 
-MateIR compileToMateIR(ExtractedIR& extracted,
-                       const slang::SourceManager& sourceManager,
-                       const std::vector<std::string>& sourceFiles,
-                       const MateIRCompileOptions& options) {
+MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
+                                  const slang::SourceManager& sourceManager,
+                                  const SystemVerilogCompileOptions& options) {
     ResolvedModule topModule = [&]() {
         if (options.top_module) {
             ParameterContext topParams;
@@ -307,7 +306,7 @@ MateIR compileToMateIR(ExtractedIR& extracted,
 
     MateIR mateIR;
     mateIR.top = std::move(topModule);
-    mateIR.source_files = sourceFiles;
+    mateIR.source_files = options.source_files;
     mateIR.frontend_module_count = extracted.modules.size();
     return mateIR;
 }

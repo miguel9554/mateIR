@@ -1,10 +1,12 @@
 #include "frontends/systemverilog/systemverilog_frontend.h"
 
+#include "frontends/systemverilog/systemverilog_pipeline.h"
+#include "passes/extractor.h"
 #include "util/source_loc.h"
 
 #include "slang/syntax/SyntaxTree.h"
 
-#include <iostream>
+#include <memory>
 #include <span>
 #include <string_view>
 
@@ -14,7 +16,7 @@ std::string SystemVerilogFrontend::name() const {
     return "systemverilog";
 }
 
-FrontendOutput SystemVerilogFrontend::parse(const FrontendOptions& options) const {
+MateIR SystemVerilogFrontend::compile(const FrontendOptions& options) const {
     std::shared_ptr<slang::syntax::SyntaxTree> tree;
 
     if (options.source_files.empty()) {
@@ -49,10 +51,8 @@ FrontendOutput SystemVerilogFrontend::parse(const FrontendOptions& options) cons
         throw CompilerError("Syntax errors found: " + std::to_string(diagnostics.size()) + " diagnostic(s)");
     }
 
-    return FrontendOutput{
-        .extracted_ir = buildIR(*tree),
-        .systemverilog_syntax_tree = std::move(tree),
-    };
+    auto extracted = buildIR(*tree);
+    return lowerSystemVerilogToMateIR(extracted, tree->sourceManager(), options);
 }
 
 } // namespace custom_hdl

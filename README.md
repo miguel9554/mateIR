@@ -61,9 +61,25 @@ clock domain, a reset, or the async domain.
 
 ## Usage
 
+The executable now has three stages: a frontend (`--frontend systemverilog` by
+default), the mateIR pipeline, and optional consumers such as static analysis or
+simulation. The current architecture is described in
+`docs/mateir_architecture.md`.
+
 **Compile a single-module design:**
 ```
 ./build/custom_hdl_compiler --domains module.domains.yaml module.v
+```
+
+**Serialize mateIR:**
+```
+./build/custom_hdl_compiler --emit-mateir out.mateir.json \
+    --domains module.domains.yaml module.v
+```
+
+**Run static analysis:**
+```
+./build/custom_hdl_compiler --analyze --domains module.domains.yaml module.v
 ```
 
 **Simulate a hierarchical design:**

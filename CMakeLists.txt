@@ -58,7 +58,7 @@ set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/yaml-cpp)
 
 # Collect all source files in src/
-file(GLOB_RECURSE PROJECT_SOURCES src/*.cpp)
+file(GLOB_RECURSE PROJECT_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 
 # VCD tracer library (compiled directly, not via its own CMake project)
 set(VCD_TRACER_SOURCES external/cpp-vcd-tracer/src/vcd_tracer.cpp)

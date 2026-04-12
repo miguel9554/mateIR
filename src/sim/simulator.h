@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ir/resolved.h"
+#include "mateir/debug.h"
 #include "sim/sim_value.h"
 #include "sim/vcd_writer.h"
 
@@ -15,11 +16,6 @@
 namespace custom_hdl {
 
 enum class FlopsInitial { Random, AllZeros, AllOnes };
-
-struct DebugNodeSpec {
-    std::string module_path; // empty = match any module; otherwise suffix-matched against hierarchy path
-    std::string node_name;
-};
 
 struct SimConfig {
     std::vector<std::string> source_files;

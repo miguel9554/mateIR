@@ -1,4 +1,4 @@
-#include "util/syntax_helpers.h"
+#include "frontends/systemverilog/syntax_helpers.h"
 
 #include "util/source_loc.h"
 
@@ -7,7 +7,7 @@
 
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxKind.h"
-#include "mateir/unresolved.h"
+#include "frontends/systemverilog/unresolved.h"
 
 using namespace slang::syntax;
 using namespace slang::parsing;

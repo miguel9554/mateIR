@@ -2,7 +2,6 @@
 
 #include "mateir/dfg.h"
 #include "mateir/types.h"
-#include "mateir/unresolved.h"
 
 #include <map>
 #include <memory>
@@ -45,7 +44,7 @@ struct FlopBinding {
     std::vector<DFGNode*> q_leaves;
 };
 
-struct ResolvedSignal;
+struct Signal;
 struct FlopInfo;
 
 // ============================================================================
@@ -54,35 +53,35 @@ struct FlopInfo;
 
 // Number of DFG leaves for a type: product of all unpacked dimension sizes.
 // Scalars and packed vectors return 1.
-size_t unpackedLeafCount(const ResolvedType& type);
+size_t unpackedLeafCount(const Type& type);
 
 // Linear leaf index for a multi-dimensional unpacked address.
 // indices[i] is the SV index value for dims[i]; declared order (outermost first).
-size_t linearUnpackedIndex(const std::vector<ResolvedDimension>& dims,
+size_t linearUnpackedIndex(const std::vector<Dimension>& dims,
                            const std::vector<int64_t>& indices);
 
 // All declaration-order index suffix strings for a type's unpacked dimensions.
 // E.g. type [0:1][0:1] → {"[0][0]", "[0][1]", "[1][0]", "[1][1]"}
 // Scalars return {""}.
-std::vector<std::string> unpackedIndexSuffixes(const ResolvedType& type);
+std::vector<std::string> unpackedIndexSuffixes(const Type& type);
 
 // Return the type with its first unpacked dimension removed.
-ResolvedType dropFirstUnpackedDim(ResolvedType type);
+Type dropFirstUnpackedDim(Type type);
 
 // Return the element type of the first unpacked dimension (same as dropFirstUnpackedDim).
-ResolvedType unpackedElementType(const ResolvedType& type);
+Type unpackedElementType(const Type& type);
 
 // Return the single leaf for a scalar/packed-vector signal (asserts leaf count == 1).
 DFGNode* scalarLeaf(const SignalBinding& binding);
 
 // Return the leaf for a given set of unpacked indices.
 DFGNode* leafAt(const SignalBinding& binding,
-                const ResolvedType& type,
+                const Type& type,
                 const std::vector<int64_t>& indices);
 
 // Authoritative signal/flop binding accessors.
-const std::vector<DFGNode*>& signalLeaves(const ResolvedSignal& signal);
-DFGNode* scalarSignalNode(const ResolvedSignal& signal);
+const std::vector<DFGNode*>& signalLeaves(const Signal& signal);
+DFGNode* scalarSignalNode(const Signal& signal);
 const std::vector<DFGNode*>& flopDLeaves(const FlopInfo& flop);
 const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop);
 DFGNode* scalarFlopDNode(const FlopInfo& flop);
@@ -92,21 +91,21 @@ DFGNode* scalarFlopQNode(const FlopInfo& flop);
 // Signal and parameter structures
 // ============================================================================
 
-struct ResolvedSignalBase {
+struct SignalBase {
     std::string name;
-    ResolvedType type;
+    Type type;
 
     void print(std::ostream& os) const;
 };
 
-struct ResolvedSignal : ResolvedSignalBase{
+struct Signal : SignalBase {
     SyncKind sync_kind = SyncKind::Sync;
-    ResolvedSignal* clock_domain = nullptr;
+    Signal* clock_domain = nullptr;
     std::optional<edge_t> clock_edge;
     // Leaf bindings in declaration order. This is the authoritative source.
     SignalBinding binding;
     void print(std::ostream& os) const {
-        ResolvedSignalBase::print(os);
+        SignalBase::print(os);
         const char* sk = sync_kind == SyncKind::Sync  ? "Sync"  :
                          sync_kind == SyncKind::Clock ? "Clock" :
                          sync_kind == SyncKind::Reset ? "Reset" : "Async";
@@ -117,11 +116,11 @@ struct ResolvedSignal : ResolvedSignalBase{
     }
 };
 
-struct ResolvedParam : ResolvedSignalBase {
+struct Param : SignalBase {
     double value = 0;
     DFGNode* dfg_node = nullptr;  // direct pointer to the corresponding CONST node
     void print(std::ostream& os) const {
-        ResolvedSignalBase::print(os);
+        SignalBase::print(os);
         os << " value=" << value;
     }
 };
@@ -132,7 +131,7 @@ typedef enum {
 
 struct FlopInfo {
     std::string name;
-    ResolvedSignal type;
+    Signal type;
     flopType_t flop_type;
     asyncTrigger_t clock;
     std::optional<asyncTrigger_t> reset;
@@ -143,37 +142,25 @@ struct FlopInfo {
     void print(std::ostream& os, int indent = 0) const;
 };
 
-// ============================================================================
-// Type traits for resolved types
-// ============================================================================
-
-struct ResolvedTypes {
-    using Type = ResolvedType;
-    using Dimension = ResolvedDimension;
-    using Signal = ResolvedSignal;
-    using Param = ResolvedParam;
-    using Hierarchy = UnresolvedTypes::Hierarchy;
-};
-
 // Per-module combinational dependency map: output_port -> {input_ports it depends on}
 using ComboDeps = std::map<std::string, std::set<std::string>>;
 
 // ============================================================================
-// Resolved IR module (output of pass 2)
+// mateIR module
 // ============================================================================
 
-struct ResolvedModule {
+struct Module {
     std::string name;           // module type name
     std::string instance_name;  // instance name (empty for the top module)
-    std::vector<ResolvedTypes::Param> parameters;
-    std::vector<ResolvedTypes::Param> localparams;
-    std::map<std::string, ResolvedTypes::Signal> inputs;
-    std::map<std::string, ResolvedTypes::Signal> outputs;
-    std::map<std::string, ResolvedTypes::Signal> signals;
+    std::vector<Param> parameters;
+    std::vector<Param> localparams;
+    std::map<std::string, Signal> inputs;
+    std::map<std::string, Signal> outputs;
+    std::map<std::string, Signal> signals;
     std::vector<FlopInfo> flops;
 
     // TODO a list of instantiated modules.
-    std::vector<ResolvedModule> hierarchyInstantiation;
+    std::vector<Module> hierarchyInstantiation;
 
     // Single DFG containing all resolved logic
     std::unique_ptr<DFG> dfg;
@@ -215,6 +202,6 @@ struct ParameterContext {
 
 // Validate that no combinational loops exist in the DFG.
 // Throws CompilerError listing the nodes involved in any detected cycle.
-void validateNoCombLoops(const ResolvedModule& module);
+void validateNoCombLoops(const Module& module);
 
 } // namespace custom_hdl

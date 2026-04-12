@@ -46,8 +46,8 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-static ResolvedType makeOneBitUnsigned() {
-    return ResolvedType::makeInteger(1, false);
+static Type makeOneBitUnsigned() {
+    return Type::makeInteger(1, false);
 }
 
 static void rejectUnpacked(const DFGNode* node, const char* opName) {
@@ -77,16 +77,16 @@ static void rejectEnum(const DFGNode* node, const char* opName) {
 
 // Return the "wider" type: max width, signed only if both signed.
 // Throws if either type is an enum — enum consistency must be validated before calling this.
-static ResolvedType widenTypes(const ResolvedType& a, const ResolvedType& b) {
+static Type widenTypes(const Type& a, const Type& b) {
     int width = std::max(a.width, b.width);
     bool is_signed = a.isSigned() && b.isSigned();
-    return ResolvedType::makeInteger(width, is_signed);
+    return Type::makeInteger(width, is_signed);
 }
 
 // Validate that two enum types are compatible for a MUX branch.
 // Returns the enum type if both match, or the widened integer type if neither is enum.
 // Throws on mismatch.
-static ResolvedType mergeDataTypes(const ResolvedType& a, const ResolvedType& b,
+static Type mergeDataTypes(const Type& a, const Type& b,
                                    std::optional<SourceLoc> loc = {}) {
     if (a.isEnum() || b.isEnum()) {
         if (!a.isEnum() || !b.isEnum() ||
@@ -142,7 +142,7 @@ bool inferNodeType(DFGNode* node) {
             rejectUnpacked(lhs, "SUB"); rejectUnpacked(rhs, "SUB");
             rejectEnum(lhs, "SUB"); rejectEnum(rhs, "SUB");
             int width = std::max(lhs->type->width, rhs->type->width);
-            node->type = ResolvedType::makeInteger(width, true);
+            node->type = Type::makeInteger(width, true);
             return true;
         }
 
@@ -210,7 +210,7 @@ bool inferNodeType(DFGNode* node) {
             for (size_t i = 0; i < node->muxArmCount(); ++i) {
                 if (!node->muxArmData(i).node->hasType()) return false;
             }
-            ResolvedType result = *node->muxArmData(0).node->type;
+            Type result = *node->muxArmData(0).node->type;
             for (size_t i = 1; i < node->muxArmCount(); ++i) {
                 result = mergeDataTypes(result, *node->muxArmData(i).node->type, node->loc);
             }
@@ -261,7 +261,7 @@ bool inferNodeType(DFGNode* node) {
             rejectEnum(a, to_string(node->kind())); rejectEnum(b, to_string(node->kind()));
             int w = std::max(a->type->width, b->type->width);
             bool s = a->type->isSigned() && b->type->isSigned();
-            node->type = ResolvedType::makeInteger(w, s);
+            node->type = Type::makeInteger(w, s);
             return true;
         }
 
@@ -303,7 +303,7 @@ bool inferNodeType(DFGNode* node) {
             for (const auto& input : node->concatParts()) {
                 totalWidth += input.node->type->width;
             }
-            node->type = ResolvedType::makeInteger(totalWidth, false);
+            node->type = Type::makeInteger(totalWidth, false);
             return true;
         }
 
@@ -340,18 +340,18 @@ bool inferNodeType(DFGNode* node) {
 
                 if (high_val == low_val) {
                     // Single-element bit-select: peel one packed dim
-                    std::vector<ResolvedDimension> remaining(
+                    std::vector<Dimension> remaining(
                         atype.packed_dims.begin() + 1, atype.packed_dims.end());
                     int new_width = 1;
                     for (const auto& d : remaining) {
                         new_width *= d.size();
                     }
-                    node->type = ResolvedType::makeInteger(
+                    node->type = Type::makeInteger(
                         new_width, atype.isSigned(), remaining);
                 } else {
                     // Range select: result width = |high - low| + 1, no packed dims
                     int new_width = static_cast<int>(std::abs(high_val - low_val)) + 1;
-                    node->type = ResolvedType::makeInteger(
+                    node->type = Type::makeInteger(
                         new_width, atype.isSigned());
                 }
                 return true;
@@ -366,7 +366,7 @@ bool inferNodeType(DFGNode* node) {
             }
             int64_t high_val = highNode->constValue();
             int64_t low_val  = lowNode->constValue();
-            node->type = ResolvedType::makeInteger(
+            node->type = Type::makeInteger(
                 static_cast<int>(std::abs(high_val - low_val)) + 1,
                 high_val == low_val ? false : atype.isSigned());
             return true;
@@ -413,7 +413,7 @@ bool propagateTypes(DFG& graph) {
                 DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& edge) {
                     DFGNode* src = edge.node;
                     if (src->hasType() && isArithOp(src->kind()) && src->type->width < contextWidth) {
-                        src->type = ResolvedType::makeInteger(contextWidth, src->type->isSigned());
+                        src->type = Type::makeInteger(contextWidth, src->type->isSigned());
                         backwardChanged = true;
                         anyChanged = true;
                     }

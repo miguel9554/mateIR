@@ -147,7 +147,7 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
 }
 
 void VcdWriter::addSignalEntries(vcd_tracer::module& scope, const std::string& name,
-                                 const ResolvedSignal& sig,
+                                 const Signal& sig,
                                  const std::unordered_set<const DFGNode*>& alive) {
     if (sig.type.unpacked_dims.empty()) {
         addEntry(scope, name, scalarSignalNode(sig), alive);
@@ -179,7 +179,7 @@ void VcdWriter::addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
 // VcdWriter::setupHier — hierarchical VCD
 // ============================================================================
 
-void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scope,
+void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
                           const std::unordered_set<const DFGNode*>& alive,
                           const NameMap& translation) {
     if (!mod.parameters.empty() || !mod.localparams.empty()) {
@@ -295,7 +295,7 @@ void VcdWriter::setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scop
 // VcdWriter::setupRaw — raw VCD (no kind grouping)
 // ============================================================================
 
-void VcdWriter::setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
+void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
                           const std::unordered_set<const DFGNode*>& alive,
                           const NameMap& translation) {
     for (const auto* params : {&mod.parameters, &mod.localparams}) {
@@ -381,7 +381,7 @@ void VcdWriter::setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
 // VcdWriter constructor
 // ============================================================================
 
-VcdWriter::VcdWriter(const ResolvedModule& module, const std::string& output_dir) {
+VcdWriter::VcdWriter(const Module& module, const std::string& output_dir) {
     std::filesystem::create_directories(output_dir);
 
     grouped_path_ = output_dir + "/" + module.name + ".vcd";

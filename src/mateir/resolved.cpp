@@ -15,7 +15,7 @@ namespace custom_hdl {
 // Leaf layout helpers
 // ============================================================================
 
-size_t unpackedLeafCount(const ResolvedType& type) {
+size_t unpackedLeafCount(const Type& type) {
     size_t count = 1;
     for (const auto& dim : type.unpacked_dims) {
         count *= static_cast<size_t>(dim.size());
@@ -23,7 +23,7 @@ size_t unpackedLeafCount(const ResolvedType& type) {
     return count;
 }
 
-size_t linearUnpackedIndex(const std::vector<ResolvedDimension>& dims,
+size_t linearUnpackedIndex(const std::vector<Dimension>& dims,
                            const std::vector<int64_t>& indices) {
     if (indices.size() != dims.size()) {
         throw CompilerError("unpacked index rank mismatch");
@@ -55,7 +55,7 @@ size_t linearUnpackedIndex(const std::vector<ResolvedDimension>& dims,
     return linear;
 }
 
-std::vector<std::string> unpackedIndexSuffixes(const ResolvedType& type) {
+std::vector<std::string> unpackedIndexSuffixes(const Type& type) {
     if (type.unpacked_dims.empty()) {
         return {""};
     }
@@ -74,14 +74,14 @@ std::vector<std::string> unpackedIndexSuffixes(const ResolvedType& type) {
     return result;
 }
 
-ResolvedType dropFirstUnpackedDim(ResolvedType type) {
+Type dropFirstUnpackedDim(Type type) {
     if (!type.unpacked_dims.empty()) {
         type.unpacked_dims.erase(type.unpacked_dims.begin());
     }
     return type;
 }
 
-ResolvedType unpackedElementType(const ResolvedType& type) {
+Type unpackedElementType(const Type& type) {
     return dropFirstUnpackedDim(type);
 }
 
@@ -94,7 +94,7 @@ DFGNode* scalarLeaf(const SignalBinding& binding) {
 }
 
 DFGNode* leafAt(const SignalBinding& binding,
-                const ResolvedType& type,
+                const Type& type,
                 const std::vector<int64_t>& indices) {
     size_t idx = linearUnpackedIndex(type.unpacked_dims, indices);
     if (idx >= binding.leaves.size()) {
@@ -104,11 +104,11 @@ DFGNode* leafAt(const SignalBinding& binding,
     return binding.leaves[idx];
 }
 
-const std::vector<DFGNode*>& signalLeaves(const ResolvedSignal& signal) {
+const std::vector<DFGNode*>& signalLeaves(const Signal& signal) {
     return signal.binding.leaves;
 }
 
-DFGNode* scalarSignalNode(const ResolvedSignal& signal) {
+DFGNode* scalarSignalNode(const Signal& signal) {
     try {
         return scalarLeaf(signal.binding);
     } catch (const CompilerError&) {
@@ -145,27 +145,27 @@ DFGNode* scalarFlopQNode(const FlopInfo& flop) {
 }
 
 // ============================================================================
-// ResolvedType implementation
+// Type implementation
 // ============================================================================
 
-ResolvedType ResolvedType::makeInteger(int width, bool is_signed,
-                                       std::vector<ResolvedDimension> packed_dims,
-                                       std::vector<ResolvedDimension> unpacked_dims) {
-    return ResolvedType{
-        .kind = ResolvedTypeKind::Integer,
+Type Type::makeInteger(int width, bool is_signed,
+                       std::vector<Dimension> packed_dims,
+                       std::vector<Dimension> unpacked_dims) {
+    return Type{
+        .kind = TypeKind::Integer,
         .width = width,
-        .metadata = ResolvedIntegerInfo{.is_signed = is_signed},
+        .metadata = IntegerInfo{.is_signed = is_signed},
         .packed_dims = std::move(packed_dims),
         .unpacked_dims = std::move(unpacked_dims)
     };
 }
 
-ResolvedType ResolvedType::makeEnum(std::string type_name, int width,
-                                    std::vector<ResolvedEnumMember> members) {
-    return ResolvedType{
-        .kind = ResolvedTypeKind::Enum,
+Type Type::makeEnum(std::string type_name, int width,
+                    std::vector<EnumMember> members) {
+    return Type{
+        .kind = TypeKind::Enum,
         .width = width,
-        .metadata = ResolvedEnumInfo{
+        .metadata = EnumInfo{
             .type_name = std::move(type_name),
             .members   = std::move(members)
         },
@@ -174,12 +174,12 @@ ResolvedType ResolvedType::makeEnum(std::string type_name, int width,
     };
 }
 
-void ResolvedType::print(std::ostream& os) const {
+void Type::print(std::ostream& os) const {
     switch (kind) {
-        case ResolvedTypeKind::Integer:
+        case TypeKind::Integer:
             os << "Integer";
             break;
-        case ResolvedTypeKind::Enum:
+        case TypeKind::Enum:
             os << "Enum(" << enumInfo().type_name << ")";
             break;
     }
@@ -190,8 +190,8 @@ void ResolvedType::print(std::ostream& os) const {
     } else {
         os << "[" << width << "]";
     }
-    if (std::holds_alternative<ResolvedIntegerInfo>(metadata)) {
-        auto& intInfo = std::get<ResolvedIntegerInfo>(metadata);
+    if (std::holds_alternative<IntegerInfo>(metadata)) {
+        auto& intInfo = std::get<IntegerInfo>(metadata);
         os << (intInfo.is_signed ? " signed" : " unsigned");
     }
 }
@@ -223,7 +223,7 @@ void FlopInfo::print(std::ostream& os, int indent) const {
     }
 }
 
-void ResolvedSignalBase::print(std::ostream& os) const {
+void SignalBase::print(std::ostream& os) const {
     os << name << ": ";
     type.print(os);
     for (const auto& dim : type.unpacked_dims) {
@@ -231,7 +231,7 @@ void ResolvedSignalBase::print(std::ostream& os) const {
     }
 }
 
-void ResolvedModule::print(int indent) const {
+void Module::print(int indent) const {
     auto indent_str = [](int n) { return std::string(n * 2, ' '); };
 
     std::cout << indent_str(indent) << "Module: " << this->name << std::endl;
@@ -305,10 +305,10 @@ void ResolvedModule::print(int indent) const {
 // JSON serialisation
 // ============================================================================
 
-static std::string typeToJson(const ResolvedType& t) {
+static std::string typeToJson(const Type& t) {
     std::ostringstream ss;
     ss << "{";
-    ss << "\"kind\": \"" << (t.kind == ResolvedTypeKind::Enum ? "enum" : "integer") << "\", ";
+    ss << "\"kind\": \"" << (t.kind == TypeKind::Enum ? "enum" : "integer") << "\", ";
     ss << "\"width\": " << t.width << ", ";
     ss << "\"signed\": " << (t.isSigned() ? "true" : "false");
     if (!t.packed_dims.empty()) {
@@ -329,7 +329,7 @@ static std::string typeToJson(const ResolvedType& t) {
         }
         ss << "]";
     }
-    if (t.kind == ResolvedTypeKind::Enum) {
+    if (t.kind == TypeKind::Enum) {
         const auto& ei = t.enumInfo();
         ss << ", \"enum_type\": \"" << ei.type_name << "\"";
         ss << ", \"enum_members\": [";
@@ -354,7 +354,7 @@ static std::string syncKindStr(SyncKind sk) {
     return "sync";
 }
 
-static std::string signalToJson(const ResolvedSignal& s) {
+static std::string signalToJson(const Signal& s) {
     std::ostringstream ss;
     ss << "{";
     ss << "\"name\": \"" << s.name << "\", ";
@@ -368,7 +368,7 @@ static std::string signalToJson(const ResolvedSignal& s) {
     return ss.str();
 }
 
-static std::string paramToJson(const ResolvedParam& p) {
+static std::string paramToJson(const Param& p) {
     std::ostringstream ss;
     ss << "{\"name\": \"" << p.name << "\", \"type\": " << typeToJson(p.type)
        << ", \"value\": " << p.value << "}";
@@ -393,7 +393,7 @@ static std::string flopToJson(const FlopInfo& f) {
     return ss.str();
 }
 
-static std::string moduleToJson(const ResolvedModule& m, int indent) {
+static std::string moduleToJson(const Module& m, int indent) {
     auto ind = [](int n) { return std::string(n * 2, ' '); };
     std::ostringstream ss;
 
@@ -476,7 +476,7 @@ static std::string moduleToJson(const ResolvedModule& m, int indent) {
     return ss.str();
 }
 
-std::string ResolvedModule::toJson() const {
+std::string Module::toJson() const {
     return moduleToJson(*this, 0) + "\n";
 }
 
@@ -484,7 +484,7 @@ std::string ResolvedModule::toJson() const {
 // Combinational loop detection
 // ============================================================================
 
-void validateNoCombLoops(const ResolvedModule& module) {
+void validateNoCombLoops(const Module& module) {
     if (!module.dfg) return;
 
     const auto& nodes = module.dfg->nodes;

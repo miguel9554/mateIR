@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mateir/unresolved.h"
+#include "frontends/systemverilog/unresolved.h"
 
 // Forward declarations for slang types
 namespace slang::syntax {

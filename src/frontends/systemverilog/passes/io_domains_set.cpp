@@ -66,8 +66,8 @@ std::vector<std::string> expandPattern(
     return matches;
 }
 
-// Find a ResolvedSignal by name in inputs or outputs
-ResolvedSignal* findSignal(ResolvedModule& module, const std::string& name) {
+// Find a Signal by name in inputs or outputs
+Signal* findSignal(Module& module, const std::string& name) {
     if (auto it = module.inputs.find(name); it != module.inputs.end()) return &it->second;
     if (auto it = module.outputs.find(name); it != module.outputs.end()) return &it->second;
     return nullptr;
@@ -75,7 +75,7 @@ ResolvedSignal* findSignal(ResolvedModule& module, const std::string& name) {
 
 } // anonymous namespace
 
-void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
+void setIODomains(Module& module, const std::string& yamlPath) {
     // 3a. Load & parse YAML
     YAML::Node config = YAML::LoadFile(yamlPath);
 
@@ -260,7 +260,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
 
     // Set sync_kind on all classified IO ports
     for (const auto& [portName, cls] : portClassMap) {
-        ResolvedSignal* sig = findSignal(module, portName);
+        Signal* sig = findSignal(module, portName);
         if (!sig) continue;
         switch (cls.cls) {
             case PortClass::Clock: sig->sync_kind = SyncKind::Clock; break;
@@ -274,7 +274,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
     // expected edge on the clock input signal so domains_propagate_and_check can
     // validate polarity without re-parsing the YAML.
     for (const auto& [domainName, info] : clockDomains) {
-        ResolvedSignal* clockSig = findSignal(module, info.input_port);
+        Signal* clockSig = findSignal(module, info.input_port);
         if (!clockSig) continue;
 
         edge_t edge = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
@@ -283,7 +283,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
         clockSig->clock_edge = edge;
 
         for (const auto& portName : info.matched_ports) {
-            ResolvedSignal* sig = findSignal(module, portName);
+            Signal* sig = findSignal(module, portName);
             if (sig) {
                 sig->clock_domain = clockSig;
                 sig->clock_edge = edge;
@@ -294,7 +294,7 @@ void setIODomains(ResolvedModule& module, const std::string& yamlPath) {
     // Store each reset's expected polarity on the reset signal itself (POSEDGE = positive,
     // NEGEDGE = negative) so domains_propagate_and_check can validate without re-parsing.
     for (const auto& [resetName, info] : resets) {
-        ResolvedSignal* sig = findSignal(module, info.signal_name);
+        Signal* sig = findSignal(module, info.signal_name);
         if (sig) {
             sig->clock_edge = (info.polarity == "positive") ? POSEDGE : NEGEDGE;
         }

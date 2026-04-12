@@ -13,6 +13,6 @@ namespace custom_hdl {
 //   - Flop .q INPUT nodes from submodules are in top.dfg's inputs map
 //   - DFGNode::instance_path is set on all inlined nodes
 //   - Submodule dfg fields are nulled
-void inlineDFGs(ResolvedModule& top);
+void inlineDFGs(Module& top);
 
 } // namespace custom_hdl

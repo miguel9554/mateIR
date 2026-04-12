@@ -8,6 +8,6 @@ namespace custom_hdl {
 // domain configuration file. Validates that the YAML matches the
 // module's ports, flop info, and performs fanin checks.
 // Must run after flop_resolve + port_type_propagation.
-void setIODomains(ResolvedModule& module, const std::string& yamlPath);
+void setIODomains(Module& module, const std::string& yamlPath);
 
 } // namespace custom_hdl

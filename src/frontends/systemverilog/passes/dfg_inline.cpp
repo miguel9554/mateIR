@@ -2,18 +2,19 @@
 
 #include <algorithm>
 #include <format>
+#include <functional>
 #include <string>
 
 namespace custom_hdl {
 
 namespace {
 
-void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
+void inlineModuleNode(Module& parent, DFGNode* moduleNode) {
     const std::string& moduleTypeName = moduleNode->moduleType();
     const std::string& instanceName = moduleNode->name;
 
-    // Find the sub ResolvedModule by instance name
-    ResolvedModule* sub = nullptr;
+    // Find the sub Module by instance name
+    Module* sub = nullptr;
     for (auto& s : parent.hierarchyInstantiation) {
         if (s.instance_name == instanceName) {
             sub = &s;
@@ -55,7 +56,7 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
 
         // Recursively fix input bindings in deeper descendants that were wired to
         // subInputNode during a prior inner inlining pass.
-        std::function<void(ResolvedModule&)> fixDescendants = [&](ResolvedModule& mod) {
+        std::function<void(Module&)> fixDescendants = [&](Module& mod) {
             for (auto& [name, inp] : mod.inputs) {
                 for (auto*& leaf : inp.binding.leaves) {
                     if (leaf == subInputNode) leaf = driver.node;
@@ -129,7 +130,7 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
 
 } // anonymous namespace
 
-void inlineDFGs(ResolvedModule& top) {
+void inlineDFGs(Module& top) {
     // Bottom-up: recurse into children first so each sub DFG is flat before we inline it
     for (auto& sub : top.hierarchyInstantiation) {
         inlineDFGs(sub);

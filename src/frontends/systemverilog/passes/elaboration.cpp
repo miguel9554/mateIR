@@ -1,7 +1,7 @@
 #include "frontends/systemverilog/passes/elaboration.h"
 #include "mateir/dfg.h"
 #include "mateir/resolved.h"
-#include "mateir/unresolved.h"
+#include "frontends/systemverilog/unresolved.h"
 #include "util/source_loc_resolve.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxKind.h"
@@ -27,10 +27,10 @@ using namespace slang::syntax;
 
 namespace custom_hdl {
 
-// Enum type registry: typedef name → ResolvedType (Enum kind)
-using EnumRegistry  = std::map<std::string, ResolvedType>;
-// Map from enum member/enum-typed-localparam name → (integer value, enum ResolvedType)
-using EnumMemberMap = std::map<std::string, std::pair<int64_t, ResolvedType>>;
+// Enum type registry: typedef name → Type (Enum kind)
+using EnumRegistry  = std::map<std::string, Type>;
+// Map from enum member/enum-typed-localparam name → (integer value, enum Type)
+using EnumMemberMap = std::map<std::string, std::pair<int64_t, Type>>;
 
 struct PartialSliceDriver {
     int64_t low;
@@ -39,24 +39,24 @@ struct PartialSliceDriver {
 };
 
 struct PartialTargetState {
-    ResolvedType type;
+    Type type;
     std::vector<PartialSliceDriver> slices;
 };
 
 using PartialDriverMap = std::unordered_map<std::string, PartialTargetState>;
 
 // Package registry: package name → its resolved enum types and members
-struct ResolvedPackageEntry {
+struct PackageEntry {
     EnumRegistry  enumTypes;
     EnumMemberMap enumMembers;
     std::map<std::string, const FunctionDeclarationSyntax*> functions;
 };
-using PackageRegistry = std::map<std::string, ResolvedPackageEntry>;
+using PackageRegistry = std::map<std::string, PackageEntry>;
 
 // Context struct for resolution - bundles all parameters needed during DFG building
 struct ResolutionContext {
     DFG& graph;
-    ResolvedModule* thisModule;
+    Module* thisModule;
     const std::set<std::string>& flopNames;
     const ParameterContext& params;
     const slang::SourceManager& sm;
@@ -79,10 +79,10 @@ struct ResolutionContext {
     // Wires: "name[i]" → leaf_node (for arrays; no aggregate base-name entry)
     //        "name" → signal_node (for scalars)
     std::map<std::string, DFGNode*> local_signals;
-    // local_array_types: base name → full ResolvedType (including unpacked_dims) for
+    // local_array_types: base name → full Type (including unpacked_dims) for
     // generate-scope array signals. Used by lookupDeclaredType since there is no
     // aggregate node for arrays after the leaf-binding refactor.
-    std::map<std::string, ResolvedType> local_array_types;
+    std::map<std::string, Type> local_array_types;
     // local_flop_names: base names of flops declared in this generate scope
     std::set<std::string> local_flop_names;
 
@@ -136,7 +136,7 @@ struct ResolutionContext {
 // ============================================================================
 
 // Forward declaration (defined after the anonymous namespace)
-static ResolvedModule resolveModule(const UnresolvedModule& unresolved,
+static Module resolveModule(const UnresolvedModule& unresolved,
                                     const ParameterContext& topCtx,
                                     const ModuleLookup& moduleLookup,
                                     const slang::SourceManager& sourceManager,
@@ -312,7 +312,7 @@ struct ReturnSignal {
 // ============================================================================
 
 struct ExprValue {
-    ResolvedType type;
+    Type type;
     DFGNode* scalar = nullptr;      // valid when type.unpacked_dims is empty
     std::vector<DFGNode*> leaves;   // valid when type.unpacked_dims is non-empty
 };
@@ -339,7 +339,7 @@ static DFGNode* inlineSubroutineCall(
         ResolutionContext& ctx
 );
 
-const ResolvedType* lookupDeclaredType(const std::string& baseName,
+const Type* lookupDeclaredType(const std::string& baseName,
                                        const ResolutionContext& ctx);
 
 // Unwrap a PropertyExprSyntax (as produced by function argument positions) to ExpressionSyntax.
@@ -634,7 +634,7 @@ static DFGNode* getRetainedDriver(ResolutionContext& ctx,
     return qNode;
 }
 
-static PartialTargetState makeWholeDriverState(const ResolvedType& type, DFGNode* driver) {
+static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver) {
     PartialTargetState state{type, {}};
     if (!driver || type.width <= 0) {
         return state;
@@ -692,7 +692,7 @@ static PartialTargetState makeWholeDriverState(const ResolvedType& type, DFGNode
     return state;
 }
 
-static const ResolvedType& lookupTargetTypeOrThrow(const std::string& targetName,
+static const Type& lookupTargetTypeOrThrow(const std::string& targetName,
                                                    ResolutionContext& ctx,
                                                    const std::optional<SourceLoc>& loc) {
     std::string baseName = targetName;
@@ -1285,16 +1285,16 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 // VirtualInterfaceType
 // ImplicitType
 
-// Resolve an UnresolvedParam to ResolvedParam
+// Resolve an UnresolvedParam to Param
 // TODO: Actually evaluate the type syntax and dimension expressions
-ResolvedParam resolveParameter(const UnresolvedParam& param, const ParameterContext& topCtx,
+Param resolveParameter(const UnresolvedParam& param, const ParameterContext& topCtx,
                                ParameterContext& localCtx, bool isLocal = false,
                                const EnumRegistry* enumRegistry = nullptr) {
-    ResolvedParam resolved;
+    Param resolved;
     resolved.name = param.name;
 
     if (param.type.syntax->kind == SyntaxKind::ImplicitType) {
-        resolved.type = ResolvedType::makeInteger(32, false);
+        resolved.type = Type::makeInteger(32, false);
     } else if (param.type.syntax->kind == SyntaxKind::NamedType && enumRegistry) {
         auto& named = param.type.syntax->as<NamedTypeSyntax>();
         std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
@@ -1374,11 +1374,11 @@ ResolvedParam resolveParameter(const UnresolvedParam& param, const ParameterCont
 // VirtualInterfaceType
 // ImplicitType
 
-std::vector<ResolvedDimension> ResolveDimensions(
+std::vector<Dimension> ResolveDimensions(
         const SyntaxList<VariableDimensionSyntax>& dimensionsSyntaxList,
         const ParameterContext& ctx,
         const slang::SourceManager* sm = nullptr){
-    std::vector<ResolvedDimension> resolvedDimensions;
+    std::vector<Dimension> resolvedDimensions;
     // Parse dimensionsSyntax from syntax
     if (!dimensionsSyntaxList.empty()) {
         for (const auto* dimSyntax : dimensionsSyntaxList) {
@@ -1399,7 +1399,7 @@ std::vector<ResolvedDimension> ResolveDimensions(
                 // [N] in a declaration means an unpacked array of N elements: [0:N-1]
                 auto& bitSelect = rangeSpec.selector->as<BitSelectSyntax>();
                 int64_t size = evaluateConstantExpr(bitSelect.expr, ctx);
-                resolvedDimensions.push_back(ResolvedDimension{
+                resolvedDimensions.push_back(Dimension{
                     .left = 0,
                     .right = static_cast<int>(size - 1)
                 });
@@ -1407,7 +1407,7 @@ std::vector<ResolvedDimension> ResolveDimensions(
                 auto& rangeSelect = rangeSpec.selector->as<RangeSelectSyntax>();
                 int64_t left = evaluateConstantExpr(rangeSelect.left, ctx);
                 int64_t right = evaluateConstantExpr(rangeSelect.right, ctx);
-                resolvedDimensions.push_back(ResolvedDimension{
+                resolvedDimensions.push_back(Dimension{
                     .left = static_cast<int>(left),
                     .right = static_cast<int>(right)
                 });
@@ -1420,14 +1420,14 @@ std::vector<ResolvedDimension> ResolveDimensions(
         }
     } else {
         // No dimension syntax - default to single bit [0:0]
-        resolvedDimensions.push_back(ResolvedDimension{.left = 0, .right = 0});
+        resolvedDimensions.push_back(Dimension{.left = 0, .right = 0});
     }
     return resolvedDimensions;
 }
 
 // Resolve type and dimensions from syntax
-// Populates the dimensions vector and returns the ResolvedType with computed width
-ResolvedType resolveType(
+// Populates the dimensions vector and returns the Type with computed width
+Type resolveType(
     const DataTypeSyntax& syntax,
     const ParameterContext& ctx,
     const EnumRegistry& enumRegistry,
@@ -1468,7 +1468,7 @@ ResolvedType resolveType(
             EnumRegistry emptyReg;
             width = resolveType(*enumSyntax.baseType, ctx, emptyReg).width;
         }
-        std::vector<ResolvedEnumMember> members;
+        std::vector<EnumMember> members;
         int64_t nextValue = 0;
         for (const auto* decl : enumSyntax.members) {
             int64_t val = nextValue;
@@ -1477,7 +1477,7 @@ ResolvedType resolveType(
             members.push_back({std::string(decl->name.valueText()), val});
             nextValue = val + 1;
         }
-        return ResolvedType::makeEnum(typeName, width, members);
+        return Type::makeEnum(typeName, width, members);
     }
 
     SyntaxList<VariableDimensionSyntax> packedDimensionsSyntax = nullptr;
@@ -1514,7 +1514,7 @@ ResolvedType resolveType(
         width *= dim.size();
     }
 
-    return ResolvedType::makeInteger(width, is_signed, packedDimensions);
+    return Type::makeInteger(width, is_signed, packedDimensions);
 }
 
 DFGNode* resolveIdentifier(
@@ -1537,7 +1537,7 @@ DFGNode* resolveIdentifier(
     return node;
 }
 
-const ResolvedType* lookupDeclaredType(const std::string& baseName,
+const Type* lookupDeclaredType(const std::string& baseName,
                                        const ResolutionContext& ctx) {
     // Check local array type map first (generate-scope arrays have no aggregate node).
     if (auto it = ctx.local_array_types.find(baseName); it != ctx.local_array_types.end()) {
@@ -1566,7 +1566,7 @@ const ResolvedType* lookupDeclaredType(const std::string& baseName,
     return nullptr;
 }
 
-const ResolvedType* lookupDeclaredTypeWithSuffix(const std::string& baseName,
+const Type* lookupDeclaredTypeWithSuffix(const std::string& baseName,
                                                  const std::string& indexSuffix,
                                                  const ResolutionContext& ctx) {
     if (indexSuffix.empty()) return lookupDeclaredType(baseName, ctx);
@@ -1581,7 +1581,7 @@ const ResolvedType* lookupDeclaredTypeWithSuffix(const std::string& baseName,
     return nullptr;
 }
 
-static int64_t packedIndexOffsetFromLsb(const ResolvedDimension& dim, int64_t idx) {
+static int64_t packedIndexOffsetFromLsb(const Dimension& dim, int64_t idx) {
     int64_t lo = std::min(dim.left, dim.right);
     int64_t hi = std::max(dim.left, dim.right);
     if (idx < lo || idx > hi) {
@@ -1591,7 +1591,7 @@ static int64_t packedIndexOffsetFromLsb(const ResolvedDimension& dim, int64_t id
     return std::llabs(idx - dim.right);
 }
 
-static int64_t packedSuffixWidth(const ResolvedType& type, size_t fromDim) {
+static int64_t packedSuffixWidth(const Type& type, size_t fromDim) {
     int64_t width = 1;
     for (size_t i = fromDim; i < type.packed_dims.size(); ++i) {
         width *= type.packed_dims[i].size();
@@ -1626,7 +1626,7 @@ static DFGNode* lookupLeafNode(ResolutionContext& ctx, const std::string& name) 
 
 static std::vector<DFGNode*> lookupArrayLeaves(ResolutionContext& ctx,
                                                const std::string& baseName,
-                                               const ResolvedType& type) {
+                                               const Type& type) {
     std::vector<DFGNode*> leaves;
     leaves.reserve(unpackedLeafCount(type));
     const bool readFlopQ = isFlopBaseName(ctx, baseName);
@@ -1655,8 +1655,8 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
 
     if (!ctx.is_sequential) {
         if (auto it = ctx.combDrivers.find(baseName); it != ctx.combDrivers.end()) {
-            ResolvedType type = it->second->type.value_or(
-                declaredType ? *declaredType : ResolvedType::makeInteger(0, false));
+            Type type = it->second->type.value_or(
+                declaredType ? *declaredType : Type::makeInteger(0, false));
             return ExprValue{.type = type, .scalar = it->second, .leaves = {}};
         }
     }
@@ -1695,7 +1695,7 @@ static ExprValue selectStaticUnpacked(const ExprValue& value, int64_t idx) {
     }
     const auto& dim = value.type.unpacked_dims.front();
     size_t pos = linearUnpackedIndex({dim}, {idx});
-    ResolvedType childType = dropFirstUnpackedDim(value.type);
+    Type childType = dropFirstUnpackedDim(value.type);
     size_t groupSize = unpackedLeafCount(childType);
     size_t start = pos * groupSize;
     if (start + groupSize > value.leaves.size()) {
@@ -1712,7 +1712,7 @@ static ExprValue selectStaticUnpacked(const ExprValue& value, int64_t idx) {
     };
 }
 
-static DFGNode* zeroScalarForType(DFG& graph, const ResolvedType& type) {
+static DFGNode* zeroScalarForType(DFG& graph, const Type& type) {
     auto* zero = graph.constant(0);
     zero->type = type;
     return zero;
@@ -1730,7 +1730,7 @@ static ExprValue selectDynamicUnpacked(const ExprValue& value,
     int64_t lo = std::min<int64_t>(dim.left, dim.right);
     int64_t hi = std::max<int64_t>(dim.left, dim.right);
     int64_t N = hi - lo + 1;
-    ResolvedType childType = dropFirstUnpackedDim(value.type);
+    Type childType = dropFirstUnpackedDim(value.type);
     size_t groupSize = unpackedLeafCount(childType);
 
     DFGNode* adjustedSel = selectorExprNode;
@@ -1753,7 +1753,7 @@ static ExprValue selectDynamicUnpacked(const ExprValue& value,
         std::vector<DFGNode*> armData;
         armValues.reserve(static_cast<size_t>(totalCodes));
         armData.reserve(static_cast<size_t>(totalCodes));
-        ResolvedType scalarType = childType;
+        Type scalarType = childType;
         scalarType.unpacked_dims.clear();
         DFGNode* zeroNode = zeroScalarForType(ctx.graph, scalarType);
         for (int64_t v = 0; v < totalCodes; ++v) {
@@ -1870,14 +1870,14 @@ static void writeWholeTargetAsPartial(ResolutionContext& ctx,
 
 static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
                                             DFGNode* expr,
-                                            const std::optional<ResolvedType>& targetType,
+                                            const std::optional<Type>& targetType,
                                             const std::optional<SourceLoc>& loc) {
     int targetWidth = targetType ? targetType->width : 0;
     bool targetSigned = targetType ? targetType->isSigned() : false;
     if (!expr || targetWidth <= 0) return expr;
 
     if (expr->kind() == DFGOp::CONST) {
-        expr->type = targetType ? *targetType : ResolvedType::makeInteger(targetWidth, targetSigned);
+        expr->type = targetType ? *targetType : Type::makeInteger(targetWidth, targetSigned);
         return expr;
     }
 
@@ -1895,7 +1895,7 @@ static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
             lowNode->loc = *loc;
         }
         auto* truncated = ctx.graph.slice(expr, highNode, lowNode);
-        truncated->type = ResolvedType::makeInteger(targetWidth, targetSigned);
+        truncated->type = Type::makeInteger(targetWidth, targetSigned);
         if (loc) truncated->loc = *loc;
         expr = truncated;
     }
@@ -1945,7 +1945,7 @@ static ExprValue buildExprValue(
         auto& name = expr->as<IdentifierSelectNameSyntax>();
         std::string baseName(name.identifier.valueText());
         ExprValue value = exprValueFromIdentifier(baseName, resolveSourceLoc(*expr, ctx.sm), ctx);
-        std::optional<ResolvedType> currentType = value.type;
+        std::optional<Type> currentType = value.type;
 
         for (const auto& elemSelect : name.selectors) {
             if (!elemSelect->selector) {
@@ -1980,7 +1980,7 @@ static ExprValue buildExprValue(
                         auto* highNode = ctx.graph.constant(offset + elemWidth - 1);
                         auto* sliceNode = ctx.graph.slice(value.scalar, highNode, lowNode);
                         sliceNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        ResolvedType narrowed = *currentType;
+                        Type narrowed = *currentType;
                         narrowed.width = static_cast<int>(elemWidth);
                         narrowed.packed_dims.erase(narrowed.packed_dims.begin());
                         sliceNode->type = narrowed;
@@ -2003,7 +2003,7 @@ static ExprValue buildExprValue(
                 auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
                 auto* sliceNode = ctx.graph.slice(value.scalar, leftNode, rightNode);
                 sliceNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                value = ExprValue{.type = sliceNode->type.value_or(ResolvedType{}),
+                value = ExprValue{.type = sliceNode->type.value_or(Type{}),
                                   .scalar = sliceNode,
                                   .leaves = {}};
                 currentType.reset();
@@ -2048,7 +2048,7 @@ static ExprValue buildExprValue(
                     std::vector<int64_t> armValues;
                     std::vector<DFGNode*> armData;
                     DFGNode* zeroNode = ctx.graph.constant(0);
-                    zeroNode->type = ResolvedType::makeInteger(
+                    zeroNode->type = Type::makeInteger(
                         static_cast<int>(width), currentType->isSigned());
 
                     for (int64_t v = 0; v < (1LL << selBits); ++v) {
@@ -2073,10 +2073,10 @@ static ExprValue buildExprValue(
                     sliceNode = ctx.graph.mux(truncSel, armValues, armData);
                     sliceNode->loc = resolveSourceLoc(*expr, ctx.sm);
                 }
-                ResolvedType sliceType = ResolvedType::makeInteger(
+                Type sliceType = Type::makeInteger(
                     static_cast<int>(width), currentType ? currentType->isSigned() : false);
                 sliceNode->type = sliceType;
-                value = ExprValue{.type = sliceNode->type.value_or(ResolvedType{}),
+                value = ExprValue{.type = sliceNode->type.value_or(Type{}),
                                   .scalar = sliceNode,
                                   .leaves = {}};
                 currentType = sliceType;
@@ -2095,7 +2095,7 @@ static ExprValue buildExprValue(
 
     auto* scalar = buildExprScalarImpl(expr, ctx);
     if (!scalar || !scalar->hasType()) {
-        return ExprValue{.type = ResolvedType{}, .scalar = scalar, .leaves = {}};
+        return ExprValue{.type = Type{}, .scalar = scalar, .leaves = {}};
     }
     return ExprValue{.type = *scalar->type, .scalar = scalar, .leaves = {}};
 }
@@ -2152,7 +2152,7 @@ static DFGNode* buildExprScalarImpl(
             auto& vecExpr = expr->as<IntegerVectorExpressionSyntax>();
             const auto lit = parseIntegerVectorExpression(vecExpr);
             auto* node = ctx.graph.constant(lit.value);
-            node->type = ResolvedType::makeInteger(lit.width, lit.is_signed);
+            node->type = Type::makeInteger(lit.width, lit.is_signed);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
@@ -2242,7 +2242,7 @@ static DFGNode* buildExprScalarImpl(
             }
             const auto selectors = &name.selectors;
             auto indexedSignalNode = node;
-            std::optional<ResolvedType> currentSelectedType;
+            std::optional<Type> currentSelectedType;
             if (const auto* declaredType = lookupDeclaredType(baseName, ctx)) {
                 currentSelectedType = *declaredType;
             } else if (node && node->hasType()) {
@@ -2268,7 +2268,7 @@ static DFGNode* buildExprScalarImpl(
                                     if (indexedSignalNode->hasType()) {
                                         currentSelectedType = *indexedSignalNode->type;
                                     } else {
-                                        ResolvedType narrowed = *currentSelectedType;
+                                        Type narrowed = *currentSelectedType;
                                         narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
                                         currentSelectedType = narrowed;
                                     }
@@ -2280,7 +2280,7 @@ static DFGNode* buildExprScalarImpl(
                                     if (indexedSignalNode->hasType()) {
                                         currentSelectedType = *indexedSignalNode->type;
                                     } else {
-                                        ResolvedType narrowed = *currentSelectedType;
+                                        Type narrowed = *currentSelectedType;
                                         narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
                                         currentSelectedType = narrowed;
                                     }
@@ -2301,7 +2301,7 @@ static DFGNode* buildExprScalarImpl(
                                 indexedSignalNode = ctx.graph.slice(indexedSignalNode, highNode, lowNode);
                                 indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
 
-                                ResolvedType narrowed = *currentSelectedType;
+                                Type narrowed = *currentSelectedType;
                                 narrowed.width = static_cast<int>(elemWidth);
                                 narrowed.packed_dims.erase(narrowed.packed_dims.begin());
                                 currentSelectedType = narrowed;
@@ -2328,7 +2328,7 @@ static DFGNode* buildExprScalarImpl(
 
                         if (N == 1) {
                             // Degenerate single-element array: no MUX needed.
-                            ResolvedType narrowed = *currentSelectedType;
+                            Type narrowed = *currentSelectedType;
                             narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
                             std::string elemKey = baseName + "[" + std::to_string(lo) + "]";
                             if (auto* elemNode = lookupLeafNode(ctx, elemKey)) {
@@ -2361,7 +2361,7 @@ static DFGNode* buildExprScalarImpl(
 
                             std::vector<int64_t> armValues;
                             std::vector<DFGNode*> armData;
-                            ResolvedType armType = *currentSelectedType;
+                            Type armType = *currentSelectedType;
                             armType.unpacked_dims.erase(armType.unpacked_dims.begin());
                             DFGNode* zeroNode = zeroScalarForType(ctx.graph, armType);
 
@@ -2434,7 +2434,7 @@ static DFGNode* buildExprScalarImpl(
                             std::vector<int64_t> armValues;
                             std::vector<DFGNode*> armData;
                             DFGNode* zeroNode = ctx.graph.constant(0);
-                            zeroNode->type = ResolvedType::makeInteger(
+                            zeroNode->type = Type::makeInteger(
                                 static_cast<int>(width), currentSelectedType->isSigned());
 
                             for (int64_t v = 0; v < (1LL << selBits); ++v) {
@@ -2453,7 +2453,7 @@ static DFGNode* buildExprScalarImpl(
                             indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
                             indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
                         }
-                        currentSelectedType = ResolvedType::makeInteger(
+                        currentSelectedType = Type::makeInteger(
                             static_cast<int>(width),
                             currentSelectedType ? currentSelectedType->isSigned() : false);
                     } else if (elemSelect->selector->kind == SyntaxKind::DescendingRangeSelect) {
@@ -2490,7 +2490,7 @@ static DFGNode* buildExprScalarImpl(
                             std::vector<int64_t> armValues;
                             std::vector<DFGNode*> armData;
                             DFGNode* zeroNode = ctx.graph.constant(0);
-                            zeroNode->type = ResolvedType::makeInteger(
+                            zeroNode->type = Type::makeInteger(
                                 static_cast<int>(width), currentSelectedType->isSigned());
 
                             for (int64_t v = 0; v < (1LL << selBits); ++v) {
@@ -2509,7 +2509,7 @@ static DFGNode* buildExprScalarImpl(
                             indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
                             indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
                         }
-                        currentSelectedType = ResolvedType::makeInteger(
+                        currentSelectedType = Type::makeInteger(
                             static_cast<int>(width),
                             currentSelectedType ? currentSelectedType->isSigned() : false);
                     } else {
@@ -2816,7 +2816,7 @@ static DFGNode* buildExprScalarImpl(
         case SyntaxKind::CastExpression: {
             auto& castExpr = expr->as<CastExpressionSyntax>();
             // Only enum type casts are supported: enum_t'(expr) or pkg::enum_t'(expr)
-            ResolvedType castType;
+            Type castType;
             if (castExpr.left->kind == SyntaxKind::NamedType) {
                 auto& namedType = castExpr.left->as<NamedTypeSyntax>();
                 if (namedType.name->kind == SyntaxKind::ScopedName) {
@@ -2917,7 +2917,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
     };
 
-    auto enumerateIndices = [](const ResolvedDimension& dim) {
+    auto enumerateIndices = [](const Dimension& dim) {
         std::vector<int64_t> indices;
         int64_t step = dim.left <= dim.right ? 1 : -1;
         for (int64_t idx = dim.left;; idx += step) {
@@ -2928,14 +2928,14 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     };
 
     auto connectWholeUnpackedArray = [&](const std::string& baseName,
-                                         const ResolvedType& arrayType,
+                                         const Type& arrayType,
                                          const std::vector<DFGNode*>& elementDrivers) {
         const auto suffixes = unpackedIndexSuffixes(arrayType);
         if (suffixes.size() != elementDrivers.size()) {
             throw CompilerError("Whole-array assignment element count mismatch", assignLoc);
         }
 
-        ResolvedType elementType = arrayType;
+        Type elementType = arrayType;
         elementType.unpacked_dims.clear();
 
         for (size_t i = 0; i < suffixes.size(); ++i) {
@@ -3180,8 +3180,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     std::string indexSuffix;
     bool hasRangeSelect = false;
     int64_t rangeHigh = 0, rangeLow = 0;
-    std::optional<ResolvedType> currentSelectedType;
-    const ResolvedType* targetDeclaredType = lookupDeclaredType(baseName, ctx);
+    std::optional<Type> currentSelectedType;
+    const Type* targetDeclaredType = lookupDeclaredType(baseName, ctx);
     if (targetDeclaredType) {
         currentSelectedType = *targetDeclaredType;
     }
@@ -3215,7 +3215,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                         rangeLow = baseLow + offset;
                         rangeHigh = rangeLow + elemWidth - 1;
                         hasRangeSelect = true;
-                        ResolvedType narrowed = *currentSelectedType;
+                        Type narrowed = *currentSelectedType;
                         narrowed.width = static_cast<int>(elemWidth);
                         narrowed.packed_dims.erase(narrowed.packed_dims.begin());
                         currentSelectedType = narrowed;
@@ -3280,7 +3280,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
     }
 
-    std::optional<ResolvedType> assignmentTargetType;
+    std::optional<Type> assignmentTargetType;
         if (hasRangeSelect) {
         if (currentSelectedType) {
             assignmentTargetType = *currentSelectedType;
@@ -3954,11 +3954,11 @@ void resolveProceduralTimingInPlace(
     resolveStatementInPlace(statement, ctx);
 }
 
-ResolvedSignal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx,
+Signal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx,
                              const EnumRegistry& enumRegistry,
                              const PackageRegistry* pkgRegistry = nullptr,
                              const slang::SourceManager* sm = nullptr) {
-    ResolvedSignal resolved;
+    Signal resolved;
     resolved.name = signal.name;
 
     resolved.type = resolveType(
@@ -3984,14 +3984,14 @@ ResolvedSignal resolveSignal(const UnresolvedSignal& signal, const ParameterCont
 
 // Pre-populate module input (port) with all bit indices
 // For vector inputs, creates base node + individual element nodes
-void prePopulateInput(DFG& graph, ResolvedSignal& sig) {
+void prePopulateInput(DFG& graph, Signal& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
         auto* node = graph.input("", sig.name);
         node->type = sig.type;
         sig.binding.leaves.push_back(node);
     } else {
-        ResolvedType leafType = sig.type;
+        Type leafType = sig.type;
         leafType.unpacked_dims.clear();
         for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
             auto* node = graph.input("", sig.name + suffix);
@@ -4004,14 +4004,14 @@ void prePopulateInput(DFG& graph, ResolvedSignal& sig) {
 // Pre-populate module output (port) with all bit indices
 // Creates OUTPUT nodes with no driver
 // For vector outputs, creates base node + individual element nodes
-void prePopulateOutput(DFG& graph, ResolvedSignal& sig) {
+void prePopulateOutput(DFG& graph, Signal& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
         auto* node = graph.outputPlaceholder("", sig.name);
         node->type = sig.type;
         sig.binding.leaves.push_back(node);
     } else {
-        ResolvedType leafType = sig.type;
+        Type leafType = sig.type;
         leafType.unpacked_dims.clear();
         for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
             auto* node = graph.outputPlaceholder("", sig.name + suffix);
@@ -4024,7 +4024,7 @@ void prePopulateOutput(DFG& graph, ResolvedSignal& sig) {
 // Pre-populate internal signal with all bit indices.
 // Only called for plain (non-flop) signals; .d/.q nodes are handled by
 // prePopulateFlopNodes below.
-void prePopulateSignal(DFG& graph, ResolvedSignal& sig) {
+void prePopulateSignal(DFG& graph, Signal& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
         auto* node = graph.signal("", sig.name);
@@ -4033,7 +4033,7 @@ void prePopulateSignal(DFG& graph, ResolvedSignal& sig) {
         return;
     }
 
-    ResolvedType leafType = sig.type;
+    Type leafType = sig.type;
     leafType.unpacked_dims.clear();
     for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
         auto* node = graph.signal("", sig.name + suffix);
@@ -4046,7 +4046,7 @@ void prePopulateSignal(DFG& graph, ResolvedSignal& sig) {
 // the FlopInfo (name + type). Called after flops are resolved, before signals.
 void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
     const std::string& name = flop.name;
-    const ResolvedType& type = flop.type.type;
+    const Type& type = flop.type.type;
     flop.binding.d_leaves.clear();
     flop.binding.q_leaves.clear();
 
@@ -4139,7 +4139,7 @@ void connectModuleOutput(DFG& graph, DFGNode* moduleNode,
 void resolveNamedPortConnection(
         const NamedPortConnectionSyntax& named,
         DFG& graph, DFGNode* moduleNode,
-        ResolvedModule& resolvedSub,
+        Module& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
         const std::map<std::string, size_t>& subOutputIndex,
@@ -4246,7 +4246,7 @@ void resolveNamedPortConnection(
 
 void resolveWildcardPortConnection(
         DFG& graph, DFGNode* moduleNode,
-        ResolvedModule& resolvedSub,
+        Module& resolvedSub,
         ResolutionContext& ctx) {
     for (const auto& [name, inp] : resolvedSub.inputs) {
         auto* driver = graph.lookupSignal("", name);
@@ -4264,7 +4264,7 @@ void resolveWildcardPortConnection(
 void resolvePortConnection(
         const PortConnectionSyntax* conn,
         DFG& graph, DFGNode* moduleNode,
-        ResolvedModule& resolvedSub,
+        Module& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
         const std::map<std::string, size_t>& subOutputIndex,
@@ -4397,7 +4397,7 @@ static void resolveGenerateScopeDecls(
                                   const DeclaratorSyntax& decl,
                                   bool isFlop) {
         std::string name(decl.name.valueText());
-        ResolvedType type = resolveType(typeSyntax, ctx.params, ctx.enumRegistry, &ctx.pkgRegistry);
+        Type type = resolveType(typeSyntax, ctx.params, ctx.enumRegistry, &ctx.pkgRegistry);
 
         // Resolve unpacked dimensions from the declarator
         auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.sm);
@@ -4424,7 +4424,7 @@ static void resolveGenerateScopeDecls(
             std::string qualifiedName = ctx.instance_path.empty()
                 ? name : ctx.instance_path + "." + name;
 
-            ResolvedSignal flopSig;
+            Signal flopSig;
             flopSig.name = qualifiedName;
             flopSig.type = type;
 
@@ -4447,7 +4447,7 @@ static void resolveGenerateScopeDecls(
                 // place this signal under the correct generate-scope hierarchy.
                 if (!ctx.instance_path.empty()) {
                     std::string qualName = ctx.instance_path + "." + name;
-                    ResolvedSignal genSig;
+                    Signal genSig;
                 genSig.name     = qualName;
                 genSig.type     = type;
                 genSig.binding.leaves = {node};
@@ -4456,10 +4456,10 @@ static void resolveGenerateScopeDecls(
             } else {
                 ctx.local_array_types[name] = type;
 
-                ResolvedType leafType = type;
+                Type leafType = type;
                 leafType.unpacked_dims.clear();
 
-                ResolvedSignal genSig;
+                Signal genSig;
                 genSig.name = ctx.instance_path.empty() ? name : ctx.instance_path + "." + name;
                 genSig.type = type;
 
@@ -4792,13 +4792,13 @@ static PackageRegistry resolvePackages(
 {
     PackageRegistry registry;
     for (const auto& pkg : packages) {
-        ResolvedPackageEntry entry;
+        PackageEntry entry;
         ParameterContext emptyCtx;
         for (const auto& [typeName, enumSyntax] : pkg->enumTypedefs) {
             int width = 32;
             if (enumSyntax->baseType)
                 width = resolveType(*enumSyntax->baseType, emptyCtx, {}).width;
-            std::vector<ResolvedEnumMember> members;
+            std::vector<EnumMember> members;
             int64_t nextValue = 0;
             for (const auto* decl : enumSyntax->members) {
                 int64_t val = nextValue;
@@ -4807,7 +4807,7 @@ static PackageRegistry resolvePackages(
                 members.push_back({std::string(decl->name.valueText()), val});
                 nextValue = val + 1;
             }
-            ResolvedType enumType = ResolvedType::makeEnum(typeName, width, members);
+            Type enumType = Type::makeEnum(typeName, width, members);
             entry.enumTypes[typeName] = enumType;
             for (const auto& m : members)
                 entry.enumMembers[m.name] = {m.value, enumType};
@@ -4854,12 +4854,12 @@ static void applyImports(
     }
 }
 
-ResolvedModule resolveModule(const UnresolvedModule& unresolved, const ParameterContext& topCtx,
+Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext& topCtx,
                              const ModuleLookup& moduleLookup,
                              const slang::SourceManager& sourceManager,
                              const PackageRegistry& pkgRegistry,
                              const std::vector<ImportSpec>& globalImports) {
-    ResolvedModule resolved;
+    Module resolved;
     resolved.name = unresolved.name;
     auto localCtx = std::make_unique<ParameterContext>(topCtx);
 
@@ -4878,12 +4878,12 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
         int width = 32;  // default if no explicit base type
         if (enumSyntax->baseType) {
             // Use an empty registry — base types must be integer types
-            ResolvedType base = resolveType(*enumSyntax->baseType, *localCtx, {});
+            Type base = resolveType(*enumSyntax->baseType, *localCtx, {});
             width = base.width;
         }
 
         // Walk members, auto-incrementing value unless overridden
-        std::vector<ResolvedEnumMember> members;
+        std::vector<EnumMember> members;
         int64_t nextValue = 0;
         for (const auto* decl : enumSyntax->members) {
             int64_t val = nextValue;
@@ -4894,7 +4894,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
             nextValue = val + 1;
         }
 
-        ResolvedType enumType = ResolvedType::makeEnum(typeName, width, members);
+        Type enumType = Type::makeEnum(typeName, width, members);
         enumRegistry[typeName] = enumType;
 
         // Inject member names as integer constants (for evaluateConstantExpr in localparams)
@@ -4936,7 +4936,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
                 EnumRegistry emptyReg;
                 width = resolveType(*enumSyntax->baseType, *mergedCtx, emptyReg).width;
             }
-            std::vector<ResolvedEnumMember> members;
+            std::vector<EnumMember> members;
             int64_t nextValue = 0;
             for (const auto* decl : enumSyntax->members) {
                 int64_t val = nextValue;
@@ -4945,7 +4945,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
                 members.push_back({std::string(decl->name.valueText()), val});
                 nextValue = val + 1;
             }
-            ResolvedType enumType = ResolvedType::makeEnum(typeName, width, members);
+            Type enumType = Type::makeEnum(typeName, width, members);
             enumRegistry[typeName] = enumType;
             for (const auto& m : members) {
                 mergedCtx->values[m.name] = m.value;
@@ -5137,7 +5137,7 @@ ResolvedModule resolveModule(const UnresolvedModule& unresolved, const Parameter
     return resolved;
 }
 
-ResolvedModule resolveModules(
+Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
     const std::vector<ImportSpec>& globalImports,
@@ -5161,7 +5161,7 @@ ResolvedModule resolveModules(
     return resolveModule(*modules[0], emptyCtx, moduleLookup, sourceManager, pkgRegistry, globalImports);
 }
 
-ResolvedModule resolveModules(
+Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
     const std::vector<ImportSpec>& globalImports,

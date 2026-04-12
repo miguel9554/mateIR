@@ -9,7 +9,7 @@
 namespace custom_hdl {
 
 struct MateIR {
-    ResolvedModule top;
+    Module top;
     std::vector<std::string> source_files;
     size_t frontend_module_count = 0;
 };

@@ -9,6 +9,6 @@ namespace custom_hdl {
 // - Validates clock/reset sync_kind on flop trigger signals
 // - Propagates clock_domain/clock_edge to internal signals and flop types
 // - CDC fanin validation: checks sync/async inputs only reach flops in their domain
-void domainsPropagateAndCheck(ResolvedModule& module);
+void domainsPropagateAndCheck(Module& module);
 
 } // namespace custom_hdl

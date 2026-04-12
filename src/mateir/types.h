@@ -9,15 +9,15 @@
 
 namespace custom_hdl {
 
-struct ResolvedDimension {
+struct Dimension {
     int left = 0;
     int right = 0;
 
     int size() const { return std::abs(left - right) + 1; }
-    bool operator==(const ResolvedDimension&) const = default;
+    bool operator==(const Dimension&) const = default;
 };
 
-enum class ResolvedTypeKind {
+enum class TypeKind {
     Integer,
     Enum,
 };
@@ -29,54 +29,54 @@ enum class SyncKind {
     Async,  // purely async data, no clock domain (e.g. UART rxd)
 };
 
-struct ResolvedIntegerInfo {
+struct IntegerInfo {
     bool is_signed = false;
 };
 
-struct ResolvedEnumMember {
+struct EnumMember {
     std::string name;
     int64_t     value;
 };
 
-struct ResolvedEnumInfo {
-    std::string                     type_name;
-    std::vector<ResolvedEnumMember> members;
-    // width lives on ResolvedType::width, not here
+struct EnumInfo {
+    std::string                type_name;
+    std::vector<EnumMember>    members;
+    // width lives on Type::width, not here
 };
 
-using ResolvedTypeMetadata = std::variant<
+using TypeMetadata = std::variant<
     std::monostate,
-    ResolvedIntegerInfo,
-    ResolvedEnumInfo
+    IntegerInfo,
+    EnumInfo
 >;
 
-struct ResolvedType {
-    ResolvedTypeKind kind = ResolvedTypeKind::Integer;
+struct Type {
+    TypeKind kind = TypeKind::Integer;
     int width = 0;
-    ResolvedTypeMetadata metadata;
-    std::vector<ResolvedDimension> packed_dims;
-    std::vector<ResolvedDimension> unpacked_dims;
+    TypeMetadata metadata;
+    std::vector<Dimension> packed_dims;
+    std::vector<Dimension> unpacked_dims;
 
     void print(std::ostream& os) const;
 
-    static ResolvedType makeInteger(int width, bool is_signed,
-                                    std::vector<ResolvedDimension> packed_dims = {},
-                                    std::vector<ResolvedDimension> unpacked_dims = {});
+    static Type makeInteger(int width, bool is_signed,
+                            std::vector<Dimension> packed_dims = {},
+                            std::vector<Dimension> unpacked_dims = {});
 
-    static ResolvedType makeEnum(std::string type_name, int width,
-                                 std::vector<ResolvedEnumMember> members);
+    static Type makeEnum(std::string type_name, int width,
+                         std::vector<EnumMember> members);
 
     bool isSigned() const {
-        if (std::holds_alternative<ResolvedIntegerInfo>(metadata)) {
-            return std::get<ResolvedIntegerInfo>(metadata).is_signed;
+        if (std::holds_alternative<IntegerInfo>(metadata)) {
+            return std::get<IntegerInfo>(metadata).is_signed;
         }
         return false;
     }
 
-    bool isEnum() const { return kind == ResolvedTypeKind::Enum; }
+    bool isEnum() const { return kind == TypeKind::Enum; }
 
-    const ResolvedEnumInfo& enumInfo() const {
-        return std::get<ResolvedEnumInfo>(metadata);
+    const EnumInfo& enumInfo() const {
+        return std::get<EnumInfo>(metadata);
     }
 };
 

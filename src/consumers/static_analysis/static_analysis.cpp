@@ -6,7 +6,7 @@ namespace custom_hdl {
 
 namespace {
 
-void collectModule(const ResolvedModule& module, StaticAnalysisSummary& summary) {
+void collectModule(const Module& module, StaticAnalysisSummary& summary) {
     summary.modules++;
     summary.inputs += module.inputs.size();
     summary.outputs += module.outputs.size();

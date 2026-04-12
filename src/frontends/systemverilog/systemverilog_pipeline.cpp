@@ -47,13 +47,13 @@ std::map<std::string, std::string> loadDomainPathsByModule(
     return domainPathsByModule;
 }
 
-void validateDebugSpecsBeforePipeline(const ResolvedModule& topModule,
+void validateDebugSpecsBeforePipeline(const Module& topModule,
                                       const std::vector<DebugNodeSpec>& specs) {
     if (specs.empty()) return;
 
     std::set<size_t> foundSpecs;
-    std::function<void(const ResolvedModule&, const std::string&)> validate =
-            [&](const ResolvedModule& module, const std::string& currentPath) {
+    std::function<void(const Module&, const std::string&)> validate =
+            [&](const Module& module, const std::string& currentPath) {
         if (!module.dfg) return;
         for (const auto& sub : module.hierarchyInstantiation)
             validate(sub, currentPath + "." + sub.name);
@@ -87,15 +87,15 @@ void validateDebugSpecsBeforePipeline(const ResolvedModule& topModule,
     }
 }
 
-void runMateIRPipeline(ResolvedModule& topModule,
+void runMateIRPipeline(Module& topModule,
                        const std::map<std::string, std::string>& domainPathsByModule,
                        const std::vector<DebugNodeSpec>& debugSpecs) {
     validateDebugSpecsBeforePipeline(topModule, debugSpecs);
 
     std::set<size_t> satisfiedDebugSpecs;
 
-    std::function<void(ResolvedModule&, const std::string&)> runPipeline =
-            [&](ResolvedModule& module, const std::string& currentPath) {
+    std::function<void(Module&, const std::string&)> runPipeline =
+            [&](Module& module, const std::string& currentPath) {
         if (!module.dfg) return;
 
         std::cout << "========================================" << std::endl;
@@ -104,8 +104,8 @@ void runMateIRPipeline(ResolvedModule& topModule,
 
         auto findInlinedNode = [&](const std::string& modulePath,
                                    const std::string& nodeName) -> const DFGNode* {
-            std::function<const DFGNode*(const ResolvedModule&, const std::string&)> recurse =
-                [&](const ResolvedModule& mod, const std::string& prefix) -> const DFGNode* {
+            std::function<const DFGNode*(const Module&, const std::string&)> recurse =
+                [&](const Module& mod, const std::string& prefix) -> const DFGNode* {
                     for (const auto& sub : mod.hierarchyInstantiation) {
                         std::string subPath = prefix.empty() ? sub.instance_name
                                                              : prefix + "." + sub.instance_name;
@@ -180,8 +180,8 @@ void runMateIRPipeline(ResolvedModule& topModule,
             }
         };
 
-        std::function<void(const ResolvedModule&, std::ostream&)> dumpFlopsRecursive =
-            [&](const ResolvedModule& mod, std::ostream& f) {
+        std::function<void(const Module&, std::ostream&)> dumpFlopsRecursive =
+            [&](const Module& mod, std::ostream& f) {
                 if (!mod.flops.empty()) {
                     f << "=== " << mod.name << " ===\n";
                     for (const auto& flop : mod.flops)
@@ -201,7 +201,7 @@ void runMateIRPipeline(ResolvedModule& topModule,
         runPass(7, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
         runPass(8, "constant_fold", [&]{ constantFold(*module.dfg); });
         runPass(9, "io_domains_set", [&]{
-            std::function<void(ResolvedModule&)> setDomains = [&](ResolvedModule& mod) {
+            std::function<void(Module&)> setDomains = [&](Module& mod) {
                 auto it = domainPathsByModule.find(mod.name);
                 if (it == domainPathsByModule.end()) {
                     throw CompilerError(std::format(
@@ -222,7 +222,7 @@ void runMateIRPipeline(ResolvedModule& topModule,
         }
         runPass(11, "dce", [&]{
             std::unordered_set<DFGNode*> keepAlive;
-            std::function<void(const ResolvedModule&)> collect = [&](const ResolvedModule& mod) {
+            std::function<void(const Module&)> collect = [&](const Module& mod) {
                 for (const auto& parameter : mod.parameters)
                     if (parameter.dfg_node) keepAlive.insert(parameter.dfg_node);
                 for (const auto& parameter : mod.localparams)
@@ -288,7 +288,7 @@ void runMateIRPipeline(ResolvedModule& topModule,
 MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
                                   const slang::SourceManager& sourceManager,
                                   const SystemVerilogCompileOptions& options) {
-    ResolvedModule topModule = [&]() {
+    Module topModule = [&]() {
         if (options.top_module) {
             ParameterContext topParams;
             for (const auto& [name, value] : options.parameters) {

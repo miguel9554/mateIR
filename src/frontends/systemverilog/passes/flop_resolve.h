@@ -12,7 +12,7 @@ namespace custom_hdl {
 //
 // Must run after constant folding and condition normalization so that
 // the reset MUX pattern is in canonical form.
-void resolveFlops(ResolvedModule& module);
+void resolveFlops(Module& module);
 
 
 } // namespace custom_hdl

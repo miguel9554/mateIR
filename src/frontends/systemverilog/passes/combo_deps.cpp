@@ -31,7 +31,7 @@ void collectInputDeps(const DFGNode* node,
 
 } // anonymous namespace
 
-void computeComboDeps(ResolvedModule& module) {
+void computeComboDeps(Module& module) {
     if (!module.dfg) return;
 
     module.combo_deps.clear();

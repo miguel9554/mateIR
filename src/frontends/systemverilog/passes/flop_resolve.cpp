@@ -14,7 +14,7 @@ namespace custom_hdl {
 namespace {
 
 // Return all leaf element names for a signal (expanding dimensions)
-std::vector<std::string> allElements(const ResolvedSignal& signal) {
+std::vector<std::string> allElements(const Signal& signal) {
     std::vector<std::string> current = {signal.name};
 
     for (const auto& dimension : signal.type.unpacked_dims) {
@@ -37,7 +37,7 @@ std::string inDFG(const std::string& instance_path, const std::string& name) {
     return instance_path.empty() ? name : instance_path + "." + name;
 }
 
-DFGNode* nodeForTrigger(const ResolvedModule& resolved, const asyncTrigger_t& trigger) {
+DFGNode* nodeForTrigger(const Module& resolved, const asyncTrigger_t& trigger) {
     auto it = resolved.inputs.find(trigger.name);
     return it != resolved.inputs.end() ? scalarSignalNode(it->second) : nullptr;
 }
@@ -92,7 +92,7 @@ bool extract_reset_from_concat(
     const DFGNode* dNodeDriver,
     const std::vector<asyncTrigger_t>& triggers,
     const std::string& flop_name,
-    const ResolvedModule& resolved,
+    const Module& resolved,
     asyncTrigger_t& reset,
     asyncTrigger_t& clock,
     int& reset_value,
@@ -205,7 +205,7 @@ bool extract_reset(
     const DFGNode* dNodeDriver,
     const std::vector<asyncTrigger_t>& triggers,
     const std::string& flop_name,
-    const ResolvedModule& resolved,
+    const Module& resolved,
     asyncTrigger_t& reset,
     asyncTrigger_t& clock,
     int& reset_value,
@@ -270,7 +270,7 @@ bool extract_reset(
 
 FlopInfo extractFlopClockAndReset(
     DFG& graph,
-    ResolvedModule& resolved,
+    Module& resolved,
     const std::string& flop_name,
     const std::string& instance_path,
     const FlopInfo& flopIn,
@@ -376,22 +376,22 @@ void check_logic_no_clock_reset(
 } // anonymous namespace
 
 // Forward declarations
-static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const std::string& instance_path);
-static void resolveFlopsRecursive(ResolvedModule& module, DFG& topDFG, const std::string& instance_path);
+static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::string& instance_path);
+static void resolveFlopsRecursive(Module& module, DFG& topDFG, const std::string& instance_path);
 
-void resolveFlops(ResolvedModule& module) {
+void resolveFlops(Module& module) {
     if (!module.dfg) return;
     resolveFlopsRecursive(module, *module.dfg, "");
 }
 
-static void resolveFlopsRecursive(ResolvedModule& module, DFG& topDFG, const std::string& instance_path) {
+static void resolveFlopsRecursive(Module& module, DFG& topDFG, const std::string& instance_path) {
     // Bottom-up: resolve submodules first so their clock/reset types are tagged first
     for (auto& sub : module.hierarchyInstantiation)
         resolveFlopsRecursive(sub, topDFG, inDFG(instance_path, sub.instance_name));
     resolveFlopsForModule(module, topDFG, instance_path);
 }
 
-static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const std::string& instance_path) {
+static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::string& instance_path) {
     if (resolved.flops.empty()) {
         return;
     }
@@ -444,7 +444,7 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
             const std::optional<asyncTrigger_t> reset = resolved_flops.back().reset;
 
             // Helper to find exactly one signal
-            auto find_unique_input = [&](const std::string& sig_name, const char* role) -> ResolvedSignal& {
+            auto find_unique_input = [&](const std::string& sig_name, const char* role) -> Signal& {
                 auto it = resolved.inputs.find(sig_name);
                 if (it == resolved.inputs.end())
                     throw CompilerError(std::format(

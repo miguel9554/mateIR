@@ -41,7 +41,7 @@ private:
 class VcdWriter {
 public:
     // Opens both VCD files, runs setup (hier + flat), writes headers.
-    VcdWriter(const ResolvedModule& module, const std::string& output_dir);
+    VcdWriter(const Module& module, const std::string& output_dir);
 
     // Call at every timeline time step. Updates both files in one pass.
     void update(const ModuleInstance& root, int64_t time_ns);
@@ -72,10 +72,10 @@ private:
     // Recursive setup helpers — both push into values_ / async_values_ / params_.
     // translation maps this module's async port names -> top-level signal names.
     using NameMap = std::map<std::string, std::string>;
-    void setupGrouped(const ResolvedModule& mod, vcd_tracer::module& scope,
+    void setupGrouped(const Module& mod, vcd_tracer::module& scope,
                       const std::unordered_set<const DFGNode*>& alive,
                       const NameMap& translation = {});
-    void setupRaw(const ResolvedModule& mod, vcd_tracer::module& scope,
+    void setupRaw(const Module& mod, vcd_tracer::module& scope,
                   const std::unordered_set<const DFGNode*>& alive,
                   const NameMap& translation = {});
 
@@ -84,7 +84,7 @@ private:
                   const DFGNode* node,
                   const std::unordered_set<const DFGNode*>& alive);
     void addSignalEntries(vcd_tracer::module& scope, const std::string& name,
-                          const ResolvedSignal& sig,
+                          const Signal& sig,
                           const std::unordered_set<const DFGNode*>& alive);
     void addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
                         const std::unordered_set<const DFGNode*>& alive);

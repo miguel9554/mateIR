@@ -1,5 +1,5 @@
 #include "frontends/systemverilog/passes/extractor.h"
-#include "util/syntax_helpers.h"
+#include "frontends/systemverilog/syntax_helpers.h"
 
 #include "util/source_loc.h"
 #include "util/source_loc_resolve.h"
@@ -14,7 +14,7 @@
 #include "slang/syntax/SyntaxKind.h"
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/syntax/SyntaxVisitor.h"
-#include "mateir/unresolved.h"
+#include "frontends/systemverilog/unresolved.h"
 
 using namespace slang::syntax;
 using namespace custom_hdl;

@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
         auto mateIR = frontend->compile(frontendOptions);
 
         std::cout << "----------------------------------------\n";
-        std::cout << "\nResolved mateIR:\n";
+        std::cout << "\nmateIR:\n";
         std::cout << "========================================\n";
         mateIR.top.print();
         std::cout << "\n";

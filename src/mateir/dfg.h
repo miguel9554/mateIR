@@ -288,7 +288,7 @@ struct DFGNode {
     std::string instance_path;
 
     // Type info (width, signedness) — set on leaf nodes, propagated by type pass
-    std::optional<ResolvedType> type;
+    std::optional<Type> type;
 
     // Source location in the original Verilog (set during elaboration)
     std::optional<SourceLoc> loc;
@@ -757,14 +757,14 @@ public:
     DFGNode* named_constant(int64_t v, const std::string& instance_path, const std::string& name) {
         nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConstPayload{v}, name));
         nodes.back()->instance_path = instance_path;
-        nodes.back()->type = ResolvedType::makeInteger(32, false);
+        nodes.back()->type = Type::makeInteger(32, false);
         constants[nodeKey(instance_path, name)] = nodes.back().get();
         return nodes.back().get();
     }
 
     DFGNode* constant(int64_t v) {
         nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConstPayload{v}));
-        nodes.back()->type = ResolvedType::makeInteger(32, false);
+        nodes.back()->type = Type::makeInteger(32, false);
         return nodes.back().get();
     }
 
@@ -808,7 +808,7 @@ public:
     }
 
     // Create a CAST node: reinterpret source as the target type (same bits, different type)
-    // Caller must set node->type to the target ResolvedType.
+    // Caller must set node->type to the target Type.
     DFGNode* cast(DFGNode* source) {
         nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGCastPayload{source}));
         return nodes.back().get();

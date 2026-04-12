@@ -40,7 +40,7 @@ const char* syncKindStr(SyncKind k) {
            k == SyncKind::Reset ? "Reset" : "Async";
 }
 
-void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
+void checkAndPropagateModule(Module& mod, const DFG* topDFG) {
     // a. Polarity and b. SyncKind checks — requires flop_resolve to have run
     for (const auto& flop : mod.flops) {
         // Clock checks
@@ -89,7 +89,7 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
     // c. Domain propagation to internal signals and flop types
 
     // Find clock inputs (single-clock assumption for internal signals)
-    ResolvedSignal* singleClockSig = nullptr;
+    Signal* singleClockSig = nullptr;
     std::optional<edge_t> singleClockEdge;
     int clockCount = 0;
     for (auto& [name, sig] : mod.inputs) {
@@ -125,7 +125,7 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
     auto fwd = buildForwardMap(*topDFG);
 
     // Build a map from flop name -> clock domain signal for quick lookup
-    std::map<std::string, const ResolvedSignal*> flopClockSig;
+    std::map<std::string, const Signal*> flopClockSig;
     for (const auto& flop : mod.flops) {
         auto clk_it = mod.inputs.find(flop.clock.name);
         if (clk_it != mod.inputs.end()) {
@@ -135,8 +135,8 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
 
     // Forward traversal from an input node, collecting .d signals reached
     auto forwardTraversal = [&](const DFGNode* start)
-            -> std::vector<std::pair<std::string, const ResolvedSignal*>> {
-        std::vector<std::pair<std::string, const ResolvedSignal*>> reached;
+            -> std::vector<std::pair<std::string, const Signal*>> {
+        std::vector<std::pair<std::string, const Signal*>> reached;
         std::set<const DFGNode*> visited;
         std::vector<const DFGNode*> worklist = {start};
 
@@ -168,8 +168,8 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
         return reached;
     };
 
-    // Helper: resolve a clock domain name to its ResolvedSignal pointer
-    auto findClockSig = [&](const std::string& domainName) -> const ResolvedSignal* {
+    // Helper: resolve a clock domain name to its Signal pointer
+    auto findClockSig = [&](const std::string& domainName) -> const Signal* {
         auto it = mod.inputs.find(domainName);
         return it != mod.inputs.end() ? &it->second : nullptr;
     };
@@ -302,9 +302,9 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
 
 } // anonymous namespace
 
-void domainsPropagateAndCheck(ResolvedModule& module) {
+void domainsPropagateAndCheck(Module& module) {
     // Bottom-up: process submodules first
-    std::function<void(ResolvedModule&)> process = [&](ResolvedModule& mod) {
+    std::function<void(Module&)> process = [&](Module& mod) {
         for (auto& sub : mod.hierarchyInstantiation)
             process(sub);
         checkAndPropagateModule(mod, module.dfg.get());

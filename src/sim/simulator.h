@@ -45,7 +45,7 @@ struct CollectedFlop {
 // All nodes from all submodules are in module_def.dfg (the flat top DFG).
 struct ModuleInstance {
     std::string instance_name;
-    const ResolvedModule& module_def;
+    const Module& module_def;
 
     // Runtime values for all DFG nodes (flat — covers entire design hierarchy)
     std::map<const DFGNode*, SimValue> values;
@@ -60,7 +60,7 @@ struct ModuleInstance {
     std::map<std::string, std::vector<CollectedFlop>> flops_by_reset;
     std::set<std::string> async_input_names;  // input ports used as clock/reset
 
-    ModuleInstance(const std::string& name, const ResolvedModule& mod);
+    ModuleInstance(const std::string& name, const Module& mod);
 
     // Construction helpers
     void buildTopology();
@@ -83,11 +83,11 @@ struct ModuleInstance {
 
 class Simulator {
 public:
-    Simulator(const ResolvedModule& module, const SimConfig& config);
+    Simulator(const Module& module, const SimConfig& config);
     void run();
 
 private:
-    const ResolvedModule& module_;
+    const Module& module_;
     const SimConfig& config_;
 
     // The root module instance (contains all state and logic)

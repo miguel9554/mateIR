@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mateir/unresolved.h"
+#include "frontends/systemverilog/unresolved.h"
 #include "mateir/resolved.h"
 
 #include <memory>
@@ -20,14 +20,14 @@ namespace custom_hdl {
 using ModuleLookup = std::unordered_map<std::string, const UnresolvedModule*>;
 
 // Resolve the single module in the input (errors if there are multiple — use --top)
-ResolvedModule resolveModules(
+Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager);
 
 // Resolve only the named top module, embedding submodules in its hierarchy
-ResolvedModule resolveModules(
+Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
     const std::vector<ImportSpec>& globalImports,

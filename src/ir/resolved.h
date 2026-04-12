@@ -103,9 +103,6 @@ struct ResolvedSignal : ResolvedSignalBase{
     SyncKind sync_kind = SyncKind::Sync;
     ResolvedSignal* clock_domain = nullptr;
     std::optional<edge_t> clock_edge;
-    // Scalar-only compatibility pointer. For unpacked arrays this must be null;
-    // use binding.leaves for authoritative storage.
-    DFGNode* dfg_node = nullptr;
     // Leaf bindings in declaration order. This is the authoritative source.
     SignalBinding binding;
     void print(std::ostream& os) const {
@@ -140,10 +137,6 @@ struct FlopInfo {
     asyncTrigger_t clock;
     std::optional<asyncTrigger_t> reset;
     std::optional<int> reset_value;
-    // Scalar-only compatibility pointers. For unpacked array flops these must be
-    // null; use binding for authoritative storage.
-    DFGNode* d_node = nullptr;
-    DFGNode* q_node = nullptr;
     // Leaf bindings in declaration order.
     FlopBinding binding;
 

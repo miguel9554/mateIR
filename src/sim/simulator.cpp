@@ -158,7 +158,7 @@ void ModuleInstance::buildTopology() {
 
 void ModuleInstance::buildFlopMaps() {
     // Collect flops from the entire hierarchy (all submodules, bottom-up).
-    // After DFG inlining, d_node/q_node pointers are valid in the flat top DFG.
+    // After DFG inlining, flop binding pointers are valid in the flat top DFG.
     //
     // translation: maps this module's async port names -> top-level signal names.
     // At the top level it is empty (identity). For each submodule it is composed

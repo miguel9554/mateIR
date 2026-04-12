@@ -49,14 +49,11 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
             }
         }
 
-        // Update scalar input binding metadata: subInputNode will be dead after
+        // Update input binding metadata: subInputNode will be dead after
         // rewiring and removed by DCE.
         if (auto it = sub->inputs.find(portName); it != sub->inputs.end()) {
             for (auto*& leaf : it->second.binding.leaves) {
                 if (leaf == subInputNode) leaf = driver.node;
-            }
-            if (it->second.type.unpacked_dims.empty()) {
-                it->second.dfg_node = driver.node;
             }
         }
 
@@ -66,9 +63,6 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
             for (auto& [name, inp] : mod.inputs) {
                 for (auto*& leaf : inp.binding.leaves) {
                     if (leaf == subInputNode) leaf = driver.node;
-                }
-                if (inp.type.unpacked_dims.empty() && inp.dfg_node == subInputNode) {
-                    inp.dfg_node = driver.node;
                 }
             }
             for (auto& child : mod.hierarchyInstantiation)

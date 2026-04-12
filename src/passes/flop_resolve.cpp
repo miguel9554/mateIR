@@ -427,17 +427,14 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
             DFGNode* functional_logic;
             resolved_flops.push_back(
                 extractFlopClockAndReset(graph, resolved, name, instance_path, flop, functional_logic));
-            // Set per-element d_node/q_node (the copy from flopIn may be null for vectorized)
+            // After flop_resolve, every FlopInfo represents one physical flop leaf.
             {
                 auto* dNode = graph.getOutputNode(instance_path, name + ".d");
                 auto* qNode = graph.getInputNode(instance_path, name + ".q");
-                resolved_flops.back().d_node = dNode;
-                resolved_flops.back().q_node = qNode;
                 resolved_flops.back().binding = FlopBinding{
                     .d_leaves = {dNode},
                     .q_leaves = {qNode},
                 };
-                resolved_flops.back().type.dfg_node = qNode;
                 resolved_flops.back().type.binding.leaves = {qNode};
             }
             DFGNode* output = scalarFlopDNode(resolved_flops.back());

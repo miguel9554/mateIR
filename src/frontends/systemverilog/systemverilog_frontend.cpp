@@ -1,7 +1,7 @@
 #include "frontends/systemverilog/systemverilog_frontend.h"
 
 #include "frontends/systemverilog/systemverilog_pipeline.h"
-#include "passes/extractor.h"
+#include "frontends/systemverilog/passes/extractor.h"
 #include "util/source_loc.h"
 
 #include "slang/syntax/SyntaxTree.h"

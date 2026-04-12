@@ -1,4 +1,4 @@
-#include "passes/domains_propagate_and_check.h"
+#include "frontends/systemverilog/passes/domains_propagate_and_check.h"
 
 #include "util/source_loc.h"
 

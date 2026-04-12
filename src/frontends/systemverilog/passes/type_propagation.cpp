@@ -1,4 +1,4 @@
-#include "passes/type_propagation.h"
+#include "frontends/systemverilog/passes/type_propagation.h"
 
 #include "util/source_loc.h"
 

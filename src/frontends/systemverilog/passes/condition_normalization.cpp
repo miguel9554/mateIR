@@ -1,4 +1,4 @@
-#include "passes/condition_normalization.h"
+#include "frontends/systemverilog/passes/condition_normalization.h"
 
 #include "util/source_loc.h"
 

@@ -1,5 +1,5 @@
-#include "passes/flop_resolve.h"
-#include "ir/dfg.h"
+#include "frontends/systemverilog/passes/flop_resolve.h"
+#include "mateir/dfg.h"
 #include "util/source_loc.h"
 
 #include <algorithm>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ir/resolved.h"
+#include "mateir/resolved.h"
 
 #include <cstddef>
 #include <string>

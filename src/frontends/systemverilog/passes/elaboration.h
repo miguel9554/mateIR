@@ -1,7 +1,7 @@
 #pragma once
 
-#include "ir/unresolved.h"
-#include "ir/resolved.h"
+#include "mateir/unresolved.h"
+#include "mateir/resolved.h"
 
 #include <memory>
 #include <string>

@@ -1,4 +1,4 @@
-#include "passes/dce.h"
+#include "frontends/systemverilog/passes/dce.h"
 
 #include <unordered_set>
 #include <vector>

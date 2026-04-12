@@ -1,4 +1,4 @@
-#include "passes/dfg_inline.h"
+#include "frontends/systemverilog/passes/dfg_inline.h"
 
 #include <algorithm>
 #include <format>

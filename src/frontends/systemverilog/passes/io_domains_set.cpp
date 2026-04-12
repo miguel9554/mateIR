@@ -1,4 +1,4 @@
-#include "passes/io_domains_set.h"
+#include "frontends/systemverilog/passes/io_domains_set.h"
 
 #include <format>
 #include <map>

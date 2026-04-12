@@ -1,4 +1,4 @@
-#include "passes/concat_cleanup.h"
+#include "frontends/systemverilog/passes/concat_cleanup.h"
 
 #include <algorithm>
 #include <format>

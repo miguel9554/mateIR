@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ir/types.h"
+#include "mateir/types.h"
 #include "util/source_loc.h"
 
 #include <algorithm>

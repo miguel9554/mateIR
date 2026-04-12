@@ -1,5 +1,5 @@
-#include "passes/constant_fold.h"
-#include "passes/type_propagation.h"
+#include "frontends/systemverilog/passes/constant_fold.h"
+#include "frontends/systemverilog/passes/type_propagation.h"
 
 #include "util/source_loc.h"
 

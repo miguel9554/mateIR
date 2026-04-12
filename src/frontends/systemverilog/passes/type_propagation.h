@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ir/dfg.h"
+#include "mateir/dfg.h"
 
 namespace custom_hdl {
 

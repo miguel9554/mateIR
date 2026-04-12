@@ -1,4 +1,4 @@
-#include "passes/combo_deps.h"
+#include "frontends/systemverilog/passes/combo_deps.h"
 
 #include <set>
 #include <string>

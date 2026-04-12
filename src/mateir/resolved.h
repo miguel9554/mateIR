@@ -1,8 +1,8 @@
 #pragma once
 
-#include "ir/dfg.h"
-#include "ir/types.h"
-#include "ir/unresolved.h"
+#include "mateir/dfg.h"
+#include "mateir/types.h"
+#include "mateir/unresolved.h"
 
 #include <map>
 #include <memory>

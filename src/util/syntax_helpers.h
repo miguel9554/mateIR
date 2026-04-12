@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ir/unresolved.h"
+#include "mateir/unresolved.h"
 
 // Forward declarations for slang types
 namespace slang::syntax {

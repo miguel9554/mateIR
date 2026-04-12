@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ir/dfg.h"
+#include "mateir/dfg.h"
 #include <unordered_set>
 
 namespace custom_hdl {

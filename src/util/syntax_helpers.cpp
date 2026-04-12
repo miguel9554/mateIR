@@ -7,7 +7,7 @@
 
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxKind.h"
-#include "ir/unresolved.h"
+#include "mateir/unresolved.h"
 
 using namespace slang::syntax;
 using namespace slang::parsing;

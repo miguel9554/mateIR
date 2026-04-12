@@ -1,4 +1,4 @@
-#include "ir/resolved.h"
+#include "mateir/resolved.h"
 #include "util/debug.h"
 
 #include <algorithm>

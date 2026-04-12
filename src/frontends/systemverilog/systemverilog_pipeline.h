@@ -1,7 +1,7 @@
 #pragma once
 
 #include "frontends/frontend.h"
-#include "passes/extractor.h"
+#include "frontends/systemverilog/passes/extractor.h"
 
 namespace slang {
 class SourceManager;

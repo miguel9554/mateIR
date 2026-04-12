@@ -33,9 +33,9 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
     }
 
     // Step 1: Rewire inputs — replace uses of sub INPUT nodes with parent drivers
-    for (size_t i = 0; i < moduleNode->in.size(); ++i) {
-        const std::string& portName = moduleNode->inputNames()[i];
-        DFGOutput driver = moduleNode->in[i];
+    for (const auto& binding : moduleNode->moduleInputs()) {
+        const std::string& portName = binding.port;
+        DFGOutput driver = binding.driver;
 
         DFGNode* subInputNode = sub->dfg->getInputNode("", portName);
         if (!subInputNode) continue;
@@ -70,9 +70,7 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
 
     // Step 2: Rewire outputs — replace {moduleNode, portIdx} references in parent
     for (auto& node : parent.dfg->nodes) {
-        auto inputs = node->inputs();
-        for (size_t inputIndex = 0; inputIndex < inputs.size(); ++inputIndex) {
-            const auto& inp = inputs[inputIndex];
+        DFGTraversal::forEachInput(node.get(), [&](size_t inputIndex, const DFGOutput& inp) {
             if (inp.node == moduleNode) {
                 int portIdx = inp.port;
                 if (portIdx < static_cast<int>(moduleNode->outputNames().size())) {
@@ -83,7 +81,7 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
                     }
                 }
             }
-        }
+        });
     }
 
     // Step 3: Set instance_path on all sub nodes (must happen before adopt so
@@ -142,7 +140,7 @@ void inlineDFGs(ResolvedModule& top) {
     // Collect all MODULE nodes before modifying the nodes vector
     std::vector<DFGNode*> moduleNodes;
     for (const auto& node : top.dfg->nodes) {
-        if (node->op == DFGOp::MODULE) {
+        if (node->kind() == DFGOp::MODULE) {
             moduleNodes.push_back(node.get());
         }
     }

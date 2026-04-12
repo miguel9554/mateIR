@@ -168,6 +168,7 @@ namespace custom_hdl {
 
 struct DFGNode; // forward declare
 struct DFG;     // forward declare
+struct DFGTraversal; // forward declare
 
 struct DFGOutput {
     DFGNode* node;
@@ -200,6 +201,27 @@ struct DFGConcatAlignPayload { DFGOutput expr; DFGOutput high; DFGOutput low; };
 struct DFGMuxPayload { DFGOutput selector; std::vector<DFGMuxArm> arms; };
 struct DFGModulePayload { std::string module_type; std::vector<std::string> output_names; std::vector<DFGModuleInput> inputs; };
 struct DFGCastPayload { DFGOutput source; };
+
+struct DFGUnaryInputs {
+    DFGOutput operand;
+};
+
+struct DFGBinaryInputs {
+    DFGOutput lhs;
+    DFGOutput rhs;
+};
+
+struct DFGSliceInputs {
+    DFGOutput source;
+    DFGOutput high;
+    DFGOutput low;
+};
+
+struct DFGConcatAlignInputs {
+    DFGOutput expr;
+    DFGOutput high;
+    DFGOutput low;
+};
 
 using DFGPayload = std::variant<
     DFGInputPayload,
@@ -284,25 +306,9 @@ public:
         ConstructionKey() = default;
     };
 
-    struct OpView {
-        const DFGNode* owner = nullptr;
-        operator DFGOp() const { return owner->opValue(); }
-    } op{this};
-
-    struct InputsView {
-        const DFGNode* owner = nullptr;
-        const std::vector<DFGOutput>& vec() const { return owner->inputs(); }
-        bool empty() const { return vec().empty(); }
-        size_t size() const { return vec().size(); }
-        const DFGOutput& at(size_t index) const { return vec().at(index); }
-        const DFGOutput& operator[](size_t index) const { return vec()[index]; }
-        auto begin() const { return vec().begin(); }
-        auto end() const { return vec().end(); }
-    } in{this};
-
     bool hasType() const { return type.has_value(); }
 
-    DFGOp opValue() const {
+    DFGOp kind() const {
         if (std::holds_alternative<DFGInputPayload>(payload_)) return DFGOp::INPUT;
         if (std::holds_alternative<DFGOutputPayload>(payload_)) return DFGOp::OUTPUT;
         if (std::holds_alternative<DFGSignalPayload>(payload_)) return DFGOp::SIGNAL;
@@ -318,7 +324,10 @@ public:
         throw CompilerError("DFGNode: invalid payload", this);
     }
 
-    const std::vector<DFGOutput>& inputs() const {
+    DFGOp opValue() const { return kind(); }
+
+private:
+    const std::vector<DFGOutput>& rawInputs() const {
         input_cache_.clear();
         if (auto* p = std::get_if<DFGOutputPayload>(&payload_)) {
             if (p->driver) input_cache_.push_back(*p->driver);
@@ -346,6 +355,44 @@ public:
         return input_cache_;
     }
 
+    friend struct DFG;
+    friend struct DFGTraversal;
+
+public:
+    std::optional<DFGOutput> driver() const {
+        if (const auto* p = std::get_if<DFGOutputPayload>(&payload_)) return p->driver;
+        if (const auto* p = std::get_if<DFGSignalPayload>(&payload_)) return p->driver;
+        throw CompilerError(std::format("driver: {} is not OUTPUT or SIGNAL", str()), this);
+    }
+
+    DFGUnaryInputs unaryInputs() const {
+        const auto& p = std::get<DFGUnaryPayload>(payload_);
+        return {p.operand};
+    }
+
+    DFGBinaryInputs binaryInputs() const {
+        const auto& p = std::get<DFGBinaryPayload>(payload_);
+        return {p.lhs, p.rhs};
+    }
+
+    DFGSliceInputs sliceInputs() const {
+        const auto& p = std::get<DFGSlicePayload>(payload_);
+        return {p.source, p.high, p.low};
+    }
+
+    const std::vector<DFGOutput>& concatParts() const {
+        return std::get<DFGConcatPayload>(payload_).parts;
+    }
+
+    DFGConcatAlignInputs concatAlignInputs() const {
+        const auto& p = std::get<DFGConcatAlignPayload>(payload_);
+        return {p.expr, p.high, p.low};
+    }
+
+    DFGOutput castSource() const {
+        return std::get<DFGCastPayload>(payload_).source;
+    }
+
     int64_t constValue() const { return std::get<DFGConstPayload>(payload_).value; }
     const std::string& moduleType() const { return std::get<DFGModulePayload>(payload_).module_type; }
 
@@ -359,6 +406,10 @@ public:
             input_name_cache_.push_back(input.port);
         }
         return input_name_cache_;
+    }
+
+    const std::vector<DFGModuleInput>& moduleInputs() const {
+        return std::get<DFGModulePayload>(payload_).inputs;
     }
 
     const std::vector<int64_t>& muxValues() const {
@@ -538,7 +589,7 @@ public:
     }
 
     void replaceInputNode(DFGNode* oldNode, DFGOutput replacement) {
-        const auto snapshot = inputs();
+        const auto snapshot = rawInputs();
         for (size_t i = 0; i < snapshot.size(); ++i) {
             if (snapshot[i].node == oldNode) replaceInputAt(i, replacement);
         }
@@ -560,6 +611,21 @@ public:
         if (opValue() == DFGOp::MODULE) result += "{" + moduleType() + "}";
         return result;
     }
+};
+
+struct DFGTraversal {
+    template<typename Fn>
+    static void forEachInput(const DFGNode* node, Fn&& fn) {
+        const auto& inputs = node->rawInputs();
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            fn(i, inputs[i]);
+        }
+    }
+
+    static bool hasInputs(const DFGNode* node) {
+        return !node->rawInputs().empty();
+    }
+
 };
 
 inline CompilerError::CompilerError(const std::string& msg, const DFGNode* node)
@@ -770,14 +836,15 @@ public:
         if (auto it = outputs.find(key); it != outputs.end()) {
             // For outputs, return the driver if connected (reading output value)
             auto* outNode = it->second;
-            return outNode->in.empty() ? outNode : outNode->in[0].node;
+            auto driver = outNode->driver();
+            return driver ? driver->node : outNode;
         }
         return nullptr;
     }
 
     // Low-level: connect a single driver to an OUTPUT or SIGNAL node.
     void connectDriver(DFGNode* target, DFGOutput driver) {
-        if (!target || (target->op != DFGOp::OUTPUT && target->op != DFGOp::SIGNAL))
+        if (!target || (target->kind() != DFGOp::OUTPUT && target->kind() != DFGOp::SIGNAL))
             throw CompilerError(std::format(
                 "connectDriver: target {} is not OUTPUT or SIGNAL", target ? target->str() : "null"));
         target->setDriver(driver);
@@ -906,7 +973,7 @@ public:
 
     // Add an input port binding to a MODULE node, keeping in and input_names in sync.
     void addModuleInput(DFGNode* moduleNode, std::string portName, DFGOutput driver) {
-        if (!moduleNode || moduleNode->op != DFGOp::MODULE)
+        if (!moduleNode || moduleNode->kind() != DFGOp::MODULE)
             throw CompilerError("addModuleInput: target is not a MODULE node");
         moduleNode->appendModuleInput(std::move(portName), driver);
     }
@@ -1000,14 +1067,14 @@ public:
     // Nodes with 0 inputs are always allowed (orphans cleaned up by DCE).
     void validate() const {
         for (const auto& node : nodes) {
-            int expected = expectedInputs(node->op);
-            int actual = static_cast<int>(node->in.size());
+            int expected = expectedInputs(node->kind());
+            int actual = static_cast<int>(node->rawInputs().size());
 
             if (actual == 0) {
-                if (node->op != DFGOp::INPUT &&
-                    node->op != DFGOp::CONST &&
-                    node->op != DFGOp::OUTPUT &&
-                    node->op != DFGOp::SIGNAL) {
+                if (node->kind() != DFGOp::INPUT &&
+                    node->kind() != DFGOp::CONST &&
+                    node->kind() != DFGOp::OUTPUT &&
+                    node->kind() != DFGOp::SIGNAL) {
                     throw CompilerError(std::format(
                         "DFG validate: {} has no inputs but is not INPUT, CONST, OUTPUT, or SIGNAL",
                         node->str()), node.get());
@@ -1022,7 +1089,7 @@ public:
             }
 
             // All DFGOutput entries must have non-null node and valid port
-            for (const auto& input : node->in) {
+            for (const auto& input : node->rawInputs()) {
                 if (!input.node)
                     throw CompilerError(std::format(
                         "DFG validate: node {} has null input node", node->str()), node.get());
@@ -1034,19 +1101,19 @@ public:
             }
 
             // SIGNAL has at most one driver
-            if (node->op == DFGOp::SIGNAL && actual > 1)
+            if (node->kind() == DFGOp::SIGNAL && actual > 1)
                 throw CompilerError(std::format(
                     "DFG validate: SIGNAL {} has {} inputs (expected 0 or 1)",
                     node->name, actual), node.get());
 
             // MODULE: input_names must be parallel to in
-            if (node->op == DFGOp::MODULE && node->inputNames().size() != node->in.size())
+            if (node->kind() == DFGOp::MODULE && node->inputNames().size() != node->rawInputs().size())
                 throw CompilerError(std::format(
                     "DFG validate: MODULE {} has {} inputs but {} input_names",
-                    node->name, node->in.size(), node->inputNames().size()), node.get());
+                    node->name, node->rawInputs().size(), node->inputNames().size()), node.get());
 
             // MODULE: no duplicate input port names
-            if (node->op == DFGOp::MODULE) {
+            if (node->kind() == DFGOp::MODULE) {
                 const auto& inputNames = node->inputNames();
                 std::set<std::string> seen(inputNames.begin(), inputNames.end());
                 if (seen.size() != inputNames.size())
@@ -1056,19 +1123,19 @@ public:
             }
 
             // Variable-count ops with specific constraints
-            if (node->op == DFGOp::OUTPUT && actual > 1) {
+            if (node->kind() == DFGOp::OUTPUT && actual > 1) {
                 throw CompilerError(std::format(
                     "DFG validate: OUTPUT {} has {} inputs (expected 0 or 1)",
                     node->name, actual), node.get());
             }
-            if (node->op == DFGOp::MUX) {
+            if (node->kind() == DFGOp::MUX) {
                 if (actual < 3) {
                     throw CompilerError(std::format(
                         "DFG validate: MUX {} has {} inputs (expected selector + at least 2 arms)",
                         node->str(), actual), node.get());
                 }
                 const auto& muxValues = node->muxValues();
-                if (muxValues.size() + 1 != node->in.size()) {
+                if (muxValues.size() + 1 != node->rawInputs().size()) {
                     throw CompilerError(std::format(
                         "DFG validate: MUX {} has {} arms but {} mux_values",
                         node->str(), actual - 1, muxValues.size()), node.get());
@@ -1078,7 +1145,7 @@ public:
                     throw CompilerError(std::format(
                         "DFG validate: MUX {} has duplicate selector values", node->str()), node.get());
                 }
-                auto* selector = node->in[0].node;
+                auto* selector = node->muxSelector().node;
                 if (!selector || !selector->hasType()) {
                     continue;
                 }
@@ -1110,9 +1177,9 @@ public:
     // - any node still carrying unpacked_dims (arrays must be leaf-bound)
     void validateStrictLiveDFG() const {
         for (const auto& node : nodes) {
-            if (node->in.empty() &&
-                node->op != DFGOp::INPUT &&
-                node->op != DFGOp::CONST) {
+            if (node->rawInputs().empty() &&
+                node->kind() != DFGOp::INPUT &&
+                node->kind() != DFGOp::CONST) {
                 throw CompilerError(std::format(
                     "DFG validateStrict: node {} has no inputs but is not INPUT or CONST",
                     node->str()), node.get());
@@ -1129,8 +1196,8 @@ public:
     // Run after DCE — orphan nodes should have been removed by then.
     void validateNoOrphans() const {
         for (const auto& node : nodes) {
-            int expected = expectedInputs(node->op);
-            int actual = static_cast<int>(node->in.size());
+            int expected = expectedInputs(node->kind());
+            int actual = static_cast<int>(node->rawInputs().size());
             if (expected > 0 && actual == 0) {
                 throw CompilerError(std::format(
                     "DFG validateNoOrphans: {} expects {} inputs, has 0",

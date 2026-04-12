@@ -215,9 +215,9 @@ void recordPartialWrite(ResolutionContext& ctx,
 DFGNode* appendConcatInput(DFG& graph, DFGNode* existingDriver, DFGNode* newPart,
                            const std::optional<SourceLoc>& loc) {
     std::vector<DFGNode*> parts;
-    if (existingDriver && existingDriver->op == DFGOp::CONCAT) {
-        parts.reserve(existingDriver->in.size() + 1);
-        for (const auto& edge : existingDriver->in) {
+    if (existingDriver && existingDriver->kind() == DFGOp::CONCAT) {
+        parts.reserve(existingDriver->concatParts().size() + 1);
+        for (const auto& edge : existingDriver->concatParts()) {
             parts.push_back(edge.node);
         }
     } else if (existingDriver) {
@@ -367,6 +367,12 @@ struct DriverSnapshot {
     std::map<std::string, DFGNode*> combDrivers;
 };
 
+static std::optional<DFGOutput> maybeDriver(const DFGNode* node) {
+    if (!node) return std::nullopt;
+    if (node->kind() != DFGOp::OUTPUT && node->kind() != DFGOp::SIGNAL) return std::nullopt;
+    return node->driver();
+}
+
 static DriverSnapshot snapshotDrivers(const ResolutionContext& ctx) {
     DriverSnapshot snapshot;
     snapshot.combDrivers = ctx.combDrivers;
@@ -374,18 +380,18 @@ static DriverSnapshot snapshotDrivers(const ResolutionContext& ctx) {
     DriverMap drivers;
     if (!ctx.is_subroutine_scope) {
         for (const auto& [outName, outNode] : ctx.graph.getOutputsMap()) {
-            if (!ctx.partial_drivers.contains(outName) && outNode->in.size() == 1) {
-                drivers[outName] = outNode->in[0].node;
+            if (!ctx.partial_drivers.contains(outName)) {
+                if (auto driver = maybeDriver(outNode)) drivers[outName] = driver->node;
             }
         }
         for (const auto& [sigName, sigNode] : ctx.graph.getSignalsMap()) {
-            if (!ctx.partial_drivers.contains(sigName) && sigNode->in.size() == 1) {
-                drivers[sigName] = sigNode->in[0].node;
+            if (!ctx.partial_drivers.contains(sigName)) {
+                if (auto driver = maybeDriver(sigNode)) drivers[sigName] = driver->node;
             }
         }
         for (const auto& [name, node] : ctx.local_signals) {
-            if (!ctx.partial_drivers.contains(name) && node->in.size() == 1) {
-                drivers[name] = node->in[0].node;
+            if (!ctx.partial_drivers.contains(name)) {
+                if (auto driver = maybeDriver(node)) drivers[name] = driver->node;
             }
         }
     }
@@ -423,7 +429,7 @@ static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNo
 
 static void clearVisibleDrivers(ResolutionContext& ctx) {
     auto clearNodeDriver = [](DFGNode* node) {
-        if (node->op == DFGOp::OUTPUT || node->op == DFGOp::SIGNAL) {
+        if (node->kind() == DFGOp::OUTPUT || node->kind() == DFGOp::SIGNAL) {
             node->clearDriver();
         }
     };
@@ -519,21 +525,21 @@ static void restoreDrivers(ResolutionContext& ctx, const DriverSnapshot& snapsho
     if (!ctx.is_subroutine_scope) {
         for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
             if ((!node->type || node->type->unpacked_dims.empty()) &&
-                    node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
+                    maybeDriver(node) && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
                 node->clearDriver();
             }
         }
         for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
             if ((!node->type || node->type->unpacked_dims.empty()) &&
-                    node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
+                    maybeDriver(node) && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
                 node->clearDriver();
             }
         }
         for (const auto& [name, node] : ctx.local_signals) {
             if ((!node->type || node->type->unpacked_dims.empty()) &&
-                    node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
+                    maybeDriver(node) && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
                 node->clearDriver();
             }
@@ -546,28 +552,28 @@ static DriverMap modifiedDriversSince(const ResolutionContext& ctx, const Driver
     if (!ctx.is_subroutine_scope) {
         for (const auto& [outName, outNode] : ctx.graph.getOutputsMap()) {
             if (ctx.partial_drivers.contains(outName)) continue;
-            if (outNode->in.size() == 1) {
+            if (auto driver = maybeDriver(outNode)) {
                 auto it = baseline.visibleDrivers.find(outName);
-                if (it == baseline.visibleDrivers.end() || it->second != outNode->in[0].node) {
-                    modified[outName] = outNode->in[0].node;
+                if (it == baseline.visibleDrivers.end() || it->second != driver->node) {
+                    modified[outName] = driver->node;
                 }
             }
         }
         for (const auto& [sigName, sigNode] : ctx.graph.getSignalsMap()) {
             if (ctx.partial_drivers.contains(sigName)) continue;
-            if (sigNode->in.size() == 1) {
+            if (auto driver = maybeDriver(sigNode)) {
                 auto it = baseline.visibleDrivers.find(sigName);
-                if (it == baseline.visibleDrivers.end() || it->second != sigNode->in[0].node) {
-                    modified[sigName] = sigNode->in[0].node;
+                if (it == baseline.visibleDrivers.end() || it->second != driver->node) {
+                    modified[sigName] = driver->node;
                 }
             }
         }
         for (const auto& [name, node] : ctx.local_signals) {
             if (ctx.partial_drivers.contains(name)) continue;
-            if (node->in.size() == 1) {
+            if (auto driver = maybeDriver(node)) {
                 auto it = baseline.visibleDrivers.find(name);
-                if (it == baseline.visibleDrivers.end() || it->second != node->in[0].node) {
-                    modified[name] = node->in[0].node;
+                if (it == baseline.visibleDrivers.end() || it->second != driver->node) {
+                    modified[name] = driver->node;
                 }
             }
         }
@@ -634,27 +640,30 @@ static PartialTargetState makeWholeDriverState(const ResolvedType& type, DFGNode
         return state;
     }
 
-    if (driver->op == DFGOp::CONCAT && !driver->in.empty()) {
+    if (driver->kind() == DFGOp::CONCAT && !driver->concatParts().empty()) {
         std::vector<PartialSliceDriver> slices;
-        slices.reserve(driver->in.size());
+        slices.reserve(driver->concatParts().size());
         int64_t nextHigh = type.width - 1;
         bool ok = true;
 
-        for (const auto& input : driver->in) {
+        for (const auto& input : driver->concatParts()) {
             DFGNode* part = input.node;
             if (!part) {
                 ok = false;
                 break;
             }
 
-            if (part->op == DFGOp::CONCAT_ALIGN && part->in.size() == 3 &&
-                part->in[1].node && part->in[2].node &&
-                part->in[1].node->op == DFGOp::CONST &&
-                part->in[2].node->op == DFGOp::CONST) {
-                int64_t high = part->in[1].node->constValue();
-                int64_t low = part->in[2].node->constValue();
+            if (part->kind() == DFGOp::CONCAT_ALIGN) {
+                auto align = part->concatAlignInputs();
+                if (align.high.node->kind() != DFGOp::CONST ||
+                    align.low.node->kind() != DFGOp::CONST) {
+                    ok = false;
+                    break;
+                }
+                int64_t high = align.high.node->constValue();
+                int64_t low = align.low.node->constValue();
                 if (high < low) std::swap(high, low);
-                slices.push_back({low, high, part->in[0].node});
+                slices.push_back({low, high, align.expr.node});
                 nextHigh = low - 1;
                 continue;
             }
@@ -1055,8 +1064,8 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             ctx.partial_drivers[signalName] = std::move(merged);
             materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
             if (!ctx.is_sequential) {
-                if (auto* node = lookupTargetNode(ctx, signalName); node && !node->in.empty()) {
-                    ctx.combDrivers[signalName] = node->in[0].node;
+                if (auto* node = lookupTargetNode(ctx, signalName)) {
+                    if (auto driver = maybeDriver(node)) ctx.combDrivers[signalName] = driver->node;
                 }
             }
             continue;
@@ -1773,8 +1782,8 @@ static DFGNode* currentWholeDriverForTarget(ResolutionContext& ctx,
                                             const std::string& targetName,
                                             const std::optional<SourceLoc>& loc) {
     if (ctx.partial_drivers.contains(targetName)) return nullptr;
-    if (auto* node = lookupTargetNode(ctx, targetName); node && node->in.size() == 1) {
-        return node->in[0].node;
+    if (auto* node = lookupTargetNode(ctx, targetName)) {
+        if (auto driver = maybeDriver(node)) return driver->node;
     }
     if (!ctx.is_sequential) return nullptr;
 
@@ -1867,7 +1876,7 @@ static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
     bool targetSigned = targetType ? targetType->isSigned() : false;
     if (!expr || targetWidth <= 0) return expr;
 
-    if (expr->op == DFGOp::CONST) {
+    if (expr->kind() == DFGOp::CONST) {
         expr->type = targetType ? *targetType : ResolvedType::makeInteger(targetWidth, targetSigned);
         return expr;
     }
@@ -3308,8 +3317,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         writePartialTargetSlice(ctx, outputName, rangeHigh, rangeLow, RHSexprNode, assignLoc);
 
         if (!ctx.is_sequential) {
-            if (auto* targetNode = lookupTargetNode(ctx, outputName); targetNode && !targetNode->in.empty()) {
-                ctx.combDrivers[outputName] = targetNode->in[0].node;
+            if (auto* targetNode = lookupTargetNode(ctx, outputName)) {
+                if (auto driver = maybeDriver(targetNode)) ctx.combDrivers[outputName] = driver->node;
             }
         }
     } else {
@@ -3339,8 +3348,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         if (usePartialAggregate) {
             writeWholeTargetAsPartial(ctx, outputName, RHSexprNode, assignLoc);
             if (!ctx.is_sequential) {
-                if (auto* targetNode = lookupTargetNode(ctx, outputName); targetNode && !targetNode->in.empty()) {
-                    ctx.combDrivers[outputName] = targetNode->in[0].node;
+                if (auto* targetNode = lookupTargetNode(ctx, outputName)) {
+                    if (auto driver = maybeDriver(targetNode)) ctx.combDrivers[outputName] = driver->node;
                 }
             }
         } else {
@@ -3993,7 +4002,7 @@ void prePopulateInput(DFG& graph, ResolvedSignal& sig) {
 }
 
 // Pre-populate module output (port) with all bit indices
-// Creates OUTPUT nodes with no driver (->in empty)
+// Creates OUTPUT nodes with no driver
 // For vector outputs, creates base node + individual element nodes
 void prePopulateOutput(DFG& graph, ResolvedSignal& sig) {
     sig.binding.leaves.clear();
@@ -4209,10 +4218,10 @@ void resolveNamedPortConnection(
                     ctx, baseName, idx, idx, resolveSourceLoc(*expr, ctx.sm),
                     std::format("module-output:{}:{}", moduleNode->name, oi));
 
-                if (!targetNode->in.empty() &&
-                        targetNode->in[0].node->op == DFGOp::CONCAT) {
+                auto targetDriver = maybeDriver(targetNode);
+                if (targetDriver && targetDriver->node->kind() == DFGOp::CONCAT) {
                     auto* concatNode = appendConcatInput(
-                        ctx.graph, targetNode->in[0].node, alignNode,
+                        ctx.graph, targetDriver->node, alignNode,
                         resolveSourceLoc(*expr, ctx.sm));
                     ctx.graph.connectDriver(targetNode, concatNode);
                 } else {

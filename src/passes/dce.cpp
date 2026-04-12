@@ -27,11 +27,11 @@ bool eliminateDeadCode(DFG& graph,
     while (!worklist.empty()) {
         DFGNode* current = worklist.back();
         worklist.pop_back();
-        for (auto& input : current->in) {
+        DFGTraversal::forEachInput(current, [&](size_t, const DFGOutput& input) {
             if (input.node && alive.insert(input.node).second) {
                 worklist.push_back(input.node);
             }
-        }
+        });
     }
 
     // Phase 2: Sweep — remove dead nodes

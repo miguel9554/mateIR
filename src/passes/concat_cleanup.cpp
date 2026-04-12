@@ -11,11 +11,12 @@ bool cleanupConcats(DFG& graph) {
     const size_t originalNodeCount = graph.nodes.size();
     for (size_t nodeIndex = 0; nodeIndex < originalNodeCount; ++nodeIndex) {
         DFGNode* node = graph.nodes[nodeIndex].get();
-        if (node->op != DFGOp::CONCAT) continue;
+        if (node->kind() != DFGOp::CONCAT) continue;
 
         // If no inputs are CONCAT_ALIGN, this is a direct RHS concat — already clean
-        bool hasAlign = std::any_of(node->in.begin(), node->in.end(),
-            [](const DFGOutput& e) { return e.node->op == DFGOp::CONCAT_ALIGN; });
+        const auto& concatParts = node->concatParts();
+        bool hasAlign = std::any_of(concatParts.begin(), concatParts.end(),
+            [](const DFGOutput& e) { return e.node->kind() == DFGOp::CONCAT_ALIGN; });
         if (!hasAlign) continue;
 
         // Collect CONCAT_ALIGN inputs with their positional info
@@ -27,22 +28,18 @@ bool cleanupConcats(DFG& graph) {
         };
         std::vector<AlignInfo> parts;
 
-        for (size_t i = 0; i < node->in.size(); ++i) {
-            auto& input = node->in[i];
+        for (size_t i = 0; i < concatParts.size(); ++i) {
+            const auto& input = concatParts[i];
             DFGNode* child = input.node;
-            if (child->op != DFGOp::CONCAT_ALIGN) {
+            if (child->kind() != DFGOp::CONCAT_ALIGN) {
                 throw CompilerError(std::format(
                     "concat_cleanup: CONCAT input {} is not CONCAT_ALIGN",
                     child->str()), child);
             }
-            if (child->in.size() != 3) {
-                throw CompilerError(std::format(
-                    "concat_cleanup: CONCAT_ALIGN {} has {} inputs (expected 3)",
-                    child->str(), child->in.size()), child);
-            }
-            DFGNode* highNode = child->in[1].node;
-            DFGNode* lowNode = child->in[2].node;
-            if (highNode->op != DFGOp::CONST || lowNode->op != DFGOp::CONST) {
+            auto align = child->concatAlignInputs();
+            DFGNode* highNode = align.high.node;
+            DFGNode* lowNode = align.low.node;
+            if (highNode->kind() != DFGOp::CONST || lowNode->kind() != DFGOp::CONST) {
                 throw CompilerError(std::format(
                     "concat_cleanup: CONCAT_ALIGN {} has non-constant indices",
                     child->str()), child);
@@ -50,7 +47,7 @@ bool cleanupConcats(DFG& graph) {
             int64_t high = highNode->constValue();
             int64_t low = lowNode->constValue();
             if (high < low) std::swap(high, low);
-            parts.push_back({high, low, child->in[0].node, i});
+            parts.push_back({high, low, align.expr.node, i});
         }
 
         // Later CONCAT_ALIGN inputs are later writes to the same aggregate. If

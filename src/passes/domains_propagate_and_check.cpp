@@ -22,9 +22,9 @@ struct FwdEdge {
 std::map<const DFGNode*, std::vector<FwdEdge>> buildForwardMap(const DFG& dfg) {
     std::map<const DFGNode*, std::vector<FwdEdge>> fwd;
     for (const auto& node : dfg.nodes) {
-        for (int i = 0; i < static_cast<int>(node->in.size()); i++) {
-            fwd[node->in[i].node].push_back({node.get(), i});
-        }
+        DFGTraversal::forEachInput(node.get(), [&](size_t i, const DFGOutput& input) {
+            fwd[input.node].push_back({node.get(), static_cast<int>(i)});
+        });
     }
     return fwd;
 }
@@ -146,7 +146,7 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
 
             if (!visited.insert(current).second) continue;
 
-            if (current->op == DFGOp::OUTPUT && current->name.ends_with(".d")) {
+            if (current->kind() == DFGOp::OUTPUT && current->name.ends_with(".d")) {
                 std::string base = flopBaseName(current->name);
                 auto it = flopClockSig.find(base);
                 if (it != flopClockSig.end()) {
@@ -155,7 +155,7 @@ void checkAndPropagateModule(ResolvedModule& mod, const DFG* topDFG) {
                 continue;
             }
 
-            if (current->op == DFGOp::INPUT && current->name.ends_with(".q")) {
+            if (current->kind() == DFGOp::INPUT && current->name.ends_with(".q")) {
                 continue;
             }
 

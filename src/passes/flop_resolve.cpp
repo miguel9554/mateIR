@@ -43,14 +43,14 @@ DFGNode* nodeForTrigger(const ResolvedModule& resolved, const asyncTrigger_t& tr
 }
 
 bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
-    if (node->op == DFGOp::INPUT) {
+    if (node->kind() == DFGOp::INPUT) {
         return node->name == flop_name + ".q";
     }
-    if (node->op != DFGOp::SLICE) {
+    if (node->kind() != DFGOp::SLICE) {
         return false;
     }
-    auto* source = node->in[0].node;
-    return source->op == DFGOp::INPUT && source->name == flop_name + ".q";
+    auto* source = node->sliceInputs().source.node;
+    return source->kind() == DFGOp::INPUT && source->name == flop_name + ".q";
 }
 
 int64_t maskForWidth(int width) {
@@ -60,21 +60,22 @@ int64_t maskForWidth(int width) {
 }
 
 std::optional<int64_t> constantValueOfNode(const DFGNode* node) {
-    if (node->op == DFGOp::CONST) {
+    if (node->kind() == DFGOp::CONST) {
         return node->constValue();
     }
-    if (node->op == DFGOp::SLICE) {
-        auto src = constantValueOfNode(node->in[0].node);
+    if (node->kind() == DFGOp::SLICE) {
+        auto slice = node->sliceInputs();
+        auto src = constantValueOfNode(slice.source.node);
         if (!src) return std::nullopt;
-        auto hi = constantValueOfNode(node->in[1].node);
-        auto lo = constantValueOfNode(node->in[2].node);
+        auto hi = constantValueOfNode(slice.high.node);
+        auto lo = constantValueOfNode(slice.low.node);
         if (!hi || !lo || *hi < *lo) return std::nullopt;
         int width = static_cast<int>(*hi - *lo + 1);
         return (*src >> *lo) & maskForWidth(width);
     }
-    if (node->op == DFGOp::CONCAT) {
+    if (node->kind() == DFGOp::CONCAT) {
         int64_t value = 0;
-        for (const auto& input : node->in) {
+        for (const auto& input : node->concatParts()) {
             auto part = constantValueOfNode(input.node);
             if (!part || !input.node->type) return std::nullopt;
             int width = input.node->type->width;
@@ -97,17 +98,17 @@ bool extract_reset_from_concat(
     int& reset_value,
     DFGNode*& functionalLogic)
 {
-    if (dNodeDriver->in.empty()) {
+    if (dNodeDriver->concatParts().empty()) {
         throw CompilerError(
             std::format("flop '{}' reset CONCAT has no inputs", flop_name),
             dNodeDriver->loc);
     }
 
-    const DFGNode* firstMux = dNodeDriver->in[0].node;
-    if (firstMux->op != DFGOp::MUX) {
+    const DFGNode* firstMux = dNodeDriver->concatParts().front().node;
+    if (firstMux->kind() != DFGOp::MUX) {
         throw CompilerError(
             std::format("flop '{}' reset CONCAT input is not a MUX (op={})",
-                flop_name, to_string(firstMux->op)),
+                flop_name, to_string(firstMux->kind())),
             firstMux->loc);
     }
     if (!firstMux->isBinaryMux()) {
@@ -130,18 +131,18 @@ bool extract_reset_from_concat(
     }
 
     std::vector<DFGNode*> functionalParts;
-    functionalParts.reserve(dNodeDriver->in.size());
+    functionalParts.reserve(dNodeDriver->concatParts().size());
 
     bool resetIsConst = true;
     bool resetIsQ = true;
     int64_t assembledReset = 0;
 
-    for (const auto& input : dNodeDriver->in) {
+    for (const auto& input : dNodeDriver->concatParts()) {
         auto* mux = input.node;
-        if (mux->op != DFGOp::MUX) {
+        if (mux->kind() != DFGOp::MUX) {
             throw CompilerError(
                 std::format("flop '{}' reset CONCAT contains non-MUX input (op={})",
-                    flop_name, to_string(mux->op)),
+                    flop_name, to_string(mux->kind())),
                 mux->loc);
         }
         if (!mux->isBinaryMux()) {
@@ -210,17 +211,17 @@ bool extract_reset(
     int& reset_value,
     DFGNode*& functionalLogic)
 {
-    if (dNodeDriver->op == DFGOp::CONCAT) {
+    if (dNodeDriver->kind() == DFGOp::CONCAT) {
         return extract_reset_from_concat(
             graph, dNodeDriver, triggers, flop_name, resolved,
             reset, clock, reset_value, functionalLogic);
     }
 
     // With 2 triggers the driver must be a reset MUX, or a CONCAT of reset MUX slices.
-    if (dNodeDriver->op != DFGOp::MUX) {
+    if (dNodeDriver->kind() != DFGOp::MUX) {
         throw CompilerError(std::format(
             "flop '{}' has 2 triggers but its .d driver is neither MUX nor CONCAT-of-MUX (op={})",
-            flop_name, to_string(dNodeDriver->op)), dNodeDriver->loc);
+            flop_name, to_string(dNodeDriver->kind())), dNodeDriver->loc);
     }
     if (!dNodeDriver->isBinaryMux()) {
         throw CompilerError(
@@ -287,13 +288,14 @@ FlopInfo extractFlopClockAndReset(
             "Flop .d node not found: {}",
             instance_path.empty() ? flop_name + ".d" : instance_path + "." + flop_name + ".d"));
     }
-    auto* dNodeDriver = dNode->in[0].node;
-    const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
-
-    if (dNode->in.size() != 1) {
+    auto dDriver = dNode->driver();
+    if (!dDriver) {
         throw CompilerError(std::format(
-            "Flop must have single driver: {} has {}", instance_path.empty() ? flop_name : instance_path + "." + flop_name + ".d", dNode->in.size()), dNode->loc);
+            "Flop must have single driver: {} has 0",
+            instance_path.empty() ? flop_name : instance_path + "." + flop_name + ".d"), dNode->loc);
     }
+    auto* dNodeDriver = dDriver->node;
+    const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
 
     asyncTrigger_t clock;
     asyncTrigger_t reset;
@@ -345,9 +347,9 @@ void check_logic_no_clock_reset(
 
         // Don't traverse into submodule inputs — clocks/resets driving a MODULE node
         // are valid (used inside the submodule for clocking, not as combinational inputs).
-        if (current->op == DFGOp::MODULE) continue;
+        if (current->kind() == DFGOp::MODULE) continue;
 
-        if (current->op == DFGOp::INPUT) {
+        if (current->kind() == DFGOp::INPUT) {
             auto loc = current->loc ? current->loc : root->loc;
             for (const auto& clk : clocks) {
                 if (current->name == clk) {
@@ -365,9 +367,9 @@ void check_logic_no_clock_reset(
             }
         }
 
-        for (const auto& inp : current->in) {
+        DFGTraversal::forEachInput(current, [&](size_t, const DFGOutput& inp) {
             to_visit.push_back(inp.node);
-        }
+        });
     }
 }
 

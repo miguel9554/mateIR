@@ -7,6 +7,7 @@
 #include <format>
 #include <stdexcept>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace custom_hdl {
@@ -20,9 +21,9 @@ static void postOrderVisit(DFGNode* node,
                            std::vector<DFGNode*>& order) {
     if (!node || visited.count(node)) return;
     visited.insert(node);
-    for (auto& input : node->in) {
+    DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
         postOrderVisit(input.node, visited, order);
-    }
+    });
     order.push_back(node);
 }
 
@@ -55,6 +56,15 @@ static void rejectUnpacked(const DFGNode* node, const char* opName) {
             "Type error: unpacked array value cannot be used with operator {}",
             opName), node->loc);
     }
+}
+
+static DFGNode* unaryNode(const DFGNode* node) {
+    return node->unaryInputs().operand.node;
+}
+
+static std::pair<DFGNode*, DFGNode*> binaryNodes(const DFGNode* node) {
+    auto inputs = node->binaryInputs();
+    return {inputs.lhs.node, inputs.rhs.node};
 }
 
 // Throw if the node has an enum type (enums cannot be used with arithmetic/bitwise ops)
@@ -97,7 +107,7 @@ static ResolvedType mergeDataTypes(const ResolvedType& a, const ResolvedType& b,
 bool inferNodeType(DFGNode* node) {
     if (node->hasType()) return false;
 
-    switch (node->op) {
+    switch (node->kind()) {
         // Leaf nodes — type must already be set during construction
         case DFGOp::INPUT:
             throw CompilerError(std::format(
@@ -114,9 +124,7 @@ bool inferNodeType(DFGNode* node) {
 
         // CAST: type is pre-set at elaboration; validate source width matches
         case DFGOp::CAST: {
-            if (node->in.empty()) throw CompilerError(
-                std::format("Type propagation: CAST {} has no inputs", node->str()), node->loc);
-            auto* src = node->in[0].node;
+            auto* src = node->castSource().node;
             if (!src->hasType()) return false;
             // node->type was set at elaboration and is the target enum type
             if (src->type->width != node->type->width)
@@ -129,13 +137,7 @@ bool inferNodeType(DFGNode* node) {
 
         // SUB: result is always signed (subtraction can produce negative values)
         case DFGOp::SUB: {
-            if (node->in.size() < 2) {
-                throw CompilerError(std::format(
-                    "Type propagation: binary op {} has {} inputs (expected 2)",
-                    node->str(), node->in.size()), node->loc);
-            }
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
+            auto [lhs, rhs] = binaryNodes(node);
             if (!lhs->hasType() || !rhs->hasType()) return false;
             rejectUnpacked(lhs, "SUB"); rejectUnpacked(rhs, "SUB");
             rejectEnum(lhs, "SUB"); rejectEnum(rhs, "SUB");
@@ -148,29 +150,17 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::ADD:
         case DFGOp::MUL:
         {
-            if (node->in.size() < 2) {
-                throw CompilerError(std::format(
-                    "Type propagation: binary op {} has {} inputs (expected 2)",
-                    node->str(), node->in.size()), node->loc);
-            }
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
+            auto [lhs, rhs] = binaryNodes(node);
             if (!lhs->hasType() || !rhs->hasType()) return false;
-            rejectUnpacked(lhs, to_string(node->op)); rejectUnpacked(rhs, to_string(node->op));
-            rejectEnum(lhs, to_string(node->op)); rejectEnum(rhs, to_string(node->op));
+            rejectUnpacked(lhs, to_string(node->kind())); rejectUnpacked(rhs, to_string(node->kind()));
+            rejectEnum(lhs, to_string(node->kind())); rejectEnum(rhs, to_string(node->kind()));
             node->type = widenTypes(*lhs->type, *rhs->type);
             return true;
         }
 
         // EQ: allow enum == enum of same type; reject mixed enum/integer
         case DFGOp::EQ: {
-            if (node->in.size() < 2) {
-                throw CompilerError(std::format(
-                    "Type propagation: comparison op {} has {} inputs (expected 2)",
-                    node->str(), node->in.size()), node->loc);
-            }
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
+            auto [lhs, rhs] = binaryNodes(node);
             if (!lhs->hasType() || !rhs->hasType()) return false;
             rejectUnpacked(lhs, "EQ"); rejectUnpacked(rhs, "EQ");
             bool lhsEnum = lhs->type->isEnum(), rhsEnum = rhs->type->isEnum();
@@ -191,16 +181,10 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::LE:
         case DFGOp::GT:
         case DFGOp::GE: {
-            if (node->in.size() < 2) {
-                throw CompilerError(std::format(
-                    "Type propagation: comparison op {} has {} inputs (expected 2)",
-                    node->str(), node->in.size()), node->loc);
-            }
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
+            auto [lhs, rhs] = binaryNodes(node);
             if (!lhs->hasType() || !rhs->hasType()) return false;
-            rejectUnpacked(lhs, to_string(node->op)); rejectUnpacked(rhs, to_string(node->op));
-            rejectEnum(lhs, to_string(node->op)); rejectEnum(rhs, to_string(node->op));
+            rejectUnpacked(lhs, to_string(node->kind())); rejectUnpacked(rhs, to_string(node->kind()));
+            rejectEnum(lhs, to_string(node->kind())); rejectEnum(rhs, to_string(node->kind()));
             node->type = makeOneBitUnsigned();
             return true;
         }
@@ -208,32 +192,27 @@ bool inferNodeType(DFGNode* node) {
         // Shift ops: result = left operand type (enum not allowed)
         case DFGOp::SHL:
         case DFGOp::ASR: {
-            if (node->in.size() < 2) {
-                throw CompilerError(std::format(
-                    "Type propagation: shift op {} has {} inputs (expected 2)",
-                    node->str(), node->in.size()), node->loc);
-            }
-            auto* lhs = node->in[0].node;
+            auto* lhs = node->binaryInputs().lhs.node;
             if (!lhs->hasType()) return false;
-            rejectUnpacked(lhs, to_string(node->op));
-            rejectEnum(lhs, to_string(node->op));
+            rejectUnpacked(lhs, to_string(node->kind()));
+            rejectEnum(lhs, to_string(node->kind()));
             node->type = *lhs->type;
             return true;
         }
 
         // MUX: result = type of data inputs (must be same enum type or both integer)
         case DFGOp::MUX: {
-            if (node->in.size() < 3) {
+            if (node->muxArmCount() < 2) {
                 throw CompilerError(std::format(
-                    "Type propagation: MUX {} has {} inputs (expected selector + at least 2 arms)",
-                    node->str(), node->in.size()), node->loc);
+                    "Type propagation: MUX {} has {} arms (expected at least 2)",
+                    node->str(), node->muxArmCount()), node->loc);
             }
-            for (size_t i = 1; i < node->in.size(); ++i) {
-                if (!node->in[i].node->hasType()) return false;
+            for (size_t i = 0; i < node->muxArmCount(); ++i) {
+                if (!node->muxArmData(i).node->hasType()) return false;
             }
-            ResolvedType result = *node->in[1].node->type;
-            for (size_t i = 2; i < node->in.size(); ++i) {
-                result = mergeDataTypes(result, *node->in[i].node->type, node->loc);
+            ResolvedType result = *node->muxArmData(0).node->type;
+            for (size_t i = 1; i < node->muxArmCount(); ++i) {
+                result = mergeDataTypes(result, *node->muxArmData(i).node->type, node->loc);
             }
             node->type = result;
             return true;
@@ -243,26 +222,19 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::UNARY_PLUS:
         case DFGOp::UNARY_NEGATE:
         case DFGOp::BITWISE_NOT: {
-            if (node->in.empty()) {
-                throw CompilerError(std::format(
-                    "Type propagation: unary op {} has no inputs", node->str()), node->loc);
-            }
-            auto* operand = node->in[0].node;
+            auto* operand = unaryNode(node);
             if (!operand->hasType()) return false;
-            rejectUnpacked(operand, to_string(node->op));
-            rejectEnum(operand, to_string(node->op));
+            rejectUnpacked(operand, to_string(node->kind()));
+            rejectEnum(operand, to_string(node->kind()));
             node->type = *operand->type;
             return true;
         }
 
         // Logical NOT: 1-bit unsigned
         case DFGOp::LOGICAL_NOT: {
-            if (node->in.empty()) {
-                throw CompilerError(std::format(
-                    "Type propagation: LOGICAL_NOT {} has no inputs", node->str()), node->loc);
-            }
-            if (!node->in[0].node->hasType()) return false;
-            rejectUnpacked(node->in[0].node, "LOGICAL_NOT");
+            auto* operand = unaryNode(node);
+            if (!operand->hasType()) return false;
+            rejectUnpacked(operand, "LOGICAL_NOT");
             node->type = makeOneBitUnsigned();
             return true;
         }
@@ -270,13 +242,10 @@ bool inferNodeType(DFGNode* node) {
         // Logical AND/OR: 1-bit unsigned
         case DFGOp::LOGICAL_OR:
         case DFGOp::LOGICAL_AND: {
-            if (node->in.size() < 2) {
-                throw CompilerError(std::format(
-                    "Type propagation: LOGICAL_AND {} has fewer than 2 inputs", node->str()), node->loc);
-            }
-            if (!node->in[0].node->hasType() || !node->in[1].node->hasType()) return false;
-            rejectUnpacked(node->in[0].node, to_string(node->op));
-            rejectUnpacked(node->in[1].node, to_string(node->op));
+            auto [lhs, rhs] = binaryNodes(node);
+            if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectUnpacked(lhs, to_string(node->kind()));
+            rejectUnpacked(rhs, to_string(node->kind()));
             node->type = makeOneBitUnsigned();
             return true;
         }
@@ -286,12 +255,10 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::BITWISE_OR:
         case DFGOp::BITWISE_XOR:
         case DFGOp::BITWISE_XNOR: {
-            if (node->in.size() < 2) return false;
-            auto* a = node->in[0].node;
-            auto* b = node->in[1].node;
+            auto [a, b] = binaryNodes(node);
             if (!a->hasType() || !b->hasType()) return false;
-            rejectUnpacked(a, to_string(node->op)); rejectUnpacked(b, to_string(node->op));
-            rejectEnum(a, to_string(node->op)); rejectEnum(b, to_string(node->op));
+            rejectUnpacked(a, to_string(node->kind())); rejectUnpacked(b, to_string(node->kind()));
+            rejectEnum(a, to_string(node->kind())); rejectEnum(b, to_string(node->kind()));
             int w = std::max(a->type->width, b->type->width);
             bool s = a->type->isSigned() && b->type->isSigned();
             node->type = ResolvedType::makeInteger(w, s);
@@ -305,12 +272,9 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::REDUCTION_NOR:
         case DFGOp::REDUCTION_XOR:
         case DFGOp::REDUCTION_XNOR: {
-            if (node->in.empty()) {
-                throw CompilerError(std::format(
-                    "Type propagation: reduction op {} has no inputs", node->str()), node->loc);
-            }
-            if (!node->in[0].node->hasType()) return false;
-            rejectUnpacked(node->in[0].node, to_string(node->op));
+            auto* operand = unaryNode(node);
+            if (!operand->hasType()) return false;
+            rejectUnpacked(operand, to_string(node->kind()));
             node->type = makeOneBitUnsigned();
             return true;
         }
@@ -318,8 +282,9 @@ bool inferNodeType(DFGNode* node) {
         // OUTPUT/SIGNAL: inherit from driver if present
         case DFGOp::OUTPUT:
         case DFGOp::SIGNAL: {
-            if (node->in.empty()) return false;
-            auto* driver = node->in[0].node;
+            auto driverOutput = node->driver();
+            if (!driverOutput) return false;
+            auto* driver = driverOutput->node;
             if (!driver->hasType()) return false;
             node->type = *driver->type;
             return true;
@@ -327,15 +292,15 @@ bool inferNodeType(DFGNode* node) {
 
         // CONCAT: result width = sum of input widths, always unsigned
         case DFGOp::CONCAT: {
-            if (node->in.empty()) {
+            if (node->concatParts().empty()) {
                 throw CompilerError(std::format(
                     "Type propagation: CONCAT {} has no inputs", node->str()), node->loc);
             }
-            for (const auto& input : node->in) {
+            for (const auto& input : node->concatParts()) {
                 if (!input.node->hasType()) return false;
             }
             int totalWidth = 0;
-            for (const auto& input : node->in) {
+            for (const auto& input : node->concatParts()) {
                 totalWidth += input.node->type->width;
             }
             node->type = ResolvedType::makeInteger(totalWidth, false);
@@ -344,12 +309,7 @@ bool inferNodeType(DFGNode* node) {
 
         // CONCAT_ALIGN: pass-through type from expression input (in[0])
         case DFGOp::CONCAT_ALIGN: {
-            if (node->in.size() < 3) {
-                throw CompilerError(std::format(
-                    "Type propagation: CONCAT_ALIGN {} has {} inputs (expected 3)",
-                    node->str(), node->in.size()), node->loc);
-            }
-            auto* expr = node->in[0].node;
+            auto* expr = node->concatAlignInputs().expr.node;
             if (!expr->hasType()) return false;
             node->type = *expr->type;
             return true;
@@ -359,21 +319,17 @@ bool inferNodeType(DFGNode* node) {
         // Dynamic indexing must be lowered to MUX during elaboration; a SLICE
         // node with non-constant indices is a compiler bug.
         case DFGOp::SLICE: {
-            if (node->in.size() < 3) {
-                throw CompilerError(std::format(
-                    "Type propagation: SLICE {} has {} inputs (expected 3)",
-                    node->str(), node->in.size()), node->loc);
-            }
-            auto* source = node->in[0].node;
-            auto* highNode = node->in[1].node;
-            auto* lowNode = node->in[2].node;
+            auto slice = node->sliceInputs();
+            auto* source = slice.source.node;
+            auto* highNode = slice.high.node;
+            auto* lowNode = slice.low.node;
             if (!source->hasType()) return false;
 
             const auto& atype = *source->type;
 
             // Packed dimension indexing
             if (!atype.packed_dims.empty()) {
-                if (highNode->op != DFGOp::CONST || lowNode->op != DFGOp::CONST) {
+                if (highNode->kind() != DFGOp::CONST || lowNode->kind() != DFGOp::CONST) {
                     throw CompilerError(std::format(
                         "[BUG] SLICE {} has non-constant packed indices — dynamic indexing "
                         "should have been lowered to MUX during elaboration",
@@ -402,7 +358,7 @@ bool inferNodeType(DFGNode* node) {
             }
 
             // No packed dims — flat bit-vector.
-            if (highNode->op != DFGOp::CONST || lowNode->op != DFGOp::CONST) {
+            if (highNode->kind() != DFGOp::CONST || lowNode->kind() != DFGOp::CONST) {
                 throw CompilerError(std::format(
                     "[BUG] SLICE {} on flat vector has non-constant indices — dynamic "
                     "indexing should have been lowered to MUX during elaboration",
@@ -451,19 +407,17 @@ bool propagateTypes(DFG& graph) {
         do {
             backwardChanged = false;
             for (const auto& node : graph.nodes) {
-                if (node->op != DFGOp::SIGNAL && node->op != DFGOp::OUTPUT) continue;
+                if (node->kind() != DFGOp::SIGNAL && node->kind() != DFGOp::OUTPUT) continue;
                 if (!node->hasType()) continue;
                 int contextWidth = node->type->width;
-                for (const auto& edge : node->in) {
+                DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& edge) {
                     DFGNode* src = edge.node;
-                    if (!src->hasType()) continue;
-                    if (!isArithOp(src->op)) continue;
-                    if (src->type->width < contextWidth) {
+                    if (src->hasType() && isArithOp(src->kind()) && src->type->width < contextWidth) {
                         src->type = ResolvedType::makeInteger(contextWidth, src->type->isSigned());
                         backwardChanged = true;
                         anyChanged = true;
                     }
-                }
+                });
             }
         } while (backwardChanged);
     }

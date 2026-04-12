@@ -36,7 +36,7 @@ std::string DFG::renderDot(const std::string& graphName,
 
         ss << "  n" << i << " [label=\"";
 
-        switch (node->op) {
+        switch (node->kind()) {
             case DFGOp::INPUT:
                 ss << "INPUT\\n" << node->name;
                 break;
@@ -119,7 +119,7 @@ std::string DFG::renderDot(const std::string& graphName,
 
     // Returns the label for the j-th input edge of a positional node.
     auto inputLabel = [](const DFGNode* node, size_t j) -> std::string {
-        switch (node->op) {
+        switch (node->kind()) {
             case DFGOp::MUX:
                 if (j == 0) return "sel";
                 if (j > 0 && j - 1 < node->muxValues().size()) {
@@ -147,8 +147,8 @@ std::string DFG::renderDot(const std::string& graphName,
         const auto& node = nodes[i];
         if (filter && !filter->count(node.get())) continue;
 
-        for (size_t j = 0; j < node->in.size(); ++j) {
-            const auto& input = node->in[j];
+        for (size_t j = 0; j < node->rawInputs().size(); ++j) {
+            const auto& input = node->rawInputs()[j];
             if (filter && !filter->count(input.node)) continue;
             ss << "  n" << nodeIndex.at(input.node) << " -> n" << i;
             std::string label = inputLabel(node.get(), j);
@@ -183,7 +183,7 @@ std::string DFG::toDotCone(const DFGNode* root,
     while (!q.empty()) {
         const DFGNode* curr = q.front();
         q.pop();
-        for (const auto& input : curr->in) {
+        for (const auto& input : curr->rawInputs()) {
             if (cone.insert(input.node).second) {
                 q.push(input.node);
             }
@@ -215,22 +215,22 @@ std::string DFG::renderJson(int indent, const std::set<const DFGNode*>* filter) 
 
         ss << indentStr(indent + 2) << "{\n";
         ss << indentStr(indent + 3) << "\"id\": " << i << ",\n";
-        ss << indentStr(indent + 3) << "\"op\": \"" << to_string(node->op) << "\",\n";
+        ss << indentStr(indent + 3) << "\"op\": \"" << to_string(node->kind()) << "\",\n";
 
         // Add name if present
         if (!node->name.empty()) {
             ss << indentStr(indent + 3) << "\"name\": \"" << node->name << "\",\n";
         }
         // Add data field based on variant type
-        if (node->op == DFGOp::CONST) {
+        if (node->kind() == DFGOp::CONST) {
             ss << indentStr(indent + 3) << "\"value\": " << node->constValue() << ",\n";
         }
-        if (node->op == DFGOp::MODULE) {
+        if (node->kind() == DFGOp::MODULE) {
             ss << indentStr(indent + 3) << "\"module_type\": \"" << node->moduleType() << "\",\n";
         }
 
         // Add output_names for multi-output nodes
-        if (node->op == DFGOp::MODULE && !node->outputNames().empty()) {
+        if (node->kind() == DFGOp::MODULE && !node->outputNames().empty()) {
             ss << indentStr(indent + 3) << "\"output_names\": [";
             const auto& outputNames = node->outputNames();
             for (size_t j = 0; j < outputNames.size(); ++j) {
@@ -251,7 +251,7 @@ std::string DFG::renderJson(int indent, const std::set<const DFGNode*>* filter) 
             ss << indentStr(indent + 3) << "\"loc\": \"" << node->loc->str() << "\",\n";
         }
 
-        if (node->op == DFGOp::MUX && !node->muxValues().empty()) {
+        if (node->kind() == DFGOp::MUX && !node->muxValues().empty()) {
             ss << indentStr(indent + 3) << "\"mux_selector_values\": [";
             const auto& muxValues = node->muxValues();
             for (size_t j = 0; j < muxValues.size(); ++j) {
@@ -263,11 +263,11 @@ std::string DFG::renderJson(int indent, const std::set<const DFGNode*>* filter) 
 
         // Add inputs
         ss << indentStr(indent + 3) << "\"inputs\": [";
-        for (size_t j = 0; j < node->in.size(); ++j) {
+        for (size_t j = 0; j < node->rawInputs().size(); ++j) {
             if (j > 0) ss << ", ";
-            size_t k = nodeIndex.at(node->in[j].node);
-            if (node->in[j].port != 0) {
-                ss << "{\"node\": " << k << ", \"port\": " << node->in[j].port << "}";
+            size_t k = nodeIndex.at(node->rawInputs()[j].node);
+            if (node->rawInputs()[j].port != 0) {
+                ss << "{\"node\": " << k << ", \"port\": " << node->rawInputs()[j].port << "}";
             } else {
                 ss << k;
             }
@@ -294,7 +294,7 @@ std::string DFG::toJsonCone(const DFGNode* root, int indent) const {
     while (!q.empty()) {
         const DFGNode* curr = q.front();
         q.pop();
-        for (const auto& input : curr->in) {
+        for (const auto& input : curr->rawInputs()) {
             if (cone.insert(input.node).second) {
                 q.push(input.node);
             }

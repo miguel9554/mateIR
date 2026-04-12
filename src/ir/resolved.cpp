@@ -500,10 +500,10 @@ void validateNoCombLoops(const ResolvedModule& module) {
     }
 
     for (const auto& node : nodes) {
-        for (const auto& input : node->in) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
             in_degree[node.get()]++;
             successors[input.node].push_back(node.get());
-        }
+        });
     }
 
     std::queue<const DFGNode*> q;
@@ -551,12 +551,12 @@ void validateNoCombLoops(const ResolvedModule& module) {
     for (const DFGNode* node : cycleNodes) {
         // Show which of this node's inputs are also in the cycle
         std::string loopInputs;
-        for (const auto& input : node->in) {
+        DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
             if (cycleNodes.count(input.node)) {
                 if (!loopInputs.empty()) loopInputs += ", ";
                 loopInputs += input.node->str();
             }
-        }
+        });
         msg += std::format("    {} <- [{}]\n", node->str(), loopInputs);
     }
 

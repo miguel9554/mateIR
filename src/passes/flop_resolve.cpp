@@ -61,7 +61,7 @@ int64_t maskForWidth(int width) {
 
 std::optional<int64_t> constantValueOfNode(const DFGNode* node) {
     if (node->op == DFGOp::CONST) {
-        return std::get<int64_t>(node->data);
+        return node->constValue();
     }
     if (node->op == DFGOp::SLICE) {
         auto src = constantValueOfNode(node->in[0].node);

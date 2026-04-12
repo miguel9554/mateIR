@@ -18,7 +18,7 @@ static bool isConst(const DFGNode* n) {
 }
 
 static int64_t getConst(const DFGNode* n) {
-    return std::get<int64_t>(n->data);
+    return n->constValue();
 }
 
 static void makeConst(DFGNode* n, int64_t value) {
@@ -26,10 +26,7 @@ static void makeConst(DFGNode* n, int64_t value) {
     // infer it from the inputs now, before they are cleared.
     if (!n->type.has_value())
         inferNodeType(n);
-    n->op = DFGOp::CONST;
-    n->data = value;
-    n->in.clear();
-    n->name.clear();
+    n->rewriteToConst(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -256,14 +253,12 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             }
             // 0 - x -> UNARY_NEGATE(x)
             if (isConst(lhs) && getConst(lhs) == 0) {
-                node->op = DFGOp::UNARY_NEGATE;
-                node->in = {DFGOutput(rhs)};
+                node->rewriteToUnary(DFGOp::UNARY_NEGATE, DFGOutput(rhs));
                 return true;
             }
             // x - UNARY_NEGATE(y) -> x + y
             if (rhs->op == DFGOp::UNARY_NEGATE) {
-                node->op = DFGOp::ADD;
-                node->in[1] = DFGOutput(rhs->in[0].node);
+                node->rewriteToBinary(DFGOp::ADD, DFGOutput(lhs), DFGOutput(rhs->in[0].node));
                 return true;
             }
             break;
@@ -292,14 +287,12 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             }
             // x * -1 -> UNARY_NEGATE(x)
             if (isConst(rhs) && getConst(rhs) == -1) {
-                node->op = DFGOp::UNARY_NEGATE;
-                node->in = {DFGOutput(lhs)};
+                node->rewriteToUnary(DFGOp::UNARY_NEGATE, DFGOutput(lhs));
                 return true;
             }
             // -1 * x -> UNARY_NEGATE(x)
             if (isConst(lhs) && getConst(lhs) == -1) {
-                node->op = DFGOp::UNARY_NEGATE;
-                node->in = {DFGOutput(rhs)};
+                node->rewriteToUnary(DFGOp::UNARY_NEGATE, DFGOutput(rhs));
                 return true;
             }
             break;

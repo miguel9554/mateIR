@@ -423,7 +423,9 @@ static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNo
 
 static void clearVisibleDrivers(ResolutionContext& ctx) {
     auto clearNodeDriver = [](DFGNode* node) {
-        node->in.clear();
+        if (node->op == DFGOp::OUTPUT || node->op == DFGOp::SIGNAL) {
+            node->clearDriver();
+        }
     };
     if (ctx.is_subroutine_scope) return;
     for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
@@ -499,7 +501,7 @@ static DFGNode* materializePartialTarget(ResolutionContext& ctx,
         if (loc) driver->loc = *loc;
         connectDriver(ctx, targetName, driver);
     } else if (auto* node = lookupTargetNode(ctx, targetName)) {
-        node->in.clear();
+        node->clearDriver();
     }
     return driver;
 }
@@ -519,21 +521,21 @@ static void restoreDrivers(ResolutionContext& ctx, const DriverSnapshot& snapsho
             if ((!node->type || node->type->unpacked_dims.empty()) &&
                     node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
-                node->in.clear();
+                node->clearDriver();
             }
         }
         for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
             if ((!node->type || node->type->unpacked_dims.empty()) &&
                     node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
-                node->in.clear();
+                node->clearDriver();
             }
         }
         for (const auto& [name, node] : ctx.local_signals) {
             if ((!node->type || node->type->unpacked_dims.empty()) &&
                     node->in.size() == 1 && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
-                node->in.clear();
+                node->clearDriver();
             }
         }
     }
@@ -649,8 +651,8 @@ static PartialTargetState makeWholeDriverState(const ResolvedType& type, DFGNode
                 part->in[1].node && part->in[2].node &&
                 part->in[1].node->op == DFGOp::CONST &&
                 part->in[2].node->op == DFGOp::CONST) {
-                int64_t high = std::get<int64_t>(part->in[1].node->data);
-                int64_t low = std::get<int64_t>(part->in[2].node->data);
+                int64_t high = part->in[1].node->constValue();
+                int64_t low = part->in[2].node->constValue();
                 if (high < low) std::swap(high, low);
                 slices.push_back({low, high, part->in[0].node});
                 nextHigh = low - 1;
@@ -4202,7 +4204,7 @@ void resolveNamedPortConnection(
                 auto* highConst = ctx.graph.constant((int64_t)idx);
                 auto* lowConst  = ctx.graph.constant((int64_t)idx);
                 auto* alignNode = ctx.graph.concatAlign(moduleNode, highConst, lowConst);
-                alignNode->in[0] = DFGOutput(moduleNode, (int)oi);
+                alignNode->replaceInputAt(0, DFGOutput(moduleNode, (int)oi));
                 recordPartialWrite(
                     ctx, baseName, idx, idx, resolveSourceLoc(*expr, ctx.sm),
                     std::format("module-output:{}:{}", moduleNode->name, oi));

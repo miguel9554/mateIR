@@ -17,7 +17,7 @@ static bool isConst(const DFGNode* n) {
 }
 
 static int64_t getConst(const DFGNode* n) {
-    return std::get<int64_t>(n->data);
+    return n->constValue();
 }
 
 // ---------------------------------------------------------------------------
@@ -63,14 +63,13 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
 
         if (operand->type->width == 1) {
             // 1-bit: rewrite to BITWISE_NOT
-            node->op = DFGOp::BITWISE_NOT;
+            node->rewriteToUnary(DFGOp::BITWISE_NOT, DFGOutput(operand));
             return true;
         } else {
             // Multi-bit: rewrite to EQ(operand, 0)
             auto* zero = graph.constant(0);
             zero->loc = node->loc;
-            node->op = DFGOp::EQ;
-            node->in = {DFGOutput(operand), DFGOutput(zero)};
+            node->rewriteToBinary(DFGOp::EQ, DFGOutput(operand), DFGOutput(zero));
             return true;
         }
     }
@@ -84,8 +83,7 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
             int64_t val = getConst(rhs);
             if (val == 0) {
                 // EQ(x, 0) -> BITWISE_NOT(x)
-                node->op = DFGOp::BITWISE_NOT;
-                node->in = {DFGOutput(lhs)};
+                node->rewriteToUnary(DFGOp::BITWISE_NOT, DFGOutput(lhs));
                 return true;
             }
             if (val == 1) {
@@ -99,8 +97,7 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
             int64_t val = getConst(lhs);
             if (val == 0) {
                 // EQ(0, x) -> BITWISE_NOT(x)
-                node->op = DFGOp::BITWISE_NOT;
-                node->in = {DFGOutput(rhs)};
+                node->rewriteToUnary(DFGOp::BITWISE_NOT, DFGOutput(rhs));
                 return true;
             }
             if (val == 1) {

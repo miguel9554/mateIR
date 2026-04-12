@@ -379,8 +379,8 @@ bool inferNodeType(DFGNode* node) {
                         "should have been lowered to MUX during elaboration",
                         node->str()), node->loc);
                 }
-                int64_t high_val = std::get<int64_t>(highNode->data);
-                int64_t low_val = std::get<int64_t>(lowNode->data);
+                int64_t high_val = highNode->constValue();
+                int64_t low_val = lowNode->constValue();
 
                 if (high_val == low_val) {
                     // Single-element bit-select: peel one packed dim
@@ -408,8 +408,8 @@ bool inferNodeType(DFGNode* node) {
                     "indexing should have been lowered to MUX during elaboration",
                     node->str()), node->loc);
             }
-            int64_t high_val = std::get<int64_t>(highNode->data);
-            int64_t low_val  = std::get<int64_t>(lowNode->data);
+            int64_t high_val = highNode->constValue();
+            int64_t low_val  = lowNode->constValue();
             node->type = ResolvedType::makeInteger(
                 static_cast<int>(std::abs(high_val - low_val)) + 1,
                 high_val == low_val ? false : atype.isSigned());

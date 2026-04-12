@@ -212,7 +212,7 @@ void ModuleInstance::buildFlopMaps() {
 void ModuleInstance::initConsts() {
     for (const auto& node : module_def.dfg->nodes) {
         if (node->op == DFGOp::CONST) {
-            values[node.get()] = simValueFromInt(std::get<int64_t>(node->data), node.get());
+            values[node.get()] = simValueFromInt(node->constValue(), node.get());
         }
     }
 }

@@ -9,7 +9,7 @@ namespace custom_hdl {
 namespace {
 
 void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
-    const std::string& moduleTypeName = std::get<std::string>(moduleNode->data);
+    const std::string& moduleTypeName = moduleNode->moduleType();
     const std::string& instanceName = moduleNode->name;
 
     // Find the sub ResolvedModule by instance name
@@ -34,7 +34,7 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
 
     // Step 1: Rewire inputs — replace uses of sub INPUT nodes with parent drivers
     for (size_t i = 0; i < moduleNode->in.size(); ++i) {
-        const std::string& portName = moduleNode->input_names[i];
+        const std::string& portName = moduleNode->inputNames()[i];
         DFGOutput driver = moduleNode->in[i];
 
         DFGNode* subInputNode = sub->dfg->getInputNode("", portName);
@@ -42,11 +42,7 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
 
         // Replace all uses of subInputNode in sub.dfg with the parent driver
         for (auto& node : sub->dfg->nodes) {
-            for (auto& inp : node->in) {
-                if (inp.node == subInputNode) {
-                    inp = driver;
-                }
-            }
+            node->replaceInputNode(subInputNode, driver);
         }
 
         // Update input binding metadata: subInputNode will be dead after
@@ -74,14 +70,16 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
 
     // Step 2: Rewire outputs — replace {moduleNode, portIdx} references in parent
     for (auto& node : parent.dfg->nodes) {
-        for (auto& inp : node->in) {
+        auto inputs = node->inputs();
+        for (size_t inputIndex = 0; inputIndex < inputs.size(); ++inputIndex) {
+            const auto& inp = inputs[inputIndex];
             if (inp.node == moduleNode) {
                 int portIdx = inp.port;
-                if (portIdx < static_cast<int>(moduleNode->output_names.size())) {
-                    const std::string& outName = moduleNode->output_names[portIdx];
+                if (portIdx < static_cast<int>(moduleNode->outputNames().size())) {
+                    const std::string& outName = moduleNode->outputNames()[portIdx];
                     DFGNode* subOutputNode = sub->dfg->getOutputNode("", outName);
                     if (subOutputNode) {
-                        inp = DFGOutput{subOutputNode, 0};
+                        node->replaceInputAt(inputIndex, DFGOutput{subOutputNode, 0});
                     }
                 }
             }

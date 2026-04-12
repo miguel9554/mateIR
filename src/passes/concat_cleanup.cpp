@@ -47,8 +47,8 @@ bool cleanupConcats(DFG& graph) {
                     "concat_cleanup: CONCAT_ALIGN {} has non-constant indices",
                     child->str()), child);
             }
-            int64_t high = std::get<int64_t>(highNode->data);
-            int64_t low = std::get<int64_t>(lowNode->data);
+            int64_t high = highNode->constValue();
+            int64_t low = lowNode->constValue();
             if (high < low) std::swap(high, low);
             parts.push_back({high, low, child->in[0].node, i});
         }
@@ -85,10 +85,12 @@ bool cleanupConcats(DFG& graph) {
         });
 
         // Replace CONCAT's input list with sorted expression nodes (unwrap CONCAT_ALIGN)
-        node->in.clear();
+        std::vector<DFGOutput> newParts;
+        newParts.reserve(parts.size());
         for (const auto& part : parts) {
-            node->in.push_back(part.expr);
+            newParts.push_back(part.expr);
         }
+        node->setConcatParts(newParts);
 
         changed = true;
     }

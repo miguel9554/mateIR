@@ -5,6 +5,7 @@
 
 #include <stdexcept>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace custom_hdl {
@@ -14,11 +15,20 @@ namespace custom_hdl {
 // ---------------------------------------------------------------------------
 
 static bool isConst(const DFGNode* n) {
-    return n->op == DFGOp::CONST;
+    return n->kind() == DFGOp::CONST;
 }
 
 static int64_t getConst(const DFGNode* n) {
-    return std::get<int64_t>(n->data);
+    return n->constValue();
+}
+
+static DFGNode* unaryNode(const DFGNode* n) {
+    return n->unaryInputs().operand.node;
+}
+
+static std::pair<DFGNode*, DFGNode*> binaryNodes(const DFGNode* n) {
+    auto inputs = n->binaryInputs();
+    return {inputs.lhs.node, inputs.rhs.node};
 }
 
 static void makeConst(DFGNode* n, int64_t value) {
@@ -26,10 +36,7 @@ static void makeConst(DFGNode* n, int64_t value) {
     // infer it from the inputs now, before they are cleared.
     if (!n->type.has_value())
         inferNodeType(n);
-    n->op = DFGOp::CONST;
-    n->data = value;
-    n->in.clear();
-    n->name.clear();
+    n->rewriteToConst(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -41,9 +48,9 @@ static void postOrderVisit(DFGNode* node,
                            std::vector<DFGNode*>& order) {
     if (!node || visited.count(node)) return;
     visited.insert(node);
-    for (auto& input : node->in) {
+    DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
         postOrderVisit(input.node, visited, order);
-    }
+    });
     order.push_back(node);
 }
 
@@ -72,20 +79,20 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
 
 static bool tryConstantFold(DFGNode* node) {
     // Skip nodes that are already constants or have no inputs
-    if (node->op == DFGOp::CONST || node->op == DFGOp::INPUT ||
-        node->op == DFGOp::SLICE ||
-        node->op == DFGOp::CONCAT_ALIGN)
+    if (node->kind() == DFGOp::CONST || node->kind() == DFGOp::INPUT ||
+        node->kind() == DFGOp::SLICE ||
+        node->kind() == DFGOp::CONCAT_ALIGN)
         return false;
 
     // CONCAT with all-constant inputs: fold by bit-concatenation (MSB-first)
-    if (node->op == DFGOp::CONCAT) {
-        if (node->in.empty()) return false;
-        for (auto& inp : node->in) {
+    if (node->kind() == DFGOp::CONCAT) {
+        if (node->concatParts().empty()) return false;
+        for (const auto& inp : node->concatParts()) {
             if (!isConst(inp.node)) return false;
             if (!inp.node->hasType()) return false;  // need width for each segment
         }
         int64_t result = 0;
-        for (auto& inp : node->in) {
+        for (const auto& inp : node->concatParts()) {
             result = (result << inp.node->type->width) | getConst(inp.node);
         }
         makeConst(node, result);
@@ -93,46 +100,73 @@ static bool tryConstantFold(DFGNode* node) {
     }
 
     // Check if all inputs are constants
-    if (node->in.empty()) return false;
-    for (auto& input : node->in) {
-        if (!isConst(input.node)) return false;
-    }
+    if (!DFGTraversal::hasInputs(node)) return false;
+    bool allInputsConst = true;
+    DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
+        if (!isConst(input.node)) allInputsConst = false;
+    });
+    if (!allInputsConst) return false;
 
     int64_t result;
+    auto unaryConst = [&]() { return getConst(unaryNode(node)); };
+    auto binaryConst = [&]() {
+        auto [lhs, rhs] = binaryNodes(node);
+        return std::pair<int64_t, int64_t>{getConst(lhs), getConst(rhs)};
+    };
 
-    switch (node->op) {
-        case DFGOp::ADD:
-            result = getConst(node->in[0].node) + getConst(node->in[1].node);
+    switch (node->kind()) {
+        case DFGOp::ADD: {
+            auto [lhs, rhs] = binaryConst();
+            result = lhs + rhs;
             break;
-        case DFGOp::SUB:
-            result = getConst(node->in[0].node) - getConst(node->in[1].node);
+        }
+        case DFGOp::SUB: {
+            auto [lhs, rhs] = binaryConst();
+            result = lhs - rhs;
             break;
-        case DFGOp::MUL:
-            result = getConst(node->in[0].node) * getConst(node->in[1].node);
+        }
+        case DFGOp::MUL: {
+            auto [lhs, rhs] = binaryConst();
+            result = lhs * rhs;
             break;
-        case DFGOp::EQ:
-            result = (getConst(node->in[0].node) == getConst(node->in[1].node)) ? 1 : 0;
+        }
+        case DFGOp::EQ: {
+            auto [lhs, rhs] = binaryConst();
+            result = (lhs == rhs) ? 1 : 0;
             break;
-        case DFGOp::LT:
-            result = (getConst(node->in[0].node) < getConst(node->in[1].node)) ? 1 : 0;
+        }
+        case DFGOp::LT: {
+            auto [lhs, rhs] = binaryConst();
+            result = (lhs < rhs) ? 1 : 0;
             break;
-        case DFGOp::LE:
-            result = (getConst(node->in[0].node) <= getConst(node->in[1].node)) ? 1 : 0;
+        }
+        case DFGOp::LE: {
+            auto [lhs, rhs] = binaryConst();
+            result = (lhs <= rhs) ? 1 : 0;
             break;
-        case DFGOp::GT:
-            result = (getConst(node->in[0].node) > getConst(node->in[1].node)) ? 1 : 0;
+        }
+        case DFGOp::GT: {
+            auto [lhs, rhs] = binaryConst();
+            result = (lhs > rhs) ? 1 : 0;
             break;
-        case DFGOp::GE:
-            result = (getConst(node->in[0].node) >= getConst(node->in[1].node)) ? 1 : 0;
+        }
+        case DFGOp::GE: {
+            auto [lhs, rhs] = binaryConst();
+            result = (lhs >= rhs) ? 1 : 0;
             break;
-        case DFGOp::SHL:
-            result = getConst(node->in[0].node) << getConst(node->in[1].node);
+        }
+        case DFGOp::SHL: {
+            auto [lhs, rhs] = binaryConst();
+            result = lhs << rhs;
             break;
-        case DFGOp::ASR:
-            result = getConst(node->in[0].node) >> getConst(node->in[1].node);
+        }
+        case DFGOp::ASR: {
+            auto [lhs, rhs] = binaryConst();
+            result = lhs >> rhs;
             break;
+        }
         case DFGOp::MUX: {
-            int64_t sel = getConst(node->in[0].node);
+            int64_t sel = getConst(node->muxSelector().node);
             auto* selected = node->muxDataForValue(sel);
             if (!selected) {
                 throw CompilerError(
@@ -143,59 +177,71 @@ static bool tryConstantFold(DFGNode* node) {
             break;
         }
         case DFGOp::UNARY_PLUS:
-            result = getConst(node->in[0].node);
+            result = unaryConst();
             break;
         case DFGOp::UNARY_NEGATE:
-            result = -getConst(node->in[0].node);
+            result = -unaryConst();
             break;
         case DFGOp::BITWISE_NOT:
-            result = ~getConst(node->in[0].node);
+            result = ~unaryConst();
             break;
         case DFGOp::LOGICAL_NOT:
-            result = (getConst(node->in[0].node) == 0) ? 1 : 0;
+            result = (unaryConst() == 0) ? 1 : 0;
             break;
-        case DFGOp::LOGICAL_AND:
-            result = (getConst(node->in[0].node) != 0 && getConst(node->in[1].node) != 0) ? 1 : 0;
+        case DFGOp::LOGICAL_AND: {
+            auto [lhs, rhs] = binaryConst();
+            result = (lhs != 0 && rhs != 0) ? 1 : 0;
             break;
-        case DFGOp::LOGICAL_OR:
-            result = (getConst(node->in[0].node) != 0 || getConst(node->in[1].node) != 0) ? 1 : 0;
+        }
+        case DFGOp::LOGICAL_OR: {
+            auto [lhs, rhs] = binaryConst();
+            result = (lhs != 0 || rhs != 0) ? 1 : 0;
             break;
-        case DFGOp::BITWISE_AND:
-            result = getConst(node->in[0].node) & getConst(node->in[1].node);
+        }
+        case DFGOp::BITWISE_AND: {
+            auto [lhs, rhs] = binaryConst();
+            result = lhs & rhs;
             break;
-        case DFGOp::BITWISE_OR:
-            result = getConst(node->in[0].node) | getConst(node->in[1].node);
+        }
+        case DFGOp::BITWISE_OR: {
+            auto [lhs, rhs] = binaryConst();
+            result = lhs | rhs;
             break;
-        case DFGOp::BITWISE_XOR:
-            result = getConst(node->in[0].node) ^ getConst(node->in[1].node);
+        }
+        case DFGOp::BITWISE_XOR: {
+            auto [lhs, rhs] = binaryConst();
+            result = lhs ^ rhs;
             break;
-        case DFGOp::BITWISE_XNOR:
-            result = ~(getConst(node->in[0].node) ^ getConst(node->in[1].node));
+        }
+        case DFGOp::BITWISE_XNOR: {
+            auto [lhs, rhs] = binaryConst();
+            result = ~(lhs ^ rhs);
             break;
+        }
         case DFGOp::REDUCTION_AND:
             // For constant folding, treat as: result is 1 if all bits are 1 (value == -1 for signed), else 0
             // Without bit-width info, we check if value is non-zero and all bits set
-            result = (getConst(node->in[0].node) == -1) ? 1 : 0;
+            result = (unaryConst() == -1) ? 1 : 0;
             break;
         case DFGOp::REDUCTION_NAND:
-            result = (getConst(node->in[0].node) == -1) ? 0 : 1;
+            result = (unaryConst() == -1) ? 0 : 1;
             break;
         case DFGOp::REDUCTION_OR:
-            result = (getConst(node->in[0].node) != 0) ? 1 : 0;
+            result = (unaryConst() != 0) ? 1 : 0;
             break;
         case DFGOp::REDUCTION_NOR:
-            result = (getConst(node->in[0].node) != 0) ? 0 : 1;
+            result = (unaryConst() != 0) ? 0 : 1;
             break;
         case DFGOp::REDUCTION_XOR: {
             // Parity: count number of set bits
-            uint64_t v = static_cast<uint64_t>(getConst(node->in[0].node));
+            uint64_t v = static_cast<uint64_t>(unaryConst());
             int bits = 0;
             while (v) { bits ^= 1; v &= v - 1; }
             result = bits;
             break;
         }
         case DFGOp::REDUCTION_XNOR: {
-            uint64_t v = static_cast<uint64_t>(getConst(node->in[0].node));
+            uint64_t v = static_cast<uint64_t>(unaryConst());
             int bits = 0;
             while (v) { bits ^= 1; v &= v - 1; }
             result = bits ? 0 : 1;
@@ -214,12 +260,11 @@ static bool tryConstantFold(DFGNode* node) {
 // ---------------------------------------------------------------------------
 
 static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
-    if (node->in.empty()) return false;
+    if (!DFGTraversal::hasInputs(node)) return false;
 
-    switch (node->op) {
+    switch (node->kind()) {
         case DFGOp::ADD: {
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
+            auto [lhs, rhs] = binaryNodes(node);
             // x + 0 -> x
             if (isConst(rhs) && getConst(rhs) == 0) {
                 graph.redirectConsumers(node, lhs);
@@ -231,19 +276,18 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
                 return true;
             }
             // x + UNARY_NEGATE(x) -> 0
-            if (rhs->op == DFGOp::UNARY_NEGATE && rhs->in[0].node == lhs) {
+            if (rhs->kind() == DFGOp::UNARY_NEGATE && unaryNode(rhs) == lhs) {
                 makeConst(node, 0);
                 return true;
             }
-            if (lhs->op == DFGOp::UNARY_NEGATE && lhs->in[0].node == rhs) {
+            if (lhs->kind() == DFGOp::UNARY_NEGATE && unaryNode(lhs) == rhs) {
                 makeConst(node, 0);
                 return true;
             }
             break;
         }
         case DFGOp::SUB: {
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
+            auto [lhs, rhs] = binaryNodes(node);
             // x - 0 -> x
             if (isConst(rhs) && getConst(rhs) == 0) {
                 graph.redirectConsumers(node, lhs);
@@ -256,21 +300,18 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             }
             // 0 - x -> UNARY_NEGATE(x)
             if (isConst(lhs) && getConst(lhs) == 0) {
-                node->op = DFGOp::UNARY_NEGATE;
-                node->in = {DFGOutput(rhs)};
+                node->rewriteToUnary(DFGOp::UNARY_NEGATE, DFGOutput(rhs));
                 return true;
             }
             // x - UNARY_NEGATE(y) -> x + y
-            if (rhs->op == DFGOp::UNARY_NEGATE) {
-                node->op = DFGOp::ADD;
-                node->in[1] = DFGOutput(rhs->in[0].node);
+            if (rhs->kind() == DFGOp::UNARY_NEGATE) {
+                node->rewriteToBinary(DFGOp::ADD, DFGOutput(lhs), DFGOutput(unaryNode(rhs)));
                 return true;
             }
             break;
         }
         case DFGOp::MUL: {
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
+            auto [lhs, rhs] = binaryNodes(node);
             // x * 0 or 0 * x -> 0
             if (isConst(rhs) && getConst(rhs) == 0) {
                 makeConst(node, 0);
@@ -292,56 +333,58 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             }
             // x * -1 -> UNARY_NEGATE(x)
             if (isConst(rhs) && getConst(rhs) == -1) {
-                node->op = DFGOp::UNARY_NEGATE;
-                node->in = {DFGOutput(lhs)};
+                node->rewriteToUnary(DFGOp::UNARY_NEGATE, DFGOutput(lhs));
                 return true;
             }
             // -1 * x -> UNARY_NEGATE(x)
             if (isConst(lhs) && getConst(lhs) == -1) {
-                node->op = DFGOp::UNARY_NEGATE;
-                node->in = {DFGOutput(rhs)};
+                node->rewriteToUnary(DFGOp::UNARY_NEGATE, DFGOutput(rhs));
                 return true;
             }
             break;
         }
         case DFGOp::EQ: {
-            if (node->in[0].node == node->in[1].node) {
+            auto [lhs, rhs] = binaryNodes(node);
+            if (lhs == rhs) {
                 makeConst(node, 1);
                 return true;
             }
             break;
         }
         case DFGOp::LT: {
-            if (node->in[0].node == node->in[1].node) {
+            auto [lhs, rhs] = binaryNodes(node);
+            if (lhs == rhs) {
                 makeConst(node, 0);
                 return true;
             }
             break;
         }
         case DFGOp::LE: {
-            if (node->in[0].node == node->in[1].node) {
+            auto [lhs, rhs] = binaryNodes(node);
+            if (lhs == rhs) {
                 makeConst(node, 1);
                 return true;
             }
             break;
         }
         case DFGOp::GT: {
-            if (node->in[0].node == node->in[1].node) {
+            auto [lhs, rhs] = binaryNodes(node);
+            if (lhs == rhs) {
                 makeConst(node, 0);
                 return true;
             }
             break;
         }
         case DFGOp::GE: {
-            if (node->in[0].node == node->in[1].node) {
+            auto [lhs, rhs] = binaryNodes(node);
+            if (lhs == rhs) {
                 makeConst(node, 1);
                 return true;
             }
             break;
         }
         case DFGOp::SHL: {
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
+            auto [lhs, rhs] = binaryNodes(node);
             // x << 0 -> x
             if (isConst(rhs) && getConst(rhs) == 0) {
                 graph.redirectConsumers(node, lhs);
@@ -355,8 +398,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             break;
         }
         case DFGOp::ASR: {
-            auto* lhs = node->in[0].node;
-            auto* rhs = node->in[1].node;
+            auto [lhs, rhs] = binaryNodes(node);
             // x >>> 0 -> x
             if (isConst(rhs) && getConst(rhs) == 0) {
                 graph.redirectConsumers(node, lhs);
@@ -370,7 +412,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             break;
         }
         case DFGOp::MUX: {
-            auto* sel = node->in[0].node;
+            auto* sel = node->muxSelector().node;
             if (isConst(sel)) {
                 if (auto* selected = node->muxDataForValue(getConst(sel))) {
                     graph.redirectConsumers(node, selected);
@@ -403,32 +445,32 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
         }
         case DFGOp::UNARY_PLUS: {
             // +x -> x (always)
-            graph.redirectConsumers(node, node->in[0].node);
+            graph.redirectConsumers(node, unaryNode(node));
             return true;
         }
         case DFGOp::UNARY_NEGATE: {
-            auto* inner = node->in[0].node;
+            auto* inner = unaryNode(node);
             // -(-x) -> x
-            if (inner->op == DFGOp::UNARY_NEGATE) {
-                graph.redirectConsumers(node, inner->in[0].node);
+            if (inner->kind() == DFGOp::UNARY_NEGATE) {
+                graph.redirectConsumers(node, unaryNode(inner));
                 return true;
             }
             break;
         }
         case DFGOp::BITWISE_NOT: {
-            auto* inner = node->in[0].node;
+            auto* inner = unaryNode(node);
             // ~(~x) -> x
-            if (inner->op == DFGOp::BITWISE_NOT) {
-                graph.redirectConsumers(node, inner->in[0].node);
+            if (inner->kind() == DFGOp::BITWISE_NOT) {
+                graph.redirectConsumers(node, unaryNode(inner));
                 return true;
             }
             break;
         }
         case DFGOp::LOGICAL_NOT: {
-            auto* inner = node->in[0].node;
+            auto* inner = unaryNode(node);
             // !(!x) -> x
-            if (inner->op == DFGOp::LOGICAL_NOT) {
-                graph.redirectConsumers(node, inner->in[0].node);
+            if (inner->kind() == DFGOp::LOGICAL_NOT) {
+                graph.redirectConsumers(node, unaryNode(inner));
                 return true;
             }
             break;

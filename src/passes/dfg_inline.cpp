@@ -9,7 +9,7 @@ namespace custom_hdl {
 namespace {
 
 void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
-    const std::string& moduleTypeName = std::get<std::string>(moduleNode->data);
+    const std::string& moduleTypeName = moduleNode->moduleType();
     const std::string& instanceName = moduleNode->name;
 
     // Find the sub ResolvedModule by instance name
@@ -33,20 +33,16 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
     }
 
     // Step 1: Rewire inputs — replace uses of sub INPUT nodes with parent drivers
-    for (size_t i = 0; i < moduleNode->in.size(); ++i) {
-        const std::string& portName = moduleNode->input_names[i];
-        DFGOutput driver = moduleNode->in[i];
+    for (const auto& binding : moduleNode->moduleInputs()) {
+        const std::string& portName = binding.port;
+        DFGOutput driver = binding.driver;
 
         DFGNode* subInputNode = sub->dfg->getInputNode("", portName);
         if (!subInputNode) continue;
 
         // Replace all uses of subInputNode in sub.dfg with the parent driver
         for (auto& node : sub->dfg->nodes) {
-            for (auto& inp : node->in) {
-                if (inp.node == subInputNode) {
-                    inp = driver;
-                }
-            }
+            node->replaceInputNode(subInputNode, driver);
         }
 
         // Update input binding metadata: subInputNode will be dead after
@@ -74,18 +70,18 @@ void inlineModuleNode(ResolvedModule& parent, DFGNode* moduleNode) {
 
     // Step 2: Rewire outputs — replace {moduleNode, portIdx} references in parent
     for (auto& node : parent.dfg->nodes) {
-        for (auto& inp : node->in) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t inputIndex, const DFGOutput& inp) {
             if (inp.node == moduleNode) {
                 int portIdx = inp.port;
-                if (portIdx < static_cast<int>(moduleNode->output_names.size())) {
-                    const std::string& outName = moduleNode->output_names[portIdx];
+                if (portIdx < static_cast<int>(moduleNode->outputNames().size())) {
+                    const std::string& outName = moduleNode->outputNames()[portIdx];
                     DFGNode* subOutputNode = sub->dfg->getOutputNode("", outName);
                     if (subOutputNode) {
-                        inp = DFGOutput{subOutputNode, 0};
+                        node->replaceInputAt(inputIndex, DFGOutput{subOutputNode, 0});
                     }
                 }
             }
-        }
+        });
     }
 
     // Step 3: Set instance_path on all sub nodes (must happen before adopt so
@@ -144,7 +140,7 @@ void inlineDFGs(ResolvedModule& top) {
     // Collect all MODULE nodes before modifying the nodes vector
     std::vector<DFGNode*> moduleNodes;
     for (const auto& node : top.dfg->nodes) {
-        if (node->op == DFGOp::MODULE) {
+        if (node->kind() == DFGOp::MODULE) {
             moduleNodes.push_back(node.get());
         }
     }

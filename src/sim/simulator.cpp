@@ -11,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 
 namespace custom_hdl {
@@ -121,10 +122,10 @@ void ModuleInstance::buildTopology() {
     }
 
     for (const auto& node : nodes) {
-        for (const auto& input : node->in) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
             in_degree[node.get()]++;
             successors[input.node].push_back(node.get());
-        }
+        });
     }
 
     std::queue<const DFGNode*> q;
@@ -211,8 +212,8 @@ void ModuleInstance::buildFlopMaps() {
 
 void ModuleInstance::initConsts() {
     for (const auto& node : module_def.dfg->nodes) {
-        if (node->op == DFGOp::CONST) {
-            values[node.get()] = simValueFromInt(std::get<int64_t>(node->data), node.get());
+        if (node->kind() == DFGOp::CONST) {
+            values[node.get()] = simValueFromInt(node->constValue(), node.get());
         }
     }
 }
@@ -254,74 +255,94 @@ SimValue ModuleInstance::checkedGet(const DFGNode* node, const DFGNode* context)
 }
 
 SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
-    auto getVal = [&](int idx) -> SimValue {
-        return checkedGet(node->in[idx].node, node);
+    auto getUnaryVal = [&]() -> SimValue {
+        return checkedGet(node->unaryInputs().operand.node, node);
+    };
+    auto getBinaryVals = [&]() -> std::pair<SimValue, SimValue> {
+        auto inputs = node->binaryInputs();
+        return {checkedGet(inputs.lhs.node, node), checkedGet(inputs.rhs.node, node)};
     };
 
-    switch (node->op) {
+    switch (node->kind()) {
         case DFGOp::INPUT:
         case DFGOp::CONST:
             return checkedGet(node);
 
         case DFGOp::SIGNAL:
         case DFGOp::OUTPUT:
-            if (node->in.empty()) return checkedGet(node);
-            return getVal(0);
+            if (auto driver = node->driver()) return checkedGet(driver->node, node);
+            return checkedGet(node);
 
         case DFGOp::ADD: {
-            SimValue lhs = widenForArithmetic(getVal(0), node);
-            SimValue rhs = widenForArithmetic(getVal(1), node);
+            auto [lhsRaw, rhsRaw] = getBinaryVals();
+            SimValue lhs = widenForArithmetic(lhsRaw, node);
+            SimValue rhs = widenForArithmetic(rhsRaw, node);
             return maskToWidth(lhs.add(rhs), node);
         }
         case DFGOp::SUB: {
-            SimValue lhs = widenForArithmetic(getVal(0), node);
-            SimValue rhs = widenForArithmetic(getVal(1), node);
+            auto [lhsRaw, rhsRaw] = getBinaryVals();
+            SimValue lhs = widenForArithmetic(lhsRaw, node);
+            SimValue rhs = widenForArithmetic(rhsRaw, node);
             return maskToWidth(lhs.sub(rhs), node);
         }
         case DFGOp::MUL: {
-            SimValue lhs = widenForArithmetic(getVal(0), node);
-            SimValue rhs = widenForArithmetic(getVal(1), node);
+            auto [lhsRaw, rhsRaw] = getBinaryVals();
+            SimValue lhs = widenForArithmetic(lhsRaw, node);
+            SimValue rhs = widenForArithmetic(rhsRaw, node);
             return maskToWidth(lhs.mul(rhs), node);
         }
 
-        case DFGOp::EQ:  return boolValue(getVal(0).eq(getVal(1)));
+        case DFGOp::EQ: {
+            auto [lhs, rhs] = getBinaryVals();
+            return boolValue(lhs.eq(rhs));
+        }
         case DFGOp::LT: {
-            auto lhs = getVal(0);
-            auto rhs = getVal(1);
-            return boolValue(useSignedCompare(node->in[0].node, node->in[1].node)
+            auto inputs = node->binaryInputs();
+            auto lhs = checkedGet(inputs.lhs.node, node);
+            auto rhs = checkedGet(inputs.rhs.node, node);
+            return boolValue(useSignedCompare(inputs.lhs.node, inputs.rhs.node)
                 ? lhs.signedLt(rhs)
                 : lhs.unsignedLt(rhs));
         }
         case DFGOp::LE: {
-            auto lhs = getVal(0);
-            auto rhs = getVal(1);
-            bool lt = useSignedCompare(node->in[0].node, node->in[1].node)
+            auto inputs = node->binaryInputs();
+            auto lhs = checkedGet(inputs.lhs.node, node);
+            auto rhs = checkedGet(inputs.rhs.node, node);
+            bool lt = useSignedCompare(inputs.lhs.node, inputs.rhs.node)
                 ? lhs.signedLt(rhs)
                 : lhs.unsignedLt(rhs);
             return boolValue(lt || lhs.eq(rhs));
         }
         case DFGOp::GT: {
-            auto lhs = getVal(0);
-            auto rhs = getVal(1);
-            return boolValue(useSignedCompare(node->in[0].node, node->in[1].node)
+            auto inputs = node->binaryInputs();
+            auto lhs = checkedGet(inputs.lhs.node, node);
+            auto rhs = checkedGet(inputs.rhs.node, node);
+            return boolValue(useSignedCompare(inputs.lhs.node, inputs.rhs.node)
                 ? rhs.signedLt(lhs)
                 : rhs.unsignedLt(lhs));
         }
         case DFGOp::GE: {
-            auto lhs = getVal(0);
-            auto rhs = getVal(1);
-            bool lt = useSignedCompare(node->in[0].node, node->in[1].node)
+            auto inputs = node->binaryInputs();
+            auto lhs = checkedGet(inputs.lhs.node, node);
+            auto rhs = checkedGet(inputs.rhs.node, node);
+            bool lt = useSignedCompare(inputs.lhs.node, inputs.rhs.node)
                 ? lhs.signedLt(rhs)
                 : lhs.unsignedLt(rhs);
             return boolValue(!lt);
         }
 
-        case DFGOp::SHL:  return getVal(0).shl(getVal(1).lowU64());
-        case DFGOp::ASR:  return getVal(0).shr(getVal(1).lowU64(), true);
+        case DFGOp::SHL: {
+            auto [lhs, rhs] = getBinaryVals();
+            return lhs.shl(rhs.lowU64());
+        }
+        case DFGOp::ASR: {
+            auto [lhs, rhs] = getBinaryVals();
+            return lhs.shr(rhs.lowU64(), true);
+        }
 
         case DFGOp::MUX:
         {
-            int64_t selectorValue = static_cast<int64_t>(getVal(0).lowU64());
+            int64_t selectorValue = static_cast<int64_t>(checkedGet(node->muxSelector().node, node).lowU64());
             int armIndex = node->muxArmIndexForValue(selectorValue);
             if (armIndex < 0) {
                 throw CompilerError(
@@ -329,41 +350,60 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
                         node->str(), selectorValue),
                     node);
             }
-            return checkedGet(node->in[static_cast<size_t>(armIndex) + 1].node, node);
+            return checkedGet(node->muxArmData(static_cast<size_t>(armIndex)).node, node);
         }
 
-        case DFGOp::UNARY_PLUS:    return getVal(0);
-        case DFGOp::UNARY_NEGATE:  return getVal(0).negated();
-        case DFGOp::BITWISE_NOT:   return getVal(0).bitwiseNot();
-        case DFGOp::LOGICAL_NOT:   return boolValue(getVal(0).isZero());
-        case DFGOp::LOGICAL_AND:   return boolValue(!getVal(0).isZero() && !getVal(1).isZero());
-        case DFGOp::LOGICAL_OR:    return boolValue(!getVal(0).isZero() || !getVal(1).isZero());
-        case DFGOp::BITWISE_AND:   return getVal(0).bitwiseAnd(getVal(1));
-        case DFGOp::BITWISE_OR:    return getVal(0).bitwiseOr(getVal(1));
-        case DFGOp::BITWISE_XOR:   return getVal(0).bitwiseXor(getVal(1));
-        case DFGOp::BITWISE_XNOR:  return getVal(0).bitwiseXnor(getVal(1));
+        case DFGOp::UNARY_PLUS:    return getUnaryVal();
+        case DFGOp::UNARY_NEGATE:  return getUnaryVal().negated();
+        case DFGOp::BITWISE_NOT:   return getUnaryVal().bitwiseNot();
+        case DFGOp::LOGICAL_NOT:   return boolValue(getUnaryVal().isZero());
+        case DFGOp::LOGICAL_AND: {
+            auto [lhs, rhs] = getBinaryVals();
+            return boolValue(!lhs.isZero() && !rhs.isZero());
+        }
+        case DFGOp::LOGICAL_OR: {
+            auto [lhs, rhs] = getBinaryVals();
+            return boolValue(!lhs.isZero() || !rhs.isZero());
+        }
+        case DFGOp::BITWISE_AND: {
+            auto [lhs, rhs] = getBinaryVals();
+            return lhs.bitwiseAnd(rhs);
+        }
+        case DFGOp::BITWISE_OR: {
+            auto [lhs, rhs] = getBinaryVals();
+            return lhs.bitwiseOr(rhs);
+        }
+        case DFGOp::BITWISE_XOR: {
+            auto [lhs, rhs] = getBinaryVals();
+            return lhs.bitwiseXor(rhs);
+        }
+        case DFGOp::BITWISE_XNOR: {
+            auto [lhs, rhs] = getBinaryVals();
+            return lhs.bitwiseXnor(rhs);
+        }
 
         case DFGOp::REDUCTION_AND:
-            return boolValue(getVal(0).reductionAnd());
+            return boolValue(getUnaryVal().reductionAnd());
         case DFGOp::REDUCTION_NAND:
-            return boolValue(!getVal(0).reductionAnd());
+            return boolValue(!getUnaryVal().reductionAnd());
         case DFGOp::REDUCTION_OR:
-            return boolValue(getVal(0).reductionOr());
+            return boolValue(getUnaryVal().reductionOr());
         case DFGOp::REDUCTION_NOR:
-            return boolValue(!getVal(0).reductionOr());
+            return boolValue(!getUnaryVal().reductionOr());
         case DFGOp::REDUCTION_XOR:
-            return boolValue(getVal(0).reductionXor());
+            return boolValue(getUnaryVal().reductionXor());
         case DFGOp::REDUCTION_XNOR:
-            return boolValue(!getVal(0).reductionXor());
+            return boolValue(!getUnaryVal().reductionXor());
 
         case DFGOp::SLICE: {
             // SLICE has CONST high/low. Dynamic indexing is lowered to MUX during elaboration.
             // Unpacked array access is lowered to scalar leaves or MUX-over-leaves;
             // aggregate SIGNAL nodes no longer appear in the live DFG.
-            const DFGNode* source_node = node->in[0].node;
+            auto slice = node->sliceInputs();
+            const DFGNode* source_node = slice.source.node;
 
-            int64_t high = static_cast<int64_t>(getVal(1).lowU64());
-            int64_t low = static_cast<int64_t>(getVal(2).lowU64());
+            int64_t high = static_cast<int64_t>(checkedGet(slice.high.node, node).lowU64());
+            int64_t low = static_cast<int64_t>(checkedGet(slice.low.node, node).lowU64());
             int64_t width = high - low + 1;
 
             int64_t bit_pos;
@@ -381,14 +421,14 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
                 bit_pos = low;
             }
 
-            return getVal(0).slice(static_cast<int>(bit_pos + width - 1), static_cast<int>(bit_pos));
+            return checkedGet(slice.source.node, node).slice(static_cast<int>(bit_pos + width - 1), static_cast<int>(bit_pos));
         }
 
         case DFGOp::CONCAT: {
             std::vector<SimValue> parts;
-            parts.reserve(node->in.size());
-            for (size_t i = 0; i < node->in.size(); ++i) {
-                parts.push_back(checkedGet(node->in[i].node, node));
+            parts.reserve(node->concatParts().size());
+            for (const auto& part : node->concatParts()) {
+                parts.push_back(checkedGet(part.node, node));
             }
             return SimValue::concat(parts);
         }
@@ -398,13 +438,13 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
 
         case DFGOp::CAST:
             // CAST is a type-only operation; at simulation time the bits are unchanged.
-            return checkedGet(node->in[0].node, node);
+            return checkedGet(node->castSource().node, node);
 
         case DFGOp::MODULE:
             throw CompilerError("Simulator: MODULE nodes should not exist after dfg_inline pass", node);
     }
 
-    throw CompilerError(std::format("Simulator: unhandled op {}", to_string(node->op)), node);
+    throw CompilerError(std::format("Simulator: unhandled op {}", to_string(node->kind())), node);
 }
 
 // ============================================================================
@@ -413,7 +453,7 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
 
 void ModuleInstance::evaluateCombinational() {
     for (const DFGNode* node : topo_order) {
-        if (node->op == DFGOp::INPUT || node->op == DFGOp::CONST) continue;
+        if (node->kind() == DFGOp::INPUT || node->kind() == DFGOp::CONST) continue;
         if (flop_q_nodes.count(node)) continue;
         SimValue val = maskToWidth(evaluateNode(node), node);
         values[node] = val;

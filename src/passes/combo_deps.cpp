@@ -15,18 +15,18 @@ void collectInputDeps(const DFGNode* node,
     if (!node || !visited.insert(node).second) return;
 
     // INPUT nodes (includes .q flop state nodes) are the leaves
-    if (node->op == DFGOp::INPUT) {
+    if (node->kind() == DFGOp::INPUT) {
         reachableInputs.insert(node->name);
         return;
     }
 
     // Stop at constants — no combinational dependency
-    if (node->op == DFGOp::CONST) return;
+    if (node->kind() == DFGOp::CONST) return;
 
     // All other nodes: recurse into all inputs
-    for (const auto& inp : node->in) {
+    DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& inp) {
         collectInputDeps(inp.node, reachableInputs, visited);
-    }
+    });
 }
 
 } // anonymous namespace
@@ -41,9 +41,8 @@ void computeComboDeps(ResolvedModule& module) {
         std::set<std::string> reachableInputs;
         std::set<const DFGNode*> visited;
 
-        // OUTPUT nodes have a single driver in in[0]
-        if (!outNode->in.empty()) {
-            collectInputDeps(outNode->in[0].node, reachableInputs, visited);
+        if (auto driver = outNode->driver()) {
+            collectInputDeps(driver->node, reachableInputs, visited);
         }
 
         module.combo_deps[outName] = std::move(reachableInputs);

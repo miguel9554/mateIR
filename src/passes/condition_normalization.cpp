@@ -20,18 +20,6 @@ static int64_t getConst(const DFGNode* n) {
     return std::get<int64_t>(n->data);
 }
 
-static void redirectConsumers(DFG& graph, DFGNode* oldNode, DFGNode* newNode) {
-    for (auto& node : graph.nodes) {
-        for (auto& input : node->in) {
-            if (input.node == oldNode) {
-                input.node = newNode;
-                input.port = 0;
-            }
-        }
-    }
-    graph.replaceNodeInMaps(oldNode, newNode);
-}
-
 // ---------------------------------------------------------------------------
 // Post-order traversal
 // ---------------------------------------------------------------------------
@@ -56,9 +44,8 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
     for (auto& [name, node] : graph.getSignalsMap()) {
         postOrderVisit(node, visited, order);
     }
-    for (auto& node : graph.nodes) {
-        postOrderVisit(node.get(), visited, order);
-    }
+    // Only traverse the live graph reachable from named outputs and signals.
+    // Dead nodes (redirected by a prior rule) are not visited; DCE removes them.
     return order;
 }
 
@@ -67,9 +54,6 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
 // ---------------------------------------------------------------------------
 
 static bool tryNormalize(DFG& graph, DFGNode* node) {
-    // Skip dead nodes (inputs cleared after redirectConsumers)
-    if (node->in.empty()) return false;
-
     // Rule 1: LOGICAL_NOT elimination
     if (node->op == DFGOp::LOGICAL_NOT) {
         auto* operand = node->in[0].node;
@@ -106,8 +90,7 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
             }
             if (val == 1) {
                 // EQ(x, 1) -> x
-                redirectConsumers(graph, node, lhs);
-                node->in.clear(); // see Rule 3 comment
+                graph.redirectConsumers(node, lhs);
                 return true;
             }
         }
@@ -122,8 +105,7 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
             }
             if (val == 1) {
                 // EQ(1, x) -> x
-                redirectConsumers(graph, node, rhs);
-                node->in.clear(); // see Rule 3 comment
+                graph.redirectConsumers(node, rhs);
                 return true;
             }
         }
@@ -133,10 +115,7 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
     if (node->op == DFGOp::BITWISE_NOT) {
         auto* inner = node->in[0].node;
         if (inner->op == DFGOp::BITWISE_NOT) {
-            redirectConsumers(graph, node, inner->in[0].node);
-            // Dead node still lives in graph.nodes and gets revisited;
-            // clear inputs so it won't re-match. DCE removes it later.
-            node->in.clear();
+            graph.redirectConsumers(node, inner->in[0].node);
             return true;
         }
     }
@@ -148,12 +127,13 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
         }
         auto* sel = node->in[0].node;
         if (sel->op == DFGOp::BITWISE_NOT) {
-            // Swap binary 1/0 arms, use inner operand as selector
-            node->in[0] = DFGOutput(sel->in[0].node);
-            int trueIndex = node->muxArmIndexForValue(1);
-            int falseIndex = node->muxArmIndexForValue(0);
-            std::swap(node->in[static_cast<size_t>(trueIndex) + 1],
-                      node->in[static_cast<size_t>(falseIndex) + 1]);
+            // Swap binary 1/0 arms, use inner operand as selector.
+            // swapMuxArmData keeps mux_values fixed so selector codes stay
+            // in place — only the data edges move.
+            node->setMuxSelector(DFGOutput(sel->in[0].node));
+            node->swapMuxArmData(
+                static_cast<size_t>(node->muxArmIndexForValue(1)),
+                static_cast<size_t>(node->muxArmIndexForValue(0)));
             return true;
         }
     }

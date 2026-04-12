@@ -532,6 +532,7 @@ int main(int argc, char** argv) {
             eliminateDeadCode(*module.dfg, keepAlive);
         });
         module.dfg->validateNoOrphans();
+        module.dfg->validateStrictLiveDFG();
         runPass(12, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(module); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;

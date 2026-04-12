@@ -32,21 +32,6 @@ static void makeConst(DFGNode* n, int64_t value) {
     n->name.clear();
 }
 
-// Redirect all consumers of oldNode to point to newNode instead.
-// Also updates the named maps (constants, inputs, outputs, signals).
-static void redirectConsumers(DFG& graph, DFGNode* oldNode, DFGNode* newNode) {
-    for (auto& node : graph.nodes) {
-        for (auto& input : node->in) {
-            if (input.node == oldNode) {
-                input.node = newNode;
-                input.port = 0;
-            }
-        }
-    }
-    // Update named maps
-    graph.replaceNodeInMaps(oldNode, newNode);
-}
-
 // ---------------------------------------------------------------------------
 // Post-order traversal
 // ---------------------------------------------------------------------------
@@ -237,12 +222,12 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             auto* rhs = node->in[1].node;
             // x + 0 -> x
             if (isConst(rhs) && getConst(rhs) == 0) {
-                redirectConsumers(graph, node, lhs);
+                graph.redirectConsumers(node, lhs);
                 return true;
             }
             // 0 + x -> x
             if (isConst(lhs) && getConst(lhs) == 0) {
-                redirectConsumers(graph, node, rhs);
+                graph.redirectConsumers(node, rhs);
                 return true;
             }
             // x + UNARY_NEGATE(x) -> 0
@@ -261,7 +246,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             auto* rhs = node->in[1].node;
             // x - 0 -> x
             if (isConst(rhs) && getConst(rhs) == 0) {
-                redirectConsumers(graph, node, lhs);
+                graph.redirectConsumers(node, lhs);
                 return true;
             }
             // x - x -> 0
@@ -297,12 +282,12 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             }
             // x * 1 -> x
             if (isConst(rhs) && getConst(rhs) == 1) {
-                redirectConsumers(graph, node, lhs);
+                graph.redirectConsumers(node, lhs);
                 return true;
             }
             // 1 * x -> x
             if (isConst(lhs) && getConst(lhs) == 1) {
-                redirectConsumers(graph, node, rhs);
+                graph.redirectConsumers(node, rhs);
                 return true;
             }
             // x * -1 -> UNARY_NEGATE(x)
@@ -359,7 +344,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             auto* rhs = node->in[1].node;
             // x << 0 -> x
             if (isConst(rhs) && getConst(rhs) == 0) {
-                redirectConsumers(graph, node, lhs);
+                graph.redirectConsumers(node, lhs);
                 return true;
             }
             // 0 << x -> 0
@@ -374,7 +359,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             auto* rhs = node->in[1].node;
             // x >>> 0 -> x
             if (isConst(rhs) && getConst(rhs) == 0) {
-                redirectConsumers(graph, node, lhs);
+                graph.redirectConsumers(node, lhs);
                 return true;
             }
             // 0 >>> x -> 0
@@ -388,7 +373,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             auto* sel = node->in[0].node;
             if (isConst(sel)) {
                 if (auto* selected = node->muxDataForValue(getConst(sel))) {
-                    redirectConsumers(graph, node, selected);
+                    graph.redirectConsumers(node, selected);
                     return true;
                 }
             }
@@ -402,7 +387,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
                 }
             }
             if (allSame) {
-                redirectConsumers(graph, node, first);
+                graph.redirectConsumers(node, first);
                 return true;
             }
 
@@ -410,7 +395,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
                 auto* tval = node->muxDataForValue(1);
                 auto* fval = node->muxDataForValue(0);
                 if (tval && fval && tval == fval) {
-                    redirectConsumers(graph, node, tval);
+                    graph.redirectConsumers(node, tval);
                     return true;
                 }
             }
@@ -418,14 +403,14 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
         }
         case DFGOp::UNARY_PLUS: {
             // +x -> x (always)
-            redirectConsumers(graph, node, node->in[0].node);
+            graph.redirectConsumers(node, node->in[0].node);
             return true;
         }
         case DFGOp::UNARY_NEGATE: {
             auto* inner = node->in[0].node;
             // -(-x) -> x
             if (inner->op == DFGOp::UNARY_NEGATE) {
-                redirectConsumers(graph, node, inner->in[0].node);
+                graph.redirectConsumers(node, inner->in[0].node);
                 return true;
             }
             break;
@@ -434,7 +419,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             auto* inner = node->in[0].node;
             // ~(~x) -> x
             if (inner->op == DFGOp::BITWISE_NOT) {
-                redirectConsumers(graph, node, inner->in[0].node);
+                graph.redirectConsumers(node, inner->in[0].node);
                 return true;
             }
             break;
@@ -443,7 +428,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             auto* inner = node->in[0].node;
             // !(!x) -> x
             if (inner->op == DFGOp::LOGICAL_NOT) {
-                redirectConsumers(graph, node, inner->in[0].node);
+                graph.redirectConsumers(node, inner->in[0].node);
                 return true;
             }
             break;

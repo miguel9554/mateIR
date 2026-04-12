@@ -411,7 +411,7 @@ static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNo
         return;
     }
     if (auto localIt = ctx.local_signals.find(name); localIt != ctx.local_signals.end()) {
-        localIt->second->in = {driver};
+        ctx.graph.connectDriver(localIt->second, driver);
         return;
     }
     if (ctx.graph.hasOutput("", name)) {
@@ -2893,7 +2893,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         if (ctx.subroutine_locals.count(outputName)) return;  // local var: combDrivers only
         auto localIt = ctx.local_signals.find(outputName);
         if (localIt != ctx.local_signals.end()) {
-            localIt->second->in = {driver};
+            ctx.graph.connectDriver(localIt->second, driver);
             return;
         }
         if (ctx.graph.hasOutput("", outputName)) {
@@ -4145,8 +4145,7 @@ void resolveNamedPortConnection(
         }
         auto* expr = extractPortExpr(*named.expr);
         auto* driver = buildExprDFG(expr, ctx);
-        moduleNode->in.push_back(driver);
-        moduleNode->input_names.push_back(portName);
+        ctx.graph.addModuleInput(moduleNode, portName, driver);
         // Only record simple identifier connections; asyncPortConnections is
         // used solely for clock/reset port translation downstream.
         if (expr->kind == SyntaxKind::IdentifierName) {
@@ -4213,10 +4212,10 @@ void resolveNamedPortConnection(
                     auto* concatNode = appendConcatInput(
                         ctx.graph, targetNode->in[0].node, alignNode,
                         resolveSourceLoc(*expr, ctx.sm));
-                    targetNode->in = {concatNode};
+                    ctx.graph.connectDriver(targetNode, concatNode);
                 } else {
                     auto* concatNode = ctx.graph.concat({alignNode});
-                    targetNode->in = {concatNode};
+                    ctx.graph.connectDriver(targetNode, concatNode);
                 }
             }
             return;
@@ -4241,8 +4240,7 @@ void resolveWildcardPortConnection(
     for (const auto& [name, inp] : resolvedSub.inputs) {
         auto* driver = graph.lookupSignal("", name);
         if (driver) {
-            moduleNode->in.push_back(driver);
-            moduleNode->input_names.push_back(name);
+            graph.addModuleInput(moduleNode, name, driver);
             resolvedSub.asyncPortConnections[name] = name;
         }
     }
@@ -4495,7 +4493,7 @@ static void resolveGenerateScopeDecls(
                 throw CompilerError("Net declaration initializer: signal not found: " + name);
             auto* sigNode = it->second;
             auto* rhsNode = buildExprDFG(decl->initializer->expr, ctx);
-            sigNode->in = {rhsNode};
+            ctx.graph.connectDriver(sigNode, rhsNode);
         }
     }
 }

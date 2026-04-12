@@ -113,7 +113,7 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::CONST:  return 0;
         // OUTPUT: 0 (undriven) or 1 (driven) — validated separately
         case DFGOp::OUTPUT: return -1;
-        // SIGNAL: 0 (undriven), 1 (driven), or N (aggregate) — validated separately
+        // SIGNAL: 0 (undriven during construction) or 1 (driven) — validated separately
         case DFGOp::SIGNAL: return -1;
         // MODULE: variable input count (depends on ports)
         case DFGOp::MODULE: return -1;
@@ -247,6 +247,17 @@ struct DFGNode {
         return index >= 0 ? in.at(static_cast<size_t>(index) + 1).node : nullptr;
     }
 
+    void setMuxSelector(DFGOutput sel) {
+        in.at(0) = sel;
+    }
+
+    // Swap only data edges at arm positions i and j; mux_values stays fixed
+    // so selector codes remain attached to their positions.
+    // Use this when inverting the selector signal (e.g. MUX(!s,...) → MUX(s,...)).
+    void swapMuxArmData(size_t i, size_t j) {
+        std::swap(in.at(i + 1), in.at(j + 1));
+    }
+
     bool isBinaryMux() const {
         return op == DFGOp::MUX && in.size() == 3 &&
                mux_values.size() == 2 &&
@@ -334,6 +345,21 @@ struct DFG {
         for (auto& [k, v] : inputs)    if (v == oldNode) v = newNode;
         for (auto& [k, v] : outputs)   if (v == oldNode) v = newNode;
         for (auto& [k, v] : signals)   if (v == oldNode) v = newNode;
+    }
+
+    // Redirect all consumers of oldNode to replacement, and update named maps.
+    void redirectConsumers(DFGNode* oldNode, DFGOutput replacement) {
+        for (auto& node : nodes) {
+            for (auto& input : node->in) {
+                if (input.node == oldNode)
+                    input = replacement;
+            }
+        }
+        replaceNodeInMaps(oldNode, replacement.node);
+    }
+
+    void redirectConsumers(DFGNode* oldNode, DFGNode* newNode) {
+        redirectConsumers(oldNode, DFGOutput(newNode));
     }
 
     // Adopt an existing node into the inputs map (for DFG inlining).
@@ -472,13 +498,21 @@ public:
         return nullptr;
     }
 
+    // Low-level: connect a single driver to an OUTPUT or SIGNAL node.
+    void connectDriver(DFGNode* target, DFGOutput driver) {
+        if (!target || (target->op != DFGOp::OUTPUT && target->op != DFGOp::SIGNAL))
+            throw CompilerError(std::format(
+                "connectDriver: target {} is not OUTPUT or SIGNAL", target ? target->str() : "null"));
+        target->in = {driver};
+    }
+
     // Connect a driver to an existing output node
     void connectOutput(const std::string& instance_path, const std::string& name, DFGOutput driver) {
         auto it = outputs.find(nodeKey(instance_path, name));
         if (it == outputs.end()) {
             throw CompilerError(std::format("Output {} not found", name));
         }
-        it->second->in = {driver};
+        connectDriver(it->second, driver);
     }
 
     // Connect a driver to an existing signal node
@@ -487,7 +521,7 @@ public:
         if (it == signals.end()) {
             throw CompilerError(std::format("Signal {} not found", name));
         }
-        it->second->in = {driver};
+        connectDriver(it->second, driver);
     }
 
     // An output can be recreated, if it's assigned again.
@@ -673,6 +707,14 @@ public:
         return nodes.back().get();
     }
 
+    // Add an input port binding to a MODULE node, keeping in and input_names in sync.
+    void addModuleInput(DFGNode* moduleNode, std::string portName, DFGOutput driver) {
+        if (!moduleNode || moduleNode->op != DFGOp::MODULE)
+            throw CompilerError("addModuleInput: target is not a MODULE node");
+        moduleNode->in.push_back(driver);
+        moduleNode->input_names.push_back(std::move(portName));
+    }
+
     // Helper for unary operations (single input)
     DFGNode* binaryOp(DFGOp op, DFGNode* a, DFGNode* b, const std::string& name = "") {
         auto n = name.empty()
@@ -777,6 +819,39 @@ public:
                     node->str(), expected, actual), node.get());
             }
 
+            // All DFGOutput entries must have non-null node and valid port
+            for (const auto& input : node->in) {
+                if (!input.node)
+                    throw CompilerError(std::format(
+                        "DFG validate: node {} has null input node", node->str()), node.get());
+                if (input.port < 0 || input.port >= input.node->num_outputs())
+                    throw CompilerError(std::format(
+                        "DFG validate: node {} references port {} of {} (has {} outputs)",
+                        node->str(), input.port, input.node->str(),
+                        input.node->num_outputs()), node.get());
+            }
+
+            // SIGNAL has at most one driver
+            if (node->op == DFGOp::SIGNAL && actual > 1)
+                throw CompilerError(std::format(
+                    "DFG validate: SIGNAL {} has {} inputs (expected 0 or 1)",
+                    node->name, actual), node.get());
+
+            // MODULE: input_names must be parallel to in
+            if (node->op == DFGOp::MODULE && node->input_names.size() != node->in.size())
+                throw CompilerError(std::format(
+                    "DFG validate: MODULE {} has {} inputs but {} input_names",
+                    node->name, node->in.size(), node->input_names.size()), node.get());
+
+            // MODULE: no duplicate input port names
+            if (node->op == DFGOp::MODULE) {
+                std::set<std::string> seen(node->input_names.begin(), node->input_names.end());
+                if (seen.size() != node->input_names.size())
+                    throw CompilerError(std::format(
+                        "DFG validate: MODULE {} has duplicate input port names",
+                        node->name), node.get());
+            }
+
             // Variable-count ops with specific constraints
             if (node->op == DFGOp::OUTPUT && actual > 1) {
                 throw CompilerError(std::format(
@@ -822,6 +897,26 @@ public:
                             node->str(), value), node.get());
                     }
                 }
+            }
+        }
+    }
+
+    // Call after DCE. Rejects shapes that must not survive to the live DFG:
+    // - any non-INPUT/CONST node with zero inputs (undriven or tombstoned)
+    // - any node still carrying unpacked_dims (arrays must be leaf-bound)
+    void validateStrictLiveDFG() const {
+        for (const auto& node : nodes) {
+            if (node->in.empty() &&
+                node->op != DFGOp::INPUT &&
+                node->op != DFGOp::CONST) {
+                throw CompilerError(std::format(
+                    "DFG validateStrict: node {} has no inputs but is not INPUT or CONST",
+                    node->str()), node.get());
+            }
+            if (node->type.has_value() && !node->type->unpacked_dims.empty()) {
+                throw CompilerError(std::format(
+                    "DFG validateStrict: node {} still carries unpacked_dims",
+                    node->str()), node.get());
             }
         }
     }

@@ -402,7 +402,7 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
         if (output.type.unpacked_dims.empty()) {
             DFGNode* qNode = graph.getInputNode(instance_path, outName + ".q");
             if (qNode) {
-                scalarSignalNode(output)->in = {{qNode, 0}};
+                graph.connectDriver(scalarSignalNode(output), {qNode, 0});
             }
         } else {
             auto suffixes = unpackedIndexSuffixes(output.type);
@@ -414,7 +414,7 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
                     ? leaves[i]
                     : graph.getOutputNode(instance_path, outName + suffix);
                 if (qNode && outNode) {
-                    outNode->in = {{qNode, 0}};
+                    graph.connectDriver(outNode, {qNode, 0});
                 }
             }
         }
@@ -462,7 +462,7 @@ static void resolveFlopsForModule(ResolvedModule& resolved, DFG& graph, const st
 
             // Connect functional logic to the flop's .d signal
             // If there was reset, this removes the reset MUX
-            output->in = {functional_logic};
+            graph.connectDriver(output, functional_logic);
         }
     }
     resolved.flops = resolved_flops;

@@ -357,26 +357,10 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             return boolValue(!getVal(0).reductionXor());
 
         case DFGOp::SLICE: {
-            // SLICE has CONST high/low. Dynamic indexing is lowered to MUX during
-            // elaboration. However, constant-indexed unpacked array access uses the
-            // pattern SLICE(aggregate_signal, i, i) where i is the element index and
-            // aggregate_signal.in[i] holds the actual element node.
+            // SLICE has CONST high/low. Dynamic indexing is lowered to MUX during elaboration.
+            // Unpacked array access is lowered to scalar leaves or MUX-over-leaves;
+            // aggregate SIGNAL nodes no longer appear in the live DFG.
             const DFGNode* source_node = node->in[0].node;
-
-            if (source_node->type.has_value() && !source_node->type->unpacked_dims.empty()) {
-                int64_t index = static_cast<int64_t>(getVal(1).lowU64());
-                int64_t n = static_cast<int64_t>(source_node->in.size());
-                const auto& dim = source_node->type->unpacked_dims[0];
-                int64_t lo = std::min((int64_t)dim.left, (int64_t)dim.right);
-                int64_t hi = std::max((int64_t)dim.left, (int64_t)dim.right);
-                if (index < lo || index > hi)
-                    throw CompilerError(std::format(
-                        "Simulator: SLICE array index out of bounds: index={}, "
-                        "array size={} in node {}",
-                        index, n, node->str()), node);
-                int64_t pos = dim.left <= dim.right ? (index - dim.left) : (dim.left - index);
-                return checkedGet(source_node->in.at(static_cast<size_t>(pos)).node, node);
-            }
 
             int64_t high = static_cast<int64_t>(getVal(1).lowU64());
             int64_t low = static_cast<int64_t>(getVal(2).lowU64());

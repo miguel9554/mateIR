@@ -136,34 +136,9 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
                          const std::unordered_set<const DFGNode*>& alive) {
     if (!node || !alive.count(node)) return;
 
-    if (node->type.has_value() && !node->type->unpacked_dims.empty()) {
-        std::function<void(const ResolvedType&, size_t, std::string, std::vector<size_t>)> addLeaves;
-        addLeaves = [&](const ResolvedType& type,
-                        size_t dimIndex,
-                        std::string leafName,
-                        std::vector<size_t> path) {
-            if (dimIndex == type.unpacked_dims.size()) {
-                unsigned int w = type.width > 0 ? static_cast<unsigned int>(type.width) : 1;
-                auto v = std::make_unique<SimVcdValue>(w, path);
-                v->elaborate(scope.get_add_fn(), leafName);
-                values_[node].push_back(std::move(v));
-                return;
-            }
-            const auto& dim = type.unpacked_dims[dimIndex];
-            int64_t step = dim.left <= dim.right ? 1 : -1;
-            size_t pos = 0;
-            for (int64_t idx = dim.left;; idx += step, ++pos) {
-                auto nextPath = path;
-                nextPath.push_back(pos);
-                addLeaves(type, dimIndex + 1,
-                          leafName + "[" + std::to_string(idx) + "]",
-                          std::move(nextPath));
-                if (idx == dim.right) break;
-            }
-        };
-        addLeaves(*node->type, 0, name, {});
-        return;
-    }
+    // Unpacked array signals are leaf-bound after the array refactor;
+    // no live DFG node should carry unpacked_dims at simulation time.
+    // Callers (addSignalEntries, addFlopEntries) iterate leaves directly.
 
     unsigned int w = getWidth(node);
     auto v = std::make_unique<SimVcdValue>(w);

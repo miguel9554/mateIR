@@ -1,6 +1,6 @@
 #include "frontends/systemverilog/passes/elaboration.h"
 #include "mateir/dfg.h"
-#include "mateir/resolved.h"
+#include "mateir/module.h"
 #include "frontends/systemverilog/unresolved.h"
 #include "util/source_loc_resolve.h"
 #include "slang/syntax/AllSyntax.h"

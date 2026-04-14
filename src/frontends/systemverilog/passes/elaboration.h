@@ -1,7 +1,7 @@
 #pragma once
 
 #include "frontends/systemverilog/unresolved.h"
-#include "mateir/resolved.h"
+#include "mateir/module.h"
 
 #include <memory>
 #include <string>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mateir/resolved.h"
+#include "mateir/module.h"
 #include "mateir/debug.h"
 #include "sim/sim_value.h"
 #include "sim/vcd_writer.h"

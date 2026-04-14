@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mateir/resolved.h"
+#include "mateir/module.h"
 
 namespace custom_hdl {
 

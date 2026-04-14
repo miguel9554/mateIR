@@ -162,7 +162,7 @@ struct Module {
     // TODO a list of instantiated modules.
     std::vector<Module> hierarchyInstantiation;
 
-    // Single DFG containing all resolved logic
+    // Single DFG containing this module's logic.
     std::unique_ptr<DFG> dfg;
 
     std::map<std::string, std::vector<asyncTrigger_t>> flopsTriggers;

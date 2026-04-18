@@ -35,10 +35,10 @@ SimValue simValueFromInt(int64_t value, const DFGNode* node) {
     return SimValue::fromI64(value, nodeWidth(node), nodeSigned(node));
 }
 
-SimValue simValueFromType(int64_t value, const ResolvedType& type) {
+SimValue simValueFromType(int64_t value, const Type& type) {
     if (type.width <= 0)
         throw CompilerError(std::format(
-            "Simulator: ResolvedType has no resolved width (type_propagation incomplete?)"));
+            "Simulator: Type has no width (type_propagation incomplete?)"));
     return SimValue::fromI64(value, type.width, type.isSigned());
 }
 
@@ -49,7 +49,7 @@ SimValue boolValue(bool value) {
 void assignFlopResetLeaves(ModuleInstance& root, const FlopInfo& flop, int64_t resetValue) {
     for (auto* qLeaf : flopQLeaves(flop)) {
         if (!qLeaf) continue;
-        const ResolvedType& type = qLeaf->type.value_or(flop.type.type);
+        const Type& type = qLeaf->type.value_or(flop.type.type);
         root.values[qLeaf] = simValueFromType(resetValue, type);
     }
 }
@@ -85,7 +85,7 @@ bool useSignedCompare(const DFGNode* lhs, const DFGNode* rhs) {
 // ModuleInstance
 // ============================================================================
 
-ModuleInstance::ModuleInstance(const std::string& name, const ResolvedModule& mod)
+ModuleInstance::ModuleInstance(const std::string& name, const Module& mod)
     : instance_name(name), module_def(mod)
 {
     buildFlopMaps();
@@ -170,8 +170,8 @@ void ModuleInstance::buildFlopMaps() {
         return it != map.end() ? it->second : name;
     };
 
-    std::function<void(const ResolvedModule&, const NameMap&)> collect =
-        [&](const ResolvedModule& mod, const NameMap& translation) {
+    std::function<void(const Module&, const NameMap&)> collect =
+        [&](const Module& mod, const NameMap& translation) {
         for (const auto& flop : mod.flops) {
             for (auto* qLeaf : flopQLeaves(flop)) {
                 if (qLeaf) flop_q_nodes[qLeaf] = &flop;
@@ -225,7 +225,7 @@ void ModuleInstance::initConsts() {
 void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
     // flop_q_nodes already covers all flops from all submodules (built by buildFlopMaps)
     for (const auto& [qnode, flop] : flop_q_nodes) {
-        const ResolvedType& type = qnode->type.value_or(flop->type.type);
+        const Type& type = qnode->type.value_or(flop->type.type);
         int w = type.width;
         if (mode == FlopsInitial::Random) {
             values[qnode] = SimValue::random(w, type.isSigned(), rng);
@@ -687,7 +687,7 @@ void Simulator::writeOutputFiles() {
 // Constructor
 // ============================================================================
 
-Simulator::Simulator(const ResolvedModule& module, const SimConfig& config)
+Simulator::Simulator(const Module& module, const SimConfig& config)
     : module_(module), config_(config)
 {
     if (!module_.dfg) {

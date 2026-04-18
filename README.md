@@ -61,9 +61,19 @@ clock domain, a reset, or the async domain.
 
 ## Usage
 
+The executable now has two explicit boundaries: a frontend (`--frontend
+systemverilog` by default) compiles HDL into final mateIR, and optional
+consumers such as static analysis or simulation consume that mateIR. The current
+architecture is described in `docs/mateir_architecture.md`.
+
 **Compile a single-module design:**
 ```
 ./build/custom_hdl_compiler --domains module.domains.yaml module.v
+```
+
+**Run static analysis:**
+```
+./build/custom_hdl_compiler --analyze --domains module.domains.yaml module.v
 ```
 
 **Simulate a hierarchical design:**

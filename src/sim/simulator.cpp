@@ -14,7 +14,7 @@
 #include <utility>
 
 
-namespace custom_hdl {
+namespace mate {
 
 namespace {
 
@@ -897,4 +897,4 @@ void Simulator::run() {
     std::cout << "Simulator: raw VCD trace written to '" << vcd_->raw_path() << "'" << std::endl;
 }
 
-} // namespace custom_hdl
+} // namespace mate

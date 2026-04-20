@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -501,4 +501,4 @@ bool constantFold(DFG& graph) {
     return anyChanged;
 }
 
-} // namespace custom_hdl
+} // namespace mate

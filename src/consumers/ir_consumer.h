@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace custom_hdl {
+namespace mate {
 
 class IRConsumer {
 public:
@@ -13,4 +13,4 @@ public:
     virtual void consume(const MateIR& ir) = 0;
 };
 
-} // namespace custom_hdl
+} // namespace mate

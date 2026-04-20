@@ -23,7 +23,7 @@
 #include <set>
 #include <unordered_set>
 
-namespace custom_hdl {
+namespace mate {
 
 namespace {
 
@@ -304,11 +304,11 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
     auto domainPathsByModule = loadDomainPathsByModule(options.domain_files);
     runMateIRPipeline(topModule, domainPathsByModule, options.debug_dfg_nodes);
 
-    MateIR mateIR;
-    mateIR.top = std::move(topModule);
-    mateIR.source_files = options.source_files;
-    mateIR.frontend_module_count = extracted.modules.size();
-    return mateIR;
+    MateIR ir;
+    ir.top = std::move(topModule);
+    ir.source_files = options.source_files;
+    ir.frontend_module_count = extracted.modules.size();
+    return ir;
 }
 
-} // namespace custom_hdl
+} // namespace mate

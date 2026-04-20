@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Module Hierarchy",
-  "description": "Design hierarchy produced by the custom-hdl compiler after the full pass pipeline. Written to debug_output/<module>/hierarchy.json.",
+  "description": "Design hierarchy produced by mate after the full pass pipeline. Written to debug_output/<module>/hierarchy.json.",
   "type": "object",
   "$ref": "#/$defs/module",
 

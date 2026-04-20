@@ -7,7 +7,7 @@ namespace slang {
 class SourceManager;
 }
 
-namespace custom_hdl {
+namespace mate {
 
 using SystemVerilogCompileOptions = FrontendOptions;
 
@@ -15,4 +15,4 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
                                   const slang::SourceManager& sourceManager,
                                   const SystemVerilogCompileOptions& options);
 
-} // namespace custom_hdl
+} // namespace mate

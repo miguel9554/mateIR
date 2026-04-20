@@ -9,7 +9,7 @@
 #include <iostream>
 #include <string>
 
-namespace custom_hdl {
+namespace mate {
 
 inline bool g_dump_unresolved_assign = false;
 inline bool g_dump_unresolved_hierarchy = false;
@@ -37,4 +37,4 @@ inline void dumpSyntaxNodeToJson(const std::string& filepath, const slang::synta
     out << writer.view();
 }
 
-} // namespace custom_hdl
+} // namespace mate

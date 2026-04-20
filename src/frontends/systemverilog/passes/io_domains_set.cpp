@@ -8,7 +8,7 @@
 
 #include "yaml-cpp/yaml.h"
 
-namespace custom_hdl {
+namespace mate {
 
 namespace {
 
@@ -301,4 +301,4 @@ void setIODomains(Module& module, const std::string& yamlPath) {
     }
 }
 
-} // namespace custom_hdl
+} // namespace mate

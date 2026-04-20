@@ -2,7 +2,7 @@
 
 #include "mateir/dfg.h"
 
-namespace custom_hdl {
+namespace mate {
 
 // Reorder CONCAT inputs by descending high index (MSB first) and
 // unwrap CONCAT_ALIGN temporaries, connecting directly to the expression nodes.
@@ -10,4 +10,4 @@ namespace custom_hdl {
 // Returns true if any changes were made.
 bool cleanupConcats(DFG& graph);
 
-} // namespace custom_hdl
+} // namespace mate

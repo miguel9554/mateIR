@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 struct MateIR {
     Module top;
@@ -14,4 +14,4 @@ struct MateIR {
     size_t frontend_module_count = 0;
 };
 
-} // namespace custom_hdl
+} // namespace mate

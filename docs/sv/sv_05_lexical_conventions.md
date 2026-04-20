@@ -3,7 +3,7 @@
 This document describes how each feature of IEEE Std 1800-2023 §5 (Lexical
 conventions) is handled by this compiler. The compiler targets **synchronous RTL
 only**: it accepts synthesisable, clocked Verilog as input and lowers it into the
-`ResolvedModule` IR.
+`Module` IR.
 
 All section references below are to IEEE Std 1800-2023.
 

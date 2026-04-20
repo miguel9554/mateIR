@@ -3,7 +3,7 @@
 #include <set>
 #include <string>
 
-namespace custom_hdl {
+namespace mate {
 
 namespace {
 
@@ -49,4 +49,4 @@ void computeComboDeps(Module& module) {
     }
 }
 
-} // namespace custom_hdl
+} // namespace mate

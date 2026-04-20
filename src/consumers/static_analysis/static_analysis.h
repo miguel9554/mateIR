@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <iosfwd>
 
-namespace custom_hdl {
+namespace mate {
 
 struct StaticAnalysisSummary {
     size_t modules = 0;
@@ -30,4 +30,4 @@ private:
 
 StaticAnalysisSummary analyzeMateIR(const MateIR& ir);
 
-} // namespace custom_hdl
+} // namespace mate

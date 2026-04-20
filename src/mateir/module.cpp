@@ -9,7 +9,7 @@
 #include <queue>
 #include <set>
 
-namespace custom_hdl {
+namespace mate {
 
 // ============================================================================
 // Leaf layout helpers
@@ -511,4 +511,4 @@ void validateNoCombLoops(const Module& module) {
     throw CompilerError(msg);
 }
 
-} // namespace custom_hdl
+} // namespace mate

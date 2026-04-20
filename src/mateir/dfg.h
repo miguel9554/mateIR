@@ -14,7 +14,7 @@
 #include <string>
 #include <variant>
 
-namespace custom_hdl {
+namespace mate {
 
 enum class DFGOp {
     // Identity ops
@@ -155,16 +155,16 @@ inline int expectedInputs(DFGOp op) {
     return -1;
 }
 
-} // namespace custom_hdl
+} // namespace mate
 
 template<>
-struct std::formatter<custom_hdl::DFGOp> : std::formatter<const char*> {
-    auto format(custom_hdl::DFGOp op, std::format_context& ctx) const {
-        return std::formatter<const char*>::format(custom_hdl::to_string(op), ctx);
+struct std::formatter<mate::DFGOp> : std::formatter<const char*> {
+    auto format(mate::DFGOp op, std::format_context& ctx) const {
+        return std::formatter<const char*>::format(mate::to_string(op), ctx);
     }
 };
 
-namespace custom_hdl {
+namespace mate {
 
 struct DFGNode; // forward declare
 struct DFG;     // forward declare
@@ -633,24 +633,24 @@ inline CompilerError::CompilerError(const std::string& msg, const DFGNode* node)
       loc(node ? node->loc : std::nullopt),
       errorNode(node) {}
 
-} // namespace custom_hdl
+} // namespace mate
 
 template<>
-struct std::formatter<custom_hdl::DFGNode> : std::formatter<std::string> {
-    auto format(const custom_hdl::DFGNode& node, std::format_context& ctx) const {
+struct std::formatter<mate::DFGNode> : std::formatter<std::string> {
+    auto format(const mate::DFGNode& node, std::format_context& ctx) const {
         return std::formatter<std::string>::format(node.str(), ctx);
     }
 };
 
 template<>
-struct std::formatter<custom_hdl::DFGNode*> : std::formatter<std::string> {
-    auto format(const custom_hdl::DFGNode* node, std::format_context& ctx) const {
+struct std::formatter<mate::DFGNode*> : std::formatter<std::string> {
+    auto format(const mate::DFGNode* node, std::format_context& ctx) const {
         if (!node) return std::formatter<std::string>::format("null", ctx);
         return std::formatter<std::string>::format(node->str(), ctx);
     }
 };
 
-namespace custom_hdl {
+namespace mate {
 
 struct DFG {
     std::vector<std::unique_ptr<DFGNode>> nodes;
@@ -1221,4 +1221,4 @@ private:
                            const std::set<const DFGNode*>* filter) const;
 };
 
-} // namespace custom_hdl
+} // namespace mate

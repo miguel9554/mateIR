@@ -2,7 +2,7 @@
 
 #include "mateir/module.h"
 
-namespace custom_hdl {
+namespace mate {
 
 // Resolve flop clock/reset structure from the DFG.
 // This pass extracts the reset MUX pattern from each flop's .d driver,
@@ -15,4 +15,4 @@ namespace custom_hdl {
 void resolveFlops(Module& module);
 
 
-} // namespace custom_hdl
+} // namespace mate

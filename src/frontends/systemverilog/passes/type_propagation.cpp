@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 // ---------------------------------------------------------------------------
 // Post-order traversal (same pattern as constant_fold)
@@ -434,4 +434,4 @@ bool propagateTypes(DFG& graph) {
     return anyChanged;
 }
 
-} // namespace custom_hdl
+} // namespace mate

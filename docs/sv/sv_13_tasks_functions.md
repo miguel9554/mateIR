@@ -2,7 +2,7 @@
 
 This document specifies how each feature of IEEE Std 1800-2023 §13 (Tasks and
 functions) is handled by this compiler. The compiler targets **synchronous RTL
-only** and lowers source into the `ResolvedModule` IR with a purely combinational
+only** and lowers source into the `Module` IR with a purely combinational
 DFG.
 
 All section references below are to IEEE Std 1800-2023.

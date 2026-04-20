@@ -6,7 +6,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -166,4 +166,4 @@ bool normalizeConditions(DFG& graph) {
     return anyChanged;
 }
 
-} // namespace custom_hdl
+} // namespace mate

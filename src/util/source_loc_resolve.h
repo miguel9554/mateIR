@@ -4,7 +4,7 @@
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/text/SourceManager.h"
 
-namespace custom_hdl {
+namespace mate {
 
 inline SourceLoc resolveSourceLoc(const slang::syntax::SyntaxNode& node,
                                   const slang::SourceManager& sm) {
@@ -16,4 +16,4 @@ inline SourceLoc resolveSourceLoc(const slang::syntax::SyntaxNode& node,
     };
 }
 
-} // namespace custom_hdl
+} // namespace mate

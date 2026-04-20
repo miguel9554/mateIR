@@ -17,7 +17,7 @@
 #include "frontends/systemverilog/unresolved.h"
 
 using namespace slang::syntax;
-using namespace custom_hdl;
+using namespace mate;
 
 namespace {
 
@@ -394,7 +394,7 @@ public:
 
 } // anonymous namespace
 
-namespace custom_hdl {
+namespace mate {
 
 ExtractedIR buildIR(const SyntaxTree& tree) {
     IRBuilderVisitor visitor(tree.sourceManager());
@@ -406,4 +406,4 @@ ExtractedIR buildIR(const SyntaxTree& tree) {
     };
 }
 
-} // namespace custom_hdl
+} // namespace mate

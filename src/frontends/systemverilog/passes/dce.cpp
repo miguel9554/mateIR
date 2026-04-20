@@ -3,7 +3,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 bool eliminateDeadCode(DFG& graph,
                        const std::unordered_set<DFGNode*>& extraRoots) {
@@ -47,4 +47,4 @@ bool eliminateDeadCode(DFG& graph,
     return graph.nodes.size() < before;
 }
 
-} // namespace custom_hdl
+} // namespace mate

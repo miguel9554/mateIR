@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 class SimValue {
 public:
@@ -74,4 +74,4 @@ private:
     void copyBitsFrom(const SimValue& src, int src_start, int dst_start, int count);
 };
 
-} // namespace custom_hdl
+} // namespace mate

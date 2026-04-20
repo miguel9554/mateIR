@@ -2,7 +2,7 @@
 
 #include "mateir/dfg.h"
 
-namespace custom_hdl {
+namespace mate {
 
 // Normalize boolean conditions in a DFG:
 // - Eliminate LOGICAL_NOT (rewrite to BITWISE_NOT or EQ)
@@ -13,4 +13,4 @@ namespace custom_hdl {
 // Mutates the graph in-place. Returns true if any changes were made.
 bool normalizeConditions(DFG& graph);
 
-} // namespace custom_hdl
+} // namespace mate

@@ -13,7 +13,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 enum class FlopsInitial { Random, AllZeros, AllOnes };
 
@@ -112,4 +112,4 @@ private:
     void writeOutputFiles();
 };
 
-} // namespace custom_hdl
+} // namespace mate

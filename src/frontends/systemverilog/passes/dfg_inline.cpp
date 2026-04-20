@@ -5,7 +5,7 @@
 #include <functional>
 #include <string>
 
-namespace custom_hdl {
+namespace mate {
 
 namespace {
 
@@ -151,4 +151,4 @@ void inlineDFGs(Module& top) {
     }
 }
 
-} // namespace custom_hdl
+} // namespace mate

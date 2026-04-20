@@ -1,4 +1,4 @@
-FROM custom-hdl-slang:latest
+FROM mate-slang:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 

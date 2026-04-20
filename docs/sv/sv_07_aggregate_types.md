@@ -3,7 +3,7 @@
 This document describes how each feature of IEEE Std 1800-2023 §7 (Aggregate data
 types) is handled by this compiler. The compiler targets **synchronous RTL only**:
 it accepts synthesisable, clocked Verilog as input and lowers it into the
-`ResolvedModule` IR.
+`Module` IR.
 
 All section references below are to IEEE Std 1800-2023.
 
@@ -19,7 +19,7 @@ structures are synthesisable, the compiler does not yet support them. Encounteri
 a `struct` type in a signal or port declaration throws a compile error.
 
 The planned IR representation is: a packed struct will be stored as a
-`ResolvedType` with `kind = Integer` (total width = sum of field widths, MSB-first
+`Type` with `kind = Integer` (total width = sum of field widths, MSB-first
 per spec §7.2.1) plus a new metadata variant that records field names and their
 bit-slice offsets. Member access (`sig.field`) will lower into a `SLICE` DFG node
 using the precomputed offset. The struct is therefore treated as a flat bit vector
@@ -76,7 +76,7 @@ logic [3:0][7:0]  wide_sig;          // 2-D packed: 32 bits
 logic signed [15:0] s_sig;           // signed 1-D packed
 ```
 
-**IR mapping:** stored as a single `ResolvedType` with `kind = Integer`:
+**IR mapping:** stored as a single `Type` with `kind = Integer`:
 
 | Field | Value |
 |---|---|
@@ -115,12 +115,12 @@ logic       flags [7:0];  // 8 single-bit elements
 
 **IR mapping — signal declaration:**
 
-The aggregate signal is registered in `ResolvedModule::inputs`, `::outputs`, or
-`::signals` with `unpacked_dims` set on its `ResolvedType`. For example,
+The aggregate signal is registered in `Module::inputs`, `::outputs`, or
+`::signals` with `unpacked_dims` set on its `Type`. For example,
 `logic [7:0] arr [3:0]` produces:
 
 ```
-ResolvedType { width=8, packed_dims=[{7,0}], unpacked_dims=[{3,0}] }
+Type { width=8, packed_dims=[{7,0}], unpacked_dims=[{3,0}] }
 ```
 
 **IR mapping — DFG nodes:**
@@ -134,7 +134,7 @@ arr[0]  arr[1]  arr[2]  arr[3]
 ```
 
 Each element node carries the element type (no `unpacked_dims`):
-`ResolvedType { width=8, packed_dims=[{7,0}] }`.
+`Type { width=8, packed_dims=[{7,0}] }`.
 
 There is **no limit** on the number of array elements.
 
@@ -175,7 +175,7 @@ logic [7:0] grid [1:0][3:0];   // 2 rows × 4 columns of 8-bit elements
 
 Produces 8 DFG nodes: `grid[1][0]`, `grid[1][1]`, `grid[1][2]`, `grid[1][3]`,
 `grid[0][0]`, …, `grid[0][3]`. The aggregate signal in
-`ResolvedModule::signals` carries
+`Module::signals` carries
 `unpacked_dims=[{1,0},{3,0}]`.
 
 Mixed packed/unpacked multidimensional arrays are also supported:
@@ -319,7 +319,7 @@ at run time and are not synthesisable.
 | Packed unions (`union packed`) | **No** — planned |
 | Soft packed unions (`union soft packed`) | **No** — planned |
 | Tagged unions (`union tagged`) | **No** — not planned |
-| 1-D packed arrays (`logic [N:0]`) | **Yes** — `ResolvedType` with `packed_dims` |
+| 1-D packed arrays (`logic [N:0]`) | **Yes** — `Type` with `packed_dims` |
 | Multi-dimensional packed arrays | **Yes** — multiple entries in `packed_dims` |
 | Fixed-size unpacked arrays | **Yes** — expanded to per-element DFG nodes |
 | Multidimensional unpacked arrays | **Yes** — expanded to per-element DFG nodes |

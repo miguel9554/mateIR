@@ -7,7 +7,7 @@
 #include <variant>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 struct Dimension {
     int left = 0;
@@ -80,4 +80,4 @@ struct Type {
     }
 };
 
-} // namespace custom_hdl
+} // namespace mate

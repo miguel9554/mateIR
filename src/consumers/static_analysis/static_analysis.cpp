@@ -2,7 +2,7 @@
 
 #include <iostream>
 
-namespace custom_hdl {
+namespace mate {
 
 namespace {
 
@@ -32,7 +32,7 @@ std::string StaticAnalysisConsumer::name() const {
 
 void StaticAnalysisConsumer::consume(const MateIR& ir) {
     auto summary = analyzeMateIR(ir);
-    out_ << "mateIR static analysis\n";
+    out_ << "mateir static analysis\n";
     out_ << "  top: " << ir.top.name << "\n";
     out_ << "  modules: " << summary.modules << "\n";
     out_ << "  inputs: " << summary.inputs << "\n";
@@ -49,4 +49,4 @@ StaticAnalysisSummary analyzeMateIR(const MateIR& ir) {
     return summary;
 }
 
-} // namespace custom_hdl
+} // namespace mate

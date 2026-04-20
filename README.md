@@ -23,7 +23,7 @@ target is the internal circuit representation.
 
 ## The circuit IR
 
-The output of compilation is a `ResolvedModule` tree. Each module contains:
+The output of compilation is mateir rooted at a `Module` tree. Each module contains:
 
 - **Ports**: inputs and outputs with resolved types, clock/reset classification,
   and clock domain assignment.
@@ -62,8 +62,8 @@ clock domain, a reset, or the async domain.
 ## Usage
 
 The executable now has two explicit boundaries: a frontend (`--frontend
-systemverilog` by default) compiles HDL into final mateIR, and optional
-consumers such as static analysis or simulation consume that mateIR. The current
+systemverilog` by default) compiles HDL into final mateir, and optional
+consumers such as static analysis or simulation consume that mateir. The current
 architecture is described in `docs/mateir_architecture.md`.
 
 **Compile a single-module design:**
@@ -128,7 +128,7 @@ The compiler runs the following passes in order on the top module's flat DFG:
 
 | # | Pass | Description |
 |---|------|-------------|
-| 0 | elaboration | Verilog AST → ResolvedModule + DFG per module |
+| 0 | elaboration | Verilog AST → Module + DFG per module |
 | 1 | dfg_inline | Inline submodule DFGs into the top-level flat DFG |
 | 2 | concat_cleanup | Resolve temporary CONCAT_ALIGN nodes from partial LHS assigns |
 | 3 | constant_fold | Fold constant expressions; simplify constant-selector MUXes |

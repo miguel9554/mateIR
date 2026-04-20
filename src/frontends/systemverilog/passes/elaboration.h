@@ -10,7 +10,7 @@
 
 namespace slang { class SourceManager; }
 
-namespace custom_hdl {
+namespace mate {
 
 // ============================================================================
 // Resolution functions (pass 2)
@@ -35,4 +35,4 @@ Module resolveModules(
     const std::string& topModuleName,
     const ParameterContext& topParams);
 
-} // namespace custom_hdl
+} // namespace mate

@@ -5,7 +5,7 @@
 #include <set>
 #include <sstream>
 
-namespace custom_hdl {
+namespace mate {
 
 std::string DFG::renderDot(const std::string& graphName,
                            const std::set<const DFGNode*>& errorNodes,
@@ -303,4 +303,4 @@ std::string DFG::toJsonCone(const DFGNode* root, int indent) const {
     return renderJson(indent, &cone);
 }
 
-} // namespace custom_hdl
+} // namespace mate

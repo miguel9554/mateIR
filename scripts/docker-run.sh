@@ -15,5 +15,5 @@ docker run "${docker_args[@]}" \
   --user "$(id -u):$(id -g)" \
   -v "$(pwd)":"$(pwd)" \
   -w "$(pwd)" \
-  custom-hdl-compiler:latest \
+  mate-dev:latest \
   "${@:-bash}"

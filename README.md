@@ -68,17 +68,17 @@ architecture is described in `docs/mateir_architecture.md`.
 
 **Compile a single-module design:**
 ```
-./build/custom_hdl_compiler --domains module.domains.yaml module.v
+./build/dev/mate --domains module.domains.yaml module.v
 ```
 
 **Run static analysis:**
 ```
-./build/custom_hdl_compiler --analyze --domains module.domains.yaml module.v
+./build/dev/mate --analyze --domains module.domains.yaml module.v
 ```
 
 **Simulate a hierarchical design:**
 ```
-./build/custom_hdl_compiler --simulate \
+./build/dev/mate --simulate \
     --top counter_top \
     --inputs-dir tests/counter_top/work/custom-sim/stimuli \
     --output-dir output \
@@ -105,15 +105,22 @@ before building the compiler:
 bash scripts/build_slang.sh   # once, or after updating the slang submodule
 ```
 
-Then build the compiler:
+Then build the compiler with the default development preset:
 
 ```bash
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc) custom_hdl_compiler
+cmake --preset dev
+cmake --build --preset dev --parallel
 ```
 
-The build requires CMake 3.15+, a C++20 compiler, and the yaml-cpp library.
+The build requires CMake 3.20+, a C++20 compiler, and the yaml-cpp library.
+
+Other build presets:
+
+```bash
+cmake --preset sanitized && cmake --build --preset sanitized --parallel  # ASan/UBSan, used by tests
+cmake --preset debug && cmake --build --preset debug --parallel          # debugger build, requires Debug slang
+cmake --preset release && cmake --build --preset release --parallel      # optimized binary
+```
 
 ## Pass pipeline
 

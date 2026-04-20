@@ -8,7 +8,7 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
-SIMULATOR = REPO_ROOT / "build" / "diagnostic-relwithdebinfo" / "custom_hdl_compiler"
+SIMULATOR = REPO_ROOT / "build" / "sanitized" / "mate"
 MANIFEST = TESTS_DIR / "regression_tests.txt"
 
 GREEN = "\033[32m"
@@ -105,9 +105,9 @@ def run_validate(name):
 
 
 def ensure_simulator():
-    """Build the diagnostic simulator used by expected-failure tests."""
+    """Build the sanitized simulator used by expected-failure tests."""
     result = subprocess.run(
-        ["make", "-C", str(REPO_ROOT), "diagnostic-build"],
+        ["make", "-C", str(REPO_ROOT), "sanitized"],
         capture_output=True,
         text=True,
     )

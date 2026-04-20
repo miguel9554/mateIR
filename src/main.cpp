@@ -151,7 +151,7 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "========================================\n";
-        std::cout << "mateIR compiler\n";
+        std::cout << "mate\n";
         std::cout << "========================================\n";
         std::cout << "Frontend: " << frontendName << "\n";
         std::cout << "Sources: ";

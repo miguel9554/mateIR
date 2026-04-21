@@ -25,7 +25,7 @@
 
 using namespace slang::syntax;
 
-namespace custom_hdl {
+namespace mate {
 
 // Enum type registry: typedef name → Type (Enum kind)
 using EnumRegistry  = std::map<std::string, Type>;
@@ -5185,4 +5185,4 @@ Module resolveModules(
     return resolveModule(*it->second, topParams, moduleLookup, sourceManager, pkgRegistry, globalImports);
 }
 
-} // namespace custom_hdl
+} // namespace mate

@@ -2,7 +2,7 @@
 
 #include <utility>
 
-namespace custom_hdl {
+namespace mate {
 
 Type Type::makeInteger(int width, bool is_signed,
                        std::vector<Dimension> packed_dims,
@@ -52,4 +52,4 @@ void Type::print(std::ostream& os) const {
     }
 }
 
-} // namespace custom_hdl
+} // namespace mate

@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.15)
-project(CustomHDL VERSION 0.1.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.20)
+project(Mate VERSION 0.1.0 LANGUAGES CXX)
 
 # Set C++20 standard
 set(CMAKE_CXX_STANDARD 20)
@@ -29,7 +29,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
             "Build it with:\n"
             "  CMAKE_BUILD_TYPE=Debug bash scripts/build_slang.sh\n"
             "or use:\n"
-            "  make debug-build\n"
+            "  make debug\n"
         )
     endif()
 elseif(EXISTS "/opt/slang/lib/cmake/slang/slangConfig.cmake")
@@ -64,46 +64,43 @@ file(GLOB_RECURSE PROJECT_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 set(VCD_TRACER_SOURCES external/cpp-vcd-tracer/src/vcd_tracer.cpp)
 
 # Create the main executable
-add_executable(custom_hdl_compiler ${PROJECT_SOURCES} ${VCD_TRACER_SOURCES})
+add_executable(mate ${PROJECT_SOURCES} ${VCD_TRACER_SOURCES})
 
 # Ensure no optimizations in Debug builds for reliable debugging (project only, not slang)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(custom_hdl_compiler PRIVATE -O0 -g3)
+    target_compile_options(mate PRIVATE -O0 -g3)
 endif()
 
 if(ENABLE_SANITIZERS)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         message(FATAL_ERROR "ENABLE_SANITIZERS requires GCC or Clang")
     endif()
-    target_compile_options(custom_hdl_compiler PRIVATE
+    target_compile_options(mate PRIVATE
         -fno-omit-frame-pointer
         -fsanitize=address,undefined
     )
-    target_link_options(custom_hdl_compiler PRIVATE
+    target_link_options(mate PRIVATE
         -fno-omit-frame-pointer
         -fsanitize=address,undefined
     )
 endif()
 
 # Link against slang
-target_link_libraries(custom_hdl_compiler PRIVATE
+target_link_libraries(mate PRIVATE
     slang::slang
     yaml-cpp
 )
 
 # Include directories
-target_include_directories(custom_hdl_compiler PRIVATE
+target_include_directories(mate PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/external/yaml-cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-vcd-tracer/src
 )
 
-# Tools
-add_subdirectory(tools/vcd-compare)
-
 # Print build configuration
 message(STATUS "")
-message(STATUS "Custom HDL Compiler Configuration:")
+message(STATUS "Mate Configuration:")
 message(STATUS "  Version: ${PROJECT_VERSION}")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")

@@ -2,7 +2,7 @@
 
 #include "frontends/frontend.h"
 
-namespace custom_hdl {
+namespace mate {
 
 class SystemVerilogFrontend final : public Frontend {
 public:
@@ -10,4 +10,4 @@ public:
     MateIR compile(const FrontendOptions& options) const override;
 };
 
-} // namespace custom_hdl
+} // namespace mate

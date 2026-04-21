@@ -6,7 +6,7 @@
 #include <functional>
 #include <utility>
 
-namespace custom_hdl {
+namespace mate {
 
 SimVcdValue::SimVcdValue(unsigned int bit_size)
     : value_base(bit_size),
@@ -441,4 +441,4 @@ void VcdWriter::close(int64_t last_time_ns) {
     raw_out_.close();
 }
 
-} // namespace custom_hdl
+} // namespace mate

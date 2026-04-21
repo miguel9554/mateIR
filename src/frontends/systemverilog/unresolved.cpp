@@ -5,7 +5,7 @@
 
 #include "slang/syntax/AllSyntax.h"
 
-namespace custom_hdl {
+namespace mate {
 
 void UnresolvedType::print(std::ostream& os, bool debug) const {
     if (syntax) {
@@ -117,4 +117,4 @@ void UnresolvedModule::print(int indent) const {
     }
 }
 
-} // namespace custom_hdl
+} // namespace mate

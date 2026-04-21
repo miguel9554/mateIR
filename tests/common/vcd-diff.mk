@@ -1,8 +1,9 @@
 ROOT_DIR = ../..
 PROJECT_ROOT = $(ROOT_DIR)/../..
 MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
-BUILD_DIR ?= build/diagnostic-relwithdebinfo
-VCD_COMPARE = $(PROJECT_ROOT)/$(BUILD_DIR)/tools/vcd-compare/vcd_compare
+VCD_COMPARE_BUILD_DIR ?= $(PROJECT_ROOT)/build/vcd-compare/sanitized
+VCD_COMPARE = $(VCD_COMPARE_BUILD_DIR)/vcd-compare
+SANITIZER_ENV = ASAN_OPTIONS=symbolize=1,detect_leaks=0,abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1,halt_on_error=1
 
 WORK_REL_TO_ROOT = tests/$(MODULE_NAME)/work
 CUSTOM_SIM_DIR = $(WORK_REL_TO_ROOT)/custom-sim
@@ -21,8 +22,9 @@ HIERARCHY_JSON = $(CUSTOM_SIM_DIR)/debug_output/$(MODULE_NAME)/hierarchy.json
 VCD_COMPARE_ARGS = $(shell cat vcd-diff.args 2>/dev/null)
 
 compare:
-	$(MAKE) -C $(PROJECT_ROOT) diagnostic-build
-	$(VCD_COMPARE) --hierarchy $(PROJECT_ROOT)/$(HIERARCHY_JSON) $(VCD_COMPARE_ARGS) \
+	cmake --preset sanitized -S $(PROJECT_ROOT)/tools/vcd-compare
+	cmake --build $(VCD_COMPARE_BUILD_DIR) --parallel
+	$(SANITIZER_ENV) $(VCD_COMPARE) --hierarchy $(PROJECT_ROOT)/$(HIERARCHY_JSON) $(VCD_COMPARE_ARGS) \
 		$(CUSTOM_SIM_VCD) \
 		$(VERILATOR_SIM_VCD)
 

@@ -2,7 +2,7 @@
 
 #include "mateir/module.h"
 
-namespace custom_hdl {
+namespace mate {
 
 // Pass 12: run after flop_resolve and dce.
 // - Validates clock/reset polarity (YAML edge vs. flop_resolve edge)
@@ -11,4 +11,4 @@ namespace custom_hdl {
 // - CDC fanin validation: checks sync/async inputs only reach flops in their domain
 void domainsPropagateAndCheck(Module& module);
 
-} // namespace custom_hdl
+} // namespace mate

@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=custom-hdl-compiler:latest
+ARG BASE_IMAGE=mate-dev:latest
 FROM ${BASE_IMAGE}
 
 ENV TZ=America/Argentina/Buenos_Aires

@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace custom_hdl {
+namespace mate {
 
 struct DebugNodeSpec {
     // Empty module_path matches any module. Non-empty values are suffix-matched
@@ -12,4 +12,4 @@ struct DebugNodeSpec {
     std::string node_name;
 };
 
-} // namespace custom_hdl
+} // namespace mate

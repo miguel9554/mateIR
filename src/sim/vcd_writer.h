@@ -11,7 +11,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 struct ModuleInstance;  // forward declaration
 
@@ -90,4 +90,4 @@ private:
                         const std::unordered_set<const DFGNode*>& alive);
 };
 
-} // namespace custom_hdl
+} // namespace mate

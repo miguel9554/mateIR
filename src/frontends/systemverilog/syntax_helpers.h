@@ -8,7 +8,7 @@ struct ModuleHeaderSyntax;
 struct DataTypeSyntax;
 }
 
-namespace custom_hdl {
+namespace mate {
 
 // Extract type information - just captures the syntax pointer (no resolution)
 UnresolvedType extractDataType(const slang::syntax::DataTypeSyntax& syntax);
@@ -18,4 +18,4 @@ UnresolvedModule extractModuleHeader(const slang::syntax::ModuleHeaderSyntax& he
 
 std::vector<UnresolvedParam> extractParameter(const slang::syntax::ParameterDeclarationBaseSyntax* declaration, std::vector<UnresolvedParam> params);
 
-} // namespace custom_hdl
+} // namespace mate

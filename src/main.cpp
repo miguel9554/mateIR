@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-using namespace custom_hdl;
+using namespace mate;
 
 namespace {
 
@@ -21,7 +21,7 @@ void printUsage(const char* progName) {
               << "  --frontend <name>         HDL frontend: systemverilog (default)\n"
               << "  --top <module>            Top module name (required for multi-file designs)\n"
               << "  --domains <f1> [f2 ...]   Domain YAML files (one per module)\n"
-              << "  --analyze                 Run static analysis consumer on mateIR\n"
+              << "  --analyze                 Run static analysis consumer on mateir\n"
               << "  --simulate                Run cycle-based simulation consumer\n"
               << "  --inputs-dir <dir>        Directory containing input stimuli files\n"
               << "  --output-dir <dir>        Directory for simulation output\n"
@@ -151,7 +151,7 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "========================================\n";
-        std::cout << "mateIR compiler\n";
+        std::cout << "mate\n";
         std::cout << "========================================\n";
         std::cout << "Frontend: " << frontendName << "\n";
         std::cout << "Sources: ";
@@ -169,12 +169,12 @@ int main(int argc, char** argv) {
         parseParams(paramsStr, frontendOptions.parameters);
 
         auto frontend = makeFrontend(frontendName);
-        auto mateIR = frontend->compile(frontendOptions);
+        auto mateir = frontend->compile(frontendOptions);
 
         std::cout << "----------------------------------------\n";
-        std::cout << "\nmateIR:\n";
+        std::cout << "\nmateir:\n";
         std::cout << "========================================\n";
-        mateIR.top.print();
+        mateir.top.print();
         std::cout << "\n";
 
         if (analyzeMode) {
@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
             std::cout << "Running static analysis...\n";
             std::cout << "========================================\n";
             StaticAnalysisConsumer analyzer(std::cout);
-            analyzer.consume(mateIR);
+            analyzer.consume(mateir);
         }
 
         if (simulateMode) {
@@ -208,12 +208,12 @@ int main(int argc, char** argv) {
             std::cout << "Running simulation...\n";
             std::cout << "========================================\n";
             SimulatorConsumer simulator(std::move(simConfig));
-            simulator.consume(mateIR);
+            simulator.consume(mateir);
         }
 
         std::cout << "========================================\n";
         std::cout << "Compilation completed successfully\n";
-        std::cout << "Found " << mateIR.frontend_module_count << " module(s).\n";
+        std::cout << "Found " << mateir.frontend_module_count << " module(s).\n";
     } catch (const CompilerError& e) {
         std::cerr << "ERROR: " << e.what() << "\n";
         return 1;

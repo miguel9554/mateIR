@@ -1,6 +1,6 @@
 #include "consumers/sim/simulator_consumer.h"
 
-namespace custom_hdl {
+namespace mate {
 
 SimulatorConsumer::SimulatorConsumer(SimConfig config)
     : config_(std::move(config)) {}
@@ -14,4 +14,4 @@ void SimulatorConsumer::consume(const MateIR& ir) {
     sim.run();
 }
 
-} // namespace custom_hdl
+} // namespace mate

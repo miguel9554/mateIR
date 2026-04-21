@@ -10,7 +10,7 @@
 #include <span>
 #include <string_view>
 
-namespace custom_hdl {
+namespace mate {
 
 std::string SystemVerilogFrontend::name() const {
     return "systemverilog";
@@ -55,4 +55,4 @@ MateIR SystemVerilogFrontend::compile(const FrontendOptions& options) const {
     return lowerSystemVerilogToMateIR(extracted, tree->sourceManager(), options);
 }
 
-} // namespace custom_hdl
+} // namespace mate

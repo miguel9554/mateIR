@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace custom_hdl {
+namespace mate {
 
 struct SourceLoc {
     std::string file;
@@ -31,4 +31,4 @@ public:
     CompilerError(const std::string& msg, const DFGNode* node);
 };
 
-} // namespace custom_hdl
+} // namespace mate

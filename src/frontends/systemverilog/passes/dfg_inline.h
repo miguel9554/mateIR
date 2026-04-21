@@ -2,7 +2,7 @@
 
 #include "mateir/module.h"
 
-namespace custom_hdl {
+namespace mate {
 
 // Inline all submodule DFGs into the top-level DFG.
 // Must run after all modules are elaborated (bottom-up).
@@ -15,4 +15,4 @@ namespace custom_hdl {
 //   - Submodule dfg fields are nulled
 void inlineDFGs(Module& top);
 
-} // namespace custom_hdl
+} // namespace mate

@@ -1,43 +1,38 @@
-.PHONY: all build run clean debug debug-build ensure-debug-slang diagnostic-build gdb sim vcd-diff
+.PHONY: all build dev debug sanitized release ensure-debug-slang test regression gdb clean
 
-# Find all source files using wildcards
-CPP_SOURCES := $(shell find src -name '*.cpp')
-HEADER_SOURCES := $(shell find src -name '*.h')
-EXTERNAL_SOURCES := $(shell find external/cpp-vcd-tracer/src -name '*.cpp' -o -name '*.hpp' -o -name '*.h')
-SOURCES := $(CPP_SOURCES) $(HEADER_SOURCES) $(EXTERNAL_SOURCES)
-BUILD_DIR ?= build
-CMAKE_ARGS ?=
-BINARY := $(BUILD_DIR)/custom_hdl_compiler
+all: dev
 
-all: $(BINARY) run
+build: dev
 
-$(BUILD_DIR)/CMakeCache.txt: $(SOURCES) CMakeLists.txt
-	cmake -B $(BUILD_DIR) $(CMAKE_ARGS)
+dev:
+	cmake --preset dev
+	cmake --build --preset dev --parallel
 
-$(BINARY): $(BUILD_DIR)/CMakeCache.txt $(SOURCES)
-	cmake --build $(BUILD_DIR) -j$(shell nproc)
-
-build: $(BINARY)
-
-# Debug targets
 ensure-debug-slang:
 	@if [ ! -f external/slang-install-debug/lib/cmake/slang/slangConfig.cmake ]; then \
 		echo "Building Debug slang into external/slang-install-debug"; \
 		CMAKE_BUILD_TYPE=Debug bash scripts/build_slang.sh; \
 	fi
 
-debug-build:
-	$(MAKE) ensure-debug-slang
-	$(MAKE) BUILD_DIR=build/debug CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug" build
+debug: ensure-debug-slang
+	cmake --preset debug
+	cmake --build --preset debug --parallel
 
-diagnostic-build:
-	$(MAKE) BUILD_DIR=build/diagnostic-relwithdebinfo CMAKE_ARGS="-DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_SANITIZERS=ON" build
+sanitized:
+	cmake --preset sanitized
+	cmake --build --preset sanitized --parallel
 
-debug: debug-build
-	./build/debug/custom_hdl_compiler $(source)
+release:
+	cmake --preset release
+	cmake --build --preset release --parallel
 
-gdb: debug-build
-	gdb --args ./build/debug/custom_hdl_compiler $(source)
+test: regression
+
+regression: sanitized
+	python tests/regression.py
+
+gdb: debug
+	gdb --args ./build/debug/mate $(source)
 
 clean:
-	rm -rf build build/debug build/diagnostic build/diagnostic-relwithdebinfo
+	rm -rf build/dev build/debug build/sanitized build/release build/vcd-compare

@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 namespace {
 
@@ -312,4 +312,4 @@ void domainsPropagateAndCheck(Module& module) {
     process(module);
 }
 
-} // namespace custom_hdl
+} // namespace mate

@@ -12,7 +12,7 @@
 using namespace slang::syntax;
 using namespace slang::parsing;
 
-namespace custom_hdl {
+namespace mate {
 
 UnresolvedType extractDataType(const DataTypeSyntax& syntax) {
     // Simply capture the syntax pointer - resolution happens in pass 2
@@ -129,4 +129,4 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
     return info;
 }
 
-} // namespace custom_hdl
+} // namespace mate

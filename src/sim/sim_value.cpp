@@ -5,7 +5,7 @@
 #include <cctype>
 #include <stdexcept>
 
-namespace custom_hdl {
+namespace mate {
 
 SimValue::SimValue(int width, bool is_signed)
     : width_(std::max(width, 0)),
@@ -406,4 +406,4 @@ void SimValue::copyBitsFrom(const SimValue& src, int src_start, int dst_start, i
     }
 }
 
-} // namespace custom_hdl
+} // namespace mate

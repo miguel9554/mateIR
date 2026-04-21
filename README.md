@@ -23,7 +23,7 @@ target is the internal circuit representation.
 
 ## The circuit IR
 
-The output of compilation is a `ResolvedModule` tree. Each module contains:
+The output of compilation is mateir rooted at a `Module` tree. Each module contains:
 
 - **Ports**: inputs and outputs with resolved types, clock/reset classification,
   and clock domain assignment.
@@ -62,23 +62,23 @@ clock domain, a reset, or the async domain.
 ## Usage
 
 The executable now has two explicit boundaries: a frontend (`--frontend
-systemverilog` by default) compiles HDL into final mateIR, and optional
-consumers such as static analysis or simulation consume that mateIR. The current
+systemverilog` by default) compiles HDL into final mateir, and optional
+consumers such as static analysis or simulation consume that mateir. The current
 architecture is described in `docs/mateir_architecture.md`.
 
 **Compile a single-module design:**
 ```
-./build/custom_hdl_compiler --domains module.domains.yaml module.v
+./build/dev/mate --domains module.domains.yaml module.v
 ```
 
 **Run static analysis:**
 ```
-./build/custom_hdl_compiler --analyze --domains module.domains.yaml module.v
+./build/dev/mate --analyze --domains module.domains.yaml module.v
 ```
 
 **Simulate a hierarchical design:**
 ```
-./build/custom_hdl_compiler --simulate \
+./build/dev/mate --simulate \
     --top counter_top \
     --inputs-dir tests/counter_top/work/custom-sim/stimuli \
     --output-dir output \
@@ -105,15 +105,22 @@ before building the compiler:
 bash scripts/build_slang.sh   # once, or after updating the slang submodule
 ```
 
-Then build the compiler:
+Then build the compiler with the default development preset:
 
 ```bash
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc) custom_hdl_compiler
+cmake --preset dev
+cmake --build --preset dev --parallel
 ```
 
-The build requires CMake 3.15+, a C++20 compiler, and the yaml-cpp library.
+The build requires CMake 3.20+, a C++20 compiler, and the yaml-cpp library.
+
+Other build presets:
+
+```bash
+cmake --preset sanitized && cmake --build --preset sanitized --parallel  # ASan/UBSan, used by tests
+cmake --preset debug && cmake --build --preset debug --parallel          # debugger build, requires Debug slang
+cmake --preset release && cmake --build --preset release --parallel      # optimized binary
+```
 
 ## Pass pipeline
 
@@ -121,7 +128,7 @@ The compiler runs the following passes in order on the top module's flat DFG:
 
 | # | Pass | Description |
 |---|------|-------------|
-| 0 | elaboration | Verilog AST → ResolvedModule + DFG per module |
+| 0 | elaboration | Verilog AST → Module + DFG per module |
 | 1 | dfg_inline | Inline submodule DFGs into the top-level flat DFG |
 | 2 | concat_cleanup | Resolve temporary CONCAT_ALIGN nodes from partial LHS assigns |
 | 3 | constant_fold | Fold constant expressions; simplify constant-selector MUXes |

@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 struct FrontendOptions {
     std::vector<std::string> source_files;
@@ -25,4 +25,4 @@ public:
     virtual MateIR compile(const FrontendOptions& options) const = 0;
 };
 
-} // namespace custom_hdl
+} // namespace mate

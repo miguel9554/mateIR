@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 // ============================================================================
 // Util types for triggers
@@ -146,7 +146,7 @@ struct FlopInfo {
 using ComboDeps = std::map<std::string, std::set<std::string>>;
 
 // ============================================================================
-// mateIR module
+// mateir module
 // ============================================================================
 
 struct Module {
@@ -204,4 +204,4 @@ struct ParameterContext {
 // Throws CompilerError listing the nodes involved in any detected cycle.
 void validateNoCombLoops(const Module& module);
 
-} // namespace custom_hdl
+} // namespace mate

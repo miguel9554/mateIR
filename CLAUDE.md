@@ -8,9 +8,10 @@ stone toward a better custom HDL language.
 Each RTL SystemVerilog file has a companion `.domains.yaml` file that carries
 metadata Verilog cannot represent (clock/reset/IO domain info).
 
-## Core data structure: ResolvedModule
+## Core data structure: mateir
 
-The **ResolvedModule** is the source of truth. It contains:
+The compiler lowers source files into **mateir**. In C++ this is represented by
+`MateIR`, whose top-level design object is `Module`. `Module` contains:
 
 - **Inputs/outputs/signals**: all ports and internal signals, with name and type
 - **Flops**: all memory elements in the design
@@ -19,9 +20,9 @@ The **ResolvedModule** is the source of truth. It contains:
   NOT appear in the DFG.
 - **Modules**: submodule instantiations
 
-**The DFG is not the source of truth.** It must always coincide with the
-ResolvedModule, but when iterating over inputs, outputs, signals, or flops,
-always iterate over the ResolvedModule arrays — never the DFG.
+**The DFG is not the source of truth.** It must always coincide with `Module`,
+but when iterating over inputs, outputs, signals, or flops, always iterate over
+the `Module` containers — never the DFG maps.
 
 ## General guidelines
 
@@ -100,23 +101,22 @@ Schema: `src/domains.schema.json` — read this file when working with `.domains
 
 ```
 src/
-├── main.cpp                     CLI, pass orchestration, simulate mode
-├── ir/
-│   ├── types.h                  ResolvedType, ResolvedDimension, ResolvedTypeKind
-│   ├── unresolved.h/.cpp        UnresolvedSignal/Param/Module (raw slang syntax pointers)
-│   ├── resolved.h/.cpp          ResolvedSignal/Param/FlopInfo/ResolvedModule
-│   └── dfg.h/.cpp               DFGNode, DFGOp, DFG container
-├── passes/
-│   ├── extractor.h/.cpp         Pass 0: SyntaxTree → UnresolvedModule
-│   ├── elaboration.h/.cpp       Pass 1: UnresolvedModule → ResolvedModule + DFG
-│   ├── concat_cleanup.h/.cpp    Pass 2a: fix CONCAT_ALIGN temporaries from LHS partial assigns
-│   ├── type_propagation.h/.cpp  Pass 2b: fixed-point type inference over the DFG
-│   ├── condition_normalization.h/.cpp  Pass 3: normalise MUX selector conditions
-│   ├── constant_fold.h/.cpp     Pass 4: fold CONST-input nodes; simplify constant-selector MUXes
-│   ├── dce.h/.cpp               Pass 5: dead-code elimination
-│   ├── flop_resolve.h/.cpp      Pass 6: identify clock/reset; tag INPUT nodes; strip reset MUX
-│   ├── io_domains_set.h/.cpp    Pass 7: read *.domains.yaml; classify ports; set clock_domain
-│   └── combo_deps.h/.cpp        Pass 8: combinational dependency graph; validate no loops
+├── main.cpp                     CLI, pass orchestration, analyze/simulate modes
+├── mateir/
+│   ├── mateir.h                 MateIR result wrapper
+│   ├── module.h/.cpp            Module, Signal, Param, FlopInfo, bindings
+│   ├── types.h/.cpp             Type, Dimension, TypeKind, SyncKind
+│   ├── dfg.h/.cpp               DFGNode, DFGOp, DFG container
+│   └── debug.h                  Debug node selection types
+├── frontends/
+│   └── systemverilog/
+│       ├── unresolved.h/.cpp    UnresolvedSignal/Param/Module (raw slang syntax pointers)
+│       ├── syntax_helpers.h/.cpp
+│       ├── systemverilog_frontend.h/.cpp
+│       └── passes/              Elaboration and DFG/domain cleanup passes
+├── consumers/
+│   ├── sim/                     Simulation consumer
+│   └── static_analysis/         Static analysis consumer
 ├── sim/
 │   └── simulator.h/.cpp         Cycle-accurate simulator (CSV stimuli → CSV outputs)
 └── util/
@@ -126,7 +126,7 @@ src/
     └── syntax_helpers.h/.cpp   Misc slang utilities
 
 tools/
-└── dfg_inspect.py               DFG JSON query tool — see file header for commands
+└── vcd-compare/                 Standalone VCD comparison tool
 
 tests/<testname>/
 ├── rtl/                         Verilog source + *.domains.yaml files

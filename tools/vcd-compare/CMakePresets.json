@@ -1,0 +1,49 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "dev",
+      "displayName": "Developer",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/../../build/vcd-compare/dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ENABLE_SANITIZERS": "OFF"
+      }
+    },
+    {
+      "name": "sanitized",
+      "displayName": "Sanitized",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/../../build/vcd-compare/sanitized",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/../../build/vcd-compare/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ENABLE_SANITIZERS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "sanitized",
+      "configurePreset": "sanitized"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    }
+  ]
+}

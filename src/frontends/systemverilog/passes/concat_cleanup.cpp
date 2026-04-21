@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <format>
 
-namespace custom_hdl {
+namespace mate {
 
 bool cleanupConcats(DFG& graph) {
     bool changed = false;
@@ -95,4 +95,4 @@ bool cleanupConcats(DFG& graph) {
     return changed;
 }
 
-} // namespace custom_hdl
+} // namespace mate

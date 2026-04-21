@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 // ============================================================================
 // Package import specification
@@ -139,4 +139,4 @@ struct UnresolvedModule {
         slang::syntax::SyntaxKind::ExpressionStatement,
     };
 
-} // namespace custom_hdl
+} // namespace mate

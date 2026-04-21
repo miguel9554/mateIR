@@ -9,7 +9,7 @@ namespace slang::syntax {
 class SyntaxTree;
 }
 
-namespace custom_hdl {
+namespace mate {
 
 struct ExtractedIR {
     std::vector<std::unique_ptr<UnresolvedModule>> modules;
@@ -20,4 +20,4 @@ struct ExtractedIR {
 // Build IR from a slang syntax tree
 ExtractedIR buildIR(const slang::syntax::SyntaxTree& tree);
 
-} // namespace custom_hdl
+} // namespace mate

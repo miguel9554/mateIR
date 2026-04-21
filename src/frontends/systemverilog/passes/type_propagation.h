@@ -2,7 +2,7 @@
 
 #include "mateir/dfg.h"
 
-namespace custom_hdl {
+namespace mate {
 
 // Propagate type info (width, signedness) from leaf nodes through the DFG.
 // Mutates the graph in-place. Returns true if any changes were made.
@@ -12,4 +12,4 @@ bool propagateTypes(DFG& graph);
 // Returns true if the type was newly set, false if already typed or deferred.
 bool inferNodeType(DFGNode* node);
 
-} // namespace custom_hdl
+} // namespace mate

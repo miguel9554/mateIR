@@ -2,7 +2,7 @@
 
 This document describes how each feature of IEEE Std 1800-2023 §6 (Data types) is
 handled by this compiler. The compiler targets **synchronous RTL only**: it accepts
-synthesisable, clocked Verilog as input and lowers it into the `ResolvedModule` IR.
+synthesisable, clocked Verilog as input and lowers it into the `Module` IR.
 Many features in §6 exist solely for simulation, verification, or analogue modelling
 and are therefore not supported.
 
@@ -174,7 +174,7 @@ Only vector types with explicit user-defined widths are supported for RTL signal
 The `signed`/`unsigned` qualifiers are respected and affect arithmetic operator
 semantics (sign extension, comparison).
 
-All RTL signal types are stored as `ResolvedType` with `kind = Integer`. The
+All RTL signal types are stored as `Type` with `kind = Integer`. The
 `is_signed` flag in `ResolvedIntegerInfo` records the declared signedness.
 
 ### Parameter types
@@ -250,7 +250,7 @@ Interface-based typedefs (`typedef p.data_t my_t;`) are not supported.
 ## 6.19 Enumerations
 
 Enumerations are **supported** when the base type is an integer type. Each
-`enum` is stored in the IR as a `ResolvedType` with `kind = Enum`, carrying the
+`enum` is stored in the IR as a `Type` with `kind = Enum`, carrying the
 member names and their integer values in `ResolvedEnumInfo`.
 
 Supported forms:

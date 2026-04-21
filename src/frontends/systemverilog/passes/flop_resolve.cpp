@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace custom_hdl {
+namespace mate {
 
 namespace {
 
@@ -505,4 +505,4 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
 }
 
 
-} // namespace custom_hdl
+} // namespace mate

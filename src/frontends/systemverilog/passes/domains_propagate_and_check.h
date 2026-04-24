@@ -1,5 +1,7 @@
 #pragma once
 
+#include "frontends/systemverilog/domain_facts.h"
+#include "mateir/mateir.h"
 #include "mateir/module.h"
 
 namespace mate {
@@ -9,6 +11,6 @@ namespace mate {
 // - Validates clock/reset sync_kind on flop trigger signals
 // - Propagates clock_domain/clock_edge to internal signals and flop types
 // - CDC fanin validation: checks sync/async inputs only reach flops in their domain
-void domainsPropagateAndCheck(Module& module);
+void domainsPropagateAndCheck(MateIR& ir, const FrontendDomainFacts& domainFacts);
 
 } // namespace mate

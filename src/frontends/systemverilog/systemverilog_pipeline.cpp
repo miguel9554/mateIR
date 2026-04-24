@@ -258,7 +258,7 @@ void runMateIRPipeline(MateIR& ir,
         module.dfg->validateNoOrphans();
         module.dfg->validateStrictLiveDFG();
         validateFrontendDomainFacts(module, domainFacts);
-        runPass(13, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(module); });
+        runPass(13, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(ir, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::ofstream f(std::format("{}/13_domains_propagate_flops.txt", dir));

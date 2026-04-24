@@ -305,6 +305,17 @@ static std::string syncKindStr(SyncKind sk) {
     return "sync";
 }
 
+SyncKind syncKind(const SyncType& sync_type) {
+    if (std::holds_alternative<SyncSignal>(sync_type)) return SyncKind::Sync;
+    if (std::holds_alternative<ClockSignal>(sync_type)) return SyncKind::Clock;
+    if (std::holds_alternative<ResetSignal>(sync_type)) return SyncKind::Reset;
+    return SyncKind::Async;
+}
+
+SyncKind syncKind(const Signal& signal) {
+    return syncKind(signal.sync_type);
+}
+
 static std::string signalToJson(const Signal& s) {
     std::ostringstream ss;
     ss << "{";

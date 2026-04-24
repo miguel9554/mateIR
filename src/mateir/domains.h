@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace mate {
@@ -85,5 +86,32 @@ struct ResetDomain {
     HierSignalRef source;
     auto operator<=>(const ResetDomain&) const = default;
 };
+
+struct SyncSignal {
+    ClockId clock_domain = InvalidClockId;
+    ResetDomains reset_domains;
+    auto operator<=>(const SyncSignal&) const = default;
+};
+
+struct ClockSignal {
+    ClockId clock_domain = InvalidClockId;
+    auto operator<=>(const ClockSignal&) const = default;
+};
+
+struct ResetSignal {
+    ResetId reset_domain = InvalidResetId;
+    auto operator<=>(const ResetSignal&) const = default;
+};
+
+struct AsyncSignal {
+    auto operator<=>(const AsyncSignal&) const = default;
+};
+
+using SyncType = std::variant<
+    SyncSignal,
+    ClockSignal,
+    ResetSignal,
+    AsyncSignal
+>;
 
 } // namespace mate

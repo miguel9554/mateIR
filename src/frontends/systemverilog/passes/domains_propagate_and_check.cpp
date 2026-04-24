@@ -34,6 +34,20 @@ std::string flopBaseName(const std::string& dName) {
     return dName.substr(0, dName.size() - 2);
 }
 
+InstancePath childPath(InstancePath path, const std::string& instanceName) {
+    path.elems.push_back(instanceName);
+    return path;
+}
+
+std::string pathString(const InstancePath& path) {
+    std::string out;
+    for (const auto& elem : path.elems) {
+        if (!out.empty()) out += ".";
+        out += elem;
+    }
+    return out.empty() ? "<top>" : out;
+}
+
 const char* syncKindStr(SyncKind k) {
     return k == SyncKind::Sync  ? "Sync"  :
            k == SyncKind::Clock ? "Clock" :
@@ -291,9 +305,198 @@ void checkAndPropagateModule(Module& mod, const DFG* topDFG) {
     }
 }
 
+const ModuleDomainFacts& requireFacts(
+        const Module& module,
+        const InstancePath& path,
+        const FrontendDomainFacts& facts) {
+    ModuleOccurrenceKey key{path, module.name};
+    const auto* moduleFacts = facts.find(key);
+    if (!moduleFacts) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: missing domain facts for module '{}' at {}",
+            module.name, pathString(path)));
+    }
+    return *moduleFacts;
+}
+
+ClockId requireClockDomainForLocalClock(
+        const Module& module,
+        const InstancePath& path,
+        const MateIR& ir,
+        const ModuleDomainFacts& moduleFacts,
+        const std::string& localClockName,
+        const std::string& signalName) {
+    auto it = moduleFacts.resolved_input_domains.find(localClockName);
+    if (it == moduleFacts.resolved_input_domains.end() || !it->second.clock_domain) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+            "references unresolved clock domain '{}'",
+            signalName, module.name, pathString(path), localClockName));
+    }
+
+    ClockId id = *it->second.clock_domain;
+    if (id == InvalidClockId || id.value >= ir.clocks.size() ||
+            ir.clocks[id.value].id != id) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+            "references invalid ClockId {}",
+            signalName, module.name, pathString(path), id.value));
+    }
+    return id;
+}
+
+ResetId requireResetDomainForLocalReset(
+        const Module& module,
+        const InstancePath& path,
+        const MateIR& ir,
+        const ModuleDomainFacts& moduleFacts,
+        const std::string& localResetName,
+        const std::string& signalName) {
+    auto it = moduleFacts.resolved_input_domains.find(localResetName);
+    if (it == moduleFacts.resolved_input_domains.end() || !it->second.reset_domain) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+            "references unresolved reset domain '{}'",
+            signalName, module.name, pathString(path), localResetName));
+    }
+
+    ResetId id = *it->second.reset_domain;
+    if (id == InvalidResetId || id.value >= ir.resets.size() ||
+            ir.resets[id.value].id != id) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+            "references invalid ResetId {}",
+            signalName, module.name, pathString(path), id.value));
+    }
+    return id;
+}
+
+bool resetDomainsSortedUnique(const ResetDomains& domains) {
+    for (size_t i = 1; i < domains.ids.size(); ++i) {
+        if (!(domains.ids[i - 1] < domains.ids[i])) return false;
+    }
+    return true;
+}
+
+void validateSyncTypeIds(
+        const MateIR& ir,
+        const SyncType& syncType,
+        const Module& module,
+        const InstancePath& path,
+        const std::string& signalName) {
+    if (const auto* sync = std::get_if<SyncSignal>(&syncType)) {
+        ClockId id = sync->clock_domain;
+        if (id == InvalidClockId || id.value >= ir.clocks.size() ||
+                ir.clocks[id.value].id != id) {
+            throw CompilerError(std::format(
+                "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+                "has invalid SyncSignal ClockId {}",
+                signalName, module.name, pathString(path), id.value));
+        }
+        if (!resetDomainsSortedUnique(sync->reset_domains)) {
+            throw CompilerError(std::format(
+                "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+                "has unsorted or duplicate reset domains",
+                signalName, module.name, pathString(path)));
+        }
+        for (ResetId resetId : sync->reset_domains.ids) {
+            if (resetId == InvalidResetId || resetId.value >= ir.resets.size() ||
+                    ir.resets[resetId.value].id != resetId) {
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+                    "has invalid SyncSignal ResetId {}",
+                    signalName, module.name, pathString(path), resetId.value));
+            }
+        }
+        return;
+    }
+
+    if (const auto* clock = std::get_if<ClockSignal>(&syncType)) {
+        ClockId id = clock->clock_domain;
+        if (id == InvalidClockId || id.value >= ir.clocks.size() ||
+                ir.clocks[id.value].id != id) {
+            throw CompilerError(std::format(
+                "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+                "has invalid ClockSignal ClockId {}",
+                signalName, module.name, pathString(path), id.value));
+        }
+        return;
+    }
+
+    if (const auto* reset = std::get_if<ResetSignal>(&syncType)) {
+        ResetId id = reset->reset_domain;
+        if (id == InvalidResetId || id.value >= ir.resets.size() ||
+                ir.resets[id.value].id != id) {
+            throw CompilerError(std::format(
+                "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+                "has invalid ResetSignal ResetId {}",
+                signalName, module.name, pathString(path), id.value));
+        }
+    }
+}
+
+SyncType resolvedSyncTypeForSignal(
+        const Module& module,
+        const InstancePath& path,
+        const MateIR& ir,
+        const ModuleDomainFacts& moduleFacts,
+        const Signal& signal) {
+    switch (signal.sync_kind) {
+        case SyncKind::Clock:
+            return ClockSignal{
+                requireClockDomainForLocalClock(
+                    module, path, ir, moduleFacts, signal.name, signal.name),
+            };
+        case SyncKind::Reset:
+            return ResetSignal{
+                requireResetDomainForLocalReset(
+                    module, path, ir, moduleFacts, signal.name, signal.name),
+            };
+        case SyncKind::Async:
+            return AsyncSignal{};
+        case SyncKind::Sync:
+            if (!signal.clock_domain) return AsyncSignal{};
+            return SyncSignal{
+                .clock_domain = requireClockDomainForLocalClock(
+                    module, path, ir, moduleFacts, signal.clock_domain->name, signal.name),
+                .reset_domains = {},
+            };
+    }
+    return AsyncSignal{};
+}
+
+void assignSignalSyncTypes(
+        Module& module,
+        const InstancePath& path,
+        const MateIR& ir,
+        const FrontendDomainFacts& facts) {
+    const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
+
+    auto assign = [&](Signal& signal) {
+        signal.sync_type = resolvedSyncTypeForSignal(module, path, ir, moduleFacts, signal);
+        validateSyncTypeIds(ir, signal.sync_type, module, path, signal.name);
+
+        bool unresolvedLegacySync = signal.sync_kind == SyncKind::Sync && !signal.clock_domain;
+        if (!unresolvedLegacySync && syncKind(signal) != signal.sync_kind) {
+            throw CompilerError(std::format(
+                "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+                "has legacy/new sync kind mismatch",
+                signal.name, module.name, pathString(path)));
+        }
+    };
+
+    for (auto& [name, signal] : module.inputs) assign(signal);
+    for (auto& [name, signal] : module.outputs) assign(signal);
+    for (auto& [name, signal] : module.signals) assign(signal);
+
+    for (auto& sub : module.hierarchyInstantiation)
+        assignSignalSyncTypes(sub, childPath(path, sub.instance_name), ir, facts);
+}
+
 } // anonymous namespace
 
-void domainsPropagateAndCheck(Module& module) {
+void domainsPropagateAndCheck(MateIR& ir, const FrontendDomainFacts& domainFacts) {
+    Module& module = ir.top;
     // Bottom-up: process submodules first
     std::function<void(Module&)> process = [&](Module& mod) {
         for (auto& sub : mod.hierarchyInstantiation)
@@ -301,6 +504,7 @@ void domainsPropagateAndCheck(Module& module) {
         checkAndPropagateModule(mod, module.dfg.get());
     };
     process(module);
+    assignSignalSyncTypes(module, {}, ir, domainFacts);
 }
 
 } // namespace mate

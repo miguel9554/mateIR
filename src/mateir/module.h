@@ -84,6 +84,9 @@ const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop);
 DFGNode* scalarFlopDNode(const FlopInfo& flop);
 DFGNode* scalarFlopQNode(const FlopInfo& flop);
 
+SyncKind syncKind(const SyncType& sync_type);
+SyncKind syncKind(const Signal& signal);
+
 // ============================================================================
 // Signal and parameter structures
 // ============================================================================
@@ -99,6 +102,7 @@ struct Signal : SignalBase {
     SyncKind sync_kind = SyncKind::Sync;
     Signal* clock_domain = nullptr;
     std::optional<edge_t> clock_edge;
+    SyncType sync_type = AsyncSignal{};
     // Leaf bindings in declaration order. This is the authoritative source.
     SignalBinding binding;
     void print(std::ostream& os) const {

@@ -73,8 +73,8 @@ Goal: introduce the final domain datatypes without migrating behavior.
 Changes:
 
 - Add:
-  - `ClockId`
-  - `ResetId`
+  - `ClockId` typed wrapper
+  - `ResetId` typed wrapper
   - `ResetDomains`
   - `ClockDomain`
   - `ResetDomain`
@@ -108,6 +108,7 @@ Changes:
 
 - Add SystemVerilog frontend-private structures for:
   - YAML-derived local classifications.
+  - Optional/unresolved sync-type construction state.
   - Local parsed event controls from timing blocks.
   - Local clock/reset trigger facts from flop resolution.
   - Temporary instantiation input-connection facts.
@@ -142,6 +143,8 @@ Changes:
 - Add a new global-domain resolution pass after `flop_resolve`.
 - Use local flop trigger facts as the source of truth.
 - Walk hierarchy using frontend-private connection facts.
+- Intern domains by `(source, edge)` for clocks and `(source, active_edge)` for
+  resets.
 - Create:
 
 ```cpp
@@ -160,6 +163,8 @@ ResetDomains reset_domains;
 - Do not remove old `FlopInfo::clock` / `FlopInfo::reset`.
 - Add consistency assertions comparing old translated-string behavior with new
   IDs where practical.
+- Validate that every produced ID points into the corresponding `MateIR`
+  registry.
 
 Expected behavior:
 
@@ -201,6 +206,9 @@ std::map<ResetId, std::vector<CollectedFlop>> flops_by_reset;
 ```
 
 - Group each flop under every reset ID in `flop.reset_domains`.
+- Preserve the current reset-action model: any reset domain attached to a flop
+  applies the same `reset_value`. Reject reset/set chains or multiple reset
+  sources with different forced values rather than encoding them incorrectly.
 - Keep old local trigger fields temporarily if needed for validation/debug, but
   stop simulator consumers from using them.
 
@@ -223,6 +231,8 @@ Changes:
 
 - Add `SyncType sync_type` to `Signal`.
 - Populate it from global-domain resolution and propagation.
+- Keep unresolved/optional sync state frontend-private; final `MateIR` signals
+  should always have a concrete `SyncType`.
 - Keep old fields temporarily:
   - `Signal::sync_kind`
   - `Signal::clock_domain`
@@ -257,7 +267,8 @@ Changes:
 - Propagate signal clock/reset info using final rules:
   - same clock domain remains `SyncSignal`
   - multiple clock domains become `AsyncSignal`
-  - reset-domain sets are unioned
+  - reset-domain sets are unioned only while the result remains `SyncSignal`
+  - when the result becomes `AsyncSignal`, reset-domain information is discarded
 - Use YAML only for:
   - top-level input assumptions
   - synchronizer declarations

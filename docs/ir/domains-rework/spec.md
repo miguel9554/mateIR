@@ -30,25 +30,48 @@ performs top-down domain resolution.
 
 ## Global domain IDs
 
-Use stable IDs over raw C++ pointers as the primary references.
+Use stable typed IDs over raw C++ pointers as the primary references.
 
 Pointers are convenient inside one process, but IDs are easier to serialize,
 copy, move, inspect, and test. The API can still provide helper accessors that
 feel pointer-like.
 
 ```cpp
-using ClockId = uint32_t;
-using ResetId = uint32_t;
+struct ClockId {
+    uint32_t value;
+    auto operator<=>(const ClockId&) const = default;
+};
+
+struct ResetId {
+    uint32_t value;
+    auto operator<=>(const ResetId&) const = default;
+};
 ```
+
+Use distinct wrapper types instead of `using ClockId = uint32_t` /
+`using ResetId = uint32_t`. Clock and reset IDs are used widely enough that
+accidentally passing a reset ID where a clock ID is expected should be a compile
+error.
+
+IDs are local to one `MateIR` domain registry. In final IR, every ID reference
+must satisfy:
+
+```cpp
+id.value < registry.size()
+registry[id.value].id == id
+```
+
+That makes the vectors the owning registries and keeps lookup cheap while still
+allowing IDs to be copied through the IR.
 
 Clock IDs and reset IDs identify global domain objects. Clock membership is
 singular: a synchronous value is synchronous to exactly one known clock domain.
 If multiple clock domains meet, the result is asynchronous because it is not
 synchronous to any single known clock.
 
-Reset membership is not singular. A value can be influenced by zero, one, or
-many reset domains while still being synchronous to one clock domain. Represent
-reset membership as a sorted unique set:
+Reset membership is not singular for synchronous values. A synchronous value can
+be influenced by zero, one, or many reset domains while still being synchronous
+to one clock domain. Represent reset membership as a sorted unique set:
 
 ```cpp
 struct ResetDomains {
@@ -56,7 +79,12 @@ struct ResetDomains {
 };
 ```
 
-An empty set means no reset-domain dependency is known.
+An empty set means no reset-domain dependency is present in final IR.
+
+Reset membership is not carried by `AsyncSignal`. If a value is asynchronous,
+the IR does not try to preserve which reset sources may have influenced it. The
+consumer must treat it as asynchronous and synchronize it before using it in a
+clocked domain.
 
 The unique domain objects should live at the whole-design IR level, for example
 on `MateIR`, or temporarily on the top module if that is more convenient during
@@ -80,6 +108,16 @@ struct ResetDomain {
 
 `display_name` is for diagnostics and JSON output. It should not be the
 authoritative identity of the domain.
+
+The semantic key used when creating/interning domains is:
+
+- Clock domain: `(source, edge)`
+- Reset domain: `(source, active_edge)`
+
+Therefore `posedge clk` and `negedge clk` on the same source signal are two
+different clock domains, and active-high versus active-low use of the same reset
+source are two different reset domains. Once a domain is interned, the
+authoritative identity used by the rest of the IR is its ID.
 
 `source` is the signal occurrence that originates the clock/reset domain. For a
 simple external clock, that source is a top-level input port. In the future, for
@@ -227,14 +265,25 @@ The invariants are encoded by the variant:
   zero-or-more reset domains.
 - `ClockSignal`: clock signal. It carries/defines exactly one clock domain.
 - `ResetSignal`: reset signal. It carries/defines exactly one reset domain.
-- `AsyncSignal`: asynchronous data. It has no clock/reset domain.
+- `AsyncSignal`: asynchronous data. It has no clock/reset domain and does not
+  preserve reset-domain influence.
+
+Final `MateIR` must contain a concrete resolved `SyncType` for every `Signal`.
+There is intentionally no `UnresolvedSignal` / `UnknownSignal` case in this
+public IR datatype. The frontend may use `std::optional<SyncType>`, side tables,
+or other private construction state while resolving domains, but unresolved
+state must not escape into final IR.
 
 When signal domains are propagated through combinational logic, clock domains
 and reset domains combine differently:
 
 - Clock domain: keep the clock only when all contributors have the same
   `ClockId`; if multiple clock domains meet, the result is `AsyncSignal`.
-- Reset domains: union the reset-domain sets from all contributors.
+- Reset domains: when the result remains `SyncSignal`, union the reset-domain
+  sets from all synchronous contributors.
+- If the result becomes `AsyncSignal`, discard reset-domain information. An
+  asynchronous value must be synchronized regardless of which reset sources may
+  have affected it.
 
 `SyncKind` may remain as a derived helper enum for compatibility, printing, JSON,
 and switch statements:
@@ -281,6 +330,19 @@ Current RTL lowering commonly produces zero or one direct reset for a flop, but
 the IR should allow multiple reset domains. For example, a flop may be reset by
 logic that ORs together two reset sources. In that case, the flop is still in one
 clock domain, but has two reset domains.
+
+Multiple reset domains on one flop mean multiple reset sources cause the same
+reset action: assigning the single static `reset_value` to the flop. The target
+IR does not represent reset/set priority chains or different reset values per
+reset source. A frontend that sees a flop where different reset sources force
+different values, or where one source behaves as reset and another as set, must
+reject it until the IR grows explicit per-reset actions.
+
+The final `FlopInfo` invariants are:
+
+- `reset_domains.ids.empty()` implies `reset_value == std::nullopt`.
+- `!reset_domains.ids.empty()` implies `reset_value.has_value()`.
+- Every reset domain in `reset_domains` forces the same `reset_value`.
 
 `FlopInfo::type` should be a `Type`, not a `Signal`.
 

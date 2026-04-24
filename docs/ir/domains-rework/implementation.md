@@ -58,9 +58,13 @@ facts.
 In final IR:
 
 - `MateIR::clocks` and `MateIR::resets` contain the unique global domains.
+- All clock/reset IDs stored in signals and flops are valid IDs into those
+  registries.
 - `Signal::sync_type` directly references global clock/reset IDs when relevant.
 - `FlopInfo` directly references its global clock ID and zero-or-more global
   reset IDs.
+- Every `Signal` has a concrete resolved `SyncType`; unresolved construction
+  state is frontend-private only.
 - Local Verilog trigger strings should not remain as semantic flop state.
 - Local pointer links such as `Signal* clock_domain` should not remain.
 - `asyncPortConnections` should not remain.
@@ -76,6 +80,8 @@ of MateIR.
 Examples of acceptable frontend-private data:
 
 - YAML-derived local classifications before global domain IDs are assigned.
+- Optional/unresolved `SyncType` side tables before final signal sync types are
+  committed to `MateIR`.
 - Local parsed event controls from `always_ff` / timing controls.
 - Temporary maps from local trigger names to inferred clock/reset roles.
 - Temporary instantiation input-connection facts.
@@ -132,6 +138,34 @@ is not itself a final IR concept.
 
 Once global IDs are assigned to the child signals, the port connection facts can
 be discarded.
+
+## Domain interning keys
+
+When the frontend creates global domains, it should intern them by the semantic
+source plus active edge:
+
+```text
+clock key = (HierSignalRef source, edge)
+reset key = (HierSignalRef source, active_edge)
+```
+
+This means two local names connected to the same top-level clock source and edge
+resolve to the same `ClockId`. The same source used with different edges resolves
+to different domains.
+
+The ID is still the authoritative identity after interning. `display_name`
+should be derived diagnostic text only.
+
+## Reset-domain sets
+
+The target IR allows a flop to reference more than one reset domain, but those
+domains currently mean "different reset sources that cause the same reset
+action." A flop with multiple reset domains still has one `reset_value`, and
+each reset source forces that same value.
+
+Do not silently encode reset/set chains or reset sources that force different
+values. The frontend should reject those until the IR has explicit per-reset
+actions or priority metadata.
 
 ## Removing asyncPortConnections
 

@@ -155,6 +155,30 @@ void validateModuleFacts(const Module& module,
         }
     }
 
+    for (const auto& [flopName, resolvedFact] : moduleFacts->resolved_flop_domains) {
+        auto it = std::ranges::find_if(module.flops, [&](const FlopInfo& flop) {
+            return flop.name == flopName;
+        });
+        if (it == module.flops.end()) {
+            throw CompilerError(std::format(
+                "frontend_domain_facts: resolved flop domain '{}' missing public FlopInfo "
+                "in module '{}'",
+                flopName, module.name));
+        }
+        if (it->clock_domain != resolvedFact.clock_domain) {
+            throw CompilerError(std::format(
+                "frontend_domain_facts: resolved clock domain mismatch for flop '{}' "
+                "in module '{}'",
+                flopName, module.name));
+        }
+        if (it->reset_domains != resolvedFact.reset_domains) {
+            throw CompilerError(std::format(
+                "frontend_domain_facts: resolved reset domains mismatch for flop '{}' "
+                "in module '{}'",
+                flopName, module.name));
+        }
+    }
+
     for (const auto& connFact : moduleFacts->child_input_connections) {
         if (connFact.expr_kind != ConnectionExprKind::SimpleIdentifier) continue;
         auto childIt = std::ranges::find_if(module.hierarchyInstantiation, [&](const Module& sub) {

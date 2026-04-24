@@ -10,7 +10,7 @@ std::string SimulatorConsumer::name() const {
 }
 
 void SimulatorConsumer::consume(const MateIR& ir) {
-    Simulator sim(ir.top, config_);
+    Simulator sim(ir, config_);
     sim.run();
 }
 

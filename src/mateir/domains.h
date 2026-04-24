@@ -27,6 +27,9 @@ struct ResetId {
     auto operator<=>(const ResetId&) const = default;
 };
 
+inline constexpr ClockId InvalidClockId{UINT32_MAX};
+inline constexpr ResetId InvalidResetId{UINT32_MAX};
+
 struct ResetDomains {
     std::vector<ResetId> ids; // sorted unique
 

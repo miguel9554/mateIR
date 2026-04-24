@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mateir/module.h"
+#include "mateir/mateir.h"
 #include "mateir/debug.h"
 #include "sim/sim_value.h"
 #include "sim/vcd_writer.h"
@@ -36,8 +36,8 @@ struct AsyncEvent {
 
 struct CollectedFlop {
     const FlopInfo* flop;
-    std::string clock_name;
-    std::optional<std::string> reset_name;
+    ClockId clock_domain;
+    ResetDomains reset_domains;
 };
 
 // Runtime state for the flat (inlined) design.
@@ -46,6 +46,7 @@ struct CollectedFlop {
 struct ModuleInstance {
     std::string instance_name;
     const Module& module_def;
+    const MateIR& ir;
 
     // Runtime values for all DFG nodes (flat — covers entire design hierarchy)
     std::map<const DFGNode*, SimValue> values;
@@ -56,11 +57,10 @@ struct ModuleInstance {
     // Flat topology and flop maps (cover all submodules after inlining)
     std::vector<const DFGNode*> topo_order;
     std::map<const DFGNode*, const FlopInfo*> flop_q_nodes;
-    std::map<std::string, std::vector<CollectedFlop>> flops_by_clock;
-    std::map<std::string, std::vector<CollectedFlop>> flops_by_reset;
-    std::set<std::string> async_input_names;  // input ports used as clock/reset
+    std::map<ClockId, std::vector<CollectedFlop>> flops_by_clock;
+    std::map<ResetId, std::vector<CollectedFlop>> flops_by_reset;
 
-    ModuleInstance(const std::string& name, const Module& mod);
+    ModuleInstance(const std::string& name, const Module& mod, const MateIR& ir);
 
     // Construction helpers
     void buildTopology();
@@ -83,10 +83,11 @@ struct ModuleInstance {
 
 class Simulator {
 public:
-    Simulator(const Module& module, const SimConfig& config);
+    Simulator(const MateIR& ir, const SimConfig& config);
     void run();
 
 private:
+    const MateIR& ir_;
     const Module& module_;
     const SimConfig& config_;
 
@@ -96,8 +97,11 @@ private:
     // Testbench infrastructure
     std::vector<AsyncEvent> timeline_;
     std::set<std::string> async_inputs_;
-    // Sync input -> clock name
-    std::map<std::string, std::string> sync_input_clock_;
+    std::map<std::string, std::vector<ClockId>> clock_domains_by_top_input_;
+    std::map<std::string, std::vector<ResetId>> reset_domains_by_top_input_;
+    std::map<ResetId, std::string> reset_top_input_by_id_;
+    // Sync input -> clock domain
+    std::map<std::string, ClockId> sync_input_clock_;
     std::map<std::string, std::vector<SimValue>> sync_input_data_;
     std::map<std::string, size_t> sync_input_pos_;
     std::map<std::string, std::vector<SimValue>> recorded_values_;
@@ -105,9 +109,12 @@ private:
     std::unique_ptr<VcdWriter> vcd_;
 
     // Testbench methods
+    void buildTopInputDomainMaps();
     void buildTimeline();
     void loadSyncInputs();
-    void advanceSyncInputs(const std::set<std::string>& active_clocks);
+    void advanceSyncInputs(const std::set<ClockId>& active_clocks);
+    bool resetDomainActive(ResetId id) const;
+    std::set<ResetId> activeResetDomains() const;
     void recordOutputs();
     void writeOutputFiles();
 };

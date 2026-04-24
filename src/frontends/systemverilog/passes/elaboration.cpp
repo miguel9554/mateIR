@@ -4490,6 +4490,8 @@ static void resolveGenerateScopeDecls(
                 .clock      = {},
                 .reset      = std::nullopt,
                 .reset_value = std::nullopt,
+                .clock_domain = InvalidClockId,
+                .reset_domains = {},
                 .binding    = FlopBinding{.d_leaves = {d_node}, .q_leaves = {q_node}},
             });
         } else {
@@ -5051,6 +5053,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                 .clock = {},
                 .reset = std::nullopt,
                 .reset_value = std::nullopt,
+                .clock_domain = InvalidClockId,
+                .reset_domains = {},
                 .binding = {},
                 });
         flopNames.insert(flop.name);

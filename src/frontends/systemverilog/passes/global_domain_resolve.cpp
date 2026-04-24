@@ -1,5 +1,6 @@
 #include "frontends/systemverilog/passes/global_domain_resolve.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <format>
 #include <map>
@@ -156,7 +157,7 @@ private:
         return it->second;
     }
 
-    void resolveModule(const Module& module,
+    void resolveModule(Module& module,
                        const InstancePath& path,
                        const SourceMap& incomingClockSources,
                        const SourceMap& incomingResetSources) {
@@ -211,7 +212,7 @@ private:
 
         resolveFlopDomains(module, path, moduleFacts, localClockIds, localResetIds);
 
-        for (const auto& child : module.hierarchyInstantiation) {
+        for (auto& child : module.hierarchyInstantiation) {
             InstancePath childInstancePath = childPath(path, child.instance_name);
             const auto& childFacts = requireFacts(child, childInstancePath);
 
@@ -293,7 +294,7 @@ private:
         return parentSourceIt->second;
     }
 
-    void resolveFlopDomains(const Module& module,
+    void resolveFlopDomains(Module& module,
                             const InstancePath& path,
                             ModuleDomainFacts& moduleFacts,
                             const std::map<std::string, ClockId>& localClockIds,
@@ -323,11 +324,24 @@ private:
                 resetDomains.insert(resetIt->second);
             }
 
-            moduleFacts.resolved_flop_domains[flopName] = ResolvedFlopDomainFact{
+            ResolvedFlopDomainFact resolved{
                 .flop_name = flopName,
                 .clock_domain = clockIt->second,
                 .reset_domains = std::move(resetDomains),
             };
+            moduleFacts.resolved_flop_domains[flopName] = resolved;
+
+            auto flopIt = std::ranges::find_if(module.flops, [&](const FlopInfo& flop) {
+                return flop.name == flopName;
+            });
+            if (flopIt == module.flops.end()) {
+                throw CompilerError(std::format(
+                    "global_domain_resolve: resolved flop '{}' missing public FlopInfo "
+                    "in module '{}' at {}",
+                    flopName, module.name, pathString(path)));
+            }
+            flopIt->clock_domain = resolved.clock_domain;
+            flopIt->reset_domains = std::move(resolved.reset_domains);
         }
     }
 

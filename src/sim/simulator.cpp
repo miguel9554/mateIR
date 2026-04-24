@@ -79,14 +79,24 @@ bool useSignedCompare(const DFGNode* lhs, const DFGNode* rhs) {
     return nodeSigned(lhs) && nodeSigned(rhs);
 }
 
+bool isTopInputSource(const HierSignalRef& source) {
+    return source.instance_path.elems.empty() && source.ns == SignalNamespace::Input;
+}
+
+bool isActiveLevel(const SimValue& value, edge_t active_edge) {
+    return active_edge == POSEDGE
+        ? (!value.isZero() && value.lowU64() == 1)
+        : value.isZero();
+}
+
 } // namespace
 
 // ============================================================================
 // ModuleInstance
 // ============================================================================
 
-ModuleInstance::ModuleInstance(const std::string& name, const Module& mod)
-    : instance_name(name), module_def(mod)
+ModuleInstance::ModuleInstance(const std::string& name, const Module& mod, const MateIR& mate_ir)
+    : instance_name(name), module_def(mod), ir(mate_ir)
 {
     buildFlopMaps();
     buildTopology();
@@ -160,50 +170,50 @@ void ModuleInstance::buildTopology() {
 void ModuleInstance::buildFlopMaps() {
     // Collect flops from the entire hierarchy (all submodules, bottom-up).
     // After DFG inlining, flop binding pointers are valid in the flat top DFG.
-    //
-    // translation: maps this module's async port names -> top-level signal names.
-    // At the top level it is empty (identity). For each submodule it is composed
-    // from the parent's translation and the submodule's asyncPortConnections.
-    using NameMap = std::map<std::string, std::string>;
-    auto translate = [](const std::string& name, const NameMap& map) -> const std::string& {
-        auto it = map.find(name);
-        return it != map.end() ? it->second : name;
-    };
-
-    std::function<void(const Module&, const NameMap&)> collect =
-        [&](const Module& mod, const NameMap& translation) {
+    std::function<void(const Module&)> collect = [&](const Module& mod) {
         for (const auto& flop : mod.flops) {
             for (auto* qLeaf : flopQLeaves(flop)) {
                 if (qLeaf) flop_q_nodes[qLeaf] = &flop;
             }
+            if (flop.clock_domain == InvalidClockId) {
+                throw CompilerError(std::format(
+                    "Simulator: flop '{}' has no resolved clock domain", flop.name));
+            }
+            if (flop.clock_domain.value >= ir.clocks.size() ||
+                    ir.clocks[flop.clock_domain.value].id != flop.clock_domain) {
+                throw CompilerError(std::format(
+                    "Simulator: flop '{}' has invalid ClockId {}",
+                    flop.name, flop.clock_domain.value));
+            }
+            for (ResetId resetId : flop.reset_domains.ids) {
+                if (resetId == InvalidResetId ||
+                        resetId.value >= ir.resets.size() ||
+                        ir.resets[resetId.value].id != resetId) {
+                    throw CompilerError(std::format(
+                        "Simulator: flop '{}' has invalid ResetId {}",
+                        flop.name, resetId.value));
+                }
+            }
+            if (!flop.reset_domains.empty() && !flop.reset_value.has_value()) {
+                throw CompilerError(std::format(
+                    "Simulator: flop '{}' has reset domains but no reset value",
+                    flop.name));
+            }
             CollectedFlop collected{
                 .flop = &flop,
-                .clock_name = "",
-                .reset_name = std::nullopt,
+                .clock_domain = flop.clock_domain,
+                .reset_domains = flop.reset_domains,
             };
-            if (!flop.clock.name.empty()) {
-                collected.clock_name = translate(flop.clock.name, translation);
-                async_input_names.insert(collected.clock_name);
+            for (ResetId resetId : collected.reset_domains.ids) {
+                flops_by_reset[resetId].push_back(collected);
             }
-            if (flop.reset.has_value()) {
-                collected.reset_name = translate(flop.reset->name, translation);
-                flops_by_reset[*collected.reset_name].push_back(collected);
-                async_input_names.insert(*collected.reset_name);
-            }
-            if (!collected.clock_name.empty()) {
-                flops_by_clock[collected.clock_name].push_back(std::move(collected));
-            }
+            flops_by_clock[collected.clock_domain].push_back(std::move(collected));
         }
         for (const auto& sub : mod.hierarchyInstantiation) {
-            // Compose: sub port name -> top-level name
-            NameMap composed;
-            for (const auto& [port, parent_sig] : sub.asyncPortConnections) {
-                composed[port] = translate(parent_sig, translation);
-            }
-            collect(sub, composed);
+            collect(sub);
         }
     };
-    collect(module_def, {});
+    collect(module_def);
 }
 
 // ============================================================================
@@ -514,6 +524,31 @@ static int64_t parseTimeWithUnit(const std::string& token,
 // Build async event timeline from clock/reset input files
 // ============================================================================
 
+void Simulator::buildTopInputDomainMaps() {
+    clock_domains_by_top_input_.clear();
+    reset_domains_by_top_input_.clear();
+    reset_top_input_by_id_.clear();
+
+    for (const auto& clock : ir_.clocks) {
+        if (!isTopInputSource(clock.source)) {
+            throw CompilerError(std::format(
+                "Simulator: clock domain '{}' has unsupported non-top-input source",
+                clock.display_name));
+        }
+        clock_domains_by_top_input_[clock.source.name].push_back(clock.id);
+    }
+
+    for (const auto& reset : ir_.resets) {
+        if (!isTopInputSource(reset.source)) {
+            throw CompilerError(std::format(
+                "Simulator: reset domain '{}' has unsupported non-top-input source",
+                reset.display_name));
+        }
+        reset_domains_by_top_input_[reset.source.name].push_back(reset.id);
+        reset_top_input_by_id_[reset.id] = reset.source.name;
+    }
+}
+
 void Simulator::buildTimeline() {
     // Determine which inputs are async (clocks, resets, and async data) from resolved input types
     for (const auto& [name, input] : module_.inputs) {
@@ -528,7 +563,22 @@ void Simulator::buildTimeline() {
     for (const auto& [name, input] : module_.inputs) {
         if (async_inputs_.count(name)) continue;
         if (input.clock_domain && input.clock_edge.has_value()) {
-            sync_input_clock_[name] = input.clock_domain->name;
+            auto clockIt = clock_domains_by_top_input_.find(input.clock_domain->name);
+            if (clockIt == clock_domains_by_top_input_.end()) {
+                throw CompilerError(std::format(
+                    "Simulator: sync input '{}' references unknown clock domain '{}'",
+                    name, input.clock_domain->name));
+            }
+            auto match = std::ranges::find_if(clockIt->second, [&](ClockId id) {
+                return ir_.clocks[id.value].edge == *input.clock_edge;
+            });
+            if (match == clockIt->second.end()) {
+                throw CompilerError(std::format(
+                    "Simulator: sync input '{}' references clock domain '{}' with no "
+                    "matching global edge",
+                    name, input.clock_domain->name));
+            }
+            sync_input_clock_[name] = *match;
         }
     }
 
@@ -640,7 +690,7 @@ void Simulator::loadSyncInputs() {
 // Sync input advancement
 // ============================================================================
 
-void Simulator::advanceSyncInputs(const std::set<std::string>& active_clocks) {
+void Simulator::advanceSyncInputs(const std::set<ClockId>& active_clocks) {
     for (auto& [name, pos] : sync_input_pos_) {
         // Only advance if this input's clock had its active edge
         auto clk_it = sync_input_clock_.find(name);
@@ -654,6 +704,30 @@ void Simulator::advanceSyncInputs(const std::set<std::string>& active_clocks) {
             root_->values[inputNode] = sync_input_data_[name][pos];
         }
     }
+}
+
+bool Simulator::resetDomainActive(ResetId id) const {
+    auto sourceIt = reset_top_input_by_id_.find(id);
+    if (sourceIt == reset_top_input_by_id_.end()) {
+        throw CompilerError(std::format(
+            "Simulator: reset domain {} has no top-level input source", id.value));
+    }
+    auto valueIt = root_->async_values.find(sourceIt->second);
+    if (valueIt == root_->async_values.end()) {
+        throw CompilerError(std::format(
+            "Simulator: reset input '{}' has no runtime value", sourceIt->second));
+    }
+    return isActiveLevel(valueIt->second, ir_.resets[id.value].active_edge);
+}
+
+std::set<ResetId> Simulator::activeResetDomains() const {
+    std::set<ResetId> active;
+    for (const auto& reset : ir_.resets) {
+        if (resetDomainActive(reset.id)) {
+            active.insert(reset.id);
+        }
+    }
+    return active;
 }
 
 // ============================================================================
@@ -687,15 +761,17 @@ void Simulator::writeOutputFiles() {
 // Constructor
 // ============================================================================
 
-Simulator::Simulator(const Module& module, const SimConfig& config)
-    : module_(module), config_(config)
+Simulator::Simulator(const MateIR& ir, const SimConfig& config)
+    : ir_(ir), module_(ir.top), config_(config)
 {
     if (!module_.dfg) {
         throw CompilerError("Simulator: module has no DFG");
     }
 
+    buildTopInputDomainMaps();
+
     // Create the root module instance (recursively creates children)
-    root_ = std::make_unique<ModuleInstance>(module_.name, module_);
+    root_ = std::make_unique<ModuleInstance>(module_.name, module_, ir_);
 
     buildTimeline();
     loadSyncInputs();
@@ -758,13 +834,12 @@ void Simulator::run() {
     }
 
     // 4. If any reset is asserted at time 0 (level check), apply it
-    for (const auto& [rst_name, flops] : root_->flops_by_reset) {
-        const SimValue& rst_val = async_prev[rst_name];
-        for (const auto& collected : flops) {
+    for (ResetId reset_id : activeResetDomains()) {
+        auto flopIt = root_->flops_by_reset.find(reset_id);
+        if (flopIt == root_->flops_by_reset.end()) continue;
+        for (const auto& collected : flopIt->second) {
             const auto* flop = collected.flop;
-            bool asserted = (flop->reset->edge == POSEDGE && !rst_val.isZero() && rst_val.lowU64() == 1) ||
-                            (flop->reset->edge == NEGEDGE && rst_val.isZero());
-            if (asserted && flop->reset_value.has_value()) {
+            if (flop->reset_value.has_value()) {
                 assignFlopResetLeaves(*root_, *flop, flop->reset_value.value());
             }
         }
@@ -806,8 +881,8 @@ void Simulator::run() {
                 batch_time));
         }
 
-        std::set<std::string> active_edge_clocks;
-        std::set<std::string> active_edge_resets;
+        std::set<ClockId> active_edge_clocks;
+        std::set<ResetId> active_edge_resets;
 
         for (const auto& [name, new_val] : new_async) {
             const SimValue& old_val = async_prev[name];
@@ -820,22 +895,24 @@ void Simulator::run() {
             if (!old_val.eq(new_val)) {
                 bool posedge = old_val.isZero() && !new_val.isZero() && new_val.lowU64() == 1;
                 bool negedge = !old_val.isZero() && old_val.lowU64() == 1 && new_val.isZero();
-                if (auto clock_it = root_->flops_by_clock.find(name);
-                    clock_it != root_->flops_by_clock.end()) {
-                    for (const auto& collected : clock_it->second) {
-                        if ((collected.flop->clock.edge == POSEDGE && posedge) ||
-                            (collected.flop->clock.edge == NEGEDGE && negedge)) {
-                            active_edge_clocks.insert(name);
-                            break;
+                if (auto clock_it = clock_domains_by_top_input_.find(name);
+                    clock_it != clock_domains_by_top_input_.end()) {
+                    for (ClockId id : clock_it->second) {
+                        const auto& clock = ir_.clocks[id.value];
+                        if ((clock.edge == POSEDGE && posedge) ||
+                            (clock.edge == NEGEDGE && negedge)) {
+                            active_edge_clocks.insert(id);
                         }
                     }
                 }
-                if (auto reset_it = root_->flops_by_reset.find(name);
-                    reset_it != root_->flops_by_reset.end() && !reset_it->second.empty()) {
-                    const auto* reset = reset_it->second.front().flop->reset ? &*reset_it->second.front().flop->reset : nullptr;
-                    if (reset && ((reset->edge == POSEDGE && posedge) ||
-                                  (reset->edge == NEGEDGE && negedge))) {
-                        active_edge_resets.insert(name);
+                if (auto reset_it = reset_domains_by_top_input_.find(name);
+                    reset_it != reset_domains_by_top_input_.end()) {
+                    for (ResetId id : reset_it->second) {
+                        const auto& reset = ir_.resets[id.value];
+                        if ((reset.active_edge == POSEDGE && posedge) ||
+                            (reset.active_edge == NEGEDGE && negedge)) {
+                            active_edge_resets.insert(id);
+                        }
                     }
                 }
             }
@@ -843,8 +920,8 @@ void Simulator::run() {
             async_prev[name] = new_val;
         }
 
-        for (const auto& reset_name : active_edge_resets) {
-            for (const auto& collected : root_->flops_by_reset[reset_name]) {
+        for (ResetId reset_id : active_edge_resets) {
+            for (const auto& collected : root_->flops_by_reset[reset_id]) {
                 const auto* flop = collected.flop;
                 if (flop->reset_value.has_value()) {
                     assignFlopResetLeaves(*root_, *flop, flop->reset_value.value());
@@ -852,15 +929,17 @@ void Simulator::run() {
             }
         }
 
-        for (const auto& clock_name : active_edge_clocks) {
-            for (const auto& collected : root_->flops_by_clock[clock_name]) {
+        for (ClockId clock_id : active_edge_clocks) {
+            for (const auto& collected : root_->flops_by_clock[clock_id]) {
                 const auto* flop = collected.flop;
-                if (flop->reset.has_value() && collected.reset_name.has_value()) {
-                    const SimValue& rst_val = root_->async_values[*collected.reset_name];
-                    bool rst_active = (flop->reset->edge == POSEDGE && !rst_val.isZero() && rst_val.lowU64() == 1) ||
-                                      (flop->reset->edge == NEGEDGE && rst_val.isZero());
-                    if (rst_active) continue;
+                bool reset_active = false;
+                for (ResetId reset_id : collected.reset_domains.ids) {
+                    if (resetDomainActive(reset_id)) {
+                        reset_active = true;
+                        break;
+                    }
                 }
+                if (reset_active) continue;
                 copyFlopDToQLeaves(*root_, *flop);
             }
         }

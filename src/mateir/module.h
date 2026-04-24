@@ -133,6 +133,8 @@ struct FlopInfo {
     asyncTrigger_t clock;
     std::optional<asyncTrigger_t> reset;
     std::optional<int> reset_value;
+    ClockId clock_domain = InvalidClockId;
+    ResetDomains reset_domains;
     // Leaf bindings in declaration order.
     FlopBinding binding;
 

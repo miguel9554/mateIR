@@ -87,9 +87,11 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
     }
 }
 
-void runMateIRPipeline(Module& topModule,
+void runMateIRPipeline(MateIR& ir,
                        const std::map<std::string, std::string>& domainPathsByModule,
                        const std::vector<DebugNodeSpec>& debugSpecs) {
+    Module& topModule = ir.top;
+
     validateDebugSpecsBeforePipeline(topModule, debugSpecs);
 
     std::set<size_t> satisfiedDebugSpecs;
@@ -288,7 +290,8 @@ void runMateIRPipeline(Module& topModule,
 MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
                                   const slang::SourceManager& sourceManager,
                                   const SystemVerilogCompileOptions& options) {
-    Module topModule = [&]() {
+    MateIR ir;
+    ir.top = [&]() -> Module {
         if (options.top_module) {
             ParameterContext topParams;
             for (const auto& [name, value] : options.parameters) {
@@ -300,14 +303,12 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
         return resolveModules(extracted.modules, extracted.packages, extracted.globalImports,
                               sourceManager);
     }();
-
-    auto domainPathsByModule = loadDomainPathsByModule(options.domain_files);
-    runMateIRPipeline(topModule, domainPathsByModule, options.debug_dfg_nodes);
-
-    MateIR ir;
-    ir.top = std::move(topModule);
     ir.source_files = options.source_files;
     ir.frontend_module_count = extracted.modules.size();
+
+    auto domainPathsByModule = loadDomainPathsByModule(options.domain_files);
+    runMateIRPipeline(ir, domainPathsByModule, options.debug_dfg_nodes);
+
     return ir;
 }
 

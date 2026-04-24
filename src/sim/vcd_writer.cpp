@@ -163,12 +163,12 @@ void VcdWriter::addSignalEntries(vcd_tracer::module& scope, const std::string& n
 
 void VcdWriter::addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
                                const std::unordered_set<const DFGNode*>& alive) {
-    if (flop.type.type.unpacked_dims.empty()) {
+    if (flop.type.unpacked_dims.empty()) {
         addEntry(scope, flop.name, scalarFlopQNode(flop), alive);
         return;
     }
 
-    auto suffixes = unpackedIndexSuffixes(flop.type.type);
+    auto suffixes = unpackedIndexSuffixes(flop.type);
     const auto& leaves = flopQLeaves(flop);
     for (size_t i = 0; i < suffixes.size() && i < leaves.size(); ++i) {
         addEntry(scope, flop.name + suffixes[i], leaves[i], alive);

@@ -1559,7 +1559,7 @@ const Type* lookupDeclaredType(const std::string& baseName,
     }
     for (const auto& flop : ctx.thisModule->flops) {
         if (flop.name == baseName) {
-            return &flop.type.type;
+            return &flop.type;
         }
     }
 
@@ -4046,7 +4046,7 @@ void prePopulateSignal(DFG& graph, Signal& sig) {
 // the FlopInfo (name + type). Called after flops are resolved, before signals.
 void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
     const std::string& name = flop.name;
-    const Type& type = flop.type.type;
+    const Type& type = flop.type;
     flop.binding.d_leaves.clear();
     flop.binding.q_leaves.clear();
 
@@ -4058,7 +4058,6 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
         qNode->type = type;
         flop.binding.d_leaves.push_back(dNode);
         flop.binding.q_leaves.push_back(qNode);
-        flop.type.binding.leaves = {qNode};
         return;
     }
 
@@ -4074,7 +4073,6 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
         qElem->type = elemType;
         flop.binding.q_leaves.push_back(qElem);
     }
-    flop.type.binding.leaves = flop.binding.q_leaves;
 }
 
 ParameterContext parseParameterValueAssignment(
@@ -4424,13 +4422,9 @@ static void resolveGenerateScopeDecls(
             std::string qualifiedName = ctx.instance_path.empty()
                 ? name : ctx.instance_path + "." + name;
 
-            Signal flopSig;
-            flopSig.name = qualifiedName;
-            flopSig.type = type;
-
             ctx.thisModule->flops.push_back(FlopInfo{
                 .name       = qualifiedName,
-                .type       = flopSig,
+                .type       = type,
                 .flop_type  = FLOP_D,
                 .clock      = {},
                 .reset      = std::nullopt,
@@ -4982,7 +4976,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager));
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedSignal.name,
-                .type = resolvedSignal,
+                .type = resolvedSignal.type,
                 .flop_type = FLOP_D,
                 .clock = {},
                 .reset = std::nullopt,

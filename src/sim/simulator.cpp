@@ -49,7 +49,7 @@ SimValue boolValue(bool value) {
 void assignFlopResetLeaves(ModuleInstance& root, const FlopInfo& flop, int64_t resetValue) {
     for (auto* qLeaf : flopQLeaves(flop)) {
         if (!qLeaf) continue;
-        const Type& type = qLeaf->type.value_or(flop.type.type);
+        const Type& type = qLeaf->type.value_or(flop.type);
         root.values[qLeaf] = simValueFromType(resetValue, type);
     }
 }
@@ -225,7 +225,7 @@ void ModuleInstance::initConsts() {
 void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
     // flop_q_nodes already covers all flops from all submodules (built by buildFlopMaps)
     for (const auto& [qnode, flop] : flop_q_nodes) {
-        const Type& type = qnode->type.value_or(flop->type.type);
+        const Type& type = qnode->type.value_or(flop->type);
         int w = type.width;
         if (mode == FlopsInitial::Random) {
             values[qnode] = SimValue::random(w, type.isSigned(), rng);

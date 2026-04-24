@@ -131,7 +131,7 @@ typedef enum {
 
 struct FlopInfo {
     std::string name;
-    Signal type;
+    Type type;
     flopType_t flop_type;
     asyncTrigger_t clock;
     std::optional<asyncTrigger_t> reset;

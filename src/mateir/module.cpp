@@ -156,6 +156,9 @@ void FlopInfo::print(std::ostream& os, int indent) const {
     os << indent_str(indent) << "Flop: " << name << std::endl;
     os << indent_str(indent + 1) << "type: ";
     type.print(os);
+    for (const auto& dim : type.unpacked_dims) {
+        os << "[" << dim.left << ":" << dim.right << "]";
+    }
     os << std::endl;
     os << indent_str(indent + 1) << "flop_type: ";
     switch (flop_type) {
@@ -327,7 +330,7 @@ static std::string flopToJson(const FlopInfo& f) {
     std::ostringstream ss;
     ss << "{";
     ss << "\"name\": \"" << f.name << "\", ";
-    ss << "\"type\": " << typeToJson(f.type.type) << ", ";
+    ss << "\"type\": " << typeToJson(f.type) << ", ";
     ss << "\"clock\": {\"edge\": \"" << (f.clock.edge == POSEDGE ? "posedge" : "negedge")
        << "\", \"name\": \"" << f.clock.name << "\"}";
     if (f.reset) {

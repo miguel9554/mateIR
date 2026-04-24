@@ -13,22 +13,13 @@ namespace mate {
 
 namespace {
 
-// Return all leaf element names for a signal (expanding dimensions)
-std::vector<std::string> allElements(const Signal& signal) {
-    std::vector<std::string> current = {signal.name};
-
-    for (const auto& dimension : signal.type.unpacked_dims) {
-        std::vector<std::string> next;
-        int step = (dimension.left <= dimension.right) ? 1 : -1;
-        for (const auto& prefix : current) {
-            for (int i = dimension.left; step > 0 ? i <= dimension.right : i >= dimension.right; i += step) {
-                next.push_back(prefix + "[" + std::to_string(i) + "]");
-            }
-        }
-        current = std::move(next);
+// Return all leaf element names for a flop (expanding unpacked dimensions).
+std::vector<std::string> allElements(const std::string& baseName, const Type& type) {
+    std::vector<std::string> names;
+    for (const auto& suffix : unpackedIndexSuffixes(type)) {
+        names.push_back(baseName + suffix);
     }
-
-    return current;
+    return names;
 }
 
 // Prefix a module-local name with the instance path for DFG node lookups.
@@ -278,7 +269,7 @@ FlopInfo extractFlopClockAndReset(
 {
     auto flop = flopIn;
     DFGNode* dNode = nullptr;
-    if (!flopIn.type.type.unpacked_dims.empty() && flop_name != flopIn.name) {
+    if (!flopIn.type.unpacked_dims.empty() && flop_name != flopIn.name) {
         dNode = graph.getOutputNode(instance_path, flop_name + ".d");
     } else {
         dNode = scalarFlopDNode(flopIn);
@@ -321,8 +312,7 @@ FlopInfo extractFlopClockAndReset(
         flop.reset_value = reset_value;
     }
     flop.name = flop_name;
-    flop.type.name = flop_name;
-    flop.type.type.unpacked_dims = {};
+    flop.type.unpacked_dims = {};
     return flop;
 }
 
@@ -425,7 +415,7 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
     // Extract clock/reset info and validate functional logic
     std::vector<FlopInfo> resolved_flops;
     for (const auto& flop : resolved.flops) {
-        for (const auto& name : allElements(flop.type)) {
+        for (const auto& name : allElements(flop.name, flop.type)) {
             DFGNode* functional_logic;
             resolved_flops.push_back(
                 extractFlopClockAndReset(graph, resolved, name, instance_path, flop, functional_logic));
@@ -437,7 +427,6 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
                     .d_leaves = {dNode},
                     .q_leaves = {qNode},
                 };
-                resolved_flops.back().type.binding.leaves = {qNode};
             }
             DFGNode* output = scalarFlopDNode(resolved_flops.back());
             const asyncTrigger_t clock = resolved_flops.back().clock;
@@ -468,15 +457,6 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
         }
     }
     resolved.flops = resolved_flops;
-
-    // Set clock_domain/clock_edge on each flop's type signal
-    for (auto& flop : resolved.flops) {
-        auto it = resolved.inputs.find(flop.clock.name);
-        if (it != resolved.inputs.end()) {
-            flop.type.clock_domain = &it->second;
-            flop.type.clock_edge = flop.clock.edge;
-        }
-    }
 
     // Build clock/reset name lists from inputs that were tagged
     std::vector<std::string> clocks;

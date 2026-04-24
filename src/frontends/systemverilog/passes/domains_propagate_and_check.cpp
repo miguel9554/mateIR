@@ -110,15 +110,6 @@ void checkAndPropagateModule(Module& mod, const DFG* topDFG) {
         }
     }
 
-    // Propagate to flop types
-    for (auto& flop : mod.flops) {
-        auto clk_it = mod.inputs.find(flop.clock.name);
-        if (clk_it != mod.inputs.end()) {
-            flop.type.clock_domain = &clk_it->second;
-            flop.type.clock_edge = flop.clock.edge;
-        }
-    }
-
     // d. CDC fanin validation
     if (!topDFG) return;
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mateir/dfg.h"
+#include "mateir/domains.h"
 #include "mateir/types.h"
 
 #include <map>
@@ -15,10 +16,6 @@ namespace mate {
 // ============================================================================
 // Util types for triggers
 // ============================================================================
-
-typedef enum {
-    POSEDGE, NEGEDGE
-} edge_t;
 
 typedef struct {
     edge_t edge;

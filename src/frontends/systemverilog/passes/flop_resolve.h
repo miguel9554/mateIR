@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mateir/module.h"
+#include "frontends/systemverilog/domain_facts.h"
 
 namespace mate {
 
@@ -12,7 +13,7 @@ namespace mate {
 //
 // Must run after constant folding and condition normalization so that
 // the reset MUX pattern is in canonical form.
-void resolveFlops(Module& module);
+void resolveFlops(Module& module, FrontendDomainFacts* domainFacts = nullptr);
 
 
 } // namespace mate

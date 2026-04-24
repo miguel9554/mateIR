@@ -22,15 +22,42 @@ std::vector<std::string> allElements(const std::string& baseName, const Type& ty
     return names;
 }
 
-// Prefix a module-local name with the instance path for DFG node lookups.
-// Empty instance_path means top module — no prefix needed.
-std::string inDFG(const std::string& instance_path, const std::string& name) {
-    return instance_path.empty() ? name : instance_path + "." + name;
+std::string inDFG(const InstancePath& instance_path) {
+    std::string out;
+    for (const auto& elem : instance_path.elems) {
+        if (!out.empty()) out += ".";
+        out += elem;
+    }
+    return out;
+}
+
+InstancePath childPath(InstancePath path, const std::string& instanceName) {
+    path.elems.push_back(instanceName);
+    return path;
 }
 
 DFGNode* nodeForTrigger(const Module& resolved, const asyncTrigger_t& trigger) {
     auto it = resolved.inputs.find(trigger.name);
     return it != resolved.inputs.end() ? scalarSignalNode(it->second) : nullptr;
+}
+
+EventTriggerFact eventFactFor(const ModuleDomainFacts* facts,
+                              const std::string& triggerKey,
+                              const asyncTrigger_t& trigger) {
+    if (facts) {
+        auto it = facts->flop_triggers.find(triggerKey);
+        if (it != facts->flop_triggers.end()) {
+            auto factIt = std::ranges::find_if(it->second.triggers, [&](const EventTriggerFact& fact) {
+                return fact.edge == trigger.edge && fact.local_signal_name == trigger.name;
+            });
+            if (factIt != it->second.triggers.end()) return *factIt;
+        }
+    }
+    return EventTriggerFact{
+        .edge = trigger.edge,
+        .local_signal_name = trigger.name,
+        .loc = std::nullopt,
+    };
 }
 
 bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
@@ -366,22 +393,39 @@ void check_logic_no_clock_reset(
 } // anonymous namespace
 
 // Forward declarations
-static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::string& instance_path);
-static void resolveFlopsRecursive(Module& module, DFG& topDFG, const std::string& instance_path);
+static void resolveFlopsForModule(Module& resolved,
+                                  DFG& graph,
+                                  const InstancePath& instance_path,
+                                  FrontendDomainFacts* domainFacts);
+static void resolveFlopsRecursive(Module& module,
+                                  DFG& topDFG,
+                                  const InstancePath& instance_path,
+                                  FrontendDomainFacts* domainFacts);
 
-void resolveFlops(Module& module) {
+void resolveFlops(Module& module, FrontendDomainFacts* domainFacts) {
     if (!module.dfg) return;
-    resolveFlopsRecursive(module, *module.dfg, "");
+    resolveFlopsRecursive(module, *module.dfg, {}, domainFacts);
 }
 
-static void resolveFlopsRecursive(Module& module, DFG& topDFG, const std::string& instance_path) {
+static void resolveFlopsRecursive(Module& module,
+                                  DFG& topDFG,
+                                  const InstancePath& instance_path,
+                                  FrontendDomainFacts* domainFacts) {
     // Bottom-up: resolve submodules first so their clock/reset types are tagged first
     for (auto& sub : module.hierarchyInstantiation)
-        resolveFlopsRecursive(sub, topDFG, inDFG(instance_path, sub.instance_name));
-    resolveFlopsForModule(module, topDFG, instance_path);
+        resolveFlopsRecursive(sub, topDFG, childPath(instance_path, sub.instance_name), domainFacts);
+    resolveFlopsForModule(module, topDFG, instance_path, domainFacts);
 }
 
-static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::string& instance_path) {
+static void resolveFlopsForModule(Module& resolved,
+                                  DFG& graph,
+                                  const InstancePath& instance_path,
+                                  FrontendDomainFacts* domainFacts) {
+    const std::string dfgInstancePath = inDFG(instance_path);
+    ModuleDomainFacts* privateFacts = nullptr;
+    if (domainFacts) {
+        privateFacts = &domainFacts->getOrCreate({instance_path, resolved.name});
+    }
     if (resolved.flops.empty()) {
         return;
     }
@@ -392,7 +436,7 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
     for (auto& [outName, output] : resolved.outputs) {
         if (!resolved.flopsTriggers.contains(outName)) continue;
         if (output.type.unpacked_dims.empty()) {
-            DFGNode* qNode = graph.getInputNode(instance_path, outName + ".q");
+            DFGNode* qNode = graph.getInputNode(dfgInstancePath, outName + ".q");
             if (qNode) {
                 graph.connectDriver(scalarSignalNode(output), {qNode, 0});
             }
@@ -401,10 +445,10 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
             const auto& leaves = signalLeaves(output);
             for (size_t i = 0; i < suffixes.size(); ++i) {
                 const auto& suffix = suffixes[i];
-                DFGNode* qNode = graph.getInputNode(instance_path, outName + suffix + ".q");
+                DFGNode* qNode = graph.getInputNode(dfgInstancePath, outName + suffix + ".q");
                 DFGNode* outNode = i < leaves.size()
                     ? leaves[i]
-                    : graph.getOutputNode(instance_path, outName + suffix);
+                    : graph.getOutputNode(dfgInstancePath, outName + suffix);
                 if (qNode && outNode) {
                     graph.connectDriver(outNode, {qNode, 0});
                 }
@@ -418,14 +462,26 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
         for (const auto& name : allElements(flop.name, flop.type)) {
             DFGNode* functional_logic;
             resolved_flops.push_back(
-                extractFlopClockAndReset(graph, resolved, name, instance_path, flop, functional_logic));
+                extractFlopClockAndReset(graph, resolved, name, dfgInstancePath, flop, functional_logic));
             // After flop_resolve, every FlopInfo represents one physical flop leaf.
             {
-                auto* dNode = graph.getOutputNode(instance_path, name + ".d");
-                auto* qNode = graph.getInputNode(instance_path, name + ".q");
+                auto* dNode = graph.getOutputNode(dfgInstancePath, name + ".d");
+                auto* qNode = graph.getInputNode(dfgInstancePath, name + ".q");
                 resolved_flops.back().binding = FlopBinding{
                     .d_leaves = {dNode},
                     .q_leaves = {qNode},
+                };
+            }
+            if (privateFacts) {
+                const auto& resolvedFlop = resolved_flops.back();
+                privateFacts->flop_domains[name] = FlopDomainFact{
+                    .flop_name = name,
+                    .clock = eventFactFor(privateFacts, flop.name, resolvedFlop.clock),
+                    .reset = resolvedFlop.reset
+                        ? std::optional<EventTriggerFact>(
+                            eventFactFor(privateFacts, flop.name, *resolvedFlop.reset))
+                        : std::nullopt,
+                    .reset_value = resolvedFlop.reset_value,
                 };
             }
             DFGNode* output = scalarFlopDNode(resolved_flops.back());
@@ -474,11 +530,11 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
     // contains all modules' nodes, and sibling/ancestor nodes may still have their
     // reset MUXes intact (processing is bottom-up).
     for (const auto& [name, node] : graph.getSignalsMap()) {
-        if (node->instance_path != instance_path) continue;
+        if (node->instance_path != dfgInstancePath) continue;
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
     for (const auto& [name, node] : graph.getOutputsMap()) {
-        if (node->instance_path != instance_path) continue;
+        if (node->instance_path != dfgInstancePath) continue;
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
 

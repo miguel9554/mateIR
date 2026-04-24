@@ -9,6 +9,7 @@
 #include "frontends/systemverilog/passes/domains_propagate_and_check.h"
 #include "frontends/systemverilog/passes/elaboration.h"
 #include "frontends/systemverilog/passes/flop_resolve.h"
+#include "frontends/systemverilog/passes/global_domain_resolve.h"
 #include "frontends/systemverilog/passes/io_domains_set.h"
 #include "frontends/systemverilog/passes/type_propagation.h"
 #include "frontends/systemverilog/domain_facts.h"
@@ -228,7 +229,10 @@ void runMateIRPipeline(MateIR& ir,
             std::ofstream f(std::format("{}/10_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        runPass(11, "dce", [&]{
+        runPass(11, "global_domain_resolve", [&]{
+            resolveGlobalDomains(ir, domainFacts);
+        });
+        runPass(12, "dce", [&]{
             std::unordered_set<DFGNode*> keepAlive;
             std::function<void(const Module&)> collect = [&](const Module& mod) {
                 for (const auto& parameter : mod.parameters)
@@ -254,10 +258,10 @@ void runMateIRPipeline(MateIR& ir,
         module.dfg->validateNoOrphans();
         module.dfg->validateStrictLiveDFG();
         validateFrontendDomainFacts(module, domainFacts);
-        runPass(12, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(module); });
+        runPass(13, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(module); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/12_domains_propagate_flops.txt", dir));
+            std::ofstream f(std::format("{}/13_domains_propagate_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
         computeComboDeps(module);

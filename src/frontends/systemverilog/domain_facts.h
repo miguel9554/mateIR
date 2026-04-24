@@ -71,6 +71,21 @@ struct ChildInputConnectionFact {
     std::optional<SourceLoc> loc;
 };
 
+struct ResolvedInputDomainFact {
+    std::string port_name;
+    LocalPortClass cls;
+    HierSignalRef source;
+    edge_t edge;
+    std::optional<ClockId> clock_domain;
+    std::optional<ResetId> reset_domain;
+};
+
+struct ResolvedFlopDomainFact {
+    std::string flop_name;
+    ClockId clock_domain;
+    ResetDomains reset_domains;
+};
+
 struct ModuleDomainFacts {
     bool pure_combinational = false;
     std::map<std::string, LocalPortDomainFact> ports;
@@ -79,6 +94,8 @@ struct ModuleDomainFacts {
     std::map<std::string, FlopTriggerFact> flop_triggers;
     std::map<std::string, FlopDomainFact> flop_domains;
     std::vector<ChildInputConnectionFact> child_input_connections;
+    std::map<std::string, ResolvedInputDomainFact> resolved_input_domains;
+    std::map<std::string, ResolvedFlopDomainFact> resolved_flop_domains;
 };
 
 struct FrontendDomainFacts {

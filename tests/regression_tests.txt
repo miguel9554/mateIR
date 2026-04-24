@@ -16,6 +16,9 @@ enum_top_test PASS
 full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'
 func_test PASS
 generate_test PASS
+global_domains_opposite_edges PASS
+global_domains_repeated_instances PASS
+global_domains_unsupported_clock_expr FAIL global_domain_resolve: unsupported clock/reset connection expression
 inout_arg_fail FAIL inout ports not supported
 multiple_always_comb_assign FAIL Multiple drivers for target 'z'
 multiple_continuous_assign FAIL Multiple drivers for target 'n'

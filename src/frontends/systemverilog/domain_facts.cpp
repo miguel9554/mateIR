@@ -181,6 +181,12 @@ void validateModuleFacts(const Module& module,
 
     for (const auto& connFact : moduleFacts->child_input_connections) {
         if (connFact.expr_kind != ConnectionExprKind::SimpleIdentifier) continue;
+        if (!connFact.parent_signal_name) {
+            throw CompilerError(std::format(
+                "frontend_domain_facts: simple child connection fact for port '{}' "
+                "in module '{}' has no parent signal name",
+                connFact.child_port, module.name));
+        }
         auto childIt = std::ranges::find_if(module.hierarchyInstantiation, [&](const Module& sub) {
             return childPath(path, sub.instance_name) == connFact.child_instance_path &&
                    sub.name == connFact.child_module_name;
@@ -190,12 +196,11 @@ void validateModuleFacts(const Module& module,
                 "frontend_domain_facts: child connection fact references missing instance '{}' in module '{}'",
                 pathString(connFact.child_instance_path), module.name));
         }
-        auto oldIt = childIt->asyncPortConnections.find(connFact.child_port);
-        if (oldIt == childIt->asyncPortConnections.end() ||
-                oldIt->second != connFact.parent_signal_name.value_or("")) {
+        if (!childIt->inputs.contains(connFact.child_port)) {
             throw CompilerError(std::format(
-                "frontend_domain_facts: asyncPortConnections mismatch for child port '{}' in module '{}'",
-                connFact.child_port, module.name));
+                "frontend_domain_facts: child connection fact references missing input "
+                "port '{}' on child module '{}' in module '{}'",
+                connFact.child_port, childIt->name, module.name));
         }
     }
 

@@ -552,9 +552,9 @@ void Simulator::buildTopInputDomainMaps() {
 void Simulator::buildTimeline() {
     // Determine which inputs are async (clocks, resets, and async data) from resolved input types
     for (const auto& [name, input] : module_.inputs) {
-        if (input.sync_kind == SyncKind::Clock ||
-            input.sync_kind == SyncKind::Reset ||
-            input.sync_kind == SyncKind::Async) {
+        if (std::holds_alternative<ClockSignal>(input.sync_type) ||
+            std::holds_alternative<ResetSignal>(input.sync_type) ||
+            std::holds_alternative<AsyncSignal>(input.sync_type)) {
             async_inputs_.insert(name);
         }
     }
@@ -562,24 +562,20 @@ void Simulator::buildTimeline() {
     // Map each sync input to its clock domain.
     for (const auto& [name, input] : module_.inputs) {
         if (async_inputs_.count(name)) continue;
-        if (input.clock_domain && input.clock_edge.has_value()) {
-            auto clockIt = clock_domains_by_top_input_.find(input.clock_domain->name);
-            if (clockIt == clock_domains_by_top_input_.end()) {
-                throw CompilerError(std::format(
-                    "Simulator: sync input '{}' references unknown clock domain '{}'",
-                    name, input.clock_domain->name));
-            }
-            auto match = std::ranges::find_if(clockIt->second, [&](ClockId id) {
-                return ir_.clocks[id.value].edge == *input.clock_edge;
-            });
-            if (match == clockIt->second.end()) {
-                throw CompilerError(std::format(
-                    "Simulator: sync input '{}' references clock domain '{}' with no "
-                    "matching global edge",
-                    name, input.clock_domain->name));
-            }
-            sync_input_clock_[name] = *match;
+        const auto* sync = std::get_if<SyncSignal>(&input.sync_type);
+        if (!sync) {
+            throw CompilerError(std::format(
+                "Simulator: input '{}' has unsupported sync type for synchronous input",
+                name));
         }
+        ClockId id = sync->clock_domain;
+        if (id == InvalidClockId || id.value >= ir_.clocks.size() ||
+                ir_.clocks[id.value].id != id) {
+            throw CompilerError(std::format(
+                "Simulator: sync input '{}' references invalid ClockId {}",
+                name, id.value));
+        }
+        sync_input_clock_[name] = id;
     }
 
         // Parse async input files: "time value" format per line
@@ -638,9 +634,7 @@ void Simulator::buildTimeline() {
 
 void Simulator::loadSyncInputs() {
     for (const auto& [name, input] : module_.inputs) {
-        if (input.sync_kind == SyncKind::Clock ||
-            input.sync_kind == SyncKind::Reset ||
-            input.sync_kind == SyncKind::Async) continue;
+        if (!std::holds_alternative<SyncSignal>(input.sync_type)) continue;
         // (variable 'name' used by the rest of the loop body below)
 
         std::string path = config_.inputs_dir + "/" + name + ".txt";
@@ -785,7 +779,7 @@ void Simulator::run() {
     std::cout << "Simulator: starting simulation for module '" << module_.name << "'" << std::endl;
 
     // === VCD Setup ===
-    vcd_ = std::make_unique<VcdWriter>(module_, config_.output_dir);
+    vcd_ = std::make_unique<VcdWriter>(ir_, config_.output_dir);
 
     // === Initialization (time 0) ===
 

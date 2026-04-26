@@ -639,17 +639,6 @@ void validateCrossModuleConnections(
         }
 
         validateCrossModuleConnections(sub, subPath, ir, facts);
-
-        for (auto it = sub.asyncPortConnections.begin(); it != sub.asyncPortConnections.end(); ) {
-            auto cit = sub.inputs.find(it->first);
-            if (cit == sub.inputs.end() ||
-                    (syncKind(cit->second) != SyncKind::Clock &&
-                     syncKind(cit->second) != SyncKind::Reset)) {
-                it = sub.asyncPortConnections.erase(it);
-            } else {
-                ++it;
-            }
-        }
     }
 }
 

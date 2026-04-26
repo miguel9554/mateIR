@@ -173,12 +173,6 @@ struct Module {
     // Combinational dependency map: output_port -> {input_ports}
     ComboDeps combo_deps;
 
-    // Async port connection map: submodule_input_port_name -> parent_signal_name
-    // Populated during elaboration with all input connections, then trimmed by
-    // flop_resolve to keep only Clock/Reset ports. Used by the simulator and VCD
-    // writer to translate submodule async port names to top-level signal names.
-    std::map<std::string, std::string> asyncPortConnections;
-
     // CDC synchronizer declarations: input_port_name -> clock_domain_name
     // Set by io_domains_set from the domains YAML (synchronized_into attribute).
     // Indicates that the named input is intentionally crossing into the given

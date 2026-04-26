@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <string>
 #include <utility>
 
 namespace mate {
@@ -127,6 +128,53 @@ static unsigned int getWidth(const DFGNode* node) {
     return 64;
 }
 
+bool VcdWriter::isDomainInput(const Signal& sig) const {
+    return std::holds_alternative<ClockSignal>(sig.sync_type) ||
+           std::holds_alternative<ResetSignal>(sig.sync_type);
+}
+
+std::string VcdWriter::requireTopInputSourceName(const Signal& sig,
+                                                 const std::string& context) const {
+    const HierSignalRef* source = nullptr;
+
+    if (const auto* clock = std::get_if<ClockSignal>(&sig.sync_type)) {
+        ClockId id = clock->clock_domain;
+        if (id == InvalidClockId || id.value >= ir_.clocks.size() ||
+                ir_.clocks[id.value].id != id) {
+            throw CompilerError(std::format(
+                "VcdWriter: {} references invalid ClockId {}", context, id.value));
+        }
+        source = &ir_.clocks[id.value].source;
+    } else if (const auto* reset = std::get_if<ResetSignal>(&sig.sync_type)) {
+        ResetId id = reset->reset_domain;
+        if (id == InvalidResetId || id.value >= ir_.resets.size() ||
+                ir_.resets[id.value].id != id) {
+            throw CompilerError(std::format(
+                "VcdWriter: {} references invalid ResetId {}", context, id.value));
+        }
+        source = &ir_.resets[id.value].source;
+    } else {
+        throw CompilerError(std::format(
+            "VcdWriter: {} is not a clock/reset domain input", context));
+    }
+
+    if (!source->instance_path.elems.empty() || source->ns != SignalNamespace::Input) {
+        throw CompilerError(std::format(
+            "VcdWriter: {} has unsupported non-top-input clock/reset source '{}'",
+            context, source->name));
+    }
+    return source->name;
+}
+
+void VcdWriter::addDomainInputEntry(vcd_tracer::module& scope, const std::string& name,
+                                    const Signal& sig) {
+    unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
+    auto v = std::make_unique<SimVcdValue>(w);
+    v->elaborate(scope.get_add_fn(), name);
+    async_values_[requireTopInputSourceName(sig, std::format("input '{}'", name))]
+        .push_back(std::move(v));
+}
+
 // ============================================================================
 // VcdWriter::addEntry
 // ============================================================================
@@ -180,8 +228,7 @@ void VcdWriter::addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
 // ============================================================================
 
 void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
-                          const std::unordered_set<const DFGNode*>& alive,
-                          const NameMap& translation) {
+                          const std::unordered_set<const DFGNode*>& alive) {
     if (!mod.parameters.empty() || !mod.localparams.empty()) {
         vcd_tracer::module params_mod(scope, "params");
         for (const auto* params : {&mod.parameters, &mod.localparams}) {
@@ -235,14 +282,8 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
 
     for (const auto& [name, sig] : mod.inputs) {
         if (name.ends_with(".q")) continue;  // shown in flops section
-        if (sig.sync_kind == SyncKind::Clock ||
-            sig.sync_kind == SyncKind::Reset) {
-            unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
-            auto v = std::make_unique<SimVcdValue>(w);
-            v->elaborate(inputs_mod.get_add_fn(), name);
-            auto it = translation.find(name);
-            const std::string& key = it != translation.end() ? it->second : name;
-            async_values_[key].push_back(std::move(v));
+        if (isDomainInput(sig)) {
+            addDomainInputEntry(inputs_mod, name, sig);
         } else {
             addSignalEntries(inputs_mod, name, sig, alive);
         }
@@ -282,12 +323,7 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
         vcd_tracer::module childScope(
             dot == std::string::npos ? scope : getOrCreateScope(child_name.substr(0, dot)),
             dot == std::string::npos ? child_name : child_name.substr(dot + 1));
-        NameMap composed;
-        for (const auto& [port, parent_sig] : sub.asyncPortConnections) {
-            auto it = translation.find(parent_sig);
-            composed[port] = it != translation.end() ? it->second : parent_sig;
-        }
-        setupGrouped(sub, childScope, alive, composed);
+        setupGrouped(sub, childScope, alive);
     }
 }
 
@@ -296,8 +332,7 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
 // ============================================================================
 
 void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
-                          const std::unordered_set<const DFGNode*>& alive,
-                          const NameMap& translation) {
+                          const std::unordered_set<const DFGNode*>& alive) {
     for (const auto* params : {&mod.parameters, &mod.localparams}) {
         for (const auto& param : *params) {
             unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
@@ -319,14 +354,8 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
 
     for (const auto& [name, sig] : mod.inputs) {
         if (name.ends_with(".q")) continue;
-        if (sig.sync_kind == SyncKind::Clock ||
-            sig.sync_kind == SyncKind::Reset) {
-            unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
-            auto v = std::make_unique<SimVcdValue>(w);
-            v->elaborate(scope.get_add_fn(), name);
-            auto it = translation.find(name);
-            const std::string& key = it != translation.end() ? it->second : name;
-            async_values_[key].push_back(std::move(v));
+        if (isDomainInput(sig)) {
+            addDomainInputEntry(scope, name, sig);
         } else {
             addSignalEntries(scope, name, sig, alive);
         }
@@ -368,12 +397,7 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
         vcd_tracer::module childScope(
             dot == std::string::npos ? scope : getGenScope(child_name.substr(0, dot)),
             dot == std::string::npos ? child_name : child_name.substr(dot + 1));
-        NameMap composed;
-        for (const auto& [port, parent_sig] : sub.asyncPortConnections) {
-            auto it = translation.find(parent_sig);
-            composed[port] = it != translation.end() ? it->second : parent_sig;
-        }
-        setupRaw(sub, childScope, alive, composed);
+        setupRaw(sub, childScope, alive);
     }
 }
 
@@ -381,7 +405,9 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
 // VcdWriter constructor
 // ============================================================================
 
-VcdWriter::VcdWriter(const Module& module, const std::string& output_dir) {
+VcdWriter::VcdWriter(const MateIR& ir, const std::string& output_dir)
+    : ir_(ir) {
+    const Module& module = ir_.top;
     std::filesystem::create_directories(output_dir);
 
     grouped_path_ = output_dir + "/" + module.name + ".vcd";

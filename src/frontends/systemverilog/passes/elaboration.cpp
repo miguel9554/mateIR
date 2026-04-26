@@ -4204,12 +4204,6 @@ void resolveNamedPortConnection(
             }
             facts.child_input_connections.push_back(std::move(connFact));
         }
-        // Only record simple identifier connections; asyncPortConnections is
-        // used solely for clock/reset port translation downstream.
-        if (expr->kind == SyntaxKind::IdentifierName) {
-            const std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
-            resolvedSub.asyncPortConnections[portName] = name;
-        }
     } else if (subOutputNames.contains(portName)) {
         if (!named.expr) {
             throw CompilerError(
@@ -4299,7 +4293,6 @@ void resolveWildcardPortConnection(
         auto* driver = graph.lookupSignal("", name);
         if (driver) {
             graph.addModuleInput(moduleNode, name, driver);
-            resolvedSub.asyncPortConnections[name] = name;
             if (ctx.domain_facts) {
                 auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
                 facts.child_input_connections.push_back(ChildInputConnectionFact{

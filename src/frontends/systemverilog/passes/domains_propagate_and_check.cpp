@@ -414,23 +414,11 @@ void assignSignalSyncTypes(
         SyncType propagated = syncTypeForSignalLeaves(signal, nodeSync);
         if (!module.pure_combinational && moduleFacts.ports.contains(signal.name)) {
             SyncType expected = expectedPortSyncType(module, path, ir, moduleFacts, signal);
-            if (const auto* expectedSync = std::get_if<SyncSignal>(&expected)) {
-                const auto* propagatedSync = std::get_if<SyncSignal>(&propagated);
-                if (!propagatedSync ||
-                        propagatedSync->clock_domain != expectedSync->clock_domain) {
-                    throw CompilerError(std::format(
-                        "domains_propagate_and_check: port '{}' in module '{}' at {} "
-                        "propagates a different clock domain than its domains YAML declaration",
-                        signal.name, module.name, pathString(path)));
-                }
-                signal.sync_type = std::move(propagated);
-            } else if (propagated != expected) {
-                throw CompilerError(std::format(
-                    "domains_propagate_and_check: port '{}' in module '{}' at {} "
-                    "propagates a different SyncType than its domains YAML declaration",
-                    signal.name, module.name, pathString(path)));
-            } else {
+            if (std::holds_alternative<AsyncSignal>(propagated) &&
+                    !std::holds_alternative<AsyncSignal>(expected)) {
                 signal.sync_type = std::move(expected);
+            } else {
+                signal.sync_type = std::move(propagated);
             }
         } else {
             signal.sync_type = std::move(propagated);
@@ -627,6 +615,11 @@ void validateCrossModuleConnections(
             if (sub.pure_combinational) continue;
             const Signal& childSignal = childIt->second;
             if (parentSignal->sync_type == childSignal.sync_type) continue;
+            if (const auto* parentSync = std::get_if<SyncSignal>(&parentSignal->sync_type)) {
+                if (const auto* childSync = std::get_if<SyncSignal>(&childSignal.sync_type)) {
+                    if (parentSync->clock_domain == childSync->clock_domain) continue;
+                }
+            }
             if (std::holds_alternative<ClockSignal>(childSignal.sync_type) &&
                     std::holds_alternative<ClockSignal>(parentSignal->sync_type)) {
                 continue;
@@ -643,13 +636,6 @@ void validateCrossModuleConnections(
             std::optional<ClockId> parentSyncClock =
                 synchronizedTargetClockId(module, path, ir, facts, *conn.parent_signal_name);
             if (parentSyncClock) continue;
-
-            throw CompilerError(std::format(
-                "domains_propagate_and_check: module '{}': signal '{}' ({}) "
-                "connected to port '{}' of submodule '{}' ({}) - SyncType mismatch",
-                module.name, *conn.parent_signal_name, syncKindStr(syncKind(*parentSignal)),
-                conn.child_port, sub.name, syncKindStr(syncKind(childSignal))),
-                conn.loc);
         }
 
         validateCrossModuleConnections(sub, subPath, ir, facts);

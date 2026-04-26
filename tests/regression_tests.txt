@@ -26,6 +26,8 @@ multiple_seq_writers_same_flop FAIL Multiple drivers for target 'q.d'
 multiple_submodule_output_drivers FAIL Multiple drivers for target 'n'
 overlapping_partial_writes FAIL Overlapping partial writes for target 'bus'
 partial_then_full_write_conflict FAIL Multiple drivers for target 'bus'
+phase8_multiclock_cdc_fail FAIL cross-domain violation
+phase8_same_clock_merge PASS
 pkg_scope_test PASS
 ref_arg_fail FAIL ref ports not supported
 static_func_fail FAIL Only 'automatic' functions/tasks are supported

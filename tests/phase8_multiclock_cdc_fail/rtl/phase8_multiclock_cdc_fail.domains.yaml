@@ -1,0 +1,12 @@
+module_name: phase8_multiclock_cdc_fail
+
+clock_domains:
+  clk_a:
+    polarity: posedge
+    inputs_outputs:
+      - a
+      - q
+  clk_b:
+    polarity: posedge
+    inputs_outputs:
+      - b

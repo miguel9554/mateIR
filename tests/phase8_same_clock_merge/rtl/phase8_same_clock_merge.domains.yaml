@@ -1,0 +1,9 @@
+module_name: phase8_same_clock_merge
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - a
+      - b
+      - q

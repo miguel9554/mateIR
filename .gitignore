@@ -42,7 +42,7 @@ tests/**/*.txt
 !tests/regression_tests.txt
 tests/**/obj_dir
 **/*.gtkw
-tests/*/work/custom-sim/debug_output
+**/debug_output
 external/slang-install/
 
 docs/1800-2023.pdf

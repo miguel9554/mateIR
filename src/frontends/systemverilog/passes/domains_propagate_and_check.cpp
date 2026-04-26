@@ -5,18 +5,25 @@
 #include <format>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mate {
 
 namespace {
 
-// Build forward adjacency: for each node, which (node, arrival_port) pairs use it?
 struct FwdEdge {
     const DFGNode* user;
     int input_slot;
+};
+
+struct ReachedFlop {
+    std::string flop_name;
+    ClockId clock_domain;
+    const DFGNode* d_node;
 };
 
 std::map<const DFGNode*, std::vector<FwdEdge>> buildForwardMap(const DFG& dfg) {
@@ -29,7 +36,6 @@ std::map<const DFGNode*, std::vector<FwdEdge>> buildForwardMap(const DFG& dfg) {
     return fwd;
 }
 
-// Get the flop base name from a .d signal name
 std::string flopBaseName(const std::string& dName) {
     return dName.substr(0, dName.size() - 2);
 }
@@ -39,12 +45,17 @@ InstancePath childPath(InstancePath path, const std::string& instanceName) {
     return path;
 }
 
-std::string pathString(const InstancePath& path) {
+std::string dfgInstancePath(const InstancePath& path) {
     std::string out;
     for (const auto& elem : path.elems) {
         if (!out.empty()) out += ".";
         out += elem;
     }
+    return out;
+}
+
+std::string pathString(const InstancePath& path) {
+    std::string out = dfgInstancePath(path);
     return out.empty() ? "<top>" : out;
 }
 
@@ -52,257 +63,6 @@ const char* syncKindStr(SyncKind k) {
     return k == SyncKind::Sync  ? "Sync"  :
            k == SyncKind::Clock ? "Clock" :
            k == SyncKind::Reset ? "Reset" : "Async";
-}
-
-void checkAndPropagateModule(Module& mod, const DFG* topDFG) {
-    // a. Polarity and b. SyncKind checks — requires flop_resolve to have run
-    for (const auto& flop : mod.flops) {
-        // Clock checks
-        auto clk_it = mod.inputs.find(flop.clock.name);
-        if (clk_it != mod.inputs.end()) {
-            // b. SyncKind
-            if (clk_it->second.sync_kind != SyncKind::Clock) {
-                throw CompilerError(std::format(
-                    "domains_propagate_and_check: flop '{}' in module '{}': "
-                    "clock signal '{}' is not declared as a clock in the domains file",
-                    flop.name, mod.name, flop.clock.name));
-            }
-            // a. Polarity
-            if (clk_it->second.clock_edge.has_value() &&
-                flop.clock.edge != *clk_it->second.clock_edge) {
-                throw CompilerError(std::format(
-                    "domains_propagate_and_check: flop '{}' in module '{}': "
-                    "clock '{}' polarity mismatch between domains file and always block",
-                    flop.name, mod.name, flop.clock.name));
-            }
-        }
-
-        // Reset checks
-        if (flop.reset) {
-            auto rst_it = mod.inputs.find(flop.reset->name);
-            if (rst_it != mod.inputs.end()) {
-                // b. SyncKind
-                if (rst_it->second.sync_kind != SyncKind::Reset) {
-                    throw CompilerError(std::format(
-                        "domains_propagate_and_check: flop '{}' in module '{}': "
-                        "reset signal '{}' is not declared as a reset in the domains file",
-                        flop.name, mod.name, flop.reset->name));
-                }
-                // a. Polarity
-                if (rst_it->second.clock_edge.has_value() &&
-                    flop.reset->edge != *rst_it->second.clock_edge) {
-                    throw CompilerError(std::format(
-                        "domains_propagate_and_check: flop '{}' in module '{}': "
-                        "reset '{}' polarity mismatch between domains file and always block",
-                        flop.name, mod.name, flop.reset->name));
-                }
-            }
-        }
-    }
-
-    // c. Domain propagation to internal signals and flop types
-
-    // Find clock inputs (single-clock assumption for internal signals)
-    Signal* singleClockSig = nullptr;
-    std::optional<edge_t> singleClockEdge;
-    int clockCount = 0;
-    for (auto& [name, sig] : mod.inputs) {
-        if (sig.sync_kind == SyncKind::Clock) {
-            singleClockSig = &sig;
-            singleClockEdge = sig.clock_edge;
-            ++clockCount;
-        }
-    }
-
-    // Propagate to internal signals (single-clock modules only)
-    if (clockCount == 1) {
-        for (auto& [name, sig] : mod.signals) {
-            if (sig.sync_kind != SyncKind::Clock && sig.sync_kind != SyncKind::Reset) {
-                sig.clock_domain = singleClockSig;
-                sig.clock_edge = singleClockEdge;
-            }
-        }
-    }
-
-    // d. CDC fanin validation
-    if (!topDFG) return;
-
-    auto fwd = buildForwardMap(*topDFG);
-
-    // Build a map from flop name -> clock domain signal for quick lookup
-    std::map<std::string, const Signal*> flopClockSig;
-    for (const auto& flop : mod.flops) {
-        auto clk_it = mod.inputs.find(flop.clock.name);
-        if (clk_it != mod.inputs.end()) {
-            flopClockSig[flop.name] = &clk_it->second;
-        }
-    }
-
-    // Forward traversal from an input node, collecting .d signals reached
-    auto forwardTraversal = [&](const DFGNode* start)
-            -> std::vector<std::pair<std::string, const Signal*>> {
-        std::vector<std::pair<std::string, const Signal*>> reached;
-        std::set<const DFGNode*> visited;
-        std::vector<const DFGNode*> worklist = {start};
-
-        while (!worklist.empty()) {
-            const DFGNode* current = worklist.back();
-            worklist.pop_back();
-
-            if (!visited.insert(current).second) continue;
-
-            if (current->kind() == DFGOp::OUTPUT && current->name.ends_with(".d")) {
-                std::string base = flopBaseName(current->name);
-                auto it = flopClockSig.find(base);
-                if (it != flopClockSig.end()) {
-                    reached.push_back({base, it->second});
-                }
-                continue;
-            }
-
-            if (current->kind() == DFGOp::INPUT && current->name.ends_with(".q")) {
-                continue;
-            }
-
-            if (auto it = fwd.find(current); it != fwd.end()) {
-                for (const auto& edge : it->second) {
-                    worklist.push_back(edge.user);
-                }
-            }
-        }
-        return reached;
-    };
-
-    // Helper: resolve a clock domain name to its Signal pointer
-    auto findClockSig = [&](const std::string& domainName) -> const Signal* {
-        auto it = mod.inputs.find(domainName);
-        return it != mod.inputs.end() ? &it->second : nullptr;
-    };
-
-    // Validate sync domain inputs
-    for (const auto& [portName, inputSig] : mod.inputs) {
-        if (inputSig.sync_kind != SyncKind::Sync) continue;
-
-        for (auto* leaf : signalLeaves(inputSig)) {
-            if (!leaf) continue;
-            auto reached = forwardTraversal(leaf);
-            for (const auto& [flopName, flopClk] : reached) {
-                if (flopClk == inputSig.clock_domain) continue;
-                // Declared CDC crossing via synchronized_into
-                auto syncIt = mod.synchronizedSignals.find(portName);
-                if (syncIt != mod.synchronizedSignals.end() &&
-                    flopClk == findClockSig(syncIt->second)) continue;
-                throw CompilerError(std::format(
-                    "domains_propagate_and_check: module '{}': sync input '{}' "
-                    "feeds flop '{}' in a different clock domain — cross-domain violation",
-                    mod.name, portName, flopName));
-            }
-        }
-    }
-
-    // Validate async domain inputs
-    for (const auto& [portName, inputSig] : mod.inputs) {
-        if (inputSig.sync_kind != SyncKind::Async) continue;
-
-        for (auto* leaf : signalLeaves(inputSig)) {
-            if (!leaf) continue;
-            auto reached = forwardTraversal(leaf);
-            for (const auto& [flopName, flopClk] : reached) {
-                // Declared CDC crossing via synchronized_into
-                auto syncIt = mod.synchronizedSignals.find(portName);
-                if (syncIt != mod.synchronizedSignals.end() &&
-                    flopClk == findClockSig(syncIt->second)) continue;
-                throw CompilerError(std::format(
-                    "domains_propagate_and_check: module '{}': async input '{}' "
-                    "feeds flop '{}' without a declared synchronizer",
-                    mod.name, portName, flopName));
-            }
-        }
-    }
-
-    // e. Cross-module port sync_kind consistency check + asyncPortConnections trimming.
-    // For each submodule, every port connection must have matching sync_kind on both
-    // the parent signal and the child port. After verification, trim asyncPortConnections
-    // to Clock/Reset-only entries (used by the simulator for async port translation).
-    for (auto& sub : mod.hierarchyInstantiation) {
-        for (const auto& [childPort, parentSignal] : sub.asyncPortConnections) {
-            // Pure combinational submodules have no clock domain — skip the check.
-            if (sub.pure_combinational) continue;
-            // Look up parent signal's sync_kind (input or internal signal)
-            SyncKind parentKind;
-            auto pit = mod.inputs.find(parentSignal);
-            if (pit != mod.inputs.end()) {
-                parentKind = pit->second.sync_kind;
-            } else {
-                auto sit = mod.signals.find(parentSignal);
-                if (sit != mod.signals.end()) {
-                    parentKind = sit->second.sync_kind;
-                } else {
-                    throw CompilerError(std::format(
-                        "domains_propagate_and_check: module '{}': signal '{}' connected "
-                        "to port '{}' of submodule '{}' not found in parent inputs or signals",
-                        mod.name, parentSignal, childPort, sub.name));
-                }
-            }
-
-            // Look up child port's sync_kind
-            auto cit = sub.inputs.find(childPort);
-            if (cit == sub.inputs.end()) {
-                throw CompilerError(std::format(
-                    "domains_propagate_and_check: submodule '{}' port '{}' "
-                    "not found in inputs",
-                    sub.name, childPort));
-            }
-            SyncKind childKind = cit->second.sync_kind;
-
-            if (parentKind == childKind) continue;
-
-            // Sync → Async: allowed — the child explicitly declares an async/CDC input.
-            if (parentKind == SyncKind::Sync && childKind == SyncKind::Async) continue;
-
-            // Reset/Clock → Async: allowed only when the child port declares
-            // synchronized_into, meaning it is the input to a synchronizer.
-            if (childKind == SyncKind::Async &&
-                (parentKind == SyncKind::Reset || parentKind == SyncKind::Clock)) {
-                if (sub.synchronizedSignals.contains(childPort)) continue;
-                throw CompilerError(std::format(
-                    "domains_propagate_and_check: module '{}': {} signal '{}' "
-                    "connected to async port '{}' of submodule '{}' without "
-                    "synchronized_into declaration on the child port",
-                    mod.name, syncKindStr(parentKind), parentSignal,
-                    childPort, sub.name));
-            }
-
-            // Async → Sync: allowed only if the parent declares synchronized_into for
-            // this signal, meaning it has been synchronized before reaching the child.
-            if (parentKind == SyncKind::Async && childKind == SyncKind::Sync) {
-                if (mod.synchronizedSignals.contains(parentSignal)) continue;
-                throw CompilerError(std::format(
-                    "domains_propagate_and_check: module '{}': async signal '{}' "
-                    "connected to sync port '{}' of submodule '{}' without "
-                    "synchronized_into declaration",
-                    mod.name, parentSignal, childPort, sub.name));
-            }
-
-            throw CompilerError(std::format(
-                "domains_propagate_and_check: module '{}': signal '{}' ({}) "
-                "connected to port '{}' of submodule '{}' ({}) — sync_kind mismatch",
-                mod.name, parentSignal, syncKindStr(parentKind),
-                childPort, sub.name, syncKindStr(childKind)));
-        }
-
-        // Trim asyncPortConnections to Clock/Reset only
-        for (auto it = sub.asyncPortConnections.begin(); it != sub.asyncPortConnections.end(); ) {
-            auto cit = sub.inputs.find(it->first);
-            if (cit == sub.inputs.end() ||
-                (cit->second.sync_kind != SyncKind::Clock &&
-                 cit->second.sync_kind != SyncKind::Reset)) {
-                it = sub.asyncPortConnections.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
 }
 
 const ModuleDomainFacts& requireFacts(
@@ -435,76 +195,494 @@ void validateSyncTypeIds(
     }
 }
 
-SyncType resolvedSyncTypeForSignal(
+SyncType expectedPortSyncType(
         const Module& module,
         const InstancePath& path,
         const MateIR& ir,
         const ModuleDomainFacts& moduleFacts,
         const Signal& signal) {
-    switch (signal.sync_kind) {
-        case SyncKind::Clock:
+    auto it = moduleFacts.ports.find(signal.name);
+    if (it == moduleFacts.ports.end()) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: missing port domain fact for '{}' "
+            "in module '{}' at {}",
+            signal.name, module.name, pathString(path)));
+    }
+
+    const LocalPortDomainFact& portFact = it->second;
+    switch (portFact.cls) {
+        case LocalPortClass::Clock:
             return ClockSignal{
                 requireClockDomainForLocalClock(
                     module, path, ir, moduleFacts, signal.name, signal.name),
             };
-        case SyncKind::Reset:
+        case LocalPortClass::Reset:
             return ResetSignal{
                 requireResetDomainForLocalReset(
                     module, path, ir, moduleFacts, signal.name, signal.name),
             };
-        case SyncKind::Async:
+        case LocalPortClass::Async:
             return AsyncSignal{};
-        case SyncKind::Sync:
-            if (!signal.clock_domain) return AsyncSignal{};
+        case LocalPortClass::Sync:
+            if (!portFact.local_domain_name) {
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: sync port '{}' in module '{}' at {} "
+                    "has no local clock domain fact",
+                    signal.name, module.name, pathString(path)));
+            }
             return SyncSignal{
                 .clock_domain = requireClockDomainForLocalClock(
-                    module, path, ir, moduleFacts, signal.clock_domain->name, signal.name),
+                    module, path, ir, moduleFacts, *portFact.local_domain_name, signal.name),
                 .reset_domains = {},
             };
     }
     return AsyncSignal{};
 }
 
+SyncType mergeSyncTypes(const std::vector<SyncType>& inputs) {
+    std::optional<ClockId> clock;
+    ResetDomains resets;
+    bool sawSync = false;
+
+    for (const SyncType& input : inputs) {
+        if (std::holds_alternative<AsyncSignal>(input) ||
+                std::holds_alternative<ClockSignal>(input) ||
+                std::holds_alternative<ResetSignal>(input)) {
+            return AsyncSignal{};
+        }
+
+        const auto* sync = std::get_if<SyncSignal>(&input);
+        if (!sync) continue;
+        if (!clock) {
+            clock = sync->clock_domain;
+        } else if (*clock != sync->clock_domain) {
+            return AsyncSignal{};
+        }
+        for (ResetId resetId : sync->reset_domains.ids)
+            resets.insert(resetId);
+        sawSync = true;
+    }
+
+    if (!sawSync || !clock) return AsyncSignal{};
+    return SyncSignal{.clock_domain = *clock, .reset_domains = std::move(resets)};
+}
+
+void setNodeSync(
+        std::map<const DFGNode*, SyncType>& nodeSync,
+        const DFGNode* node,
+        const SyncType& syncType) {
+    if (!node) return;
+    auto it = nodeSync.find(node);
+    if (it == nodeSync.end()) {
+        nodeSync[node] = syncType;
+    } else if (it->second == syncType) {
+        return;
+    } else {
+        it->second = mergeSyncTypes({it->second, syncType});
+    }
+}
+
+std::optional<SyncType> nodeSyncType(
+        const std::map<const DFGNode*, SyncType>& nodeSync,
+        const DFGNode* node) {
+    if (!node) return std::nullopt;
+    if (node->kind() == DFGOp::CONST) return std::nullopt;
+    auto it = nodeSync.find(node);
+    if (it == nodeSync.end()) return std::nullopt;
+    return it->second;
+}
+
+void seedDeclaredInputSyncTypes(
+        Module& module,
+        const InstancePath& path,
+        const MateIR& ir,
+        const FrontendDomainFacts& facts,
+        std::map<const DFGNode*, SyncType>& nodeSync) {
+    const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
+
+    if (!module.pure_combinational) {
+        for (auto& [name, input] : module.inputs) {
+            input.sync_type = expectedPortSyncType(module, path, ir, moduleFacts, input);
+            validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
+            for (auto* leaf : signalLeaves(input))
+                setNodeSync(nodeSync, leaf, input.sync_type);
+        }
+    }
+
+    for (auto& sub : module.hierarchyInstantiation)
+        seedDeclaredInputSyncTypes(sub, childPath(path, sub.instance_name), ir, facts, nodeSync);
+}
+
+void seedFlopSyncTypes(
+        const Module& module,
+        std::map<const DFGNode*, SyncType>& nodeSync) {
+    for (const auto& flop : module.flops) {
+        SyncType syncType = SyncSignal{
+            .clock_domain = flop.clock_domain,
+            .reset_domains = flop.reset_domains,
+        };
+        for (auto* leaf : flopQLeaves(flop))
+            setNodeSync(nodeSync, leaf, syncType);
+    }
+    for (const auto& sub : module.hierarchyInstantiation)
+        seedFlopSyncTypes(sub, nodeSync);
+}
+
+std::map<const DFGNode*, SyncType> propagateNodeSyncTypes(
+        const DFG& dfg,
+        std::map<const DFGNode*, SyncType> nodeSync) {
+    bool changed;
+    do {
+        changed = false;
+        for (const auto& nodePtr : dfg.nodes) {
+            const DFGNode* node = nodePtr.get();
+
+            std::vector<SyncType> inputs;
+            bool hasNonConstInput = false;
+            bool missingInput = false;
+            DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
+                if (input.node->kind() == DFGOp::CONST) return;
+                hasNonConstInput = true;
+                auto syncType = nodeSyncType(nodeSync, input.node);
+                if (!syncType) {
+                    missingInput = true;
+                    return;
+                }
+                inputs.push_back(*syncType);
+            });
+
+            if (missingInput) continue;
+            if (!hasNonConstInput && nodeSync.contains(node)) continue;
+            SyncType computed = hasNonConstInput ? mergeSyncTypes(inputs) : AsyncSignal{};
+
+            auto it = nodeSync.find(node);
+            if (it == nodeSync.end() || it->second != computed) {
+                nodeSync[node] = std::move(computed);
+                changed = true;
+            }
+        }
+    } while (changed);
+
+    return nodeSync;
+}
+
+SyncType syncTypeForSignalLeaves(
+        const Signal& signal,
+        const std::map<const DFGNode*, SyncType>& nodeSync) {
+    std::vector<SyncType> leaves;
+    for (auto* leaf : signalLeaves(signal)) {
+        auto syncType = nodeSyncType(nodeSync, leaf);
+        if (syncType) leaves.push_back(*syncType);
+    }
+    return mergeSyncTypes(leaves);
+}
+
+void assertLegacyKindCompatible(
+        const Module& module,
+        const InstancePath& path,
+        const Signal& signal) {
+    if (signal.sync_kind == SyncKind::Sync && !signal.clock_domain) return;
+    if (module.pure_combinational && signal.sync_kind == SyncKind::Sync) return;
+    if (syncKind(signal) != signal.sync_kind) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: signal '{}' in module '{}' at {} "
+            "has legacy/new sync kind mismatch: legacy={} new={}",
+            signal.name, module.name, pathString(path),
+            syncKindStr(signal.sync_kind), syncKindStr(syncKind(signal))));
+    }
+}
+
 void assignSignalSyncTypes(
+        Module& module,
+        const InstancePath& path,
+        const MateIR& ir,
+        const FrontendDomainFacts& facts,
+        const std::map<const DFGNode*, SyncType>& nodeSync) {
+    const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
+
+    auto assignInput = [&](Signal& input) {
+        if (module.pure_combinational) {
+            input.sync_type = syncTypeForSignalLeaves(input, nodeSync);
+        } else {
+            input.sync_type = expectedPortSyncType(module, path, ir, moduleFacts, input);
+        }
+        validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
+        assertLegacyKindCompatible(module, path, input);
+    };
+
+    auto assignDrivenSignal = [&](Signal& signal) {
+        SyncType propagated = syncTypeForSignalLeaves(signal, nodeSync);
+        if (!module.pure_combinational && moduleFacts.ports.contains(signal.name)) {
+            SyncType expected = expectedPortSyncType(module, path, ir, moduleFacts, signal);
+            if (const auto* expectedSync = std::get_if<SyncSignal>(&expected)) {
+                const auto* propagatedSync = std::get_if<SyncSignal>(&propagated);
+                if (!propagatedSync ||
+                        propagatedSync->clock_domain != expectedSync->clock_domain) {
+                    throw CompilerError(std::format(
+                        "domains_propagate_and_check: port '{}' in module '{}' at {} "
+                        "propagates a different clock domain than its domains YAML declaration",
+                        signal.name, module.name, pathString(path)));
+                }
+                signal.sync_type = std::move(propagated);
+            } else if (propagated != expected) {
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: port '{}' in module '{}' at {} "
+                    "propagates a different SyncType than its domains YAML declaration",
+                    signal.name, module.name, pathString(path)));
+            } else {
+                signal.sync_type = std::move(expected);
+            }
+        } else {
+            signal.sync_type = std::move(propagated);
+        }
+        validateSyncTypeIds(ir, signal.sync_type, module, path, signal.name);
+        assertLegacyKindCompatible(module, path, signal);
+    };
+
+    for (auto& [name, input] : module.inputs) assignInput(input);
+    for (auto& [name, output] : module.outputs) assignDrivenSignal(output);
+    for (auto& [name, signal] : module.signals) assignDrivenSignal(signal);
+
+    for (auto& sub : module.hierarchyInstantiation)
+        assignSignalSyncTypes(sub, childPath(path, sub.instance_name), ir, facts, nodeSync);
+}
+
+void validateFlopTriggerFacts(
+        const Module& module,
+        const InstancePath& path,
+        const FrontendDomainFacts& facts) {
+    const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
+    for (const auto& flop : module.flops) {
+        auto factIt = moduleFacts.flop_domains.find(flop.name);
+        if (factIt == moduleFacts.flop_domains.end()) continue;
+        const FlopDomainFact& fact = factIt->second;
+
+        auto portIt = moduleFacts.ports.find(fact.clock.local_signal_name);
+        if (portIt == moduleFacts.ports.end() || portIt->second.cls != LocalPortClass::Clock) {
+            throw CompilerError(std::format(
+                "domains_propagate_and_check: flop '{}' in module '{}' at {}: "
+                "clock signal '{}' is not declared as a clock in the domains file",
+                flop.name, module.name, pathString(path), fact.clock.local_signal_name),
+                fact.clock.loc);
+        }
+        if (portIt->second.edge && fact.clock.edge != *portIt->second.edge) {
+            throw CompilerError(std::format(
+                "domains_propagate_and_check: flop '{}' in module '{}' at {}: "
+                "clock '{}' polarity mismatch between domains file and always block",
+                flop.name, module.name, pathString(path), fact.clock.local_signal_name),
+                fact.clock.loc);
+        }
+
+        if (fact.reset) {
+            auto resetIt = moduleFacts.ports.find(fact.reset->local_signal_name);
+            if (resetIt == moduleFacts.ports.end() || resetIt->second.cls != LocalPortClass::Reset) {
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: flop '{}' in module '{}' at {}: "
+                    "reset signal '{}' is not declared as a reset in the domains file",
+                    flop.name, module.name, pathString(path), fact.reset->local_signal_name),
+                    fact.reset->loc);
+            }
+            if (resetIt->second.edge && fact.reset->edge != *resetIt->second.edge) {
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: flop '{}' in module '{}' at {}: "
+                    "reset '{}' polarity mismatch between domains file and always block",
+                    flop.name, module.name, pathString(path), fact.reset->local_signal_name),
+                    fact.reset->loc);
+            }
+        }
+    }
+
+    for (const auto& sub : module.hierarchyInstantiation)
+        validateFlopTriggerFacts(sub, childPath(path, sub.instance_name), facts);
+}
+
+std::optional<ClockId> synchronizedTargetClockId(
+        const Module& module,
+        const InstancePath& path,
+        const MateIR& ir,
+        const FrontendDomainFacts& facts,
+        const std::string& portName) {
+    const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
+    auto portIt = moduleFacts.ports.find(portName);
+    if (portIt == moduleFacts.ports.end() || !portIt->second.synchronized_into)
+        return std::nullopt;
+
+    return requireClockDomainForLocalClock(
+        module, path, ir, moduleFacts, *portIt->second.synchronized_into, portName);
+}
+
+void validateCdcForModule(
+        const Module& module,
+        const InstancePath& path,
+        const DFG& topDFG,
+        const MateIR& ir,
+        const FrontendDomainFacts& facts) {
+    auto fwd = buildForwardMap(topDFG);
+
+    std::map<std::string, ClockId> flopClock;
+    for (const auto& flop : module.flops)
+        flopClock[flop.name] = flop.clock_domain;
+
+    auto forwardTraversal = [&](const DFGNode* start) -> std::vector<ReachedFlop> {
+        std::vector<ReachedFlop> reached;
+        std::set<const DFGNode*> visited;
+        std::vector<const DFGNode*> worklist = {start};
+
+        while (!worklist.empty()) {
+            const DFGNode* current = worklist.back();
+            worklist.pop_back();
+
+            if (!visited.insert(current).second) continue;
+
+            if (current->kind() == DFGOp::OUTPUT && current->name.ends_with(".d") &&
+                    current->instance_path == dfgInstancePath(path)) {
+                std::string base = flopBaseName(current->name);
+                auto it = flopClock.find(base);
+                if (it != flopClock.end())
+                    reached.push_back({base, it->second, current});
+                continue;
+            }
+
+            if (current->kind() == DFGOp::INPUT && current->name.ends_with(".q")) continue;
+
+            if (auto it = fwd.find(current); it != fwd.end()) {
+                for (const auto& edge : it->second)
+                    worklist.push_back(edge.user);
+            }
+        }
+        return reached;
+    };
+
+    for (const auto& [portName, inputSig] : module.inputs) {
+        std::optional<ClockId> synchronizedClock =
+            synchronizedTargetClockId(module, path, ir, facts, portName);
+
+        for (auto* leaf : signalLeaves(inputSig)) {
+            if (!leaf) continue;
+            for (const auto& reached : forwardTraversal(leaf)) {
+                if (const auto* sync = std::get_if<SyncSignal>(&inputSig.sync_type)) {
+                    if (sync->clock_domain == reached.clock_domain) continue;
+                    if (synchronizedClock && *synchronizedClock == reached.clock_domain) continue;
+                    throw CompilerError(std::format(
+                        "domains_propagate_and_check: module '{}': sync input '{}' "
+                        "feeds flop '{}' in a different clock domain - cross-domain violation",
+                        module.name, portName, reached.flop_name), reached.d_node);
+                }
+
+                if (synchronizedClock && *synchronizedClock == reached.clock_domain) continue;
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: module '{}': {} input '{}' "
+                    "feeds flop '{}' without a declared synchronizer",
+                    module.name, syncKindStr(syncKind(inputSig)),
+                    portName, reached.flop_name), reached.d_node);
+            }
+        }
+    }
+
+    for (const auto& sub : module.hierarchyInstantiation)
+        validateCdcForModule(sub, childPath(path, sub.instance_name), topDFG, ir, facts);
+}
+
+const Signal* findParentSignal(const Module& module, const std::string& name) {
+    if (auto it = module.inputs.find(name); it != module.inputs.end()) return &it->second;
+    if (auto it = module.signals.find(name); it != module.signals.end()) return &it->second;
+    if (auto it = module.outputs.find(name); it != module.outputs.end()) return &it->second;
+    return nullptr;
+}
+
+void validateCrossModuleConnections(
         Module& module,
         const InstancePath& path,
         const MateIR& ir,
         const FrontendDomainFacts& facts) {
     const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
 
-    auto assign = [&](Signal& signal) {
-        signal.sync_type = resolvedSyncTypeForSignal(module, path, ir, moduleFacts, signal);
-        validateSyncTypeIds(ir, signal.sync_type, module, path, signal.name);
+    for (auto& sub : module.hierarchyInstantiation) {
+        InstancePath subPath = childPath(path, sub.instance_name);
 
-        bool unresolvedLegacySync = signal.sync_kind == SyncKind::Sync && !signal.clock_domain;
-        if (!unresolvedLegacySync && syncKind(signal) != signal.sync_kind) {
+        for (const auto& conn : moduleFacts.child_input_connections) {
+            if (conn.child_instance_path != subPath ||
+                    conn.child_module_name != sub.name ||
+                    conn.expr_kind != ConnectionExprKind::SimpleIdentifier ||
+                    !conn.parent_signal_name) {
+                continue;
+            }
+
+            const Signal* parentSignal = findParentSignal(module, *conn.parent_signal_name);
+            if (!parentSignal) {
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: module '{}': signal '{}' connected "
+                    "to port '{}' of submodule '{}' not found in parent",
+                    module.name, *conn.parent_signal_name, conn.child_port, sub.name),
+                    conn.loc);
+            }
+
+            auto childIt = sub.inputs.find(conn.child_port);
+            if (childIt == sub.inputs.end()) {
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: submodule '{}' port '{}' not found in inputs",
+                    sub.name, conn.child_port), conn.loc);
+            }
+
+            if (sub.pure_combinational) continue;
+            const Signal& childSignal = childIt->second;
+            if (parentSignal->sync_type == childSignal.sync_type) continue;
+            if (std::holds_alternative<ClockSignal>(childSignal.sync_type) &&
+                    std::holds_alternative<ClockSignal>(parentSignal->sync_type)) {
+                continue;
+            }
+            if (std::holds_alternative<ResetSignal>(childSignal.sync_type) &&
+                    std::holds_alternative<ResetSignal>(parentSignal->sync_type)) {
+                continue;
+            }
+
+            std::optional<ClockId> childSyncClock =
+                synchronizedTargetClockId(sub, subPath, ir, facts, conn.child_port);
+            if (childSyncClock) continue;
+
+            std::optional<ClockId> parentSyncClock =
+                synchronizedTargetClockId(module, path, ir, facts, *conn.parent_signal_name);
+            if (parentSyncClock) continue;
+
             throw CompilerError(std::format(
-                "domains_propagate_and_check: signal '{}' in module '{}' at {} "
-                "has legacy/new sync kind mismatch",
-                signal.name, module.name, pathString(path)));
+                "domains_propagate_and_check: module '{}': signal '{}' ({}) "
+                "connected to port '{}' of submodule '{}' ({}) - SyncType mismatch",
+                module.name, *conn.parent_signal_name, syncKindStr(syncKind(*parentSignal)),
+                conn.child_port, sub.name, syncKindStr(syncKind(childSignal))),
+                conn.loc);
         }
-    };
 
-    for (auto& [name, signal] : module.inputs) assign(signal);
-    for (auto& [name, signal] : module.outputs) assign(signal);
-    for (auto& [name, signal] : module.signals) assign(signal);
+        validateCrossModuleConnections(sub, subPath, ir, facts);
 
-    for (auto& sub : module.hierarchyInstantiation)
-        assignSignalSyncTypes(sub, childPath(path, sub.instance_name), ir, facts);
+        for (auto it = sub.asyncPortConnections.begin(); it != sub.asyncPortConnections.end(); ) {
+            auto cit = sub.inputs.find(it->first);
+            if (cit == sub.inputs.end() ||
+                    (syncKind(cit->second) != SyncKind::Clock &&
+                     syncKind(cit->second) != SyncKind::Reset)) {
+                it = sub.asyncPortConnections.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 }
 
 } // anonymous namespace
 
 void domainsPropagateAndCheck(MateIR& ir, const FrontendDomainFacts& domainFacts) {
     Module& module = ir.top;
-    // Bottom-up: process submodules first
-    std::function<void(Module&)> process = [&](Module& mod) {
-        for (auto& sub : mod.hierarchyInstantiation)
-            process(sub);
-        checkAndPropagateModule(mod, module.dfg.get());
-    };
-    process(module);
-    assignSignalSyncTypes(module, {}, ir, domainFacts);
+    if (!module.dfg) return;
+
+    validateFlopTriggerFacts(module, {}, domainFacts);
+
+    std::map<const DFGNode*, SyncType> nodeSync;
+    seedDeclaredInputSyncTypes(module, {}, ir, domainFacts, nodeSync);
+    seedFlopSyncTypes(module, nodeSync);
+    nodeSync = propagateNodeSyncTypes(*module.dfg, std::move(nodeSync));
+
+    assignSignalSyncTypes(module, {}, ir, domainFacts, nodeSync);
+    validateCdcForModule(module, {}, *module.dfg, ir, domainFacts);
+    validateCrossModuleConnections(module, {}, ir, domainFacts);
 }
 
 } // namespace mate

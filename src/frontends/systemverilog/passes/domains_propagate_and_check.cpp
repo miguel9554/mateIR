@@ -619,6 +619,19 @@ void validateCrossModuleConnections(
             std::optional<ClockId> parentSyncClock =
                 synchronizedTargetClockId(module, path, ir, facts, *conn.parent_signal_name);
             if (parentSyncClock) continue;
+
+            if (module.inputs.contains(*conn.parent_signal_name) &&
+                    std::holds_alternative<AsyncSignal>(parentSignal->sync_type) &&
+                    !std::holds_alternative<AsyncSignal>(childSignal.sync_type)) {
+                throw CompilerError(std::format(
+                    "domains_propagate_and_check: cross-module sync type mismatch: "
+                    "parent input '{}' in module '{}' is Async but child port '{}.{}' "
+                    "in module '{}' is {}",
+                    *conn.parent_signal_name, module.name,
+                    sub.instance_name.empty() ? sub.name : sub.instance_name,
+                    conn.child_port, sub.name, syncKindStr(syncKind(childSignal))),
+                    conn.loc);
+            }
         }
 
         validateCrossModuleConnections(sub, subPath, ir, facts);

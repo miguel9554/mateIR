@@ -1,0 +1,10 @@
+module_name: cross_module_async_to_sync_fail
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - q
+
+async_domain:
+  - async_in

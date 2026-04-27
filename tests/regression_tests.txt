@@ -11,6 +11,7 @@ const_only_dynamic_fail FAIL DIV operation requires constant operands
 const_only_ops PASS
 cordic PASS
 counter_top PASS
+cross_module_async_to_sync_fail FAIL cross-module sync type mismatch
 enum_local_test PASS
 enum_top_test PASS
 full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'

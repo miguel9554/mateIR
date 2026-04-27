@@ -4,7 +4,6 @@
 
 #include <format>
 #include <map>
-#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -77,32 +76,6 @@ const ModuleDomainFacts& requireFacts(
     return *moduleFacts;
 }
 
-ClockId requireClockDomainForLocalClock(
-        const Module& module,
-        const InstancePath& path,
-        const MateIR& ir,
-        const ModuleDomainFacts& moduleFacts,
-        const std::string& localClockName,
-        const std::string& signalName) {
-    auto it = moduleFacts.resolved_input_domains.find(localClockName);
-    if (it == moduleFacts.resolved_input_domains.end() || !it->second.clock_domain) {
-        throw CompilerError(std::format(
-            "domains_propagate_and_check: signal '{}' in module '{}' at {} "
-            "references unresolved clock domain '{}'",
-            signalName, module.name, pathString(path), localClockName));
-    }
-
-    ClockId id = *it->second.clock_domain;
-    if (id == InvalidClockId || id.value >= ir.clocks.size() ||
-            ir.clocks[id.value].id != id) {
-        throw CompilerError(std::format(
-            "domains_propagate_and_check: signal '{}' in module '{}' at {} "
-            "references invalid ClockId {}",
-            signalName, module.name, pathString(path), id.value));
-    }
-    return id;
-}
-
 void validateFlopTriggerFactsForModule(
         const Module& module,
         const InstancePath& path,
@@ -152,28 +125,13 @@ void validateFlopTriggerFactsForModule(
         validateFlopTriggerFactsForModule(sub, childPath(path, sub.instance_name), facts);
 }
 
-std::optional<ClockId> synchronizedTargetClockId(
-        const Module& module,
-        const InstancePath& path,
-        const MateIR& ir,
-        const FrontendDomainFacts& facts,
-        const std::string& portName) {
-    const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
-    auto portIt = moduleFacts.ports.find(portName);
-    if (portIt == moduleFacts.ports.end() || !portIt->second.synchronized_into)
-        return std::nullopt;
-
-    return requireClockDomainForLocalClock(
-        module, path, ir, moduleFacts, *portIt->second.synchronized_into, portName);
-}
-
 void validateCdcForModule(
         const Module& module,
         const InstancePath& path,
         const DFG& topDFG,
-        const MateIR& ir,
         const FrontendDomainFacts& facts) {
     auto fwd = buildForwardMap(topDFG);
+    const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
 
     std::map<std::string, ClockId> flopClock;
     for (const auto& flop : module.flops)
@@ -210,22 +168,20 @@ void validateCdcForModule(
     };
 
     for (const auto& [portName, inputSig] : module.inputs) {
-        std::optional<ClockId> synchronizedClock =
-            synchronizedTargetClockId(module, path, ir, facts, portName);
-
         for (auto* leaf : signalLeaves(inputSig)) {
             if (!leaf) continue;
             for (const auto& reached : forwardTraversal(leaf)) {
+                if (moduleFacts.cdc.synchronizer_flops.contains(reached.flop_name))
+                    continue;
+
                 if (const auto* sync = std::get_if<SyncSignal>(&inputSig.sync_type)) {
                     if (sync->clock_domain == reached.clock_domain) continue;
-                    if (synchronizedClock && *synchronizedClock == reached.clock_domain) continue;
                     throw CompilerError(std::format(
                         "domains_propagate_and_check: module '{}': sync input '{}' "
                         "feeds flop '{}' in a different clock domain - cross-domain violation",
                         module.name, portName, reached.flop_name), reached.d_node);
                 }
 
-                if (synchronizedClock && *synchronizedClock == reached.clock_domain) continue;
                 throw CompilerError(std::format(
                     "domains_propagate_and_check: module '{}': {} input '{}' "
                     "feeds flop '{}' without a declared synchronizer",
@@ -236,7 +192,7 @@ void validateCdcForModule(
     }
 
     for (const auto& sub : module.hierarchyInstantiation)
-        validateCdcForModule(sub, childPath(path, sub.instance_name), topDFG, ir, facts);
+        validateCdcForModule(sub, childPath(path, sub.instance_name), topDFG, facts);
 }
 
 const Signal* findParentSignal(const Module& module, const std::string& name) {
@@ -297,14 +253,6 @@ void validateCrossModuleConnections(
                 continue;
             }
 
-            std::optional<ClockId> childSyncClock =
-                synchronizedTargetClockId(sub, subPath, ir, facts, conn.child_port);
-            if (childSyncClock) continue;
-
-            std::optional<ClockId> parentSyncClock =
-                synchronizedTargetClockId(module, path, ir, facts, *conn.parent_signal_name);
-            if (parentSyncClock) continue;
-
             if (module.inputs.contains(*conn.parent_signal_name) &&
                     std::holds_alternative<AsyncSignal>(parentSignal->sync_type) &&
                     !std::holds_alternative<AsyncSignal>(childSignal.sync_type)) {
@@ -338,7 +286,7 @@ void checkCdcAndCrossModuleConnections(
         const FrontendDomainFacts& domainFacts,
         const SyncDomainAnalysis& analysis) {
     (void)analysis;
-    validateCdcForModule(top, {}, topDFG, ir, domainFacts);
+    validateCdcForModule(top, {}, topDFG, domainFacts);
     validateCrossModuleConnections(top, {}, ir, domainFacts);
 }
 

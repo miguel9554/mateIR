@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RTL CDC Sidecar",
+  "description": "Marks local flops that intentionally sample async or foreign-domain data.",
+  "type": "object",
+  "properties": {
+    "synchronizer_flops": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}

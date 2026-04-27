@@ -17,5 +17,4 @@ clock_domains:
       - interrupt
 
 async_domain:
-  - gpio_in:
-      synchronized_into: HCLK
+  - gpio_in

@@ -15,5 +15,4 @@ clock_domains:
       - data_async
 
 async_domain:
-  - read_pointer:
-      synchronized_into: clk
+  - read_pointer

@@ -1,11 +1,10 @@
-module_name: synchronizer_1bit
+module_name: cdc_sidecar_duplicate_flop_fail
 
 clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - rst
-      - out_signal
+      - q
 
 async_domain:
-  - in_signal
+  - async_in

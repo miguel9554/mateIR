@@ -14,11 +14,7 @@ clock_domains:
       - rd_wr_sync
 
 async_domain:
-  - cs:
-      synchronized_into: sys_clk
-  - address:
-      synchronized_into: sys_clk
-  - address_valid:
-      synchronized_into: sys_clk
-  - rd_wr:
-      synchronized_into: sys_clk
+  - cs
+  - address
+  - address_valid
+  - rd_wr

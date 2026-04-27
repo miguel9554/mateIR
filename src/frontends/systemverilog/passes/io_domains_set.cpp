@@ -18,31 +18,18 @@ enum class PortClass { Clock, Reset, Sync, Async };
 struct PortClassification {
     PortClass cls;
     std::string clock_name;        // only for Sync
-    std::string synchronized_into; // optional: declared target domain for cross-domain crossing
 };
 
-// Parse a signal_with_attrs YAML entry.
-// Either a plain string or a single-key map: { signal_name: { synchronized_into: domain } }
-struct SignalRef {
-    std::string name;
-    std::string synchronized_into; // empty if not specified
-};
-
-SignalRef parseSignalRef(const YAML::Node& entry) {
+std::string parseSignalRef(const YAML::Node& entry) {
     if (entry.IsScalar()) {
-        return {entry.as<std::string>(), ""};
+        return entry.as<std::string>();
     }
-    if (entry.IsMap() && entry.size() == 1) {
-        auto it = entry.begin();
-        SignalRef ref;
-        ref.name = it->first.as<std::string>();
-        auto attrs = it->second;
-        if (attrs["synchronized_into"]) {
-            ref.synchronized_into = attrs["synchronized_into"].as<std::string>();
-        }
-        return ref;
+    if (entry.IsMap()) {
+        throw CompilerError(
+            "io_domains_set: synchronized_into is no longer supported in domains YAML; "
+            "use <module_name>.cdc.yaml synchronizer_flops instead");
     }
-    throw CompilerError("io_domains_set: invalid signal entry format (expected string or single-key map)");
+    throw CompilerError("io_domains_set: invalid signal entry format (expected string)");
 }
 
 // Expand a wildcard pattern (e.g. "s_axis_*") against a set of port names.
@@ -133,19 +120,19 @@ void setIODomains(Module& module,
                     "io_domains_set: module '{}': port '{}' classified in multiple domains",
                     module.name, info.input_port));
             }
-            portClassMap[info.input_port] = {PortClass::Clock, domainName, ""};
+            portClassMap[info.input_port] = {PortClass::Clock, domainName};
 
             // Expand inputs_outputs entries
             auto ioList = domainNode["inputs_outputs"];
             if (ioList && ioList.IsSequence()) {
                 for (const auto& entry : ioList) {
                     auto ref = parseSignalRef(entry);
-                    auto matches = expandPattern(ref.name, allPortNames);
+                    auto matches = expandPattern(ref, allPortNames);
                     if (matches.empty()) {
                         throw CompilerError(std::format(
                             "io_domains_set: wildcard '{}' in clock domain '{}' "
                             "matches no ports in module '{}'",
-                            ref.name, domainName, module.name));
+                            ref, domainName, module.name));
                     }
                     for (const auto& name : matches) {
                         if (portClassMap.contains(name)) {
@@ -153,7 +140,7 @@ void setIODomains(Module& module,
                                 "io_domains_set: module '{}': port '{}' classified in multiple domains",
                                 module.name, name));
                         }
-                        portClassMap[name] = {PortClass::Sync, domainName, ref.synchronized_into};
+                        portClassMap[name] = {PortClass::Sync, domainName};
                         info.matched_ports.push_back(name);
                     }
                 }
@@ -196,7 +183,7 @@ void setIODomains(Module& module,
                     "io_domains_set: module '{}': port '{}' classified in multiple domains",
                     module.name, info.signal_name));
             }
-            portClassMap[info.signal_name] = {PortClass::Reset, "", ""};
+            portClassMap[info.signal_name] = {PortClass::Reset, ""};
 
             resets[resetName] = std::move(info);
             if (privateFacts) {
@@ -214,12 +201,12 @@ void setIODomains(Module& module,
     if (asyncNode && asyncNode.IsSequence()) {
         for (const auto& entry : asyncNode) {
             auto ref = parseSignalRef(entry);
-            auto matches = expandPattern(ref.name, allPortNames);
+            auto matches = expandPattern(ref, allPortNames);
             if (matches.empty()) {
                 throw CompilerError(std::format(
                     "io_domains_set: wildcard '{}' in async_domain "
                     "matches no ports in module '{}'",
-                    ref.name, module.name));
+                    ref, module.name));
             }
             for (const auto& name : matches) {
                 if (portClassMap.contains(name)) {
@@ -227,7 +214,7 @@ void setIODomains(Module& module,
                         "io_domains_set: module '{}': port '{}' classified in multiple domains",
                         module.name, name));
                 }
-                portClassMap[name] = {PortClass::Async, "", ref.synchronized_into};
+                portClassMap[name] = {PortClass::Async, ""};
             }
         }
     }
@@ -288,9 +275,6 @@ void setIODomains(Module& module,
                 .local_domain_name = cls.cls == PortClass::Sync
                     ? std::optional<std::string>(cls.clock_name)
                     : std::nullopt,
-                .synchronized_into = cls.synchronized_into.empty()
-                    ? std::nullopt
-                    : std::optional<std::string>(cls.synchronized_into),
                 .edge = std::nullopt,
             };
         }

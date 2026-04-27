@@ -1,0 +1,4 @@
+synchronizer_flops:
+  - cs_reg
+  - valid_reg
+  - rdwr_reg

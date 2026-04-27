@@ -9,7 +9,7 @@ namespace mate {
 // Run after global_domain_resolve, flop_resolve, and dce.
 // - Validates clock/reset trigger facts against YAML-derived frontend facts
 // - Propagates final SyncType through the flat DFG using ClockId/ResetId domains
-// - Validates CDC fanin using ClockId comparisons and synchronized_into escapes
+// - Validates CDC fanin using ClockId comparisons and CDC sidecar synchronizer escapes
 void domainsPropagateAndCheck(MateIR& ir, const FrontendDomainFacts& domainFacts);
 
 } // namespace mate

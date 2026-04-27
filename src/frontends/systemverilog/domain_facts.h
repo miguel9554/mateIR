@@ -6,6 +6,7 @@
 
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -36,7 +37,6 @@ struct LocalPortDomainFact {
     std::string port_name;
     LocalPortClass cls;
     std::optional<std::string> local_domain_name;
-    std::optional<std::string> synchronized_into;
     std::optional<edge_t> edge;
 };
 
@@ -86,6 +86,10 @@ struct ResolvedFlopDomainFact {
     ResetDomains reset_domains;
 };
 
+struct ModuleCdcFacts {
+    std::set<std::string> synchronizer_flops;
+};
+
 struct ModuleDomainFacts {
     bool pure_combinational = false;
     std::map<std::string, LocalPortDomainFact> ports;
@@ -96,6 +100,7 @@ struct ModuleDomainFacts {
     std::vector<ChildInputConnectionFact> child_input_connections;
     std::map<std::string, ResolvedInputDomainFact> resolved_input_domains;
     std::map<std::string, ResolvedFlopDomainFact> resolved_flop_domains;
+    ModuleCdcFacts cdc;
 };
 
 struct FrontendDomainFacts {

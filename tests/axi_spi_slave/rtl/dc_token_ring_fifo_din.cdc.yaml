@@ -1,0 +1,10 @@
+synchronizer_flops:
+  - mem[0]
+  - mem[1]
+  - mem[2]
+  - mem[3]
+  - mem[4]
+  - mem[5]
+  - mem[6]
+  - mem[7]
+  - wr_token

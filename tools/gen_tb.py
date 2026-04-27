@@ -178,18 +178,18 @@ class DomainConfig:
 
 
 def _normalize_signal_refs(signal_refs: list[object]) -> list[str]:
-    """Extract signal names from schema-valid string and single-key mapping forms."""
+    """Extract signal names from schema-valid string forms."""
     result = []
     for signal_ref in signal_refs:
         if isinstance(signal_ref, str):
             result.append(signal_ref)
             continue
         if isinstance(signal_ref, dict):
-            if len(signal_ref) != 1:
-                raise ValueError(f"Expected single-key signal mapping, got: {signal_ref!r}")
-            result.extend(signal_ref.keys())
-            continue
-        raise ValueError(f"Expected signal reference string or mapping, got: {signal_ref!r}")
+            raise ValueError(
+                "synchronized_into is no longer supported in domains YAML; "
+                "use <module_name>.cdc.yaml synchronizer_flops instead"
+            )
+        raise ValueError(f"Expected signal reference string, got: {signal_ref!r}")
     return result
 
 

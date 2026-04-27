@@ -1,0 +1,8 @@
+module_name: global_domains_unsupported_clock_expr
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - d
+      - q

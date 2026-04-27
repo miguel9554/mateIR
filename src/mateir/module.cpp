@@ -1,4 +1,4 @@
-#include "mateir/module.h"
+#include "mateir/mateir.h"
 #include "util/debug.h"
 
 #include <algorithm>
@@ -8,6 +8,7 @@
 #include <map>
 #include <queue>
 #include <set>
+#include <sstream>
 
 namespace mate {
 
@@ -144,27 +145,26 @@ DFGNode* scalarFlopQNode(const FlopInfo& flop) {
     return flop.binding.q_leaves[0];
 }
 
-std::ostream& operator<<(std::ostream& os, const asyncTrigger_t& t) {
-    os << (t.edge == POSEDGE ? "posedge" : "negedge")
-       << ":" << t.name;
-    return os;
-}
-
 void FlopInfo::print(std::ostream& os, int indent) const {
     auto indent_str = [](int n) { return std::string(n * 2, ' '); };
 
     os << indent_str(indent) << "Flop: " << name << std::endl;
     os << indent_str(indent + 1) << "type: ";
     type.print(os);
+    for (const auto& dim : type.unpacked_dims) {
+        os << "[" << dim.left << ":" << dim.right << "]";
+    }
     os << std::endl;
     os << indent_str(indent + 1) << "flop_type: ";
     switch (flop_type) {
         case FLOP_D: os << "FLOP_D"; break;
     }
     os << std::endl;
-    os << indent_str(indent + 1) << "clock: " << clock << std::endl;
-    if (reset) {
-        os << indent_str(indent + 1) << "reset: " << *reset << std::endl;
+    os << indent_str(indent + 1) << "clock_domain: " << clock_domain.value << std::endl;
+    if (!reset_domains.empty()) {
+        os << indent_str(indent + 1) << "reset_domains:";
+        for (ResetId id : reset_domains.ids) os << " " << id.value;
+        os << std::endl;
     }
     if (reset_value) {
         os << indent_str(indent + 1) << "reset_value: " << *reset_value << std::endl;
@@ -176,6 +176,29 @@ void SignalBase::print(std::ostream& os) const {
     type.print(os);
     for (const auto& dim : type.unpacked_dims) {
         os << "[" << dim.left << ":" << dim.right << "]";
+    }
+}
+
+void Signal::print(std::ostream& os) const {
+    SignalBase::print(os);
+    SyncKind kind = syncKind(*this);
+    const char* kindName = kind == SyncKind::Sync  ? "sync"  :
+                           kind == SyncKind::Clock ? "clock" :
+                           kind == SyncKind::Reset ? "reset" : "async";
+    os << " sync_kind=" << kindName;
+    if (const auto* sync = std::get_if<SyncSignal>(&sync_type)) {
+        os << " clock_domain=" << sync->clock_domain.value;
+        if (!sync->reset_domains.empty()) {
+            os << " reset_domains=";
+            for (size_t i = 0; i < sync->reset_domains.ids.size(); ++i) {
+                if (i) os << ",";
+                os << sync->reset_domains.ids[i].value;
+            }
+        }
+    } else if (const auto* clock = std::get_if<ClockSignal>(&sync_type)) {
+        os << " clock_domain=" << clock->clock_domain.value;
+    } else if (const auto* reset = std::get_if<ResetSignal>(&sync_type)) {
+        os << " reset_domain=" << reset->reset_domain.value;
     }
 }
 
@@ -302,16 +325,91 @@ static std::string syncKindStr(SyncKind sk) {
     return "sync";
 }
 
+static std::string edgeToJson(edge_t edge) {
+    return edge == POSEDGE ? "posedge" : "negedge";
+}
+
+static std::string signalNamespaceToJson(SignalNamespace ns) {
+    switch (ns) {
+        case SignalNamespace::Input: return "input";
+        case SignalNamespace::Output: return "output";
+        case SignalNamespace::Internal: return "internal";
+        case SignalNamespace::FlopQ: return "flop_q";
+        case SignalNamespace::FlopD: return "flop_d";
+    }
+    return "internal";
+}
+
+static std::string instancePathToJson(const InstancePath& path) {
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < path.elems.size(); ++i) {
+        if (i) ss << ", ";
+        ss << "\"" << path.elems[i] << "\"";
+    }
+    ss << "]";
+    return ss.str();
+}
+
+static std::string hierSignalRefToJson(const HierSignalRef& ref) {
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"instance_path\": " << instancePathToJson(ref.instance_path) << ", ";
+    ss << "\"namespace\": \"" << signalNamespaceToJson(ref.ns) << "\", ";
+    ss << "\"name\": \"" << ref.name << "\"";
+    ss << "}";
+    return ss.str();
+}
+
+static std::string resetDomainsToJson(const ResetDomains& domains) {
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < domains.ids.size(); ++i) {
+        if (i) ss << ", ";
+        ss << domains.ids[i].value;
+    }
+    ss << "]";
+    return ss.str();
+}
+
+static std::string syncTypeToJson(const SyncType& syncType) {
+    std::ostringstream ss;
+    ss << "{";
+    if (const auto* sync = std::get_if<SyncSignal>(&syncType)) {
+        ss << "\"kind\": \"sync\", ";
+        ss << "\"clock_domain\": " << sync->clock_domain.value << ", ";
+        ss << "\"reset_domains\": " << resetDomainsToJson(sync->reset_domains);
+    } else if (const auto* clock = std::get_if<ClockSignal>(&syncType)) {
+        ss << "\"kind\": \"clock\", ";
+        ss << "\"clock_domain\": " << clock->clock_domain.value;
+    } else if (const auto* reset = std::get_if<ResetSignal>(&syncType)) {
+        ss << "\"kind\": \"reset\", ";
+        ss << "\"reset_domain\": " << reset->reset_domain.value;
+    } else {
+        ss << "\"kind\": \"async\"";
+    }
+    ss << "}";
+    return ss.str();
+}
+
+SyncKind syncKind(const SyncType& sync_type) {
+    if (std::holds_alternative<SyncSignal>(sync_type)) return SyncKind::Sync;
+    if (std::holds_alternative<ClockSignal>(sync_type)) return SyncKind::Clock;
+    if (std::holds_alternative<ResetSignal>(sync_type)) return SyncKind::Reset;
+    return SyncKind::Async;
+}
+
+SyncKind syncKind(const Signal& signal) {
+    return syncKind(signal.sync_type);
+}
+
 static std::string signalToJson(const Signal& s) {
     std::ostringstream ss;
     ss << "{";
     ss << "\"name\": \"" << s.name << "\", ";
     ss << "\"type\": " << typeToJson(s.type) << ", ";
-    ss << "\"sync_kind\": \"" << syncKindStr(s.sync_kind) << "\"";
-    if (s.clock_domain)
-        ss << ", \"clock_domain\": \"" << s.clock_domain->name << "\"";
-    if (s.clock_edge.has_value())
-        ss << ", \"clock_edge\": \"" << (*s.clock_edge == POSEDGE ? "posedge" : "negedge") << "\"";
+    ss << "\"sync_kind\": \"" << syncKindStr(syncKind(s)) << "\", ";
+    ss << "\"sync_type\": " << syncTypeToJson(s.sync_type);
     ss << "}";
     return ss.str();
 }
@@ -327,13 +425,9 @@ static std::string flopToJson(const FlopInfo& f) {
     std::ostringstream ss;
     ss << "{";
     ss << "\"name\": \"" << f.name << "\", ";
-    ss << "\"type\": " << typeToJson(f.type.type) << ", ";
-    ss << "\"clock\": {\"edge\": \"" << (f.clock.edge == POSEDGE ? "posedge" : "negedge")
-       << "\", \"name\": \"" << f.clock.name << "\"}";
-    if (f.reset) {
-        ss << ", \"reset\": {\"edge\": \"" << (f.reset->edge == POSEDGE ? "posedge" : "negedge")
-           << "\", \"name\": \"" << f.reset->name << "\"}";
-    }
+    ss << "\"type\": " << typeToJson(f.type) << ", ";
+    ss << "\"clock_domain\": " << f.clock_domain.value << ", ";
+    ss << "\"reset_domains\": " << resetDomainsToJson(f.reset_domains);
     if (f.reset_value) {
         ss << ", \"reset_value\": " << *f.reset_value;
     }
@@ -424,8 +518,47 @@ static std::string moduleToJson(const Module& m, int indent) {
     return ss.str();
 }
 
-std::string Module::toJson() const {
-    return moduleToJson(*this, 0) + "\n";
+static std::string clockDomainToJson(const ClockDomain& clock) {
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"id\": " << clock.id.value << ", ";
+    ss << "\"display_name\": \"" << clock.display_name << "\", ";
+    ss << "\"edge\": \"" << edgeToJson(clock.edge) << "\", ";
+    ss << "\"source\": " << hierSignalRefToJson(clock.source);
+    ss << "}";
+    return ss.str();
+}
+
+static std::string resetDomainToJson(const ResetDomain& reset) {
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"id\": " << reset.id.value << ", ";
+    ss << "\"display_name\": \"" << reset.display_name << "\", ";
+    ss << "\"active_edge\": \"" << edgeToJson(reset.active_edge) << "\", ";
+    ss << "\"source\": " << hierSignalRefToJson(reset.source);
+    ss << "}";
+    return ss.str();
+}
+
+std::string hierarchyToJson(const MateIR& ir) {
+    std::ostringstream ss;
+    ss << "{\n";
+    ss << "  \"clock_domains\": [\n";
+    for (size_t i = 0; i < ir.clocks.size(); ++i) {
+        if (i) ss << ",\n";
+        ss << "    " << clockDomainToJson(ir.clocks[i]);
+    }
+    ss << "\n  ],\n";
+    ss << "  \"reset_domains\": [\n";
+    for (size_t i = 0; i < ir.resets.size(); ++i) {
+        if (i) ss << ",\n";
+        ss << "    " << resetDomainToJson(ir.resets[i]);
+    }
+    ss << "\n  ],\n";
+    ss << "  \"top\": ";
+    ss << moduleToJson(ir.top, 1) << "\n";
+    ss << "}\n";
+    return ss.str();
 }
 
 // ============================================================================

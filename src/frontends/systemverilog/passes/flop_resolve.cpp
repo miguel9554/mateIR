@@ -13,32 +13,31 @@ namespace mate {
 
 namespace {
 
-// Return all leaf element names for a signal (expanding dimensions)
-std::vector<std::string> allElements(const Signal& signal) {
-    std::vector<std::string> current = {signal.name};
-
-    for (const auto& dimension : signal.type.unpacked_dims) {
-        std::vector<std::string> next;
-        int step = (dimension.left <= dimension.right) ? 1 : -1;
-        for (const auto& prefix : current) {
-            for (int i = dimension.left; step > 0 ? i <= dimension.right : i >= dimension.right; i += step) {
-                next.push_back(prefix + "[" + std::to_string(i) + "]");
-            }
-        }
-        current = std::move(next);
+// Return all leaf element names for a flop (expanding unpacked dimensions).
+std::vector<std::string> allElements(const std::string& baseName, const Type& type) {
+    std::vector<std::string> names;
+    for (const auto& suffix : unpackedIndexSuffixes(type)) {
+        names.push_back(baseName + suffix);
     }
-
-    return current;
+    return names;
 }
 
-// Prefix a module-local name with the instance path for DFG node lookups.
-// Empty instance_path means top module — no prefix needed.
-std::string inDFG(const std::string& instance_path, const std::string& name) {
-    return instance_path.empty() ? name : instance_path + "." + name;
+std::string inDFG(const InstancePath& instance_path) {
+    std::string out;
+    for (const auto& elem : instance_path.elems) {
+        if (!out.empty()) out += ".";
+        out += elem;
+    }
+    return out;
 }
 
-DFGNode* nodeForTrigger(const Module& resolved, const asyncTrigger_t& trigger) {
-    auto it = resolved.inputs.find(trigger.name);
+InstancePath childPath(InstancePath path, const std::string& instanceName) {
+    path.elems.push_back(instanceName);
+    return path;
+}
+
+DFGNode* nodeForTrigger(const Module& resolved, const EventTriggerFact& trigger) {
+    auto it = resolved.inputs.find(trigger.local_signal_name);
     return it != resolved.inputs.end() ? scalarSignalNode(it->second) : nullptr;
 }
 
@@ -90,11 +89,11 @@ std::optional<int64_t> constantValueOfNode(const DFGNode* node) {
 bool extract_reset_from_concat(
     DFG& graph,
     const DFGNode* dNodeDriver,
-    const std::vector<asyncTrigger_t>& triggers,
+    const std::vector<EventTriggerFact>& triggers,
     const std::string& flop_name,
     const Module& resolved,
-    asyncTrigger_t& reset,
-    asyncTrigger_t& clock,
+    EventTriggerFact& reset,
+    EventTriggerFact& clock,
     int& reset_value,
     DFGNode*& functionalLogic)
 {
@@ -127,7 +126,8 @@ bool extract_reset_from_concat(
     } else {
         throw CompilerError(std::format(
             "flop '{}' has 2 triggers but CONCAT/MUX selector '{}' matches neither trigger ('{}', '{}')",
-            flop_name, mux_sel->name, triggers[0].name, triggers[1].name), dNodeDriver->loc);
+            flop_name, mux_sel->name, triggers[0].local_signal_name,
+            triggers[1].local_signal_name), dNodeDriver->loc);
     }
 
     std::vector<DFGNode*> functionalParts;
@@ -203,11 +203,11 @@ bool extract_reset_from_concat(
 bool extract_reset(
     DFG& graph,
     const DFGNode* dNodeDriver,
-    const std::vector<asyncTrigger_t>& triggers,
+    const std::vector<EventTriggerFact>& triggers,
     const std::string& flop_name,
     const Module& resolved,
-    asyncTrigger_t& reset,
-    asyncTrigger_t& clock,
+    EventTriggerFact& reset,
+    EventTriggerFact& clock,
     int& reset_value,
     DFGNode*& functionalLogic)
 {
@@ -247,7 +247,8 @@ bool extract_reset(
     } else {
         throw CompilerError(std::format(
             "flop '{}' has 2 triggers but MUX selector '{}' matches neither trigger ('{}', '{}')",
-            flop_name, mux_sel->name, triggers[0].name, triggers[1].name), dNodeDriver->loc);
+            flop_name, mux_sel->name, triggers[0].local_signal_name,
+            triggers[1].local_signal_name), dNodeDriver->loc);
     }
 
     // Assign the expected reset and functional branches
@@ -274,11 +275,12 @@ FlopInfo extractFlopClockAndReset(
     const std::string& flop_name,
     const std::string& instance_path,
     const FlopInfo& flopIn,
+    ModuleDomainFacts& moduleFacts,
     DFGNode*& functionalLogic)
 {
     auto flop = flopIn;
     DFGNode* dNode = nullptr;
-    if (!flopIn.type.type.unpacked_dims.empty() && flop_name != flopIn.name) {
+    if (!flopIn.type.unpacked_dims.empty() && flop_name != flopIn.name) {
         dNode = graph.getOutputNode(instance_path, flop_name + ".d");
     } else {
         dNode = scalarFlopDNode(flopIn);
@@ -295,10 +297,16 @@ FlopInfo extractFlopClockAndReset(
             instance_path.empty() ? flop_name : instance_path + "." + flop_name + ".d"), dNode->loc);
     }
     auto* dNodeDriver = dDriver->node;
-    const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
+    auto triggerIt = moduleFacts.flop_triggers.find(flopIn.name);
+    if (triggerIt == moduleFacts.flop_triggers.end()) {
+        throw CompilerError(std::format(
+            "flop_resolve: missing trigger facts for flop '{}' in module '{}'",
+            flopIn.name, resolved.name));
+    }
+    const auto& triggers = triggerIt->second.triggers;
 
-    asyncTrigger_t clock;
-    asyncTrigger_t reset;
+    EventTriggerFact clock;
+    EventTriggerFact reset;
     bool has_reset;
     int reset_value;
 
@@ -315,14 +323,19 @@ FlopInfo extractFlopClockAndReset(
             "Trigger size not supported: {}", triggers.size()), dNode->loc);
     }
 
-    flop.clock = clock;
     if (has_reset) {
-        flop.reset = reset;
         flop.reset_value = reset_value;
     }
+    moduleFacts.flop_domains[flop_name] = FlopDomainFact{
+        .flop_name = flop_name,
+        .clock = clock,
+        .reset = has_reset
+            ? std::optional<EventTriggerFact>(reset)
+            : std::nullopt,
+        .reset_value = flop.reset_value,
+    };
     flop.name = flop_name;
-    flop.type.name = flop_name;
-    flop.type.type.unpacked_dims = {};
+    flop.type.unpacked_dims = {};
     return flop;
 }
 
@@ -376,22 +389,36 @@ void check_logic_no_clock_reset(
 } // anonymous namespace
 
 // Forward declarations
-static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::string& instance_path);
-static void resolveFlopsRecursive(Module& module, DFG& topDFG, const std::string& instance_path);
+static void resolveFlopsForModule(Module& resolved,
+                                  DFG& graph,
+                                  const InstancePath& instance_path,
+                                  FrontendDomainFacts& domainFacts);
+static void resolveFlopsRecursive(Module& module,
+                                  DFG& topDFG,
+                                  const InstancePath& instance_path,
+                                  FrontendDomainFacts& domainFacts);
 
-void resolveFlops(Module& module) {
+void resolveFlops(Module& module, FrontendDomainFacts& domainFacts) {
     if (!module.dfg) return;
-    resolveFlopsRecursive(module, *module.dfg, "");
+    resolveFlopsRecursive(module, *module.dfg, {}, domainFacts);
 }
 
-static void resolveFlopsRecursive(Module& module, DFG& topDFG, const std::string& instance_path) {
+static void resolveFlopsRecursive(Module& module,
+                                  DFG& topDFG,
+                                  const InstancePath& instance_path,
+                                  FrontendDomainFacts& domainFacts) {
     // Bottom-up: resolve submodules first so their clock/reset types are tagged first
     for (auto& sub : module.hierarchyInstantiation)
-        resolveFlopsRecursive(sub, topDFG, inDFG(instance_path, sub.instance_name));
-    resolveFlopsForModule(module, topDFG, instance_path);
+        resolveFlopsRecursive(sub, topDFG, childPath(instance_path, sub.instance_name), domainFacts);
+    resolveFlopsForModule(module, topDFG, instance_path, domainFacts);
 }
 
-static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::string& instance_path) {
+static void resolveFlopsForModule(Module& resolved,
+                                  DFG& graph,
+                                  const InstancePath& instance_path,
+                                  FrontendDomainFacts& domainFacts) {
+    const std::string dfgInstancePath = inDFG(instance_path);
+    ModuleDomainFacts& privateFacts = domainFacts.getOrCreate({instance_path, resolved.name});
     if (resolved.flops.empty()) {
         return;
     }
@@ -400,9 +427,9 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
     // Uses output bindings directly since after DFG inlining submodule output
     // ports may not be in the flat top DFG's outputs map (only .d nodes are adopted).
     for (auto& [outName, output] : resolved.outputs) {
-        if (!resolved.flopsTriggers.contains(outName)) continue;
+        if (!privateFacts.flop_triggers.contains(outName)) continue;
         if (output.type.unpacked_dims.empty()) {
-            DFGNode* qNode = graph.getInputNode(instance_path, outName + ".q");
+            DFGNode* qNode = graph.getInputNode(dfgInstancePath, outName + ".q");
             if (qNode) {
                 graph.connectDriver(scalarSignalNode(output), {qNode, 0});
             }
@@ -411,10 +438,10 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
             const auto& leaves = signalLeaves(output);
             for (size_t i = 0; i < suffixes.size(); ++i) {
                 const auto& suffix = suffixes[i];
-                DFGNode* qNode = graph.getInputNode(instance_path, outName + suffix + ".q");
+                DFGNode* qNode = graph.getInputNode(dfgInstancePath, outName + suffix + ".q");
                 DFGNode* outNode = i < leaves.size()
                     ? leaves[i]
-                    : graph.getOutputNode(instance_path, outName + suffix);
+                    : graph.getOutputNode(dfgInstancePath, outName + suffix);
                 if (qNode && outNode) {
                     graph.connectDriver(outNode, {qNode, 0});
                 }
@@ -425,23 +452,25 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
     // Extract clock/reset info and validate functional logic
     std::vector<FlopInfo> resolved_flops;
     for (const auto& flop : resolved.flops) {
-        for (const auto& name : allElements(flop.type)) {
+        for (const auto& name : allElements(flop.name, flop.type)) {
             DFGNode* functional_logic;
             resolved_flops.push_back(
-                extractFlopClockAndReset(graph, resolved, name, instance_path, flop, functional_logic));
+                extractFlopClockAndReset(
+                    graph, resolved, name, dfgInstancePath, flop, privateFacts, functional_logic));
             // After flop_resolve, every FlopInfo represents one physical flop leaf.
             {
-                auto* dNode = graph.getOutputNode(instance_path, name + ".d");
-                auto* qNode = graph.getInputNode(instance_path, name + ".q");
+                auto* dNode = graph.getOutputNode(dfgInstancePath, name + ".d");
+                auto* qNode = graph.getInputNode(dfgInstancePath, name + ".q");
                 resolved_flops.back().binding = FlopBinding{
                     .d_leaves = {dNode},
                     .q_leaves = {qNode},
                 };
-                resolved_flops.back().type.binding.leaves = {qNode};
             }
             DFGNode* output = scalarFlopDNode(resolved_flops.back());
-            const asyncTrigger_t clock = resolved_flops.back().clock;
-            const std::optional<asyncTrigger_t> reset = resolved_flops.back().reset;
+
+            const FlopDomainFact& flopDomain = privateFacts.flop_domains.at(name);
+            const EventTriggerFact& clock = flopDomain.clock;
+            const std::optional<EventTriggerFact>& reset = flopDomain.reset;
 
             // Helper to find exactly one signal
             auto find_unique_input = [&](const std::string& sig_name, const char* role) -> Signal& {
@@ -454,12 +483,11 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
                 return it->second;
             };
 
-            // Validate clock/reset are input ports; do NOT override sync_kind here.
-            // sync_kind was set by io_domains_set from the domains file and must not
-            // be overwritten — domains_propagate_and_check will verify consistency.
-            find_unique_input(clock.name, "clock");  // validate it's an input port
+            // Validate clock/reset are input ports; final SyncType assignment happens
+            // after global domain resolution in domains_propagate_and_check.
+            find_unique_input(clock.local_signal_name, "clock");  // validate it's an input port
             if (reset) {
-                find_unique_input(reset->name, "reset");  // validate it's an input port
+                find_unique_input(reset->local_signal_name, "reset");  // validate it's an input port
             }
 
             // Connect functional logic to the flop's .d signal
@@ -469,22 +497,13 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
     }
     resolved.flops = resolved_flops;
 
-    // Set clock_domain/clock_edge on each flop's type signal
-    for (auto& flop : resolved.flops) {
-        auto it = resolved.inputs.find(flop.clock.name);
-        if (it != resolved.inputs.end()) {
-            flop.type.clock_domain = &it->second;
-            flop.type.clock_edge = flop.clock.edge;
-        }
-    }
-
     // Build clock/reset name lists from inputs that were tagged
     std::vector<std::string> clocks;
     std::vector<std::string> resets;
-    for (const auto& [name, input] : resolved.inputs) {
-        if (input.sync_kind == SyncKind::Clock) {
+    for (const auto& [name, portFact] : privateFacts.ports) {
+        if (portFact.cls == LocalPortClass::Clock) {
             clocks.push_back(name);
-        } else if (input.sync_kind == SyncKind::Reset) {
+        } else if (portFact.cls == LocalPortClass::Reset) {
             resets.push_back(name);
         }
     }
@@ -494,11 +513,11 @@ static void resolveFlopsForModule(Module& resolved, DFG& graph, const std::strin
     // contains all modules' nodes, and sibling/ancestor nodes may still have their
     // reset MUXes intact (processing is bottom-up).
     for (const auto& [name, node] : graph.getSignalsMap()) {
-        if (node->instance_path != instance_path) continue;
+        if (node->instance_path != dfgInstancePath) continue;
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
     for (const auto& [name, node] : graph.getOutputsMap()) {
-        if (node->instance_path != instance_path) continue;
+        if (node->instance_path != dfgInstancePath) continue;
         check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
     }
 

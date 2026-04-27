@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mateir/module.h"
+#include "mateir/mateir.h"
 #include "sim/sim_value.h"
 #include "vcd_tracer.hpp"
 
@@ -41,7 +41,7 @@ private:
 class VcdWriter {
 public:
     // Opens both VCD files, runs setup (hier + flat), writes headers.
-    VcdWriter(const Module& module, const std::string& output_dir);
+    explicit VcdWriter(const MateIR& ir, const std::string& output_dir);
 
     // Call at every timeline time step. Updates both files in one pass.
     void update(const ModuleInstance& root, int64_t time_ns);
@@ -55,6 +55,7 @@ public:
 private:
     std::string grouped_path_;
     std::string raw_path_;
+    const MateIR& ir_;
     std::ofstream grouped_out_;
     std::ofstream raw_out_;
     std::unique_ptr<vcd_tracer::top> grouped_top_;
@@ -70,16 +71,17 @@ private:
     std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>> params_;
 
     // Recursive setup helpers — both push into values_ / async_values_ / params_.
-    // translation maps this module's async port names -> top-level signal names.
-    using NameMap = std::map<std::string, std::string>;
     void setupGrouped(const Module& mod, vcd_tracer::module& scope,
-                      const std::unordered_set<const DFGNode*>& alive,
-                      const NameMap& translation = {});
+                      const std::unordered_set<const DFGNode*>& alive);
     void setupRaw(const Module& mod, vcd_tracer::module& scope,
-                  const std::unordered_set<const DFGNode*>& alive,
-                  const NameMap& translation = {});
+                  const std::unordered_set<const DFGNode*>& alive);
 
     // Shared helper: adds a VCD entry for node into values_.
+    bool isDomainInput(const Signal& sig) const;
+    std::string requireTopInputSourceName(const Signal& sig,
+                                          const std::string& context) const;
+    void addDomainInputEntry(vcd_tracer::module& scope, const std::string& name,
+                             const Signal& sig);
     void addEntry(vcd_tracer::module& scope, const std::string& name,
                   const DFGNode* node,
                   const std::unordered_set<const DFGNode*>& alive);

@@ -1,14 +1,15 @@
 #pragma once
 
+#include "frontends/systemverilog/domain_facts.h"
+#include "mateir/mateir.h"
 #include "mateir/module.h"
 
 namespace mate {
 
-// Pass 12: run after flop_resolve and dce.
-// - Validates clock/reset polarity (YAML edge vs. flop_resolve edge)
-// - Validates clock/reset sync_kind on flop trigger signals
-// - Propagates clock_domain/clock_edge to internal signals and flop types
-// - CDC fanin validation: checks sync/async inputs only reach flops in their domain
-void domainsPropagateAndCheck(Module& module);
+// Run after global_domain_resolve, flop_resolve, and dce.
+// - Validates clock/reset trigger facts against YAML-derived frontend facts
+// - Propagates final SyncType through the flat DFG using ClockId/ResetId domains
+// - Validates CDC fanin using ClockId comparisons and synchronized_into escapes
+void domainsPropagateAndCheck(MateIR& ir, const FrontendDomainFacts& domainFacts);
 
 } // namespace mate

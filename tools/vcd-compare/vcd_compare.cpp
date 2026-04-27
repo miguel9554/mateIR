@@ -439,6 +439,7 @@ struct HierarchyParser {
                 else if (key == "flops")         parse_named_array(m.flops);
                 else if (key == "parameters")    parse_named_array(m.params);
                 else if (key == "localparams")   parse_named_array(m.params);
+                else if (key == "top")            m = parse_module();
                 else if (key == "submodules") {
                     expect('[');
                     skip_ws();

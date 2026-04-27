@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mateir/dfg.h"
+#include "mateir/domains.h"
 #include "mateir/types.h"
 
 #include <map>
@@ -11,19 +12,6 @@
 #include <vector>
 
 namespace mate {
-
-// ============================================================================
-// Util types for triggers
-// ============================================================================
-
-typedef enum {
-    POSEDGE, NEGEDGE
-} edge_t;
-
-typedef struct {
-    edge_t edge;
-    std::string name;
-} asyncTrigger_t;
 
 // ============================================================================
 // Leaf binding structures
@@ -87,6 +75,9 @@ const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop);
 DFGNode* scalarFlopDNode(const FlopInfo& flop);
 DFGNode* scalarFlopQNode(const FlopInfo& flop);
 
+SyncKind syncKind(const SyncType& sync_type);
+SyncKind syncKind(const Signal& signal);
+
 // ============================================================================
 // Signal and parameter structures
 // ============================================================================
@@ -99,21 +90,10 @@ struct SignalBase {
 };
 
 struct Signal : SignalBase {
-    SyncKind sync_kind = SyncKind::Sync;
-    Signal* clock_domain = nullptr;
-    std::optional<edge_t> clock_edge;
+    SyncType sync_type = AsyncSignal{};
     // Leaf bindings in declaration order. This is the authoritative source.
     SignalBinding binding;
-    void print(std::ostream& os) const {
-        SignalBase::print(os);
-        const char* sk = sync_kind == SyncKind::Sync  ? "Sync"  :
-                         sync_kind == SyncKind::Clock ? "Clock" :
-                         sync_kind == SyncKind::Reset ? "Reset" : "Async";
-        os << " sync_kind=" << sk;
-        if (clock_domain) os << " domain=" << clock_domain->name;
-        if (clock_edge.has_value())
-            os << " edge=" << (*clock_edge == POSEDGE ? "posedge" : "negedge");
-    }
+    void print(std::ostream& os) const;
 };
 
 struct Param : SignalBase {
@@ -131,11 +111,11 @@ typedef enum {
 
 struct FlopInfo {
     std::string name;
-    Signal type;
+    Type type;
     flopType_t flop_type;
-    asyncTrigger_t clock;
-    std::optional<asyncTrigger_t> reset;
     std::optional<int> reset_value;
+    ClockId clock_domain = InvalidClockId;
+    ResetDomains reset_domains;
     // Leaf bindings in declaration order.
     FlopBinding binding;
 
@@ -165,30 +145,14 @@ struct Module {
     // Single DFG containing this module's logic.
     std::unique_ptr<DFG> dfg;
 
-    std::map<std::string, std::vector<asyncTrigger_t>> flopsTriggers;
-
     // Combinational dependency map: output_port -> {input_ports}
     ComboDeps combo_deps;
 
-    // Async port connection map: submodule_input_port_name -> parent_signal_name
-    // Populated during elaboration with all input connections, then trimmed by
-    // flop_resolve to keep only Clock/Reset ports. Used by the simulator and VCD
-    // writer to translate submodule async port names to top-level signal names.
-    std::map<std::string, std::string> asyncPortConnections;
-
-    // CDC synchronizer declarations: input_port_name -> clock_domain_name
-    // Set by io_domains_set from the domains YAML (synchronized_into attribute).
-    // Indicates that the named input is intentionally crossing into the given
-    // clock domain inside this module (e.g. the first flop of a synchronizer).
-    std::map<std::string, std::string> synchronizedSignals;
-
     // True if this module is purely combinational (no flops, no clock domains).
     // Set by io_domains_set when the domains YAML has pure_combinational: true.
-    // Cross-module sync_kind checks are skipped for pure_combinational submodules.
     bool pure_combinational = false;
 
     void print(int indent = 0) const;
-    std::string toJson() const;
 };
 
 // ============================================================================

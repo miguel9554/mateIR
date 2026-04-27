@@ -1,6 +1,7 @@
 #pragma once
 
 #include "frontends/systemverilog/unresolved.h"
+#include "frontends/systemverilog/domain_facts.h"
 #include "mateir/module.h"
 
 #include <memory>
@@ -24,7 +25,8 @@ Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
     const std::vector<ImportSpec>& globalImports,
-    const slang::SourceManager& sourceManager);
+    const slang::SourceManager& sourceManager,
+    FrontendDomainFacts* domainFacts = nullptr);
 
 // Resolve only the named top module, embedding submodules in its hierarchy
 Module resolveModules(
@@ -33,6 +35,7 @@ Module resolveModules(
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     const std::string& topModuleName,
-    const ParameterContext& topParams);
+    const ParameterContext& topParams,
+    FrontendDomainFacts* domainFacts = nullptr);
 
 } // namespace mate

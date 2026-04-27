@@ -1,0 +1,8 @@
+module_name: gd_neg_child
+
+clock_domains:
+  child_clk:
+    polarity: negedge
+    inputs_outputs:
+      - d
+      - q

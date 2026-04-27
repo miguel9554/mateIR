@@ -66,16 +66,17 @@ std::vector<std::string> expandPattern(
     return matches;
 }
 
-// Find a Signal by name in inputs or outputs
-Signal* findSignal(Module& module, const std::string& name) {
-    if (auto it = module.inputs.find(name); it != module.inputs.end()) return &it->second;
-    if (auto it = module.outputs.find(name); it != module.outputs.end()) return &it->second;
-    return nullptr;
-}
-
 } // anonymous namespace
 
-void setIODomains(Module& module, const std::string& yamlPath) {
+void setIODomains(Module& module,
+                  const std::string& yamlPath,
+                  FrontendDomainFacts* domainFacts,
+                  InstancePath instancePath) {
+    ModuleDomainFacts* privateFacts = nullptr;
+    if (domainFacts) {
+        privateFacts = &domainFacts->getOrCreate({instancePath, module.name});
+    }
+
     // 3a. Load & parse YAML
     YAML::Node config = YAML::LoadFile(yamlPath);
 
@@ -94,6 +95,7 @@ void setIODomains(Module& module, const std::string& yamlPath) {
     // Pure combinational modules have no clock/reset domains; skip all classification.
     if (config["pure_combinational"] && config["pure_combinational"].as<bool>()) {
         module.pure_combinational = true;
+        if (privateFacts) privateFacts->pure_combinational = true;
         return;
     }
 
@@ -123,6 +125,7 @@ void setIODomains(Module& module, const std::string& yamlPath) {
                 ? domainNode["input_name"].as<std::string>()
                 : domainName;
             info.polarity = domainNode["polarity"].as<std::string>();
+            edge_t clockEdge = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
 
             // Classify the clock input itself
             if (portClassMap.contains(info.input_port)) {
@@ -152,14 +155,20 @@ void setIODomains(Module& module, const std::string& yamlPath) {
                         }
                         portClassMap[name] = {PortClass::Sync, domainName, ref.synchronized_into};
                         info.matched_ports.push_back(name);
-                        if (!ref.synchronized_into.empty()) {
-                            module.synchronizedSignals[name] = ref.synchronized_into;
-                        }
                     }
                 }
             }
 
             clockDomains[domainName] = std::move(info);
+            if (privateFacts) {
+                const auto& stored = clockDomains.at(domainName);
+                privateFacts->yaml_clocks[domainName] = YamlClockDomainFact{
+                    .domain_name = domainName,
+                    .input_port = stored.input_port,
+                    .edge = clockEdge,
+                    .matched_ports = stored.matched_ports,
+                };
+            }
         }
     }
 
@@ -180,6 +189,7 @@ void setIODomains(Module& module, const std::string& yamlPath) {
                 ? resetNode["signal_name"].as<std::string>()
                 : resetName;
             info.polarity = resetNode["polarity"].as<std::string>();
+            edge_t resetEdge = (info.polarity == "positive") ? POSEDGE : NEGEDGE;
 
             if (portClassMap.contains(info.signal_name)) {
                 throw CompilerError(std::format(
@@ -189,6 +199,14 @@ void setIODomains(Module& module, const std::string& yamlPath) {
             portClassMap[info.signal_name] = {PortClass::Reset, "", ""};
 
             resets[resetName] = std::move(info);
+            if (privateFacts) {
+                const auto& stored = resets.at(resetName);
+                privateFacts->yaml_resets[resetName] = YamlResetDomainFact{
+                    .reset_name = resetName,
+                    .signal_name = stored.signal_name,
+                    .active_edge = resetEdge,
+                };
+            }
         }
     }
 
@@ -210,9 +228,6 @@ void setIODomains(Module& module, const std::string& yamlPath) {
                         module.name, name));
                 }
                 portClassMap[name] = {PortClass::Async, "", ref.synchronized_into};
-                if (!ref.synchronized_into.empty()) {
-                    module.synchronizedSignals[name] = ref.synchronized_into;
-                }
             }
         }
     }
@@ -256,47 +271,54 @@ void setIODomains(Module& module, const std::string& yamlPath) {
         }
     }
 
-    // 3f (partial). Set sync_kind, clock_domain, clock_edge on inputs and outputs.
-
-    // Set sync_kind on all classified IO ports
+    // Store frontend-private local classification facts. Final public IR sync state
+    // is assigned later by domains_propagate_and_check after global domains resolve.
     for (const auto& [portName, cls] : portClassMap) {
-        Signal* sig = findSignal(module, portName);
-        if (!sig) continue;
-        switch (cls.cls) {
-            case PortClass::Clock: sig->sync_kind = SyncKind::Clock; break;
-            case PortClass::Reset: sig->sync_kind = SyncKind::Reset; break;
-            case PortClass::Async: sig->sync_kind = SyncKind::Async; break;
-            case PortClass::Sync:  sig->sync_kind = SyncKind::Sync;  break;
+        if (privateFacts) {
+            LocalPortClass factClass = LocalPortClass::Sync;
+            switch (cls.cls) {
+                case PortClass::Clock: factClass = LocalPortClass::Clock; break;
+                case PortClass::Reset: factClass = LocalPortClass::Reset; break;
+                case PortClass::Async: factClass = LocalPortClass::Async; break;
+                case PortClass::Sync: factClass = LocalPortClass::Sync; break;
+            }
+            privateFacts->ports[portName] = LocalPortDomainFact{
+                .port_name = portName,
+                .cls = factClass,
+                .local_domain_name = cls.cls == PortClass::Sync
+                    ? std::optional<std::string>(cls.clock_name)
+                    : std::nullopt,
+                .synchronized_into = cls.synchronized_into.empty()
+                    ? std::nullopt
+                    : std::optional<std::string>(cls.synchronized_into),
+                .edge = std::nullopt,
+            };
         }
     }
 
-    // Set clock_domain and clock_edge on sync IO ports; also store each clock's own
-    // expected edge on the clock input signal so domains_propagate_and_check can
-    // validate polarity without re-parsing the YAML.
+    // Store each clock's expected edge in frontend-private facts so later passes can
+    // validate polarity without re-parsing YAML.
     for (const auto& [domainName, info] : clockDomains) {
-        Signal* clockSig = findSignal(module, info.input_port);
-        if (!clockSig) continue;
-
         edge_t edge = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
 
-        // Store the clock's own polarity on the clock signal itself
-        clockSig->clock_edge = edge;
-
         for (const auto& portName : info.matched_ports) {
-            Signal* sig = findSignal(module, portName);
-            if (sig) {
-                sig->clock_domain = clockSig;
-                sig->clock_edge = edge;
+            if (privateFacts) {
+                auto portIt = privateFacts->ports.find(portName);
+                if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
             }
+        }
+        if (privateFacts) {
+            auto portIt = privateFacts->ports.find(info.input_port);
+            if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
         }
     }
 
-    // Store each reset's expected polarity on the reset signal itself (POSEDGE = positive,
-    // NEGEDGE = negative) so domains_propagate_and_check can validate without re-parsing.
+    // Store each reset's expected polarity in frontend-private facts.
     for (const auto& [resetName, info] : resets) {
-        Signal* sig = findSignal(module, info.signal_name);
-        if (sig) {
-            sig->clock_edge = (info.polarity == "positive") ? POSEDGE : NEGEDGE;
+        edge_t edge = (info.polarity == "positive") ? POSEDGE : NEGEDGE;
+        if (privateFacts) {
+            auto portIt = privateFacts->ports.find(info.signal_name);
+            if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
         }
     }
 }

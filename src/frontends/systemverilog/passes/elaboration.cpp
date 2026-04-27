@@ -61,7 +61,9 @@ struct ResolutionContext {
     const ParameterContext& params;
     const slang::SourceManager& sm;
     bool is_sequential;
-    std::vector<asyncTrigger_t> triggers;
+    std::vector<EventTriggerFact> triggers;
+    FrontendDomainFacts* domain_facts;
+    ModuleOccurrenceKey occurrence;
 
     // In combinational blocks, tracks the current driver for each signal.
     // When a signal is assigned (e.g., `x = expr`), the driver is stored here.
@@ -141,7 +143,9 @@ static Module resolveModule(const UnresolvedModule& unresolved,
                                     const ModuleLookup& moduleLookup,
                                     const slang::SourceManager& sourceManager,
                                     const PackageRegistry& pkgRegistry,
-                                    const std::vector<ImportSpec>& globalImports);
+                                    const std::vector<ImportSpec>& globalImports,
+                                    const InstancePath& occurrencePath,
+                                    FrontendDomainFacts* domainFacts);
 
 namespace {
 
@@ -149,11 +153,28 @@ std::string formatLocOrUnknown(const std::optional<SourceLoc>& loc) {
     return loc ? loc->str() : std::string("<unknown>");
 }
 
+InstancePath appendInstancePath(InstancePath path, const std::string& instanceName) {
+    path.elems.push_back(instanceName);
+    return path;
+}
+
 std::string canonicalTargetKey(const ResolutionContext& ctx, const std::string& targetName) {
     if (ctx.local_signals.contains(targetName) && !ctx.instance_path.empty()) {
         return ctx.instance_path + "." + targetName;
     }
     return targetName;
+}
+
+static void recordFlopTriggerFact(ResolutionContext& ctx,
+                                  const std::string& flopKey,
+                                  std::optional<SourceLoc> assignmentLoc) {
+    if (!ctx.domain_facts) return;
+    auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
+    facts.flop_triggers[flopKey] = FlopTriggerFact{
+        .flop_name = flopKey,
+        .triggers = ctx.triggers,
+        .assignment_loc = assignmentLoc,
+    };
 }
 
 [[noreturn]] void throwWriteConflict(
@@ -1559,7 +1580,7 @@ const Type* lookupDeclaredType(const std::string& baseName,
     }
     for (const auto& flop : ctx.thisModule->flops) {
         if (flop.name == baseName) {
-            return &flop.type.type;
+            return &flop.type;
         }
     }
 
@@ -2892,7 +2913,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         return ctx.flopNames.contains(name) || ctx.local_flop_names.count(name) > 0;
     };
 
-    // Helper: key used in flopsTriggers map for a flop
+    // Helper: key used in frontend-private trigger facts for a flop
     auto flopTriggersKey = [&](const std::string& base) -> std::string {
         if (ctx.local_flop_names.count(base))
             return ctx.instance_path.empty() ? base : ctx.instance_path + "." + base;
@@ -2963,7 +2984,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
 
         if (ctx.is_sequential) {
-            ctx.thisModule->flopsTriggers[flopTriggersKey(baseName)] = ctx.triggers;
+            recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
         }
     };
 
@@ -3137,7 +3158,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
         if (ctx.is_sequential) {
             for (const auto& elem : elements) {
-                ctx.thisModule->flopsTriggers[flopTriggersKey(elem.baseName)] = ctx.triggers;
+                recordFlopTriggerFact(ctx, flopTriggersKey(elem.baseName), assignLoc);
             }
         }
         return;
@@ -3365,7 +3386,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
     // If the assign is sequential, set the triggers of the signal
     if (ctx.is_sequential) {
-        ctx.thisModule->flopsTriggers[flopTriggersKey(baseName)] = ctx.triggers;
+        recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
     }
 }
 
@@ -3789,6 +3810,7 @@ void resolveForLoopStatementInPlace(
         ResolutionContext iterBodyCtx {
             ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
             ctx.sm, ctx.is_sequential, ctx.triggers,
+            ctx.domain_facts, ctx.occurrence,
             ctx.combDrivers,
             ctx.instance_path, ctx.local_signals, ctx.local_array_types, ctx.local_flop_names,
             ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
@@ -3869,9 +3891,10 @@ void resolveProceduralComboInPlace(
     resolveStatementInPlace(statement, ctx);
 }
 
-std::vector<asyncTrigger_t> extractSignalEventExpression(
+std::vector<EventTriggerFact> extractSignalEventExpression(
         const SignalEventExpressionSyntax& sigEventExpr,
-        std::vector<asyncTrigger_t> triggers
+        std::vector<EventTriggerFact> triggers,
+        const slang::SourceManager& sm
 ){
     if (sigEventExpr.expr->kind != SyntaxKind::IdentifierName) {
         throw CompilerError(
@@ -3888,19 +3911,20 @@ std::vector<asyncTrigger_t> extractSignalEventExpression(
         throw CompilerError(
                 "Edge must be posedge or negedge.");
     }
-    triggers.push_back({edge, name});
+    triggers.push_back({edge, name, resolveSourceLoc(sigEventExpr, sm)});
     return triggers;
 }
 
-std::vector<asyncTrigger_t> extractAsyncTriggers(
+std::vector<EventTriggerFact> extractAsyncTriggerFacts(
         const EventExpressionSyntax* expr,
-        std::vector<asyncTrigger_t> triggers){
+        std::vector<EventTriggerFact> triggers,
+        const slang::SourceManager& sm){
     switch (expr->kind){
         case SyntaxKind::SignalEventExpression:
-            return extractSignalEventExpression(expr->as<SignalEventExpressionSyntax>(), triggers);
+            return extractSignalEventExpression(expr->as<SignalEventExpressionSyntax>(), triggers, sm);
         case SyntaxKind::ParenthesizedEventExpression:{
             const auto& eventExpr = expr->as<ParenthesizedEventExpressionSyntax>().expr;
-            return extractAsyncTriggers(eventExpr, triggers);
+            return extractAsyncTriggerFacts(eventExpr, triggers, sm);
          }
         case SyntaxKind::BinaryEventExpression:{
             const auto& binaryEventExpr = expr->as<BinaryEventExpressionSyntax>();
@@ -3911,8 +3935,8 @@ std::vector<asyncTrigger_t> extractAsyncTriggers(
             if (op != "or" && op != ","){
                 throw CompilerError("Only OR or comma supported in event list.");
             }
-            triggers = extractAsyncTriggers(leftExpr, triggers);
-            triggers = extractAsyncTriggers(rightExpr, triggers);
+            triggers = extractAsyncTriggerFacts(leftExpr, triggers, sm);
+            triggers = extractAsyncTriggerFacts(rightExpr, triggers, sm);
             return triggers;
         }
         default:
@@ -3926,7 +3950,7 @@ void resolveProceduralTimingInPlace(
 ){
     const auto& timingControl = timingStatement->timingControl;
     const auto& statement = timingStatement->statement;
-    std::vector<asyncTrigger_t> triggers;
+    std::vector<EventTriggerFact> triggerFacts;
 
     switch (timingControl->kind){
         case SyntaxKind::ImplicitEventControl:
@@ -3937,7 +3961,7 @@ void resolveProceduralTimingInPlace(
         case SyntaxKind::EventControlWithExpression:{
             std::cout << "We are on flop procedural" << std::endl;
             const auto& eventControl = timingControl->as<EventControlWithExpressionSyntax>();
-            triggers = extractAsyncTriggers((eventControl.expr), triggers);
+            triggerFacts = extractAsyncTriggerFacts((eventControl.expr), triggerFacts, ctx.sm);
             std::cout << "Triggers:\n";
             ctx.is_sequential = true;
             break;
@@ -3948,7 +3972,7 @@ void resolveProceduralTimingInPlace(
                 resolveSourceLoc(*timingStatement, ctx.sm));
 
     }
-    ctx.triggers = triggers;
+    ctx.triggers = std::move(triggerFacts);
     ctx.current_write_origin = std::format("procedural-block:{}",
                                            reinterpret_cast<uintptr_t>(timingStatement));
     resolveStatementInPlace(statement, ctx);
@@ -4046,7 +4070,7 @@ void prePopulateSignal(DFG& graph, Signal& sig) {
 // the FlopInfo (name + type). Called after flops are resolved, before signals.
 void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
     const std::string& name = flop.name;
-    const Type& type = flop.type.type;
+    const Type& type = flop.type;
     flop.binding.d_leaves.clear();
     flop.binding.q_leaves.clear();
 
@@ -4058,7 +4082,6 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
         qNode->type = type;
         flop.binding.d_leaves.push_back(dNode);
         flop.binding.q_leaves.push_back(qNode);
-        flop.type.binding.leaves = {qNode};
         return;
     }
 
@@ -4074,7 +4097,6 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
         qElem->type = elemType;
         flop.binding.q_leaves.push_back(qElem);
     }
-    flop.type.binding.leaves = flop.binding.q_leaves;
 }
 
 ParameterContext parseParameterValueAssignment(
@@ -4157,11 +4179,24 @@ void resolveNamedPortConnection(
         auto* expr = extractPortExpr(*named.expr);
         auto* driver = buildExprDFG(expr, ctx);
         ctx.graph.addModuleInput(moduleNode, portName, driver);
-        // Only record simple identifier connections; asyncPortConnections is
-        // used solely for clock/reset port translation downstream.
-        if (expr->kind == SyntaxKind::IdentifierName) {
-            const std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
-            resolvedSub.asyncPortConnections[portName] = name;
+        if (ctx.domain_facts) {
+            auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
+            ChildInputConnectionFact connFact{
+                .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, moduleNode->name),
+                .child_module_name = resolvedSub.name,
+                .child_port = portName,
+                .expr_kind = expr->kind == SyntaxKind::IdentifierName
+                    ? ConnectionExprKind::SimpleIdentifier
+                    : ConnectionExprKind::UnsupportedExpression,
+                .parent_signal_name = std::nullopt,
+                .diagnostic_expr_kind = std::string(toString(expr->kind)),
+                .loc = resolveSourceLoc(*expr, ctx.sm),
+            };
+            if (expr->kind == SyntaxKind::IdentifierName) {
+                connFact.parent_signal_name =
+                    std::string(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            }
+            facts.child_input_connections.push_back(std::move(connFact));
         }
     } else if (subOutputNames.contains(portName)) {
         if (!named.expr) {
@@ -4252,7 +4287,18 @@ void resolveWildcardPortConnection(
         auto* driver = graph.lookupSignal("", name);
         if (driver) {
             graph.addModuleInput(moduleNode, name, driver);
-            resolvedSub.asyncPortConnections[name] = name;
+            if (ctx.domain_facts) {
+                auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
+                facts.child_input_connections.push_back(ChildInputConnectionFact{
+                    .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, moduleNode->name),
+                    .child_module_name = resolvedSub.name,
+                    .child_port = name,
+                    .expr_kind = ConnectionExprKind::SimpleIdentifier,
+                    .parent_signal_name = name,
+                    .diagnostic_expr_kind = std::string(toString(SyntaxKind::IdentifierName)),
+                    .loc = moduleNode->loc,
+                });
+            }
         }
     }
     size_t oi = 0;
@@ -4420,21 +4466,17 @@ static void resolveGenerateScopeDecls(
             ctx.local_signals[name + ".q"] = q_node;
             ctx.local_signals[name]         = q_node;  // reads return .q
 
-            // Qualified name used for FlopInfo and flopsTriggers key
+            // Qualified name used for FlopInfo and frontend-private trigger facts
             std::string qualifiedName = ctx.instance_path.empty()
                 ? name : ctx.instance_path + "." + name;
 
-            Signal flopSig;
-            flopSig.name = qualifiedName;
-            flopSig.type = type;
-
             ctx.thisModule->flops.push_back(FlopInfo{
                 .name       = qualifiedName,
-                .type       = flopSig,
+                .type       = type,
                 .flop_type  = FLOP_D,
-                .clock      = {},
-                .reset      = std::nullopt,
                 .reset_value = std::nullopt,
+                .clock_domain = InvalidClockId,
+                .reset_domains = {},
                 .binding    = FlopBinding{.d_leaves = {d_node}, .q_leaves = {q_node}},
             });
         } else {
@@ -4616,7 +4658,8 @@ void resolveGenerateMemberInPlace(
                 // Per-iteration context: inherits parent local_signals for outer-scope access
                 ResolutionContext iterResCtx{
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
-                    ctx.sm, false, {}, {}, childPath, ctx.local_signals,
+                    ctx.sm, false, {}, ctx.domain_facts, ctx.occurrence, {},
+                    childPath, ctx.local_signals,
                     ctx.local_array_types, {},
                     ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
                     ctx.moduleLookup, ctx.globalImports,
@@ -4738,9 +4781,13 @@ void resolveGenerateMemberInPlace(
                     ? baseName
                     : ctx.instance_path + "." + baseName;
 
+                InstancePath childOccurrencePath =
+                    appendInstancePath(ctx.occurrence.instance_path, qualifiedName);
                 auto resolvedSub = resolveModule(*it->second, instCtx,
                                                 ctx.moduleLookup, ctx.sm,
-                                                ctx.pkgRegistry, ctx.globalImports);
+                                                ctx.pkgRegistry, ctx.globalImports,
+                                                childOccurrencePath,
+                                                ctx.domain_facts);
 
                 std::set<std::string> subInputNames, subOutputNames;
                 std::map<std::string, size_t> subOutputIndex;
@@ -4858,9 +4905,13 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                              const ModuleLookup& moduleLookup,
                              const slang::SourceManager& sourceManager,
                              const PackageRegistry& pkgRegistry,
-                             const std::vector<ImportSpec>& globalImports) {
+                             const std::vector<ImportSpec>& globalImports,
+                             const InstancePath& occurrencePath,
+                             FrontendDomainFacts* domainFacts) {
     Module resolved;
     resolved.name = unresolved.name;
+    ModuleOccurrenceKey occurrence{occurrencePath, resolved.name};
+    if (domainFacts) domainFacts->getOrCreate(occurrence);
     auto localCtx = std::make_unique<ParameterContext>(topCtx);
 
     // === Build enum registry from typedef enum declarations ===
@@ -4982,11 +5033,11 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager));
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedSignal.name,
-                .type = resolvedSignal,
+                .type = resolvedSignal.type,
                 .flop_type = FLOP_D,
-                .clock = {},
-                .reset = std::nullopt,
                 .reset_value = std::nullopt,
+                .clock_domain = InvalidClockId,
+                .reset_domains = {},
                 .binding = {},
                 });
         flopNames.insert(flop.name);
@@ -5059,7 +5110,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // === Resolve all blocks into the shared graph ===
     // Create resolution context
     ResolutionContext resCtx{
-        graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {}, {},
+        graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {},
+        domainFacts, occurrence, {},
         "", {}, {}, {}, enumRegistry, enumMemberValues, pkgRegistry,
         moduleLookup, globalImports, "", {}, {}, subroutineRegistry
     };
@@ -5103,7 +5155,10 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                 instanceName = std::string(inst->decl->name.valueText());
             }
 
-            auto resolvedSub = resolveModule(*it->second, instCtx, moduleLookup, sourceManager, pkgRegistry, globalImports);
+            InstancePath childOccurrencePath = appendInstancePath(occurrencePath, instanceName);
+            auto resolvedSub = resolveModule(*it->second, instCtx, moduleLookup, sourceManager,
+                                            pkgRegistry, globalImports, childOccurrencePath,
+                                            domainFacts);
 
             // Build sets of input/output port names for the submodule
             std::set<std::string> subInputNames, subOutputNames;
@@ -5141,7 +5196,8 @@ Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
     const std::vector<ImportSpec>& globalImports,
-    const slang::SourceManager& sourceManager) {
+    const slang::SourceManager& sourceManager,
+    FrontendDomainFacts* domainFacts) {
 
     // Filter out package declarations from module count
     if (modules.size() != 1) {
@@ -5158,7 +5214,8 @@ Module resolveModules(
     }
 
     ParameterContext emptyCtx;
-    return resolveModule(*modules[0], emptyCtx, moduleLookup, sourceManager, pkgRegistry, globalImports);
+    return resolveModule(*modules[0], emptyCtx, moduleLookup, sourceManager, pkgRegistry,
+                         globalImports, {}, domainFacts);
 }
 
 Module resolveModules(
@@ -5167,7 +5224,8 @@ Module resolveModules(
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     const std::string& topModuleName,
-    const ParameterContext& topParams) {
+    const ParameterContext& topParams,
+    FrontendDomainFacts* domainFacts) {
 
     PackageRegistry pkgRegistry = resolvePackages(packages);
 
@@ -5182,7 +5240,8 @@ Module resolveModules(
             "Top module '{}' not found in input files", topModuleName));
     }
 
-    return resolveModule(*it->second, topParams, moduleLookup, sourceManager, pkgRegistry, globalImports);
+    return resolveModule(*it->second, topParams, moduleLookup, sourceManager, pkgRegistry,
+                         globalImports, {}, domainFacts);
 }
 
 } // namespace mate

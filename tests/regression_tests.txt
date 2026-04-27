@@ -11,11 +11,15 @@ const_only_dynamic_fail FAIL DIV operation requires constant operands
 const_only_ops PASS
 cordic PASS
 counter_top PASS
+cross_module_async_to_sync_fail FAIL cross-module sync type mismatch
 enum_local_test PASS
 enum_top_test PASS
 full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'
 func_test PASS
 generate_test PASS
+global_domains_opposite_edges PASS
+global_domains_repeated_instances PASS
+global_domains_unsupported_clock_expr FAIL global_domain_resolve: unsupported clock/reset connection expression
 inout_arg_fail FAIL inout ports not supported
 multiple_always_comb_assign FAIL Multiple drivers for target 'z'
 multiple_continuous_assign FAIL Multiple drivers for target 'n'
@@ -23,6 +27,8 @@ multiple_seq_writers_same_flop FAIL Multiple drivers for target 'q.d'
 multiple_submodule_output_drivers FAIL Multiple drivers for target 'n'
 overlapping_partial_writes FAIL Overlapping partial writes for target 'bus'
 partial_then_full_write_conflict FAIL Multiple drivers for target 'bus'
+phase8_multiclock_cdc_fail FAIL cross-domain violation
+phase8_same_clock_merge PASS
 pkg_scope_test PASS
 ref_arg_fail FAIL ref ports not supported
 static_func_fail FAIL Only 'automatic' functions/tasks are supported

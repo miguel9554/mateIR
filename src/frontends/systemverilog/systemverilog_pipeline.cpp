@@ -9,8 +9,10 @@
 #include "frontends/systemverilog/passes/domains_propagate_and_check.h"
 #include "frontends/systemverilog/passes/elaboration.h"
 #include "frontends/systemverilog/passes/flop_resolve.h"
+#include "frontends/systemverilog/passes/global_domain_resolve.h"
 #include "frontends/systemverilog/passes/io_domains_set.h"
 #include "frontends/systemverilog/passes/type_propagation.h"
+#include "frontends/systemverilog/domain_facts.h"
 #include "util/debug.h"
 
 #include "yaml-cpp/yaml.h"
@@ -87,9 +89,12 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
     }
 }
 
-void runMateIRPipeline(Module& topModule,
+void runMateIRPipeline(MateIR& ir,
                        const std::map<std::string, std::string>& domainPathsByModule,
+                       FrontendDomainFacts& domainFacts,
                        const std::vector<DebugNodeSpec>& debugSpecs) {
+    Module& topModule = ir.top;
+
     validateDebugSpecsBeforePipeline(topModule, debugSpecs);
 
     std::set<size_t> satisfiedDebugSpecs;
@@ -201,26 +206,33 @@ void runMateIRPipeline(Module& topModule,
         runPass(7, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
         runPass(8, "constant_fold", [&]{ constantFold(*module.dfg); });
         runPass(9, "io_domains_set", [&]{
-            std::function<void(Module&)> setDomains = [&](Module& mod) {
+            std::function<void(Module&, InstancePath)> setDomains =
+                    [&](Module& mod, InstancePath path) {
                 auto it = domainPathsByModule.find(mod.name);
                 if (it == domainPathsByModule.end()) {
                     throw CompilerError(std::format(
                         "No domains file provided for module '{}' "
                         "(use --domains to specify)", mod.name));
                 }
-                setIODomains(mod, it->second);
-                for (auto& sub : mod.hierarchyInstantiation)
-                    setDomains(sub);
+                setIODomains(mod, it->second, &domainFacts, path);
+                for (auto& sub : mod.hierarchyInstantiation) {
+                    InstancePath childPath = path;
+                    childPath.elems.push_back(sub.instance_name);
+                    setDomains(sub, childPath);
+                }
             };
-            setDomains(module);
+            setDomains(module, {});
         });
-        runPass(10, "flop_resolve", [&]{ resolveFlops(module); });
+        runPass(10, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::ofstream f(std::format("{}/10_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        runPass(11, "dce", [&]{
+        runPass(11, "global_domain_resolve", [&]{
+            resolveGlobalDomains(ir, domainFacts);
+        });
+        runPass(12, "dce", [&]{
             std::unordered_set<DFGNode*> keepAlive;
             std::function<void(const Module&)> collect = [&](const Module& mod) {
                 for (const auto& parameter : mod.parameters)
@@ -245,10 +257,11 @@ void runMateIRPipeline(Module& topModule,
         });
         module.dfg->validateNoOrphans();
         module.dfg->validateStrictLiveDFG();
-        runPass(12, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(module); });
+        validateFrontendDomainFacts(module, domainFacts);
+        runPass(13, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(ir, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/12_domains_propagate_flops.txt", dir));
+            std::ofstream f(std::format("{}/13_domains_propagate_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
         computeComboDeps(module);
@@ -280,7 +293,7 @@ void runMateIRPipeline(Module& topModule,
 
     std::string dir = DEBUG_OUTPUT_DIR + "/" + topModule.name;
     std::filesystem::create_directories(dir);
-    std::ofstream(dir + "/hierarchy.json") << topModule.toJson();
+    std::ofstream(dir + "/hierarchy.json") << hierarchyToJson(ir);
 }
 
 } // namespace
@@ -288,26 +301,26 @@ void runMateIRPipeline(Module& topModule,
 MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
                                   const slang::SourceManager& sourceManager,
                                   const SystemVerilogCompileOptions& options) {
-    Module topModule = [&]() {
+    MateIR ir;
+    FrontendDomainFacts domainFacts;
+    ir.top = [&]() -> Module {
         if (options.top_module) {
             ParameterContext topParams;
             for (const auto& [name, value] : options.parameters) {
                 topParams.values[name] = static_cast<int>(value);
             }
             return resolveModules(extracted.modules, extracted.packages, extracted.globalImports,
-                                  sourceManager, *options.top_module, topParams);
+                                  sourceManager, *options.top_module, topParams, &domainFacts);
         }
         return resolveModules(extracted.modules, extracted.packages, extracted.globalImports,
-                              sourceManager);
+                              sourceManager, &domainFacts);
     }();
-
-    auto domainPathsByModule = loadDomainPathsByModule(options.domain_files);
-    runMateIRPipeline(topModule, domainPathsByModule, options.debug_dfg_nodes);
-
-    MateIR ir;
-    ir.top = std::move(topModule);
     ir.source_files = options.source_files;
     ir.frontend_module_count = extracted.modules.size();
+
+    auto domainPathsByModule = loadDomainPathsByModule(options.domain_files);
+    runMateIRPipeline(ir, domainPathsByModule, domainFacts, options.debug_dfg_nodes);
+
     return ir;
 }
 

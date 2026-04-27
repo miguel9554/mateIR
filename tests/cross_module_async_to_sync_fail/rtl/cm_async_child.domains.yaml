@@ -1,0 +1,8 @@
+module_name: cm_async_child
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - d
+      - q

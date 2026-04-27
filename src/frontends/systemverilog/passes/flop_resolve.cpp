@@ -483,9 +483,8 @@ static void resolveFlopsForModule(Module& resolved,
                 return it->second;
             };
 
-            // Validate clock/reset are input ports; do NOT override sync_kind here.
-            // sync_kind was set by io_domains_set from the domains file and must not
-            // be overwritten — domains_propagate_and_check will verify consistency.
+            // Validate clock/reset are input ports; final SyncType assignment happens
+            // after global domain resolution in domains_propagate_and_check.
             find_unique_input(clock.local_signal_name, "clock");  // validate it's an input port
             if (reset) {
                 find_unique_input(reset->local_signal_name, "reset");  // validate it's an input port

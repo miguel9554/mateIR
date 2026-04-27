@@ -36,28 +36,9 @@ InstancePath childPath(InstancePath path, const std::string& instanceName) {
     return path;
 }
 
-DFGNode* nodeForTrigger(const Module& resolved, const asyncTrigger_t& trigger) {
-    auto it = resolved.inputs.find(trigger.name);
+DFGNode* nodeForTrigger(const Module& resolved, const EventTriggerFact& trigger) {
+    auto it = resolved.inputs.find(trigger.local_signal_name);
     return it != resolved.inputs.end() ? scalarSignalNode(it->second) : nullptr;
-}
-
-EventTriggerFact eventFactFor(const ModuleDomainFacts* facts,
-                              const std::string& triggerKey,
-                              const asyncTrigger_t& trigger) {
-    if (facts) {
-        auto it = facts->flop_triggers.find(triggerKey);
-        if (it != facts->flop_triggers.end()) {
-            auto factIt = std::ranges::find_if(it->second.triggers, [&](const EventTriggerFact& fact) {
-                return fact.edge == trigger.edge && fact.local_signal_name == trigger.name;
-            });
-            if (factIt != it->second.triggers.end()) return *factIt;
-        }
-    }
-    return EventTriggerFact{
-        .edge = trigger.edge,
-        .local_signal_name = trigger.name,
-        .loc = std::nullopt,
-    };
 }
 
 bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
@@ -108,11 +89,11 @@ std::optional<int64_t> constantValueOfNode(const DFGNode* node) {
 bool extract_reset_from_concat(
     DFG& graph,
     const DFGNode* dNodeDriver,
-    const std::vector<asyncTrigger_t>& triggers,
+    const std::vector<EventTriggerFact>& triggers,
     const std::string& flop_name,
     const Module& resolved,
-    asyncTrigger_t& reset,
-    asyncTrigger_t& clock,
+    EventTriggerFact& reset,
+    EventTriggerFact& clock,
     int& reset_value,
     DFGNode*& functionalLogic)
 {
@@ -145,7 +126,8 @@ bool extract_reset_from_concat(
     } else {
         throw CompilerError(std::format(
             "flop '{}' has 2 triggers but CONCAT/MUX selector '{}' matches neither trigger ('{}', '{}')",
-            flop_name, mux_sel->name, triggers[0].name, triggers[1].name), dNodeDriver->loc);
+            flop_name, mux_sel->name, triggers[0].local_signal_name,
+            triggers[1].local_signal_name), dNodeDriver->loc);
     }
 
     std::vector<DFGNode*> functionalParts;
@@ -221,11 +203,11 @@ bool extract_reset_from_concat(
 bool extract_reset(
     DFG& graph,
     const DFGNode* dNodeDriver,
-    const std::vector<asyncTrigger_t>& triggers,
+    const std::vector<EventTriggerFact>& triggers,
     const std::string& flop_name,
     const Module& resolved,
-    asyncTrigger_t& reset,
-    asyncTrigger_t& clock,
+    EventTriggerFact& reset,
+    EventTriggerFact& clock,
     int& reset_value,
     DFGNode*& functionalLogic)
 {
@@ -265,7 +247,8 @@ bool extract_reset(
     } else {
         throw CompilerError(std::format(
             "flop '{}' has 2 triggers but MUX selector '{}' matches neither trigger ('{}', '{}')",
-            flop_name, mux_sel->name, triggers[0].name, triggers[1].name), dNodeDriver->loc);
+            flop_name, mux_sel->name, triggers[0].local_signal_name,
+            triggers[1].local_signal_name), dNodeDriver->loc);
     }
 
     // Assign the expected reset and functional branches
@@ -292,6 +275,7 @@ FlopInfo extractFlopClockAndReset(
     const std::string& flop_name,
     const std::string& instance_path,
     const FlopInfo& flopIn,
+    ModuleDomainFacts& moduleFacts,
     DFGNode*& functionalLogic)
 {
     auto flop = flopIn;
@@ -313,10 +297,16 @@ FlopInfo extractFlopClockAndReset(
             instance_path.empty() ? flop_name : instance_path + "." + flop_name + ".d"), dNode->loc);
     }
     auto* dNodeDriver = dDriver->node;
-    const auto& triggers = resolved.flopsTriggers.at(flopIn.name);
+    auto triggerIt = moduleFacts.flop_triggers.find(flopIn.name);
+    if (triggerIt == moduleFacts.flop_triggers.end()) {
+        throw CompilerError(std::format(
+            "flop_resolve: missing trigger facts for flop '{}' in module '{}'",
+            flopIn.name, resolved.name));
+    }
+    const auto& triggers = triggerIt->second.triggers;
 
-    asyncTrigger_t clock;
-    asyncTrigger_t reset;
+    EventTriggerFact clock;
+    EventTriggerFact reset;
     bool has_reset;
     int reset_value;
 
@@ -333,11 +323,17 @@ FlopInfo extractFlopClockAndReset(
             "Trigger size not supported: {}", triggers.size()), dNode->loc);
     }
 
-    flop.clock = clock;
     if (has_reset) {
-        flop.reset = reset;
         flop.reset_value = reset_value;
     }
+    moduleFacts.flop_domains[flop_name] = FlopDomainFact{
+        .flop_name = flop_name,
+        .clock = clock,
+        .reset = has_reset
+            ? std::optional<EventTriggerFact>(reset)
+            : std::nullopt,
+        .reset_value = flop.reset_value,
+    };
     flop.name = flop_name;
     flop.type.unpacked_dims = {};
     return flop;
@@ -396,13 +392,13 @@ void check_logic_no_clock_reset(
 static void resolveFlopsForModule(Module& resolved,
                                   DFG& graph,
                                   const InstancePath& instance_path,
-                                  FrontendDomainFacts* domainFacts);
+                                  FrontendDomainFacts& domainFacts);
 static void resolveFlopsRecursive(Module& module,
                                   DFG& topDFG,
                                   const InstancePath& instance_path,
-                                  FrontendDomainFacts* domainFacts);
+                                  FrontendDomainFacts& domainFacts);
 
-void resolveFlops(Module& module, FrontendDomainFacts* domainFacts) {
+void resolveFlops(Module& module, FrontendDomainFacts& domainFacts) {
     if (!module.dfg) return;
     resolveFlopsRecursive(module, *module.dfg, {}, domainFacts);
 }
@@ -410,7 +406,7 @@ void resolveFlops(Module& module, FrontendDomainFacts* domainFacts) {
 static void resolveFlopsRecursive(Module& module,
                                   DFG& topDFG,
                                   const InstancePath& instance_path,
-                                  FrontendDomainFacts* domainFacts) {
+                                  FrontendDomainFacts& domainFacts) {
     // Bottom-up: resolve submodules first so their clock/reset types are tagged first
     for (auto& sub : module.hierarchyInstantiation)
         resolveFlopsRecursive(sub, topDFG, childPath(instance_path, sub.instance_name), domainFacts);
@@ -420,12 +416,9 @@ static void resolveFlopsRecursive(Module& module,
 static void resolveFlopsForModule(Module& resolved,
                                   DFG& graph,
                                   const InstancePath& instance_path,
-                                  FrontendDomainFacts* domainFacts) {
+                                  FrontendDomainFacts& domainFacts) {
     const std::string dfgInstancePath = inDFG(instance_path);
-    ModuleDomainFacts* privateFacts = nullptr;
-    if (domainFacts) {
-        privateFacts = &domainFacts->getOrCreate({instance_path, resolved.name});
-    }
+    ModuleDomainFacts& privateFacts = domainFacts.getOrCreate({instance_path, resolved.name});
     if (resolved.flops.empty()) {
         return;
     }
@@ -434,7 +427,7 @@ static void resolveFlopsForModule(Module& resolved,
     // Uses output bindings directly since after DFG inlining submodule output
     // ports may not be in the flat top DFG's outputs map (only .d nodes are adopted).
     for (auto& [outName, output] : resolved.outputs) {
-        if (!resolved.flopsTriggers.contains(outName)) continue;
+        if (!privateFacts.flop_triggers.contains(outName)) continue;
         if (output.type.unpacked_dims.empty()) {
             DFGNode* qNode = graph.getInputNode(dfgInstancePath, outName + ".q");
             if (qNode) {
@@ -462,7 +455,8 @@ static void resolveFlopsForModule(Module& resolved,
         for (const auto& name : allElements(flop.name, flop.type)) {
             DFGNode* functional_logic;
             resolved_flops.push_back(
-                extractFlopClockAndReset(graph, resolved, name, dfgInstancePath, flop, functional_logic));
+                extractFlopClockAndReset(
+                    graph, resolved, name, dfgInstancePath, flop, privateFacts, functional_logic));
             // After flop_resolve, every FlopInfo represents one physical flop leaf.
             {
                 auto* dNode = graph.getOutputNode(dfgInstancePath, name + ".d");
@@ -472,21 +466,11 @@ static void resolveFlopsForModule(Module& resolved,
                     .q_leaves = {qNode},
                 };
             }
-            if (privateFacts) {
-                const auto& resolvedFlop = resolved_flops.back();
-                privateFacts->flop_domains[name] = FlopDomainFact{
-                    .flop_name = name,
-                    .clock = eventFactFor(privateFacts, flop.name, resolvedFlop.clock),
-                    .reset = resolvedFlop.reset
-                        ? std::optional<EventTriggerFact>(
-                            eventFactFor(privateFacts, flop.name, *resolvedFlop.reset))
-                        : std::nullopt,
-                    .reset_value = resolvedFlop.reset_value,
-                };
-            }
             DFGNode* output = scalarFlopDNode(resolved_flops.back());
-            const asyncTrigger_t clock = resolved_flops.back().clock;
-            const std::optional<asyncTrigger_t> reset = resolved_flops.back().reset;
+
+            const FlopDomainFact& flopDomain = privateFacts.flop_domains.at(name);
+            const EventTriggerFact& clock = flopDomain.clock;
+            const std::optional<EventTriggerFact>& reset = flopDomain.reset;
 
             // Helper to find exactly one signal
             auto find_unique_input = [&](const std::string& sig_name, const char* role) -> Signal& {
@@ -502,9 +486,9 @@ static void resolveFlopsForModule(Module& resolved,
             // Validate clock/reset are input ports; do NOT override sync_kind here.
             // sync_kind was set by io_domains_set from the domains file and must not
             // be overwritten — domains_propagate_and_check will verify consistency.
-            find_unique_input(clock.name, "clock");  // validate it's an input port
+            find_unique_input(clock.local_signal_name, "clock");  // validate it's an input port
             if (reset) {
-                find_unique_input(reset->name, "reset");  // validate it's an input port
+                find_unique_input(reset->local_signal_name, "reset");  // validate it's an input port
             }
 
             // Connect functional logic to the flop's .d signal
@@ -517,10 +501,10 @@ static void resolveFlopsForModule(Module& resolved,
     // Build clock/reset name lists from inputs that were tagged
     std::vector<std::string> clocks;
     std::vector<std::string> resets;
-    for (const auto& [name, input] : resolved.inputs) {
-        if (input.sync_kind == SyncKind::Clock) {
+    for (const auto& [name, portFact] : privateFacts.ports) {
+        if (portFact.cls == LocalPortClass::Clock) {
             clocks.push_back(name);
-        } else if (input.sync_kind == SyncKind::Reset) {
+        } else if (portFact.cls == LocalPortClass::Reset) {
             resets.push_back(name);
         }
     }

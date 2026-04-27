@@ -66,13 +66,6 @@ std::vector<std::string> expandPattern(
     return matches;
 }
 
-// Find a Signal by name in inputs or outputs
-Signal* findSignal(Module& module, const std::string& name) {
-    if (auto it = module.inputs.find(name); it != module.inputs.end()) return &it->second;
-    if (auto it = module.outputs.find(name); it != module.outputs.end()) return &it->second;
-    return nullptr;
-}
-
 } // anonymous namespace
 
 void setIODomains(Module& module,
@@ -162,9 +155,6 @@ void setIODomains(Module& module,
                         }
                         portClassMap[name] = {PortClass::Sync, domainName, ref.synchronized_into};
                         info.matched_ports.push_back(name);
-                        if (!ref.synchronized_into.empty()) {
-                            module.synchronizedSignals[name] = ref.synchronized_into;
-                        }
                     }
                 }
             }
@@ -238,9 +228,6 @@ void setIODomains(Module& module,
                         module.name, name));
                 }
                 portClassMap[name] = {PortClass::Async, "", ref.synchronized_into};
-                if (!ref.synchronized_into.empty()) {
-                    module.synchronizedSignals[name] = ref.synchronized_into;
-                }
             }
         }
     }
@@ -284,18 +271,9 @@ void setIODomains(Module& module,
         }
     }
 
-    // 3f (partial). Set sync_kind, clock_domain, clock_edge on inputs and outputs.
-
-    // Set sync_kind on all classified IO ports
+    // Store frontend-private local classification facts. Final public IR sync state
+    // is assigned later by domains_propagate_and_check after global domains resolve.
     for (const auto& [portName, cls] : portClassMap) {
-        Signal* sig = findSignal(module, portName);
-        if (!sig) continue;
-        switch (cls.cls) {
-            case PortClass::Clock: sig->sync_kind = SyncKind::Clock; break;
-            case PortClass::Reset: sig->sync_kind = SyncKind::Reset; break;
-            case PortClass::Async: sig->sync_kind = SyncKind::Async; break;
-            case PortClass::Sync:  sig->sync_kind = SyncKind::Sync;  break;
-        }
         if (privateFacts) {
             LocalPortClass factClass = LocalPortClass::Sync;
             switch (cls.cls) {
@@ -318,27 +296,15 @@ void setIODomains(Module& module,
         }
     }
 
-    // Set clock_domain and clock_edge on sync IO ports; also store each clock's own
-    // expected edge on the clock input signal so domains_propagate_and_check can
-    // validate polarity without re-parsing the YAML.
+    // Store each clock's expected edge in frontend-private facts so later passes can
+    // validate polarity without re-parsing YAML.
     for (const auto& [domainName, info] : clockDomains) {
-        Signal* clockSig = findSignal(module, info.input_port);
-        if (!clockSig) continue;
-
         edge_t edge = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
 
-        // Store the clock's own polarity on the clock signal itself
-        clockSig->clock_edge = edge;
-
         for (const auto& portName : info.matched_ports) {
-            Signal* sig = findSignal(module, portName);
-            if (sig) {
-                sig->clock_domain = clockSig;
-                sig->clock_edge = edge;
-                if (privateFacts) {
-                    auto portIt = privateFacts->ports.find(portName);
-                    if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
-                }
+            if (privateFacts) {
+                auto portIt = privateFacts->ports.find(portName);
+                if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
             }
         }
         if (privateFacts) {
@@ -347,17 +313,12 @@ void setIODomains(Module& module,
         }
     }
 
-    // Store each reset's expected polarity on the reset signal itself (POSEDGE = positive,
-    // NEGEDGE = negative) so domains_propagate_and_check can validate without re-parsing.
+    // Store each reset's expected polarity in frontend-private facts.
     for (const auto& [resetName, info] : resets) {
-        Signal* sig = findSignal(module, info.signal_name);
-        if (sig) {
-            edge_t edge = (info.polarity == "positive") ? POSEDGE : NEGEDGE;
-            sig->clock_edge = edge;
-            if (privateFacts) {
-                auto portIt = privateFacts->ports.find(info.signal_name);
-                if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
-            }
+        edge_t edge = (info.polarity == "positive") ? POSEDGE : NEGEDGE;
+        if (privateFacts) {
+            auto portIt = privateFacts->ports.find(info.signal_name);
+            if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
         }
     }
 }

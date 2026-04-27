@@ -223,7 +223,7 @@ void runMateIRPipeline(MateIR& ir,
             };
             setDomains(module, {});
         });
-        runPass(10, "flop_resolve", [&]{ resolveFlops(module, &domainFacts); });
+        runPass(10, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::ofstream f(std::format("{}/10_flop_resolve_flops.txt", dir));
@@ -293,7 +293,7 @@ void runMateIRPipeline(MateIR& ir,
 
     std::string dir = DEBUG_OUTPUT_DIR + "/" + topModule.name;
     std::filesystem::create_directories(dir);
-    std::ofstream(dir + "/hierarchy.json") << topModule.toJson();
+    std::ofstream(dir + "/hierarchy.json") << hierarchyToJson(ir);
 }
 
 } // namespace

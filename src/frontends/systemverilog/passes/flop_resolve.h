@@ -13,7 +13,7 @@ namespace mate {
 //
 // Must run after constant folding and condition normalization so that
 // the reset MUX pattern is in canonical form.
-void resolveFlops(Module& module, FrontendDomainFacts* domainFacts = nullptr);
+void resolveFlops(Module& module, FrontendDomainFacts& domainFacts);
 
 
 } // namespace mate

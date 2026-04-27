@@ -9,8 +9,8 @@ Commands:
   tree                    Print the full module hierarchy as an indented tree
   module  <path>          Show all signals/flops of a module (dot-separated instance path)
   flops   <path>          List flops of a module with clock/reset info
-  inputs  <path>          List inputs of a module with sync_kind/clock_domain
-  outputs <path>          List outputs of a module with sync_kind/clock_domain
+  inputs  <path>          List inputs of a module with sync_type domain IDs
+  outputs <path>          List outputs of a module with sync_type domain IDs
   signals <path>          List internal signals of a module
   find    <name>          Find all signals/flops named <name> anywhere in the hierarchy
   clocks                  List all distinct clock domains used across the hierarchy
@@ -26,7 +26,13 @@ from pathlib import Path
 
 def load(path):
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    if "top" in data:
+        top = data["top"]
+        top["__clock_domains"] = data.get("clock_domains", [])
+        top["__reset_domains"] = data.get("reset_domains", [])
+        return top
+    return data
 
 
 # ── hierarchy navigation ───────────────────────────────────────────────────────
@@ -88,30 +94,28 @@ def fmt_type(t):
 def fmt_signal(s, category=""):
     name  = s["name"]
     typ   = fmt_type(s.get("type"))
-    sk    = s.get("sync_kind", "")
-    cd    = s.get("clock_domain", "")
-    ce    = s.get("clock_edge", "")
+    sync  = s.get("sync_type", {})
+    sk    = s.get("sync_kind", sync.get("kind", ""))
     parts = [f"{name}  [{typ}]"]
     if sk:
         parts.append(sk)
-    if cd:
-        parts.append(f"clk:{cd}({ce})")
-    elif ce:
-        parts.append(ce)
+    if "clock_domain" in sync:
+        parts.append(f"clk:{sync['clock_domain']}")
+    if "reset_domain" in sync:
+        parts.append(f"rst:{sync['reset_domain']}")
+    if sync.get("reset_domains"):
+        parts.append("rst:{}".format(",".join(str(r) for r in sync["reset_domains"])))
     return "  ".join(parts)
 
 
 def fmt_flop(f):
     name  = f["name"]
     typ   = fmt_type(f.get("type"))
-    clk   = f.get("clock", {})
-    rst   = f.get("reset")
+    clk   = f.get("clock_domain")
+    resets = f.get("reset_domains", [])
     rv    = f.get("reset_value")
-    clk_str = f"{clk.get('edge','')} {clk.get('name','')}" if clk else ""
-    rst_str = ""
-    if rst:
-        rst_str = f"  rst:{rst.get('edge','')} {rst.get('name','')}={rv}"
-    return f"{name}  [{typ}]  clk:{clk_str}{rst_str}"
+    rst_str = f"  rst:{','.join(str(r) for r in resets)}={rv}" if resets else ""
+    return f"{name}  [{typ}]  clk:{clk}{rst_str}"
 
 
 # ── commands ───────────────────────────────────────────────────────────────────
@@ -211,22 +215,26 @@ def cmd_find(root, args):
 
 
 def cmd_clocks(root, args):
-    clocks = {}  # clock_name -> set of module paths
+    registry = {d.get("id"): d for d in root.get("__clock_domains", [])}
+    clocks = {}  # clock_id -> set of module paths
     for path, m in iter_modules(root):
         for cat in ("inputs", "outputs", "signals"):
             for s in m.get(cat, []):
-                cd = s.get("clock_domain")
-                if cd:
+                cd = s.get("sync_type", {}).get("clock_domain")
+                if cd is not None:
                     clocks.setdefault(cd, set()).add(path)
         for f in m.get("flops", []):
-            clk = f.get("clock", {}).get("name")
-            if clk:
+            clk = f.get("clock_domain")
+            if clk is not None:
                 clocks.setdefault(clk, set()).add(path)
     if not clocks:
         print("No clock domains found")
         return
     for clk, paths in sorted(clocks.items()):
-        print(f"{clk}  (used in {len(paths)} module(s))")
+        domain = registry.get(clk, {})
+        label = domain.get("display_name", f"clock_{clk}")
+        edge = domain.get("edge", "")
+        print(f"{clk}: {label} {edge}  (used in {len(paths)} module(s))")
         for p in sorted(paths):
             print(f"    {p}")
 

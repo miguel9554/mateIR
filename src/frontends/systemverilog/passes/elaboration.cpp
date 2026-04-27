@@ -61,10 +61,9 @@ struct ResolutionContext {
     const ParameterContext& params;
     const slang::SourceManager& sm;
     bool is_sequential;
-    std::vector<asyncTrigger_t> triggers;
+    std::vector<EventTriggerFact> triggers;
     FrontendDomainFacts* domain_facts;
     ModuleOccurrenceKey occurrence;
-    std::vector<EventTriggerFact> trigger_facts;
 
     // In combinational blocks, tracks the current driver for each signal.
     // When a signal is assigned (e.g., `x = expr`), the driver is stored here.
@@ -169,12 +168,11 @@ std::string canonicalTargetKey(const ResolutionContext& ctx, const std::string& 
 static void recordFlopTriggerFact(ResolutionContext& ctx,
                                   const std::string& flopKey,
                                   std::optional<SourceLoc> assignmentLoc) {
-    ctx.thisModule->flopsTriggers[flopKey] = ctx.triggers;
     if (!ctx.domain_facts) return;
     auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
     facts.flop_triggers[flopKey] = FlopTriggerFact{
         .flop_name = flopKey,
-        .triggers = ctx.trigger_facts,
+        .triggers = ctx.triggers,
         .assignment_loc = assignmentLoc,
     };
 }
@@ -2915,7 +2913,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         return ctx.flopNames.contains(name) || ctx.local_flop_names.count(name) > 0;
     };
 
-    // Helper: key used in flopsTriggers map for a flop
+    // Helper: key used in frontend-private trigger facts for a flop
     auto flopTriggersKey = [&](const std::string& base) -> std::string {
         if (ctx.local_flop_names.count(base))
             return ctx.instance_path.empty() ? base : ctx.instance_path + "." + base;
@@ -3812,7 +3810,7 @@ void resolveForLoopStatementInPlace(
         ResolutionContext iterBodyCtx {
             ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
             ctx.sm, ctx.is_sequential, ctx.triggers,
-            ctx.domain_facts, ctx.occurrence, ctx.trigger_facts,
+            ctx.domain_facts, ctx.occurrence,
             ctx.combDrivers,
             ctx.instance_path, ctx.local_signals, ctx.local_array_types, ctx.local_flop_names,
             ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
@@ -3974,11 +3972,7 @@ void resolveProceduralTimingInPlace(
                 resolveSourceLoc(*timingStatement, ctx.sm));
 
     }
-    ctx.trigger_facts = triggerFacts;
-    ctx.triggers.clear();
-    ctx.triggers.reserve(triggerFacts.size());
-    for (const auto& fact : triggerFacts)
-        ctx.triggers.push_back({fact.edge, fact.local_signal_name});
+    ctx.triggers = std::move(triggerFacts);
     ctx.current_write_origin = std::format("procedural-block:{}",
                                            reinterpret_cast<uintptr_t>(timingStatement));
     resolveStatementInPlace(statement, ctx);
@@ -4472,7 +4466,7 @@ static void resolveGenerateScopeDecls(
             ctx.local_signals[name + ".q"] = q_node;
             ctx.local_signals[name]         = q_node;  // reads return .q
 
-            // Qualified name used for FlopInfo and flopsTriggers key
+            // Qualified name used for FlopInfo and frontend-private trigger facts
             std::string qualifiedName = ctx.instance_path.empty()
                 ? name : ctx.instance_path + "." + name;
 
@@ -4480,8 +4474,6 @@ static void resolveGenerateScopeDecls(
                 .name       = qualifiedName,
                 .type       = type,
                 .flop_type  = FLOP_D,
-                .clock      = {},
-                .reset      = std::nullopt,
                 .reset_value = std::nullopt,
                 .clock_domain = InvalidClockId,
                 .reset_domains = {},
@@ -4666,7 +4658,7 @@ void resolveGenerateMemberInPlace(
                 // Per-iteration context: inherits parent local_signals for outer-scope access
                 ResolutionContext iterResCtx{
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
-                    ctx.sm, false, {}, ctx.domain_facts, ctx.occurrence, {}, {},
+                    ctx.sm, false, {}, ctx.domain_facts, ctx.occurrence, {},
                     childPath, ctx.local_signals,
                     ctx.local_array_types, {},
                     ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
@@ -5043,8 +5035,6 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                 .name = resolvedSignal.name,
                 .type = resolvedSignal.type,
                 .flop_type = FLOP_D,
-                .clock = {},
-                .reset = std::nullopt,
                 .reset_value = std::nullopt,
                 .clock_domain = InvalidClockId,
                 .reset_domains = {},
@@ -5121,7 +5111,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Create resolution context
     ResolutionContext resCtx{
         graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {},
-        domainFacts, occurrence, {}, {},
+        domainFacts, occurrence, {},
         "", {}, {}, {}, enumRegistry, enumMemberValues, pkgRegistry,
         moduleLookup, globalImports, "", {}, {}, subroutineRegistry
     };

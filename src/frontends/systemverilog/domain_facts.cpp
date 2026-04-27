@@ -22,16 +22,6 @@ InstancePath childPath(InstancePath path, const std::string& instanceName) {
     return path;
 }
 
-SyncKind expectedSyncKind(LocalPortClass cls) {
-    switch (cls) {
-        case LocalPortClass::Clock: return SyncKind::Clock;
-        case LocalPortClass::Reset: return SyncKind::Reset;
-        case LocalPortClass::Async: return SyncKind::Async;
-        case LocalPortClass::Sync: return SyncKind::Sync;
-    }
-    return SyncKind::Sync;
-}
-
 const Signal* findPort(const Module& module, const std::string& name) {
     if (auto it = module.inputs.find(name); it != module.inputs.end()) return &it->second;
     if (auto it = module.outputs.find(name); it != module.outputs.end()) return &it->second;
@@ -45,10 +35,6 @@ std::string pathString(const InstancePath& path) {
         out += elem;
     }
     return out.empty() ? "<top>" : out;
-}
-
-bool sameTrigger(const EventTriggerFact& fact, const asyncTrigger_t& old) {
-    return fact.edge == old.edge && fact.local_signal_name == old.name;
 }
 
 void validateModuleFacts(const Module& module,
@@ -75,54 +61,10 @@ void validateModuleFacts(const Module& module,
                 "frontend_domain_facts: private port fact '{}' missing public port in module '{}'",
                 portName, module.name));
         }
-        if (sig->sync_kind != expectedSyncKind(portFact.cls)) {
-            throw CompilerError(std::format(
-                "frontend_domain_facts: sync_kind mismatch for port '{}' in module '{}'",
-                portName, module.name));
-        }
-        if (portFact.local_domain_name) {
-            if (!sig->clock_domain || sig->clock_domain->name != *portFact.local_domain_name) {
-                throw CompilerError(std::format(
-                    "frontend_domain_facts: clock domain mismatch for port '{}' in module '{}'",
-                    portName, module.name));
-            }
-        }
-        if (portFact.edge && sig->clock_edge != portFact.edge) {
-            throw CompilerError(std::format(
-                "frontend_domain_facts: edge mismatch for port '{}' in module '{}'",
-                portName, module.name));
-        }
-        if (portFact.synchronized_into) {
-            auto syncIt = module.synchronizedSignals.find(portName);
-            if (syncIt == module.synchronizedSignals.end() ||
-                    syncIt->second != *portFact.synchronized_into) {
-                throw CompilerError(std::format(
-                    "frontend_domain_facts: synchronized_into mismatch for port '{}' in module '{}'",
-                    portName, module.name));
-            }
-        }
+        (void)sig;
     }
 
-    for (const auto& [flopName, triggerFact] : moduleFacts->flop_triggers) {
-        auto it = module.flopsTriggers.find(flopName);
-        if (it == module.flopsTriggers.end()) {
-            throw CompilerError(std::format(
-                "frontend_domain_facts: private trigger fact '{}' missing public flopsTriggers in module '{}'",
-                flopName, module.name));
-        }
-        if (it->second.size() != triggerFact.triggers.size()) {
-            throw CompilerError(std::format(
-                "frontend_domain_facts: trigger count mismatch for flop '{}' in module '{}'",
-                flopName, module.name));
-        }
-        for (size_t i = 0; i < triggerFact.triggers.size(); ++i) {
-            if (!sameTrigger(triggerFact.triggers[i], it->second[i])) {
-                throw CompilerError(std::format(
-                    "frontend_domain_facts: trigger mismatch for flop '{}' in module '{}'",
-                    flopName, module.name));
-            }
-        }
-    }
+    (void)moduleFacts->flop_triggers;
 
     for (const auto& [flopName, domainFact] : moduleFacts->flop_domains) {
         auto it = std::ranges::find_if(module.flops, [&](const FlopInfo& flop) {
@@ -131,21 +73,6 @@ void validateModuleFacts(const Module& module,
         if (it == module.flops.end()) {
             throw CompilerError(std::format(
                 "frontend_domain_facts: private flop domain '{}' missing public FlopInfo in module '{}'",
-                flopName, module.name));
-        }
-        if (!sameTrigger(domainFact.clock, it->clock)) {
-            throw CompilerError(std::format(
-                "frontend_domain_facts: clock mismatch for flop '{}' in module '{}'",
-                flopName, module.name));
-        }
-        if (domainFact.reset.has_value() != it->reset.has_value()) {
-            throw CompilerError(std::format(
-                "frontend_domain_facts: reset presence mismatch for flop '{}' in module '{}'",
-                flopName, module.name));
-        }
-        if (domainFact.reset && !sameTrigger(*domainFact.reset, *it->reset)) {
-            throw CompilerError(std::format(
-                "frontend_domain_facts: reset mismatch for flop '{}' in module '{}'",
                 flopName, module.name));
         }
         if (domainFact.reset_value != it->reset_value) {

@@ -16,4 +16,6 @@ struct MateIR {
     size_t frontend_module_count = 0;
 };
 
+std::string hierarchyToJson(const MateIR& ir);
+
 } // namespace mate

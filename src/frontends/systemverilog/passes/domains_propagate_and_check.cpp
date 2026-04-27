@@ -377,21 +377,6 @@ SyncType syncTypeForSignalLeaves(
     return mergeSyncTypes(leaves);
 }
 
-void assertLegacyKindCompatible(
-        const Module& module,
-        const InstancePath& path,
-        const Signal& signal) {
-    if (signal.sync_kind == SyncKind::Sync && !signal.clock_domain) return;
-    if (module.pure_combinational && signal.sync_kind == SyncKind::Sync) return;
-    if (syncKind(signal) != signal.sync_kind) {
-        throw CompilerError(std::format(
-            "domains_propagate_and_check: signal '{}' in module '{}' at {} "
-            "has legacy/new sync kind mismatch: legacy={} new={}",
-            signal.name, module.name, pathString(path),
-            syncKindStr(signal.sync_kind), syncKindStr(syncKind(signal))));
-    }
-}
-
 void assignSignalSyncTypes(
         Module& module,
         const InstancePath& path,
@@ -407,7 +392,6 @@ void assignSignalSyncTypes(
             input.sync_type = expectedPortSyncType(module, path, ir, moduleFacts, input);
         }
         validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
-        assertLegacyKindCompatible(module, path, input);
     };
 
     auto assignDrivenSignal = [&](Signal& signal) {
@@ -424,7 +408,6 @@ void assignSignalSyncTypes(
             signal.sync_type = std::move(propagated);
         }
         validateSyncTypeIds(ir, signal.sync_type, module, path, signal.name);
-        assertLegacyKindCompatible(module, path, signal);
     };
 
     for (auto& [name, input] : module.inputs) assignInput(input);

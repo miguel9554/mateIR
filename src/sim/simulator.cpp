@@ -436,10 +436,6 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
         case DFGOp::CONCAT_ALIGN:
             throw CompilerError("Simulator: CONCAT_ALIGN should have been cleaned up by concat_cleanup pass", node);
 
-        case DFGOp::CAST:
-            // CAST is a type-only operation; at simulation time the bits are unchanged.
-            return checkedGet(node->castSource().node, node);
-
         case DFGOp::MODULE:
             throw CompilerError("Simulator: MODULE nodes should not exist after dfg_inline pass", node);
     }

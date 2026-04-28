@@ -342,6 +342,9 @@ struct ExprValue {
 static ExprValue buildExprValue(const slang::syntax::ExpressionSyntax* expr,
                                 ResolutionContext& ctx);
 
+static ExprValue buildScalarExprValue(const slang::syntax::ExpressionSyntax* expr,
+                                      ResolutionContext& ctx);
+
 // Build a scalar-only expression. Throws if the expression resolves to an array.
 static DFGNode* buildExprDFG(const slang::syntax::ExpressionSyntax* expr,
                               ResolutionContext& ctx);
@@ -863,6 +866,11 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
                                   const std::optional<DriverMap>& fallbackBranch,
                                   const DriverSnapshot& baseline,
                                   const std::optional<SourceLoc>& loc) {
+    std::string targetBaseName = targetName;
+    if (targetBaseName.ends_with(".d") || targetBaseName.ends_with(".q")) {
+        targetBaseName = targetBaseName.substr(0, targetBaseName.size() - 2);
+    }
+    const Type* targetType = lookupDeclaredType(targetBaseName, ctx);
     DFGNode* retained = getRetainedDriver(ctx, targetName, baseline, loc);
     auto branchValue = [&](const DriverMap& modified) -> DFGNode* {
         if (auto it = modified.find(targetName); it != modified.end()) {
@@ -888,6 +896,9 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
         if (selected == result) continue;
         auto* mux = ctx.graph.mux(it->condition, selected, result);
         mux->loc = loc;
+        if (targetType && targetType->isEnum()) {
+            mux->type = *targetType;
+        }
         result = mux;
     }
     return result;
@@ -1172,6 +1183,14 @@ static void mergeCaseBranches(ResolutionContext& ctx,
 
         DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
         result->loc = loc;
+        std::string targetBaseName = signalName;
+        if (targetBaseName.ends_with(".d") || targetBaseName.ends_with(".q")) {
+            targetBaseName = targetBaseName.substr(0, targetBaseName.size() - 2);
+        }
+        const Type* targetType = lookupDeclaredType(targetBaseName, ctx);
+        if (targetType && targetType->isEnum()) {
+            result->type = *targetType;
+        }
 
         connectDriver(ctx, signalName, result);
         if (!ctx.is_sequential) {
@@ -1724,8 +1743,8 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
 
     if (!ctx.is_sequential) {
         if (auto it = ctx.combDrivers.find(baseName); it != ctx.combDrivers.end()) {
-            Type type = it->second->type.value_or(
-                declaredType ? *declaredType : Type::makeInteger(0, false));
+            Type type = declaredType ? *declaredType :
+                it->second->type.value_or(Type::makeInteger(0, false));
             return ExprValue{.type = type, .scalar = it->second, .leaves = {}};
         }
     }
@@ -1937,23 +1956,158 @@ static void writeWholeTargetAsPartial(ResolutionContext& ctx,
     materializePartialTarget(ctx, targetName, state, loc);
 }
 
-static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
-                                            DFGNode* expr,
-                                            const std::optional<Type>& targetType,
-                                            const std::optional<SourceLoc>& loc) {
+static std::string frontendTypeName(const Type& type) {
+    return type.isEnum() ? type.enumInfo().type_name : "integer";
+}
+
+static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
+                                ResolutionContext& ctx,
+                                const std::optional<SourceLoc>& loc) {
+    if (castExpr.left->kind == SyntaxKind::NamedType) {
+        auto& namedType = castExpr.left->as<NamedTypeSyntax>();
+        if (namedType.name->kind == SyntaxKind::ScopedName) {
+            auto& scoped = namedType.name->as<ScopedNameSyntax>();
+            std::string pkgName = std::string(
+                scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string typeName = std::string(
+                scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            auto pkgIt = ctx.pkgRegistry.find(pkgName);
+            if (pkgIt == ctx.pkgRegistry.end()) {
+                throw CompilerError("Unknown package in cast: " + pkgName, loc);
+            }
+            auto it = pkgIt->second.enumTypes.find(typeName);
+            if (it == pkgIt->second.enumTypes.end()) {
+                throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
+            }
+            return it->second;
+        }
+
+        std::string typeName = std::string(
+            namedType.name->as<IdentifierNameSyntax>().identifier.valueText());
+        auto it = ctx.enumRegistry.find(typeName);
+        if (it == ctx.enumRegistry.end()) {
+            throw CompilerError("Unknown enum type in cast: " + typeName, loc);
+        }
+        return it->second;
+    }
+
+    if (castExpr.left->kind == SyntaxKind::IdentifierName) {
+        std::string typeName = std::string(
+            castExpr.left->as<IdentifierNameSyntax>().identifier.valueText());
+        auto it = ctx.enumRegistry.find(typeName);
+        if (it == ctx.enumRegistry.end()) {
+            throw CompilerError("Unknown enum type in cast: " + typeName, loc);
+        }
+        return it->second;
+    }
+
+    if (castExpr.left->kind == SyntaxKind::ScopedName) {
+        auto& scoped = castExpr.left->as<ScopedNameSyntax>();
+        std::string pkgName = std::string(
+            scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+        std::string typeName = std::string(
+            scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+        auto pkgIt = ctx.pkgRegistry.find(pkgName);
+        if (pkgIt == ctx.pkgRegistry.end()) {
+            throw CompilerError("Unknown package in cast: " + pkgName, loc);
+        }
+        auto it = pkgIt->second.enumTypes.find(typeName);
+        if (it == pkgIt->second.enumTypes.end()) {
+            throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
+        }
+        return it->second;
+    }
+
+    throw CompilerError("Only enum type casts are supported (e.g. state_t'(expr))", loc);
+}
+
+static void validateEnumCastWidth(const ExprValue& sourceValue,
+                                  const Type& targetType,
+                                  const std::optional<SourceLoc>& loc) {
+    if (!sourceValue.scalar || !sourceValue.scalar->hasType()) return;
+    if (sourceValue.scalar->kind() == DFGOp::CONST) return;
+    if (sourceValue.type.width > 0 && sourceValue.type.width != targetType.width) {
+        throw CompilerError(std::format(
+            "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
+            sourceValue.type.width, targetType.enumInfo().type_name, targetType.width), loc);
+    }
+}
+
+static void validateEnumEquality(const ExprValue& lhs,
+                                 const ExprValue& rhs,
+                                 const std::optional<SourceLoc>& loc) {
+    bool lhsEnum = lhs.type.isEnum();
+    bool rhsEnum = rhs.type.isEnum();
+    if (lhsEnum || rhsEnum) {
+        if (!lhsEnum || !rhsEnum ||
+            lhs.type.enumInfo().type_name != rhs.type.enumInfo().type_name) {
+            throw CompilerError(std::format(
+                "Type error: cannot compare '{}' and '{}' with ==",
+                lhsEnum ? lhs.type.enumInfo().type_name : "integer",
+                rhsEnum ? rhs.type.enumInfo().type_name : "integer"), loc);
+        }
+    }
+}
+
+static Type mergeFrontendDataTypes(const ExprValue& lhs,
+                                   const ExprValue& rhs,
+                                   const std::optional<SourceLoc>& loc) {
+    if (lhs.type.isEnum() || rhs.type.isEnum()) {
+        if (!lhs.type.isEnum() || !rhs.type.isEnum() ||
+            lhs.type.enumInfo().type_name != rhs.type.enumInfo().type_name) {
+            throw CompilerError(std::format(
+                "Type error: MUX branches have incompatible types '{}' and '{}'",
+                frontendTypeName(lhs.type), frontendTypeName(rhs.type)), loc);
+        }
+        return lhs.type;
+    }
+    return Type::makeInteger(std::max(lhs.type.width, rhs.type.width),
+                             lhs.type.isSigned() && rhs.type.isSigned());
+}
+
+static ExprValue retagConstOrReturnValue(ExprValue value,
+                                         const Type& targetType,
+                                         const std::optional<SourceLoc>& loc) {
+    if (!value.scalar) {
+        throw CompilerError("Enum cast requires a scalar expression", loc);
+    }
+    if (value.scalar->kind() == DFGOp::CONST) {
+        value.scalar->type = targetType;
+    }
+    value.type = targetType;
+    return value;
+}
+
+static void rejectFrontendEnum(const ExprValue& value,
+                               const char* opName,
+                               const std::optional<SourceLoc>& loc) {
+    if (value.type.isEnum()) {
+        throw CompilerError(std::format(
+            "Type error: enum type '{}' cannot be used with operator {}",
+            value.type.enumInfo().type_name, opName), loc);
+    }
+}
+
+static ExprValue coerceAssignmentExprToWidth(ResolutionContext& ctx,
+                                             ExprValue value,
+                                             const std::optional<Type>& targetType,
+                                             const std::optional<SourceLoc>& loc) {
+    DFGNode* expr = value.scalar;
     int targetWidth = targetType ? targetType->width : 0;
     bool targetSigned = targetType ? targetType->isSigned() : false;
-    if (!expr || targetWidth <= 0) return expr;
+    if (!expr || targetWidth <= 0) return value;
 
     if (expr->kind() == DFGOp::CONST) {
         expr->type = targetType ? *targetType : Type::makeInteger(targetWidth, targetSigned);
-        return expr;
+        value.type = *expr->type;
+        return value;
     }
 
-    if (!expr->hasType()) return expr;
+    if (!expr->hasType()) return value;
     if (targetType && expr->type->kind == targetType->kind &&
         expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
-        return expr;
+        value.type = *targetType;
+        return value;
     }
 
     if (expr->type->width > targetWidth) {
@@ -1967,21 +2121,37 @@ static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
         truncated->type = Type::makeInteger(targetWidth, targetSigned);
         if (loc) truncated->loc = *loc;
         expr = truncated;
+        value.scalar = expr;
+        value.type = *expr->type;
     }
 
     if (targetType && targetType->isEnum()) {
-        if (expr->type->width != targetWidth) return expr;
-        auto* castNode = ctx.graph.cast(expr);
-        castNode->type = *targetType;
-        if (loc) castNode->loc = *loc;
-        return castNode;
+        if (!expr->hasType() || expr->type->width != targetWidth) {
+            int sourceWidth = expr->hasType() ? expr->type->width : value.type.width;
+            throw CompilerError(std::format(
+                "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
+                sourceWidth, targetType->enumInfo().type_name, targetWidth), loc);
+        }
+        value.type = *targetType;
+        return value;
     }
 
     if (expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
-        return expr;
+        value.type = *expr->type;
+        return value;
     }
 
-    return expr;
+    return value;
+}
+
+static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
+                                            DFGNode* expr,
+                                            const std::optional<Type>& targetType,
+                                            const std::optional<SourceLoc>& loc) {
+    Type exprType = expr && expr->hasType() ? *expr->type : Type{};
+    ExprValue coerced = coerceAssignmentExprToWidth(
+        ctx, ExprValue{.type = exprType, .scalar = expr, .leaves = {}}, targetType, loc);
+    return coerced.scalar;
 }
 
 DFGNode* tryBuildConstantExprNode(const ExpressionSyntax* expr, ResolutionContext& ctx) {
@@ -2001,6 +2171,20 @@ static ExprValue buildExprValue(
 ) {
     if (!expr) {
         throw CompilerError("Cannot build DFG from null expression");
+    }
+
+    if (expr->kind == SyntaxKind::ParenthesizedExpression) {
+        auto& paren = expr->as<ParenthesizedExpressionSyntax>();
+        return buildExprValue(paren.expression, ctx);
+    }
+
+    if (expr->kind == SyntaxKind::CastExpression) {
+        auto loc = resolveSourceLoc(*expr, ctx.sm);
+        auto& castExpr = expr->as<CastExpressionSyntax>();
+        Type castType = resolveEnumCastType(castExpr, ctx, loc);
+        ExprValue inner = buildScalarExprValue(castExpr.right->expression, ctx);
+        validateEnumCastWidth(inner, castType, loc);
+        return retagConstOrReturnValue(inner, castType, loc);
     }
 
     if (expr->kind == SyntaxKind::IdentifierName) {
@@ -2173,6 +2357,14 @@ static DFGNode* buildExprDFG(
         const ExpressionSyntax* expr,
         ResolutionContext& ctx
 ) {
+    ExprValue value = buildScalarExprValue(expr, ctx);
+    return value.scalar;
+}
+
+static ExprValue buildScalarExprValue(
+        const ExpressionSyntax* expr,
+        ResolutionContext& ctx
+) {
     ExprValue value = buildExprValue(expr, ctx);
     if (!value.type.unpacked_dims.empty()) {
         throw CompilerError("Array-valued expression used where scalar expression is required",
@@ -2182,7 +2374,7 @@ static DFGNode* buildExprDFG(
         throw CompilerError("Expression did not produce a scalar DFG node",
                             resolveSourceLoc(*expr, ctx.sm));
     }
-    return value.scalar;
+    return value;
 }
 
 // Build DFG node directly from slang expression syntax
@@ -2636,7 +2828,9 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::UnaryMinusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            auto* node = ctx.graph.unaryNegate(buildExprDFG(unary.operand, ctx));
+            auto operand = buildScalarExprValue(unary.operand, ctx);
+            rejectFrontendEnum(operand, "UNARY_NEGATE", resolveSourceLoc(*expr, ctx.sm));
+            auto* node = ctx.graph.unaryNegate(operand.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
@@ -2691,7 +2885,9 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::UnaryBitwiseNotExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseNot(buildExprDFG(unary.operand, ctx));
+            auto operand = buildScalarExprValue(unary.operand, ctx);
+            rejectFrontendEnum(operand, "BITWISE_NOT", resolveSourceLoc(*expr, ctx.sm));
+            auto* node = ctx.graph.bitwiseNot(operand.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
@@ -2699,24 +2895,36 @@ static DFGNode* buildExprScalarImpl(
         // Binary operations
         case SyntaxKind::AddExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.add(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "ADD", loc);
+            rejectFrontendEnum(rhs, "ADD", loc);
+            auto* node = ctx.graph.add(lhs.scalar, rhs.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
 
         case SyntaxKind::SubtractExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.sub(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "SUB", loc);
+            rejectFrontendEnum(rhs, "SUB", loc);
+            auto* node = ctx.graph.sub(lhs.scalar, rhs.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
 
         case SyntaxKind::MultiplyExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.mul(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "MUL", loc);
+            rejectFrontendEnum(rhs, "MUL", loc);
+            auto* node = ctx.graph.mul(lhs.scalar, rhs.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
@@ -2739,68 +2947,99 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::EqualityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.eq(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            validateEnumEquality(lhs, rhs, loc);
+            auto* node = ctx.graph.eq(lhs.scalar, rhs.scalar);
+            node->loc = loc;
+            if (lhs.type.isEnum() || rhs.type.isEnum()) {
+                node->type = Type::makeInteger(1, false);
+            }
             return node;
         }
 
         case SyntaxKind::InequalityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
             auto loc = resolveSourceLoc(*expr, ctx.sm);
-            auto* eqNode = ctx.graph.eq(buildExprDFG(binary.left, ctx),
-                                        buildExprDFG(binary.right, ctx));
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            validateEnumEquality(lhs, rhs, loc);
+            auto* eqNode = ctx.graph.eq(lhs.scalar, rhs.scalar);
             eqNode->loc = loc;
+            if (lhs.type.isEnum() || rhs.type.isEnum()) {
+                eqNode->type = Type::makeInteger(1, false);
+            }
             return lowerLogicalNot(eqNode, ctx, loc);
         }
 
         case SyntaxKind::LessThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.lt(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "LT", loc);
+            rejectFrontendEnum(rhs, "LT", loc);
+            auto* node = ctx.graph.lt(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::LessThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.le(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "LE", loc);
+            rejectFrontendEnum(rhs, "LE", loc);
+            auto* node = ctx.graph.le(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::GreaterThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.gt(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "GT", loc);
+            rejectFrontendEnum(rhs, "GT", loc);
+            auto* node = ctx.graph.gt(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::GreaterThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.ge(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "GE", loc);
+            rejectFrontendEnum(rhs, "GE", loc);
+            auto* node = ctx.graph.ge(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::LogicalShiftLeftExpression:
         case SyntaxKind::ArithmeticShiftLeftExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.shl(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            rejectFrontendEnum(lhs, "SHL", loc);
+            auto* node = ctx.graph.shl(lhs.scalar, buildExprDFG(binary.right, ctx));
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::LogicalShiftRightExpression:
         case SyntaxKind::ArithmeticShiftRightExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.asr(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            rejectFrontendEnum(lhs, "ASR", loc);
+            auto* node = ctx.graph.asr(lhs.scalar, buildExprDFG(binary.right, ctx));
+            node->loc = loc;
             return node;
         }
 
@@ -2834,33 +3073,49 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::BinaryAndExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseAnd(buildExprDFG(binary.left, ctx),
-                                              buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "BITWISE_AND", loc);
+            rejectFrontendEnum(rhs, "BITWISE_AND", loc);
+            auto* node = ctx.graph.bitwiseAnd(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::BinaryOrExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseOr(buildExprDFG(binary.left, ctx),
-                                             buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "BITWISE_OR", loc);
+            rejectFrontendEnum(rhs, "BITWISE_OR", loc);
+            auto* node = ctx.graph.bitwiseOr(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::BinaryXorExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseXor(buildExprDFG(binary.left, ctx),
-                                              buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "BITWISE_XOR", loc);
+            rejectFrontendEnum(rhs, "BITWISE_XOR", loc);
+            auto* node = ctx.graph.bitwiseXor(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::BinaryXnorExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseXnor(buildExprDFG(binary.left, ctx),
-                                               buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "BITWISE_XNOR", loc);
+            rejectFrontendEnum(rhs, "BITWISE_XNOR", loc);
+            auto* node = ctx.graph.bitwiseXnor(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
@@ -2875,67 +3130,20 @@ static DFGNode* buildExprScalarImpl(
                                     resolveSourceLoc(*expr, ctx.sm));
             }
             auto* condNode = buildExprDFG(cond.predicate->conditions[0]->expr, ctx);
-            auto* trueNode = buildExprDFG(cond.left, ctx);
-            auto* falseNode = buildExprDFG(cond.right, ctx);
-            auto* node = ctx.graph.mux(condNode, trueNode, falseNode);
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto trueValue = buildScalarExprValue(cond.left, ctx);
+            auto falseValue = buildScalarExprValue(cond.right, ctx);
+            Type mergedType = mergeFrontendDataTypes(trueValue, falseValue, loc);
+            auto* node = ctx.graph.mux(condNode, trueValue.scalar, falseValue.scalar);
+            node->loc = loc;
+            if (trueValue.type.isEnum() || falseValue.type.isEnum()) {
+                node->type = mergedType;
+            }
             return node;
         }
 
         case SyntaxKind::CastExpression: {
-            auto& castExpr = expr->as<CastExpressionSyntax>();
-            // Only enum type casts are supported: enum_t'(expr) or pkg::enum_t'(expr)
-            Type castType;
-            if (castExpr.left->kind == SyntaxKind::NamedType) {
-                auto& namedType = castExpr.left->as<NamedTypeSyntax>();
-                if (namedType.name->kind == SyntaxKind::ScopedName) {
-                    auto& scoped = namedType.name->as<ScopedNameSyntax>();
-                    std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
-                    std::string typeName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
-                    auto pkgIt = ctx.pkgRegistry.find(pkgName);
-                    if (pkgIt == ctx.pkgRegistry.end())
-                        throw CompilerError("Unknown package in cast: " + pkgName, resolveSourceLoc(*expr, ctx.sm));
-                    auto it = pkgIt->second.enumTypes.find(typeName);
-                    if (it == pkgIt->second.enumTypes.end())
-                        throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, resolveSourceLoc(*expr, ctx.sm));
-                    castType = it->second;
-                } else {
-                    std::string typeName = std::string(
-                        namedType.name->as<IdentifierNameSyntax>().identifier.valueText());
-                    auto it = ctx.enumRegistry.find(typeName);
-                    if (it == ctx.enumRegistry.end())
-                        throw CompilerError("Unknown enum type in cast: " + typeName, resolveSourceLoc(*expr, ctx.sm));
-                    castType = it->second;
-                }
-            } else if (castExpr.left->kind == SyntaxKind::IdentifierName) {
-                std::string typeName = std::string(
-                    castExpr.left->as<IdentifierNameSyntax>().identifier.valueText());
-                auto it = ctx.enumRegistry.find(typeName);
-                if (it == ctx.enumRegistry.end())
-                    throw CompilerError("Unknown enum type in cast: " + typeName, resolveSourceLoc(*expr, ctx.sm));
-                castType = it->second;
-            } else if (castExpr.left->kind == SyntaxKind::ScopedName) {
-                // Qualified cast: pkg::type'(expr) — left is a ScopedName expression
-                auto& scoped = castExpr.left->as<ScopedNameSyntax>();
-                std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
-                std::string typeName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
-                auto pkgIt = ctx.pkgRegistry.find(pkgName);
-                if (pkgIt == ctx.pkgRegistry.end())
-                    throw CompilerError("Unknown package in cast: " + pkgName, resolveSourceLoc(*expr, ctx.sm));
-                auto it = pkgIt->second.enumTypes.find(typeName);
-                if (it == pkgIt->second.enumTypes.end())
-                    throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, resolveSourceLoc(*expr, ctx.sm));
-                castType = it->second;
-            } else {
-                throw CompilerError(
-                    "Only enum type casts are supported (e.g. state_t'(expr))",
-                    resolveSourceLoc(*expr, ctx.sm));
-            }
-            DFGNode* inner = buildExprDFG(castExpr.right->expression, ctx);
-            auto* castNode = ctx.graph.cast(inner);
-            castNode->type = castType;
-            castNode->loc  = resolveSourceLoc(*expr, ctx.sm);
-            return castNode;
+            return buildScalarExprValue(expr, ctx).scalar;
         }
 
         case SyntaxKind::InvocationExpression: {
@@ -3360,7 +3568,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         assignmentTargetType = *currentSelectedType;
     }
     if (assignmentTargetType && assignmentTargetType->width > 0) {
-        RHSexprNode = coerceAssignmentExprToWidth(ctx, RHSexprNode, assignmentTargetType, assignLoc);
+        RHSvalue.scalar = RHSexprNode;
+        RHSvalue = coerceAssignmentExprToWidth(ctx, RHSvalue, assignmentTargetType, assignLoc);
+        RHSexprNode = RHSvalue.scalar;
     }
 
     // Range-select on LHS: build CONCAT_ALIGN -> CONCAT -> target

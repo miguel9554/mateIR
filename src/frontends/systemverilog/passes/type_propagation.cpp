@@ -122,19 +122,6 @@ bool inferNodeType(DFGNode* node) {
                 "Type propagation: MODULE node '{}' encountered (should have been inlined)",
                 node->name), node->loc);
 
-        // CAST: type is pre-set at elaboration; validate source width matches
-        case DFGOp::CAST: {
-            auto* src = node->castSource().node;
-            if (!src->hasType()) return false;
-            // node->type was set at elaboration and is the target enum type
-            if (src->type->width != node->type->width)
-                throw CompilerError(std::format(
-                    "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
-                    src->type->width, node->type->enumInfo().type_name, node->type->width),
-                    node->loc);
-            return false;  // already typed; no change
-        }
-
         // SUB: result is always signed (subtraction can produce negative values)
         case DFGOp::SUB: {
             auto [lhs, rhs] = binaryNodes(node);

@@ -77,7 +77,6 @@ std::string DFG::renderDot(const std::string& graphName,
             case DFGOp::SLICE: ss << "SLICE"; break;
             case DFGOp::CONCAT: ss << "CONCAT"; break;
             case DFGOp::CONCAT_ALIGN: ss << "CONCAT_ALIGN"; break;
-            case DFGOp::CAST: ss << "CAST"; break;
             case DFGOp::UNARY_NEGATE: ss << "-"; break;
             case DFGOp::BITWISE_NOT: ss << "~"; break;
             case DFGOp::BITWISE_AND:  ss << "&"; break;

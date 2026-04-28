@@ -25,7 +25,6 @@ enum class DFGOp {
     // TMP ops
     CONCAT_ALIGN,   // Temporary: in[0]=expr, in[1]=high_idx, in[2]=low_idx
     MODULE,         // Submodule instance: name=instance_name, data=module_type_name, in=input_port_drivers
-    CAST,           // Type cast: in[0]=source, type set at elaboration (e.g. integer → enum)
     UNARY_NEGATE,
     // Arithmetic ops
     ADD,
@@ -68,7 +67,6 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::SLICE: return "SLICE";
         case DFGOp::CONCAT: return "CONCAT";
         case DFGOp::CONCAT_ALIGN: return "CONCAT_ALIGN";
-        case DFGOp::CAST: return "CAST";
         case DFGOp::ADD: return "ADD";
         case DFGOp::SUB: return "SUB";
         case DFGOp::MUL: return "MUL";
@@ -115,7 +113,6 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::SLICE:  return 3;
         case DFGOp::CONCAT: return -1; // variable
         case DFGOp::CONCAT_ALIGN: return 3;
-        case DFGOp::CAST:   return 1;
         case DFGOp::ADD:    return 2;
         case DFGOp::SUB:    return 2;
         case DFGOp::MUL:    return 2;
@@ -188,7 +185,6 @@ struct DFGConcatPayload { std::vector<DFGOutput> parts; };
 struct DFGConcatAlignPayload { DFGOutput expr; DFGOutput high; DFGOutput low; };
 struct DFGMuxPayload { DFGOutput selector; std::vector<DFGMuxArm> arms; };
 struct DFGModulePayload { std::string module_type; std::vector<std::string> output_names; std::vector<DFGModuleInput> inputs; };
-struct DFGCastPayload { DFGOutput source; };
 
 struct DFGUnaryInputs {
     DFGOutput operand;
@@ -222,8 +218,7 @@ using DFGPayload = std::variant<
     DFGConcatPayload,
     DFGConcatAlignPayload,
     DFGMuxPayload,
-    DFGModulePayload,
-    DFGCastPayload
+    DFGModulePayload
 >;
 
 inline bool isUnaryDFGOp(DFGOp op) {
@@ -304,7 +299,6 @@ public:
         if (std::holds_alternative<DFGConcatAlignPayload>(payload_)) return DFGOp::CONCAT_ALIGN;
         if (std::holds_alternative<DFGMuxPayload>(payload_)) return DFGOp::MUX;
         if (std::holds_alternative<DFGModulePayload>(payload_)) return DFGOp::MODULE;
-        if (std::holds_alternative<DFGCastPayload>(payload_)) return DFGOp::CAST;
         throw CompilerError("DFGNode: invalid payload", this);
     }
 
@@ -333,8 +327,6 @@ private:
             for (const auto& arm : p->arms) input_cache_.push_back(arm.data);
         } else if (auto* p = std::get_if<DFGModulePayload>(&payload_)) {
             for (const auto& input : p->inputs) input_cache_.push_back(input.driver);
-        } else if (auto* p = std::get_if<DFGCastPayload>(&payload_)) {
-            input_cache_.push_back(p->source);
         }
         return input_cache_;
     }
@@ -371,10 +363,6 @@ public:
     DFGConcatAlignInputs concatAlignInputs() const {
         const auto& p = std::get<DFGConcatAlignPayload>(payload_);
         return {p.expr, p.high, p.low};
-    }
-
-    DFGOutput castSource() const {
-        return std::get<DFGCastPayload>(payload_).source;
     }
 
     int64_t constValue() const { return std::get<DFGConstPayload>(payload_).value; }
@@ -564,10 +552,6 @@ public:
         }
         if (auto* p = std::get_if<DFGModulePayload>(&payload_)) {
             p->inputs.at(index).driver = replacement; return;
-        }
-        if (auto* p = std::get_if<DFGCastPayload>(&payload_)) {
-            if (index != 0) throw CompilerError("replaceInputAt: CAST index out of range", this);
-            p->source = replacement; return;
         }
         throw CompilerError("replaceInputAt: node has no inputs", this);
     }
@@ -788,13 +772,6 @@ public:
         if (!name.empty()) {
             signals[name] = nodes.back().get();
         }
-        return nodes.back().get();
-    }
-
-    // Create a CAST node: reinterpret source as the target type (same bits, different type)
-    // Caller must set node->type to the target Type.
-    DFGNode* cast(DFGNode* source) {
-        nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGCastPayload{source}));
         return nodes.back().get();
     }
 

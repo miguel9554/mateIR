@@ -22,6 +22,7 @@ domains_internal_yaml_reject_fail FAIL main domains YAML is only supported for t
 domains_output_classification_fail FAIL is not a top-level input
 enum_local_test PASS
 enum_top_test PASS
+enum_cast_width_fail FAIL cast width mismatch
 full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'
 func_test PASS
 generate_test PASS

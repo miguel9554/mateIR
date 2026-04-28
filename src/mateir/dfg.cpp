@@ -76,7 +76,6 @@ std::string DFG::renderDot(const std::string& graphName,
                 break;
             case DFGOp::SLICE: ss << "SLICE"; break;
             case DFGOp::CONCAT: ss << "CONCAT"; break;
-            case DFGOp::CONCAT_ALIGN: ss << "CONCAT_ALIGN"; break;
             case DFGOp::UNARY_NEGATE: ss << "-"; break;
             case DFGOp::BITWISE_NOT: ss << "~"; break;
             case DFGOp::BITWISE_AND:  ss << "&"; break;
@@ -123,11 +122,6 @@ std::string DFG::renderDot(const std::string& graphName,
                 break;
             case DFGOp::SLICE:
                 if (j == 0) return "src";
-                if (j == 1) return "hi";
-                if (j == 2) return "lo";
-                break;
-            case DFGOp::CONCAT_ALIGN:
-                if (j == 0) return "expr";
                 if (j == 1) return "hi";
                 if (j == 2) return "lo";
                 break;

@@ -22,8 +22,6 @@ enum class DFGOp {
     OUTPUT,     // Primary output (module port)
     SIGNAL,     // Internal signal (named placeholder)
     CONST,      // Constant value (data: int64_t)
-    // TMP ops
-    CONCAT_ALIGN,   // Temporary: in[0]=expr, in[1]=high_idx, in[2]=low_idx
     MODULE,         // Submodule instance: name=instance_name, data=module_type_name, in=input_port_drivers
     UNARY_NEGATE,
     // Arithmetic ops
@@ -66,7 +64,6 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::CONST: return "CONST";
         case DFGOp::SLICE: return "SLICE";
         case DFGOp::CONCAT: return "CONCAT";
-        case DFGOp::CONCAT_ALIGN: return "CONCAT_ALIGN";
         case DFGOp::ADD: return "ADD";
         case DFGOp::SUB: return "SUB";
         case DFGOp::MUL: return "MUL";
@@ -112,7 +109,6 @@ inline int expectedInputs(DFGOp op) {
 
         case DFGOp::SLICE:  return 3;
         case DFGOp::CONCAT: return -1; // variable
-        case DFGOp::CONCAT_ALIGN: return 3;
         case DFGOp::ADD:    return 2;
         case DFGOp::SUB:    return 2;
         case DFGOp::MUL:    return 2;
@@ -182,7 +178,6 @@ struct DFGUnaryPayload { DFGOp op; DFGOutput operand; };
 struct DFGBinaryPayload { DFGOp op; DFGOutput lhs; DFGOutput rhs; };
 struct DFGSlicePayload { DFGOutput source; DFGOutput high; DFGOutput low; };
 struct DFGConcatPayload { std::vector<DFGOutput> parts; };
-struct DFGConcatAlignPayload { DFGOutput expr; DFGOutput high; DFGOutput low; };
 struct DFGMuxPayload { DFGOutput selector; std::vector<DFGMuxArm> arms; };
 struct DFGModulePayload { std::string module_type; std::vector<std::string> output_names; std::vector<DFGModuleInput> inputs; };
 
@@ -201,12 +196,6 @@ struct DFGSliceInputs {
     DFGOutput low;
 };
 
-struct DFGConcatAlignInputs {
-    DFGOutput expr;
-    DFGOutput high;
-    DFGOutput low;
-};
-
 using DFGPayload = std::variant<
     DFGInputPayload,
     DFGOutputPayload,
@@ -216,7 +205,6 @@ using DFGPayload = std::variant<
     DFGBinaryPayload,
     DFGSlicePayload,
     DFGConcatPayload,
-    DFGConcatAlignPayload,
     DFGMuxPayload,
     DFGModulePayload
 >;
@@ -296,7 +284,6 @@ public:
         if (auto* p = std::get_if<DFGBinaryPayload>(&payload_)) return p->op;
         if (std::holds_alternative<DFGSlicePayload>(payload_)) return DFGOp::SLICE;
         if (std::holds_alternative<DFGConcatPayload>(payload_)) return DFGOp::CONCAT;
-        if (std::holds_alternative<DFGConcatAlignPayload>(payload_)) return DFGOp::CONCAT_ALIGN;
         if (std::holds_alternative<DFGMuxPayload>(payload_)) return DFGOp::MUX;
         if (std::holds_alternative<DFGModulePayload>(payload_)) return DFGOp::MODULE;
         throw CompilerError("DFGNode: invalid payload", this);
@@ -320,8 +307,6 @@ private:
             input_cache_ = {p->source, p->high, p->low};
         } else if (auto* p = std::get_if<DFGConcatPayload>(&payload_)) {
             input_cache_ = p->parts;
-        } else if (auto* p = std::get_if<DFGConcatAlignPayload>(&payload_)) {
-            input_cache_ = {p->expr, p->high, p->low};
         } else if (auto* p = std::get_if<DFGMuxPayload>(&payload_)) {
             input_cache_.push_back(p->selector);
             for (const auto& arm : p->arms) input_cache_.push_back(arm.data);
@@ -358,11 +343,6 @@ public:
 
     const std::vector<DFGOutput>& concatParts() const {
         return std::get<DFGConcatPayload>(payload_).parts;
-    }
-
-    DFGConcatAlignInputs concatAlignInputs() const {
-        const auto& p = std::get<DFGConcatAlignPayload>(payload_);
-        return {p.expr, p.high, p.low};
     }
 
     int64_t constValue() const { return std::get<DFGConstPayload>(payload_).value; }
@@ -537,13 +517,6 @@ public:
         }
         if (auto* p = std::get_if<DFGConcatPayload>(&payload_)) {
             p->parts.at(index) = replacement; return;
-        }
-        if (auto* p = std::get_if<DFGConcatAlignPayload>(&payload_)) {
-            if (index == 0) p->expr = replacement;
-            else if (index == 1) p->high = replacement;
-            else if (index == 2) p->low = replacement;
-            else throw CompilerError("replaceInputAt: CONCAT_ALIGN index out of range", this);
-            return;
         }
         if (auto* p = std::get_if<DFGMuxPayload>(&payload_)) {
             if (index == 0) p->selector = replacement;
@@ -772,18 +745,6 @@ public:
         auto n = name.empty()
             ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{parts})
             : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{parts}, name);
-        nodes.push_back(std::move(n));
-        if (!name.empty()) {
-            signals[name] = nodes.back().get();
-        }
-        return nodes.back().get();
-    }
-
-    // Create a CONCAT_ALIGN node: temporary wrapper with positional metadata
-    DFGNode* concatAlign(DFGNode* expr, DFGNode* high, DFGNode* low, const std::string& name = "") {
-        auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatAlignPayload{expr, high, low})
-            : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatAlignPayload{expr, high, low}, name);
         nodes.push_back(std::move(n));
         if (!name.empty()) {
             signals[name] = nodes.back().get();

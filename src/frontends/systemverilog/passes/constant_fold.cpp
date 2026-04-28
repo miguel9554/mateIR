@@ -80,8 +80,7 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
 static bool tryConstantFold(DFGNode* node) {
     // Skip nodes that are already constants or have no inputs
     if (node->kind() == DFGOp::CONST || node->kind() == DFGOp::INPUT ||
-        node->kind() == DFGOp::SLICE ||
-        node->kind() == DFGOp::CONCAT_ALIGN)
+        node->kind() == DFGOp::SLICE)
         return false;
 
     // CONCAT with all-constant inputs: fold by bit-concatenation (MSB-first)

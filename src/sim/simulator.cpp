@@ -432,10 +432,6 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             }
             return SimValue::concat(parts);
         }
-
-        case DFGOp::CONCAT_ALIGN:
-            throw CompilerError("Simulator: unexpected CONCAT_ALIGN node reached simulation", node);
-
         case DFGOp::MODULE:
             throw CompilerError("Simulator: MODULE nodes should not exist after dfg_inline pass", node);
     }

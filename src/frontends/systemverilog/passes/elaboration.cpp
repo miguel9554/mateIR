@@ -630,21 +630,6 @@ static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver
                 break;
             }
 
-            if (part->kind() == DFGOp::CONCAT_ALIGN) {
-                auto align = part->concatAlignInputs();
-                if (align.high.node->kind() != DFGOp::CONST ||
-                    align.low.node->kind() != DFGOp::CONST) {
-                    ok = false;
-                    break;
-                }
-                int64_t high = align.high.node->constValue();
-                int64_t low = align.low.node->constValue();
-                if (high < low) std::swap(high, low);
-                slices.push_back({low, high, align.expr.node, std::nullopt, std::nullopt});
-                nextHigh = low - 1;
-                continue;
-            }
-
             int partWidth = 0;
             if (part->type.has_value()) {
                 partWidth = part->type->width;
@@ -4461,7 +4446,7 @@ void resolveNamedPortConnection(
             }
 
             // Packed bit-select on an output port or signal: drive through canonical
-            // partial-write state so frontend never emits CONCAT_ALIGN.
+            // partial-write state.
             {
                 std::string packedTargetName = baseName;
                 if (!ctx.instance_path.empty() && ctx.local_signals.count(baseName)) {

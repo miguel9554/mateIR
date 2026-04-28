@@ -272,15 +272,6 @@ bool inferNodeType(DFGNode* node) {
             node->type = Type::makeInteger(totalWidth, false);
             return true;
         }
-
-        // CONCAT_ALIGN: pass-through type from expression input (in[0])
-        case DFGOp::CONCAT_ALIGN: {
-            auto* expr = node->concatAlignInputs().expr.node;
-            if (!expr->hasType()) return false;
-            node->type = *expr->type;
-            return true;
-        }
-
         // SLICE: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
         // Dynamic indexing must be lowered to MUX during elaboration; a SLICE
         // node with non-constant indices is a compiler bug.

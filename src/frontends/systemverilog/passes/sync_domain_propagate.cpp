@@ -162,12 +162,112 @@ void validateSyncTypeIds(
     }
 }
 
+ClockId requireResolvedTopClock(
+        const MateIR& ir,
+        const FrontendDomainFacts& facts,
+        const std::string& domainName,
+        const std::string& signalName) {
+    if (!facts.top_inputs) {
+        throw CompilerError(
+            "domains_propagate_and_check: top input domain facts are missing");
+    }
+    auto it = facts.top_inputs->resolved_clocks.find(domainName);
+    if (it == facts.top_inputs->resolved_clocks.end()) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: top-level signal '{}' references "
+            "unresolved clock domain '{}'",
+            signalName, domainName));
+    }
+    ClockId id = it->second.clock_domain;
+    if (id == InvalidClockId || id.value >= ir.clocks.size() ||
+            ir.clocks[id.value].id != id) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: top-level signal '{}' references "
+            "invalid ClockId {}",
+            signalName, id.value));
+    }
+    return id;
+}
+
+ResetId requireResolvedTopReset(
+        const MateIR& ir,
+        const FrontendDomainFacts& facts,
+        const std::string& resetName,
+        const std::string& signalName) {
+    if (!facts.top_inputs) {
+        throw CompilerError(
+            "domains_propagate_and_check: top input domain facts are missing");
+    }
+    auto it = facts.top_inputs->resolved_resets.find(resetName);
+    if (it == facts.top_inputs->resolved_resets.end()) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: top-level signal '{}' references "
+            "unresolved reset domain '{}'",
+            signalName, resetName));
+    }
+    ResetId id = it->second.reset_domain;
+    if (id == InvalidResetId || id.value >= ir.resets.size() ||
+            ir.resets[id.value].id != id) {
+        throw CompilerError(std::format(
+            "domains_propagate_and_check: top-level signal '{}' references "
+            "invalid ResetId {}",
+            signalName, id.value));
+    }
+    return id;
+}
+
+std::optional<SyncType> topPortSyncType(
+        const MateIR& ir,
+        const FrontendDomainFacts& facts,
+        const Signal& signal) {
+    if (!facts.top_inputs) return std::nullopt;
+
+    for (const auto& [domainName, clock] : facts.top_inputs->clocks) {
+        if (clock.input_port == signal.name) {
+            return ClockSignal{
+                requireResolvedTopClock(ir, facts, domainName, signal.name),
+            };
+        }
+    }
+    for (const auto& [resetName, reset] : facts.top_inputs->resets) {
+        if (reset.signal_name == signal.name) {
+            return ResetSignal{
+                requireResolvedTopReset(ir, facts, resetName, signal.name),
+            };
+        }
+    }
+    if (auto syncIt = facts.top_inputs->sync_inputs.find(signal.name);
+            syncIt != facts.top_inputs->sync_inputs.end()) {
+        return SyncSignal{
+            .clock_domain = requireResolvedTopClock(
+                ir, facts, syncIt->second.clock_domain_name, signal.name),
+            .reset_domains = {},
+        };
+    }
+    if (facts.top_inputs->async_inputs.contains(signal.name)) {
+        return AsyncSignal{};
+    }
+    return std::nullopt;
+}
+
 SyncType expectedPortSyncType(
         const Module& module,
         const InstancePath& path,
         const MateIR& ir,
+        const FrontendDomainFacts& facts,
         const ModuleDomainFacts& moduleFacts,
         const Signal& signal) {
+    if (path.elems.empty()) {
+        auto topType = topPortSyncType(ir, facts, signal);
+        if (!topType) {
+            throw CompilerError(std::format(
+                "domains_propagate_and_check: missing top-level input domain for '{}' "
+                "in module '{}'",
+                signal.name, module.name));
+        }
+        return *topType;
+    }
+
     auto it = moduleFacts.ports.find(signal.name);
     if (it == moduleFacts.ports.end()) {
         throw CompilerError(std::format(
@@ -268,16 +368,9 @@ void seedDeclaredInputSyncTypes(
     const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
 
     for (auto& [name, input] : module.inputs) {
-        bool shouldSeed = path.elems.empty();
-        if (!shouldSeed) {
-            auto portIt = moduleFacts.ports.find(name);
-            shouldSeed = portIt != moduleFacts.ports.end() &&
-                (portIt->second.cls == LocalPortClass::Clock ||
-                 portIt->second.cls == LocalPortClass::Reset);
-        }
-        if (!shouldSeed) continue;
+        if (!path.elems.empty()) continue;
 
-        input.sync_type = expectedPortSyncType(module, path, ir, moduleFacts, input);
+        input.sync_type = expectedPortSyncType(module, path, ir, facts, moduleFacts, input);
         validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
         for (auto* leaf : signalLeaves(input))
             setNodeSync(nodeSync, leaf, input.sync_type);
@@ -351,48 +444,103 @@ SyncType syncTypeForLeaves(
     return mergeSyncTypes(leafSyncTypes);
 }
 
+bool hasNonConstFanin(const DFGNode* node, std::set<const DFGNode*>& visited) {
+    if (!node || !visited.insert(node).second) return false;
+    if (node->kind() == DFGOp::CONST) return false;
+
+    bool found = false;
+    bool hasInput = false;
+    DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
+        hasInput = true;
+        if (found) return;
+        if (hasNonConstFanin(input.node, visited)) found = true;
+    });
+    if (!hasInput) return node->kind() == DFGOp::INPUT;
+    return found;
+}
+
+bool hasNonConstFanin(const std::vector<DFGNode*>& leaves) {
+    for (auto* leaf : leaves) {
+        std::set<const DFGNode*> visited;
+        if (hasNonConstFanin(leaf, visited)) return true;
+    }
+    return false;
+}
+
+std::optional<SyncType> computeSyncTypeFromFanin(
+        const DFGNode* node,
+        const std::map<const DFGNode*, SyncType>& nodeSync,
+        std::map<const DFGNode*, std::optional<SyncType>>& memo) {
+    if (!node || node->kind() == DFGOp::CONST) return std::nullopt;
+    if (auto it = memo.find(node); it != memo.end()) return it->second;
+
+    bool hasInput = false;
+    std::vector<SyncType> inputs;
+    DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
+        if (input.node->kind() == DFGOp::CONST) return;
+        hasInput = true;
+        auto inputSync = computeSyncTypeFromFanin(input.node, nodeSync, memo);
+        if (inputSync) inputs.push_back(*inputSync);
+    });
+
+    std::optional<SyncType> result;
+    if (!hasInput) {
+        if (node->kind() != DFGOp::INPUT) {
+            result = std::nullopt;
+        } else if (auto seed = nodeSync.find(node); seed != nodeSync.end()) {
+            result = seed->second;
+        } else {
+            result = AsyncSignal{};
+        }
+    } else if (inputs.empty()) {
+        result = std::nullopt;
+    } else {
+        result = mergeSyncTypes(inputs);
+    }
+    memo[node] = result;
+    return result;
+}
+
+std::optional<SyncType> computeSyncTypeFromFanin(
+        const std::vector<DFGNode*>& leaves,
+        const std::map<const DFGNode*, SyncType>& nodeSync) {
+    std::map<const DFGNode*, std::optional<SyncType>> memo;
+    std::vector<SyncType> leafSyncTypes;
+    for (const auto* leaf : leaves) {
+        auto syncType = computeSyncTypeFromFanin(leaf, nodeSync, memo);
+        if (syncType) leafSyncTypes.push_back(*syncType);
+    }
+    if (leafSyncTypes.empty()) return std::nullopt;
+    return mergeSyncTypes(leafSyncTypes);
+}
+
+FlopDInputDomain flopDInputDomainForLeaves(
+        const std::vector<DFGNode*>& leaves,
+        const std::map<const DFGNode*, SyncType>& nodeSync) {
+    if (!hasNonConstFanin(leaves)) {
+        return FlopDInputDomain{
+            .sync_type = std::nullopt,
+            .constant_only = true,
+        };
+    }
+
+    auto syncType = computeSyncTypeFromFanin(leaves, nodeSync);
+    if (syncType) {
+        return FlopDInputDomain{
+            .sync_type = *syncType,
+            .constant_only = false,
+        };
+    }
+    return FlopDInputDomain{
+        .sync_type = std::nullopt,
+        .constant_only = false,
+    };
+}
+
 SyncType syncTypeForSignalLeaves(
         const Signal& signal,
         const std::map<const DFGNode*, SyncType>& nodeSync) {
     return syncTypeForLeaves(signalLeaves(signal), nodeSync);
-}
-
-bool reachesNode(const DFGNode* root,
-                 const std::set<const DFGNode*>& targets,
-                 std::set<const DFGNode*>& visited) {
-    if (!root) return false;
-    if (targets.contains(root)) return true;
-    if (!visited.insert(root).second) return false;
-
-    bool found = false;
-    DFGTraversal::forEachInput(root, [&](size_t, const DFGOutput& input) {
-        if (!found && reachesNode(input.node, targets, visited))
-            found = true;
-    });
-    return found;
-}
-
-std::optional<ClockId> clockDomainForInputFlopD(const Module& module, const Signal& input) {
-    std::set<const DFGNode*> inputLeaves;
-    for (auto* leaf : signalLeaves(input)) {
-        if (leaf) inputLeaves.insert(leaf);
-    }
-    if (inputLeaves.empty()) return std::nullopt;
-
-    std::optional<ClockId> clock;
-    for (const auto& flop : module.flops) {
-        for (auto* dLeaf : flopDLeaves(flop)) {
-            std::set<const DFGNode*> visited;
-            if (!reachesNode(dLeaf, inputLeaves, visited))
-                continue;
-            if (!clock) {
-                clock = flop.clock_domain;
-            } else if (*clock != flop.clock_domain) {
-                return std::nullopt;
-            }
-        }
-    }
-    return clock;
 }
 
 void assignSignalSyncTypes(
@@ -412,18 +560,9 @@ void assignSignalSyncTypes(
                  portIt->second.cls == LocalPortClass::Reset);
         }
         if (useDeclared) {
-            input.sync_type = expectedPortSyncType(module, path, ir, moduleFacts, input);
+            input.sync_type = expectedPortSyncType(module, path, ir, facts, moduleFacts, input);
         } else {
             input.sync_type = syncTypeForSignalLeaves(input, nodeSync);
-            if (!path.elems.empty()) {
-                auto clock = clockDomainForInputFlopD(module, input);
-                if (clock) {
-                    input.sync_type = SyncSignal{
-                        .clock_domain = *clock,
-                        .reset_domains = {},
-                    };
-                }
-            }
         }
         validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
     };
@@ -431,7 +570,7 @@ void assignSignalSyncTypes(
     auto assignDrivenSignal = [&](Signal& signal) {
         SyncType propagated = syncTypeForSignalLeaves(signal, nodeSync);
         if (!module.pure_combinational && moduleFacts.ports.contains(signal.name)) {
-            SyncType expected = expectedPortSyncType(module, path, ir, moduleFacts, signal);
+            SyncType expected = expectedPortSyncType(module, path, ir, facts, moduleFacts, signal);
             if (std::holds_alternative<AsyncSignal>(propagated) &&
                     !std::holds_alternative<AsyncSignal>(expected)) {
                 signal.sync_type = std::move(expected);
@@ -455,9 +594,9 @@ void assignSignalSyncTypes(
 void collectFlopDSyncTypes(
         const Module& module,
         const std::map<const DFGNode*, SyncType>& nodeSync,
-        std::map<const FlopInfo*, SyncType>& flopDSync) {
+        std::map<const FlopInfo*, FlopDInputDomain>& flopDSync) {
     for (const auto& flop : module.flops)
-        flopDSync[&flop] = syncTypeForLeaves(flopDLeaves(flop), nodeSync);
+        flopDSync[&flop] = flopDInputDomainForLeaves(flopDLeaves(flop), nodeSync);
 
     for (const auto& sub : module.hierarchyInstantiation)
         collectFlopDSyncTypes(sub, nodeSync, flopDSync);
@@ -477,7 +616,7 @@ SyncDomainAnalysis propagateSyncDomains(
     analysis.node_sync = propagateNodeSyncTypes(*module.dfg, std::move(analysis.node_sync));
 
     assignSignalSyncTypes(module, {}, ir, domainFacts, analysis.node_sync);
-    collectFlopDSyncTypes(module, analysis.node_sync, analysis.flop_d_sync);
+    collectFlopDSyncTypes(module, analysis.node_sync, analysis.flop_d_domains);
     return analysis;
 }
 

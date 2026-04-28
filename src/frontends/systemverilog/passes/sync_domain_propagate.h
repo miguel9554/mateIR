@@ -5,12 +5,18 @@
 #include "mateir/module.h"
 
 #include <map>
+#include <optional>
 
 namespace mate {
 
+struct FlopDInputDomain {
+    std::optional<SyncType> sync_type;
+    bool constant_only = false;
+};
+
 struct SyncDomainAnalysis {
     std::map<const DFGNode*, SyncType> node_sync;
-    std::map<const FlopInfo*, SyncType> flop_d_sync;
+    std::map<const FlopInfo*, FlopDInputDomain> flop_d_domains;
 };
 
 SyncDomainAnalysis propagateSyncDomains(

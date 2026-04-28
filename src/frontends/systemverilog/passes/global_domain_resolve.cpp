@@ -49,34 +49,114 @@ InstancePath childPath(InstancePath path, const std::string& instanceName) {
     return path;
 }
 
-bool isClockOrReset(LocalPortClass cls) {
-    return cls == LocalPortClass::Clock || cls == LocalPortClass::Reset;
-}
-
 struct LocalPortDemand {
     LocalPortClass cls;
     edge_t edge;
 };
 
-void addDemand(std::map<std::string, LocalPortDemand>& demands,
+struct LocalPortDemandKey {
+    std::string signal_name;
+    LocalPortClass cls;
+    edge_t edge;
+    auto operator<=>(const LocalPortDemandKey&) const = default;
+};
+
+void addDemand(std::map<LocalPortDemandKey, LocalPortDemand>& demands,
                const std::string& signalName,
                LocalPortClass cls,
                edge_t edge,
                const Module& module,
                const InstancePath& path) {
-    auto it = demands.find(signalName);
-    if (it == demands.end()) {
-        demands[signalName] = LocalPortDemand{.cls = cls, .edge = edge};
-        return;
+    for (const auto& [key, demand] : demands) {
+        if (key.signal_name != signalName) continue;
+        if (demand.cls != cls) {
+            throw CompilerError(std::format(
+                "global_domain_resolve: conflicting inferred clock/reset role for "
+                "signal '{}' in module '{}' at {}",
+                signalName, module.name, pathString(path)));
+        }
+        if (cls == LocalPortClass::Reset && demand.edge != edge) {
+            throw CompilerError(std::format(
+                "global_domain_resolve: conflicting inferred reset polarity for "
+                "signal '{}' in module '{}' at {}",
+                signalName, module.name, pathString(path)));
+        }
     }
-    if (it->second.cls == cls && cls == LocalPortClass::Clock)
-        return;
-    if (it->second.cls != cls || it->second.edge != edge) {
-        throw CompilerError(std::format(
-            "global_domain_resolve: conflicting inferred clock/reset role for "
-            "signal '{}' in module '{}' at {}",
-            signalName, module.name, pathString(path)));
+
+    LocalPortDemandKey key{
+        .signal_name = signalName,
+        .cls = cls,
+        .edge = edge,
+    };
+    if (demands.contains(key)) return;
+    demands[key] = LocalPortDemand{.cls = cls, .edge = edge};
+}
+
+bool hasMatchingTopClock(const FrontendDomainFacts& facts,
+                         const std::string& signalName,
+                         edge_t edge) {
+    if (!facts.top_inputs) return false;
+    for (const auto& [domainName, clock] : facts.top_inputs->clocks) {
+        if (clock.input_port == signalName && clock.edge == edge) return true;
     }
+    return false;
+}
+
+bool hasMatchingTopReset(const FrontendDomainFacts& facts,
+                         const std::string& signalName,
+                         edge_t edge) {
+    if (!facts.top_inputs) return false;
+    for (const auto& [resetName, reset] : facts.top_inputs->resets) {
+        if (reset.signal_name == signalName && reset.active_edge == edge) return true;
+    }
+    return false;
+}
+
+bool resolvedPortFactMatches(const LocalPortDomainFact& fact,
+                             LocalPortClass cls,
+                             edge_t edge) {
+    if (fact.cls != cls || !fact.edge) return false;
+    if (cls == LocalPortClass::Reset) return *fact.edge == edge;
+    return true;
+}
+
+std::vector<LocalPortDemandKey> sortedDemandKeys(
+        const std::map<LocalPortDemandKey, LocalPortDemand>& demands) {
+    std::vector<LocalPortDemandKey> keys;
+    for (const auto& [key, demand] : demands)
+        keys.push_back(key);
+    return keys;
+}
+
+std::map<LocalPortDemandKey, LocalPortDemand> collectLocalClockResetDemands(
+        const Module& module,
+        const InstancePath& path,
+        const ModuleDomainFacts& moduleFacts) {
+    std::map<LocalPortDemandKey, LocalPortDemand> demands;
+    for (const auto& [flopName, flopFact] : moduleFacts.flop_domains) {
+        addDemand(demands, flopFact.clock.local_signal_name,
+                  LocalPortClass::Clock, flopFact.clock.edge, module, path);
+        if (flopFact.reset) {
+            addDemand(demands, flopFact.reset->local_signal_name,
+                      LocalPortClass::Reset, flopFact.reset->edge, module, path);
+        }
+    }
+    return demands;
+}
+
+std::map<LocalPortDemandKey, LocalPortDemand> collectResolvedClockResetDemands(
+        const Module& module,
+        const InstancePath& path,
+        const ModuleDomainFacts& moduleFacts) {
+    auto demands = collectLocalClockResetDemands(module, path, moduleFacts);
+    for (const auto& [portName, portFact] : moduleFacts.ports) {
+        if ((portFact.cls != LocalPortClass::Clock && portFact.cls != LocalPortClass::Reset) ||
+                !portFact.edge) {
+            continue;
+        }
+        addDemand(demands, portName, portFact.cls, *portFact.edge, module, path);
+    }
+    return demands;
 }
 
 const ChildInputConnectionFact* findChildInputConnection(
@@ -102,41 +182,33 @@ const ChildInputConnectionFact* findChildInputConnection(
     return found;
 }
 
-std::map<std::string, LocalPortDemand> inferClockResetPortFacts(
+std::map<LocalPortDemandKey, LocalPortDemand> inferClockResetPortFacts(
         Module& module,
         const InstancePath& path,
         FrontendDomainFacts& facts) {
     ModuleDomainFacts& moduleFacts = facts.getOrCreate({path, module.name});
-    std::map<std::string, LocalPortDemand> demands;
-
-    for (const auto& [flopName, flopFact] : moduleFacts.flop_domains) {
-        addDemand(demands, flopFact.clock.local_signal_name,
-                  LocalPortClass::Clock, flopFact.clock.edge, module, path);
-        if (flopFact.reset) {
-            addDemand(demands, flopFact.reset->local_signal_name,
-                      LocalPortClass::Reset, flopFact.reset->edge, module, path);
-        }
-    }
+    auto demands = collectLocalClockResetDemands(module, path, moduleFacts);
 
     for (auto& child : module.hierarchyInstantiation) {
         InstancePath childInstancePath = childPath(path, child.instance_name);
         auto childDemands = inferClockResetPortFacts(child, childInstancePath, facts);
-        for (const auto& [childPort, demand] : childDemands) {
+        for (const auto& childDemandKey : sortedDemandKeys(childDemands)) {
+            const auto& demand = childDemands.at(childDemandKey);
             const auto* conn = findChildInputConnection(
-                moduleFacts, childInstancePath, child, childPort);
+                moduleFacts, childInstancePath, child, childDemandKey.signal_name);
             if (!conn) {
                 throw CompilerError(std::format(
                     "global_domain_resolve: missing connection fact for inferred "
                     "{} port '{}.{}'",
                     demand.cls == LocalPortClass::Clock ? "clock" : "reset",
-                    pathString(childInstancePath), childPort));
+                    pathString(childInstancePath), childDemandKey.signal_name));
             }
             if (conn->expr_kind != ConnectionExprKind::SimpleIdentifier ||
                     !conn->parent_signal_name) {
                 throw CompilerError(std::format(
                     "global_domain_resolve: unsupported clock/reset connection "
                     "expression for {}.{} in parent module '{}' at {}: {}",
-                    pathString(childInstancePath), childPort, module.name,
+                    pathString(childInstancePath), childDemandKey.signal_name, module.name,
                     pathString(path), conn->diagnostic_expr_kind),
                     conn->loc);
             }
@@ -147,14 +219,15 @@ std::map<std::string, LocalPortDemand> inferClockResetPortFacts(
         }
     }
 
-    for (const auto& [signalName, demand] : demands) {
+    for (const auto& demandKey : sortedDemandKeys(demands)) {
+        const auto& demand = demands.at(demandKey);
+        const std::string& signalName = demandKey.signal_name;
         auto existing = moduleFacts.ports.find(signalName);
         if (path.elems.empty()) {
-            if (existing == moduleFacts.ports.end() ||
-                    existing->second.cls != demand.cls ||
-                    !existing->second.edge ||
-                    (demand.cls == LocalPortClass::Reset &&
-                     *existing->second.edge != demand.edge)) {
+            bool yamlMatches = demand.cls == LocalPortClass::Clock
+                ? hasMatchingTopClock(facts, signalName, demand.edge)
+                : hasMatchingTopReset(facts, signalName, demand.edge);
+            if (!yamlMatches) {
                 throw CompilerError(std::format(
                     "global_domain_resolve: top-level signal '{}' in module '{}' "
                     "is used as a {} but is not declared with matching edge/polarity "
@@ -174,9 +247,7 @@ std::map<std::string, LocalPortDemand> inferClockResetPortFacts(
         }
 
         if (existing != moduleFacts.ports.end()) {
-            if (existing->second.cls != demand.cls ||
-                    !existing->second.edge ||
-                    *existing->second.edge != demand.edge) {
+            if (!resolvedPortFactMatches(existing->second, demand.cls, demand.edge)) {
                 throw CompilerError(std::format(
                     "global_domain_resolve: existing domain fact for signal '{}' "
                     "in module '{}' at {} conflicts with inferred clock/reset role",
@@ -211,6 +282,10 @@ public:
             moduleFacts.resolved_input_domains.clear();
             moduleFacts.resolved_flop_domains.clear();
         }
+        if (facts_.top_inputs) {
+            facts_.top_inputs->resolved_clocks.clear();
+            facts_.top_inputs->resolved_resets.clear();
+        }
 
         resolveModule(ir_.top, {}, {}, {});
         validateRegistries();
@@ -218,6 +293,8 @@ public:
 
 private:
     using SourceMap = std::map<std::string, HierSignalRef>;
+    using ClockIdMap = std::map<LocalPortDemandKey, ClockId>;
+    using ResetIdMap = std::map<LocalPortDemandKey, ResetId>;
 
     ClockId internClock(HierSignalRef source, edge_t edge) {
         ClockKey key{source, edge};
@@ -308,48 +385,53 @@ private:
 
         SourceMap localClockSources;
         SourceMap localResetSources;
-        std::map<std::string, ClockId> localClockIds;
-        std::map<std::string, ResetId> localResetIds;
+        ClockIdMap localClockIds;
+        ResetIdMap localResetIds;
 
-        for (const auto& [portName, portFact] : moduleFacts.ports) {
-            if (!isClockOrReset(portFact.cls)) continue;
-            if (!portFact.edge) {
-                throw CompilerError(std::format(
-                    "global_domain_resolve: module '{}' at {} {} port '{}' "
-                    "has no resolved edge/polarity",
-                    module.name, pathString(path),
-                    portFact.cls == LocalPortClass::Clock ? "clock" : "reset",
-                    portName));
+        auto localDemands = collectResolvedClockResetDemands(module, path, moduleFacts);
+        if (path.elems.empty() && facts_.top_inputs) {
+            for (const auto& [domainName, clock] : facts_.top_inputs->clocks) {
+                addDemand(localDemands, clock.input_port, LocalPortClass::Clock,
+                          clock.edge, module, path);
             }
-
-            if (portFact.cls == LocalPortClass::Clock) {
+            for (const auto& [resetName, reset] : facts_.top_inputs->resets) {
+                addDemand(localDemands, reset.signal_name, LocalPortClass::Reset,
+                          reset.active_edge, module, path);
+            }
+        }
+        for (const auto& demandKey : sortedDemandKeys(localDemands)) {
+            const auto& demand = localDemands.at(demandKey);
+            const std::string& portName = demandKey.signal_name;
+            if (demand.cls == LocalPortClass::Clock) {
                 auto source = sourceForInput(
-                    module, path, incomingClockSources, portName, portFact.cls);
-                ClockId id = internClock(source, *portFact.edge);
+                    module, path, incomingClockSources, portName, demand.cls);
+                ClockId id = internClock(source, demand.edge);
                 localClockSources[portName] = source;
-                localClockIds[portName] = id;
+                localClockIds[demandKey] = id;
                 moduleFacts.resolved_input_domains[portName] = ResolvedInputDomainFact{
                     .port_name = portName,
                     .cls = LocalPortClass::Clock,
                     .source = source,
-                    .edge = *portFact.edge,
+                    .edge = demand.edge,
                     .clock_domain = id,
                     .reset_domain = std::nullopt,
                 };
+                recordTopClockDomain(portName, source, demand.edge, id);
             } else {
                 auto source = sourceForInput(
-                    module, path, incomingResetSources, portName, portFact.cls);
-                ResetId id = internReset(source, *portFact.edge);
+                    module, path, incomingResetSources, portName, demand.cls);
+                ResetId id = internReset(source, demand.edge);
                 localResetSources[portName] = source;
-                localResetIds[portName] = id;
+                localResetIds[demandKey] = id;
                 moduleFacts.resolved_input_domains[portName] = ResolvedInputDomainFact{
                     .port_name = portName,
                     .cls = LocalPortClass::Reset,
                     .source = source,
-                    .edge = *portFact.edge,
+                    .edge = demand.edge,
                     .clock_domain = std::nullopt,
                     .reset_domain = id,
                 };
+                recordTopResetDomain(portName, source, demand.edge, id);
             }
         }
 
@@ -361,15 +443,17 @@ private:
 
             SourceMap childClockSources;
             SourceMap childResetSources;
-            for (const auto& [childPortName, childPortFact] : childFacts.ports) {
-                if (!isClockOrReset(childPortFact.cls)) continue;
-                const auto& parentSourceMap = childPortFact.cls == LocalPortClass::Clock
+            auto childDemands = collectResolvedClockResetDemands(child, childInstancePath, childFacts);
+            for (const auto& childDemandKey : sortedDemandKeys(childDemands)) {
+                const auto& childDemand = childDemands.at(childDemandKey);
+                const std::string& childPortName = childDemandKey.signal_name;
+                const auto& parentSourceMap = childDemand.cls == LocalPortClass::Clock
                     ? localClockSources
                     : localResetSources;
                 auto source = resolveChildInputSource(
                     module, path, moduleFacts, child, childInstancePath,
-                    childPortName, childPortFact.cls, parentSourceMap);
-                if (childPortFact.cls == LocalPortClass::Clock) {
+                    childPortName, childDemand.cls, parentSourceMap);
+                if (childDemand.cls == LocalPortClass::Clock) {
                     childClockSources[childPortName] = source;
                 } else {
                     childResetSources[childPortName] = source;
@@ -377,6 +461,44 @@ private:
             }
 
             resolveModule(child, childInstancePath, childClockSources, childResetSources);
+        }
+    }
+
+    void recordTopClockDomain(const std::string& topPort,
+                              const HierSignalRef& source,
+                              edge_t edge,
+                              ClockId id) {
+        if (!facts_.top_inputs || !source.instance_path.elems.empty() ||
+                source.ns != SignalNamespace::Input) {
+            return;
+        }
+        for (const auto& [domainName, clock] : facts_.top_inputs->clocks) {
+            if (clock.input_port != topPort || clock.edge != edge) continue;
+            facts_.top_inputs->resolved_clocks[domainName] = ResolvedTopClockDomainFact{
+                .domain_name = domainName,
+                .clock_domain = id,
+                .source = source,
+                .edge = edge,
+            };
+        }
+    }
+
+    void recordTopResetDomain(const std::string& topPort,
+                              const HierSignalRef& source,
+                              edge_t activeEdge,
+                              ResetId id) {
+        if (!facts_.top_inputs || !source.instance_path.elems.empty() ||
+                source.ns != SignalNamespace::Input) {
+            return;
+        }
+        for (const auto& [resetName, reset] : facts_.top_inputs->resets) {
+            if (reset.signal_name != topPort || reset.active_edge != activeEdge) continue;
+            facts_.top_inputs->resolved_resets[resetName] = ResolvedTopResetDomainFact{
+                .reset_name = resetName,
+                .reset_domain = id,
+                .source = source,
+                .active_edge = activeEdge,
+            };
         }
     }
 
@@ -440,10 +562,15 @@ private:
     void resolveFlopDomains(Module& module,
                             const InstancePath& path,
                             ModuleDomainFacts& moduleFacts,
-                            const std::map<std::string, ClockId>& localClockIds,
-                            const std::map<std::string, ResetId>& localResetIds) const {
+                            const ClockIdMap& localClockIds,
+                            const ResetIdMap& localResetIds) const {
         for (const auto& [flopName, flopFact] : moduleFacts.flop_domains) {
-            auto clockIt = localClockIds.find(flopFact.clock.local_signal_name);
+            LocalPortDemandKey clockKey{
+                .signal_name = flopFact.clock.local_signal_name,
+                .cls = LocalPortClass::Clock,
+                .edge = flopFact.clock.edge,
+            };
+            auto clockIt = localClockIds.find(clockKey);
             if (clockIt == localClockIds.end()) {
                 throw CompilerError(std::format(
                     "global_domain_resolve: flop '{}' in module '{}' at {} "
@@ -455,7 +582,12 @@ private:
 
             ResetDomains resetDomains;
             if (flopFact.reset) {
-                auto resetIt = localResetIds.find(flopFact.reset->local_signal_name);
+                LocalPortDemandKey resetKey{
+                    .signal_name = flopFact.reset->local_signal_name,
+                    .cls = LocalPortClass::Reset,
+                    .edge = flopFact.reset->edge,
+                };
+                auto resetIt = localResetIds.find(resetKey);
                 if (resetIt == localResetIds.end()) {
                     throw CompilerError(std::format(
                         "global_domain_resolve: flop '{}' in module '{}' at {} "

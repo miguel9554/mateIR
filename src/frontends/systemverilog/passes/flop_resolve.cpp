@@ -497,14 +497,16 @@ static void resolveFlopsForModule(Module& resolved,
     }
     resolved.flops = resolved_flops;
 
-    // Build clock/reset name lists from inputs that were tagged
+    // Build clock/reset name lists from RTL trigger facts. Internal clock/reset
+    // roles are inferred from flops, not from YAML port classifications.
     std::vector<std::string> clocks;
     std::vector<std::string> resets;
-    for (const auto& [name, portFact] : privateFacts.ports) {
-        if (portFact.cls == LocalPortClass::Clock) {
-            clocks.push_back(name);
-        } else if (portFact.cls == LocalPortClass::Reset) {
-            resets.push_back(name);
+    for (const auto& [flopName, flopDomain] : privateFacts.flop_domains) {
+        if (std::ranges::find(clocks, flopDomain.clock.local_signal_name) == clocks.end())
+            clocks.push_back(flopDomain.clock.local_signal_name);
+        if (flopDomain.reset &&
+                std::ranges::find(resets, flopDomain.reset->local_signal_name) == resets.end()) {
+            resets.push_back(flopDomain.reset->local_signal_name);
         }
     }
 

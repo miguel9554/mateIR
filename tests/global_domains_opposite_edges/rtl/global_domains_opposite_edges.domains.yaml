@@ -4,4 +4,8 @@ clock_domains:
     polarity: posedge
     inputs_outputs:
     - a
+  clk_n:
+    input_name: clk
+    polarity: negedge
+    inputs_outputs:
     - b

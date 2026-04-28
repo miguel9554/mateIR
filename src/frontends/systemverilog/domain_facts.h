@@ -57,11 +57,27 @@ struct TopSyncInputFact {
     std::string clock_domain_name;
 };
 
+struct ResolvedTopClockDomainFact {
+    std::string domain_name;
+    ClockId clock_domain;
+    HierSignalRef source;
+    edge_t edge;
+};
+
+struct ResolvedTopResetDomainFact {
+    std::string reset_name;
+    ResetId reset_domain;
+    HierSignalRef source;
+    edge_t active_edge;
+};
+
 struct TopInputDomainFacts {
     std::map<std::string, TopClockInputFact> clocks;
     std::map<std::string, TopResetInputFact> resets;
     std::map<std::string, TopSyncInputFact> sync_inputs;
     std::set<std::string> async_inputs;
+    std::map<std::string, ResolvedTopClockDomainFact> resolved_clocks;
+    std::map<std::string, ResolvedTopResetDomainFact> resolved_resets;
 };
 
 struct EventTriggerFact {

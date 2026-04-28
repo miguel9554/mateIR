@@ -116,7 +116,8 @@ void loadTopIODomains(Module& module,
             edge_t clockEdge = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
 
             // Classify the clock input itself
-            if (portClassMap.contains(info.input_port)) {
+            if (auto existing = portClassMap.find(info.input_port);
+                    existing != portClassMap.end() && existing->second.cls != PortClass::Clock) {
                 throw CompilerError(std::format(
                     "io_domains_set: module '{}': port '{}' classified in multiple domains",
                     module.name, info.input_port));

@@ -16,7 +16,7 @@ const_only_dynamic_fail FAIL DIV operation requires constant operands
 const_only_ops PASS
 cordic PASS
 counter_top PASS
-cross_module_async_to_sync_fail FAIL cross-module sync type mismatch
+cross_module_async_to_sync_fail FAIL samples Async input without a declared synchronizer
 domains_synchronized_into_reject_fail FAIL synchronized_into is no longer supported
 domains_internal_yaml_reject_fail FAIL main domains YAML is only supported for top module
 domains_output_classification_fail FAIL is not a top-level input
@@ -35,7 +35,7 @@ multiple_seq_writers_same_flop FAIL Multiple drivers for target 'q.d'
 multiple_submodule_output_drivers FAIL Multiple drivers for target 'n'
 overlapping_partial_writes FAIL Overlapping partial writes for target 'bus'
 partial_then_full_write_conflict FAIL Multiple drivers for target 'bus'
-phase8_multiclock_cdc_fail FAIL cross-domain violation
+phase8_multiclock_cdc_fail FAIL samples Async input without a declared synchronizer
 phase8_same_clock_merge PASS
 pkg_scope_test PASS
 ref_arg_fail FAIL ref ports not supported

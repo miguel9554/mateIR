@@ -1,0 +1,6 @@
+synchronizer_flops:
+  - AR_CS
+  - AW_CS
+  - curr_addr
+  - curr_data_rx
+  - tx_counter

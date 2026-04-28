@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Run regression tests defined in a plain-text manifest."""
+import argparse
+import os
 import shlex
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -156,7 +159,28 @@ def run_expected_failure(name, expected):
     return ok, output
 
 
+def run_case(case):
+    """Run a single test case. Returns (name, ok, output)."""
+    name = case["name"]
+    if case["kind"] == "validate":
+        # run_clean(name)
+        ok, output = run_validate(name)
+    else:
+        ok, output = run_expected_failure(name, case["expected_error"])
+    return name, ok, output
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Run regression tests.")
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Number of tests to run in parallel (default: number of CPUs)",
+    )
+    args = parser.parse_args()
+
     try:
         cases = load_test_cases()
     except RuntimeError as exc:
@@ -176,21 +200,20 @@ def main():
             print(output)
             sys.exit(1)
 
+    jobs = max(1, args.jobs)
+    print(f"Running {len(cases)} tests with {jobs} worker(s)...", flush=True)
+
     results = {}
-    for case in cases:
-        name = case["name"]
-        kind = case["kind"]
-        print(f"Running {name}...", flush=True)
-        if kind == "validate":
-            # run_clean(name)
-            ok, output = run_validate(name)
-        else:
-            ok, output = run_expected_failure(name, case["expected_error"])
-        results[name] = (ok, output)
-        if ok:
-            print(f"  {GREEN}PASS{RESET}")
-        else:
-            print(f"  {RED}FAIL{RESET}")
+    completed = 0
+    total = len(cases)
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {executor.submit(run_case, case): case for case in cases}
+        for future in as_completed(futures):
+            name, ok, output = future.result()
+            results[name] = (ok, output)
+            completed += 1
+            status = f"{GREEN}PASS{RESET}" if ok else f"{RED}FAIL{RESET}"
+            print(f"  [{completed}/{total}] {status}  {name}", flush=True)
 
     # Print failure details first
     failures = [(n, out) for n, (ok, out) in results.items() if not ok]

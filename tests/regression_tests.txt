@@ -55,6 +55,7 @@ static_flop_d PASS
 static_sync_mix PASS
 static_top_output PASS
 submodule_output_bitselect_partial PASS
+submodule_multi_output_partial PASS
 subword_assign PASS
 task_func_test PASS
 uart PASS

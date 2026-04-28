@@ -4355,14 +4355,30 @@ const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr) {
 }
 
 // Connect an output port of the submodule to a parent signal
-void connectModuleOutput(DFG& graph, DFGNode* moduleNode,
-                         const std::string& parentSignalName, size_t outputIdx,
+static DFGNode* getOrCreateOutputPlaceholder(DFG& graph,
+                                             ModuleInstanceBinding& binding,
+                                             const Module& resolvedSub,
+                                             const std::string& portName) {
+    auto [it, inserted] = binding.output_placeholders.try_emplace(
+        portName, graph.placeholderSignal(""));
+    if (inserted) {
+        if (auto outIt = resolvedSub.outputs.find(portName); outIt != resolvedSub.outputs.end()) {
+            it->second->type = outIt->second.type;
+        }
+    }
+    return it->second;
+}
+
+void connectModuleOutput(DFG& graph, ModuleInstanceBinding& binding,
+                         const Module& resolvedSub,
+                         const std::string& portName,
+                         const std::string& parentSignalName,
                          ResolutionContext& ctx,
                          const std::optional<SourceLoc>& writeLoc) {
-    DFGOutput modOut(moduleNode, static_cast<int>(outputIdx));
+    DFGOutput modOut(getOrCreateOutputPlaceholder(graph, binding, resolvedSub, portName));
     recordFullWrite(
         ctx, parentSignalName, writeLoc,
-        std::format("module-output:{}:{}", moduleNode->name, outputIdx));
+        std::format("module-output:{}:{}", binding.instance_name, portName));
     if (graph.hasOutput("", parentSignalName)) {
         graph.connectOutput("", parentSignalName, modOut);
     } else if (graph.hasSignal("", parentSignalName)) {
@@ -4372,11 +4388,10 @@ void connectModuleOutput(DFG& graph, DFGNode* moduleNode,
 
 void resolveNamedPortConnection(
         const NamedPortConnectionSyntax& named,
-        DFG& graph, DFGNode* moduleNode,
+        DFG& graph, ModuleInstanceBinding& binding,
         Module& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
-        const std::map<std::string, size_t>& subOutputIndex,
         ResolutionContext& ctx) {
 
     // Extract port name
@@ -4390,11 +4405,11 @@ void resolveNamedPortConnection(
         }
         auto* expr = extractPortExpr(*named.expr);
         auto* driver = buildExprDFG(expr, ctx);
-        ctx.graph.addModuleInput(moduleNode, portName, driver);
+        binding.inputs.push_back({portName, DFGOutput(driver)});
         if (ctx.domain_facts) {
             auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
             ChildInputConnectionFact connFact{
-                .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, moduleNode->name),
+                .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, binding.instance_name),
                 .child_module_name = resolvedSub.name,
                 .child_port = portName,
                 .expr_kind = expr->kind == SyntaxKind::IdentifierName
@@ -4440,7 +4455,7 @@ void resolveNamedPortConnection(
             // If the element node exists (unpacked array element), use the normal path.
             // Otherwise, fall through to the canonical partial-write path for packed bit-selects.
             if (graph.hasSignal("", connectName) || graph.hasOutput("", connectName)) {
-                connectModuleOutput(graph, moduleNode, connectName, subOutputIndex.at(portName),
+                connectModuleOutput(graph, binding, resolvedSub, portName, connectName,
                                     ctx, resolveSourceLoc(*expr, ctx.sm));
                 return;
             }
@@ -4458,11 +4473,12 @@ void resolveNamedPortConnection(
                         "' for bit-select output port connection",
                         resolveSourceLoc(*expr, ctx.sm));
 
-                size_t oi = subOutputIndex.at(portName);
                 auto oldOrigin = ctx.current_write_origin;
-                ctx.current_write_origin = std::format("module-output:{}:{}", moduleNode->name, oi);
+                ctx.current_write_origin = std::format(
+                    "module-output:{}:{}", binding.instance_name, portName);
                 try {
-                    auto* outBit = ctx.graph.concat({DFGOutput(moduleNode, static_cast<int>(oi))});
+                    auto* outBit = getOrCreateOutputPlaceholder(
+                        graph, binding, resolvedSub, portName);
                     outBit->loc = resolveSourceLoc(*expr, ctx.sm);
                     writePartialTargetSlice(
                         ctx, packedTargetName, idx, idx,
@@ -4480,8 +4496,8 @@ void resolveNamedPortConnection(
                 "Only simple identifier expressions supported for output port connections",
                 resolveSourceLoc(*expr, ctx.sm));
         }
-        connectModuleOutput(graph, moduleNode,
-                            connectName, subOutputIndex.at(portName),
+        connectModuleOutput(graph, binding, resolvedSub,
+                            portName, connectName,
                             ctx, resolveSourceLoc(*expr, ctx.sm));
     } else {
         throw CompilerError(
@@ -4490,55 +4506,89 @@ void resolveNamedPortConnection(
 }
 
 void resolveWildcardPortConnection(
-        DFG& graph, DFGNode* moduleNode,
+        DFG& graph, ModuleInstanceBinding& binding,
         Module& resolvedSub,
         ResolutionContext& ctx) {
     for (const auto& [name, inp] : resolvedSub.inputs) {
         auto* driver = graph.lookupSignal("", name);
         if (driver) {
-            graph.addModuleInput(moduleNode, name, driver);
+            binding.inputs.push_back({name, DFGOutput(driver)});
             if (ctx.domain_facts) {
                 auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
                 facts.child_input_connections.push_back(ChildInputConnectionFact{
-                    .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, moduleNode->name),
+                    .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, binding.instance_name),
                     .child_module_name = resolvedSub.name,
                     .child_port = name,
                     .expr_kind = ConnectionExprKind::SimpleIdentifier,
                     .parent_signal_name = name,
                     .diagnostic_expr_kind = std::string(toString(SyntaxKind::IdentifierName)),
-                    .loc = moduleNode->loc,
+                    .loc = binding.loc,
                 });
             }
         }
     }
-    size_t oi = 0;
     for (const auto& [name, out] : resolvedSub.outputs) {
-        connectModuleOutput(graph, moduleNode, name, oi++, ctx, moduleNode->loc);
+        connectModuleOutput(graph, binding, resolvedSub, name, name, ctx, binding.loc);
     }
 }
 
 void resolvePortConnection(
         const PortConnectionSyntax* conn,
-        DFG& graph, DFGNode* moduleNode,
+        DFG& graph, ModuleInstanceBinding& binding,
         Module& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
-        const std::map<std::string, size_t>& subOutputIndex,
         ResolutionContext& ctx) {
     switch (conn->kind) {
         case SyntaxKind::NamedPortConnection:
             resolveNamedPortConnection(conn->as<NamedPortConnectionSyntax>(),
-                                       graph, moduleNode, resolvedSub,
+                                       graph, binding, resolvedSub,
                                        subInputNames, subOutputNames,
-                                       subOutputIndex, ctx);
+                                       ctx);
             break;
         case SyntaxKind::WildcardPortConnection:
-            resolveWildcardPortConnection(graph, moduleNode, resolvedSub, ctx);
+            resolveWildcardPortConnection(graph, binding, resolvedSub, ctx);
             break;
         default:
             throw CompilerError(
                 "Unsupported port connection kind: " + std::string(toString(conn->kind)));
     }
+}
+
+static void instantiateSubmoduleInstance(
+        const UnresolvedModule& unresolvedSubmodule,
+        const std::string& submoduleName,
+        const HierarchicalInstanceSyntax& instanceSyntax,
+        const std::string& effectiveInstanceName,
+        const ParameterContext& instCtx,
+        const InstancePath& childOccurrencePath,
+        ResolutionContext& ctx) {
+    auto resolvedSub = resolveModule(unresolvedSubmodule, instCtx,
+                                     ctx.moduleLookup, ctx.sm,
+                                     ctx.pkgRegistry, ctx.globalImports,
+                                     childOccurrencePath,
+                                     ctx.domain_facts);
+
+    std::set<std::string> subInputNames, subOutputNames;
+    for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
+    for (const auto& [name, out] : resolvedSub.outputs) subOutputNames.insert(name);
+
+    ModuleInstanceBinding binding{
+        .instance_name = effectiveInstanceName,
+        .module_type = submoduleName,
+        .inputs = {},
+        .output_placeholders = {},
+        .loc = resolveSourceLoc(instanceSyntax, ctx.sm),
+    };
+
+    for (const auto* conn : instanceSyntax.connections) {
+        resolvePortConnection(conn, ctx.graph, binding,
+                              resolvedSub, subInputNames, subOutputNames, ctx);
+    }
+
+    resolvedSub.instance_name = effectiveInstanceName;
+    ctx.thisModule->instance_bindings.push_back(std::move(binding));
+    ctx.thisModule->hierarchyInstantiation.push_back(std::move(resolvedSub));
 }
 
 // Evaluate the next genvar value from a for-loop iteration expression.
@@ -4993,33 +5043,9 @@ void resolveGenerateMemberInPlace(
 
                 InstancePath childOccurrencePath =
                     appendInstancePath(ctx.occurrence.instance_path, qualifiedName);
-                auto resolvedSub = resolveModule(*it->second, instCtx,
-                                                ctx.moduleLookup, ctx.sm,
-                                                ctx.pkgRegistry, ctx.globalImports,
-                                                childOccurrencePath,
-                                                ctx.domain_facts);
-
-                std::set<std::string> subInputNames, subOutputNames;
-                std::map<std::string, size_t> subOutputIndex;
-                for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
-                size_t oi = 0;
-                for (const auto& [name, out] : resolvedSub.outputs) {
-                    subOutputNames.insert(name);
-                    subOutputIndex[name] = oi++;
-                }
-                std::vector<std::string> outputPortNames;
-                for (const auto& [name, out] : resolvedSub.outputs)
-                    outputPortNames.push_back(name);
-
-                auto* moduleNode = ctx.graph.module(submoduleName, qualifiedName, outputPortNames);
-                moduleNode->loc = resolveSourceLoc(*inst, ctx.sm);
-
-                for (const auto* conn : inst->connections)
-                    resolvePortConnection(conn, ctx.graph, moduleNode, resolvedSub,
-                                         subInputNames, subOutputNames, subOutputIndex, ctx);
-
-                resolvedSub.instance_name = qualifiedName;
-                ctx.thisModule->hierarchyInstantiation.push_back(std::move(resolvedSub));
+                instantiateSubmoduleInstance(*it->second, submoduleName, *inst,
+                                             qualifiedName, instCtx,
+                                             childOccurrencePath, ctx);
             }
             break;
         }
@@ -5366,36 +5392,9 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
             }
 
             InstancePath childOccurrencePath = appendInstancePath(occurrencePath, instanceName);
-            auto resolvedSub = resolveModule(*it->second, instCtx, moduleLookup, sourceManager,
-                                            pkgRegistry, globalImports, childOccurrencePath,
-                                            domainFacts);
-
-            // Build sets of input/output port names for the submodule
-            std::set<std::string> subInputNames, subOutputNames;
-            std::map<std::string, size_t> subOutputIndex;
-            for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
-            size_t oi = 0;
-            for (const auto& [name, out] : resolvedSub.outputs) {
-                subOutputNames.insert(name);
-                subOutputIndex[name] = oi++;
-            }
-
-            // Create MODULE node in the DFG with output port names
-            std::vector<std::string> outputPortNames;
-            for (const auto& [name, out] : resolvedSub.outputs) {
-                outputPortNames.push_back(name);
-            }
-            auto* moduleNode = graph.module(submoduleName, instanceName, outputPortNames);
-            moduleNode->loc = resolveSourceLoc(*inst, sourceManager);
-
-            for (const auto* conn : inst->connections) {
-                resolvePortConnection(conn, graph, moduleNode,
-                                      resolvedSub, subInputNames, subOutputNames,
-                                      subOutputIndex, resCtx);
-            }
-
-            resolvedSub.instance_name = instanceName;
-            resolved.hierarchyInstantiation.push_back(std::move(resolvedSub));
+            instantiateSubmoduleInstance(*it->second, submoduleName, *inst,
+                                         instanceName, instCtx,
+                                         childOccurrencePath, resCtx);
         }
     }
 

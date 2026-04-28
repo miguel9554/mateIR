@@ -358,10 +358,6 @@ void check_logic_no_clock_reset(
         }
         visited.insert(current);
 
-        // Don't traverse into submodule inputs — clocks/resets driving a MODULE node
-        // are valid (used inside the submodule for clocking, not as combinational inputs).
-        if (current->kind() == DFGOp::MODULE) continue;
-
         if (current->kind() == DFGOp::INPUT) {
             auto loc = current->loc ? current->loc : root->loc;
             for (const auto& clk : clocks) {

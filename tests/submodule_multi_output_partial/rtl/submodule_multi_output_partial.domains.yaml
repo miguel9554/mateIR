@@ -1,0 +1,10 @@
+module_name: submodule_multi_output_partial
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs: []
+outputs:
+  out_bus:
+    kind: Sync
+  direct_out:
+    kind: Sync

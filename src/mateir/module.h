@@ -125,6 +125,19 @@ struct FlopInfo {
 // Per-module combinational dependency map: output_port -> {input_ports it depends on}
 using ComboDeps = std::map<std::string, std::set<std::string>>;
 
+struct ModuleInstanceInputBinding {
+    std::string port_name;
+    DFGOutput driver;
+};
+
+struct ModuleInstanceBinding {
+    std::string instance_name;
+    std::string module_type;
+    std::vector<ModuleInstanceInputBinding> inputs;
+    std::map<std::string, DFGNode*> output_placeholders;
+    std::optional<SourceLoc> loc;
+};
+
 // ============================================================================
 // mateir module
 // ============================================================================
@@ -141,6 +154,7 @@ struct Module {
 
     // TODO a list of instantiated modules.
     std::vector<Module> hierarchyInstantiation;
+    std::vector<ModuleInstanceBinding> instance_bindings;
 
     // Single DFG containing this module's logic.
     std::unique_ptr<DFG> dfg;

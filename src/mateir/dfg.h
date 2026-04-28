@@ -627,6 +627,15 @@ struct DFG {
         return nodes.back().get();
     }
 
+    // Create an anonymous SIGNAL placeholder node with no driver.
+    // Not inserted in named maps, so it is not rooted by DCE.
+    DFGNode* placeholderSignal(const std::string& instance_path = "") {
+        auto n = std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGSignalPayload{}, "");
+        n->instance_path = instance_path;
+        nodes.push_back(std::move(n));
+        return nodes.back().get();
+    }
+
     // Update all internal map pointers from oldNode to newNode (used by constant_fold / condition_normalization)
     void replaceNodeInMaps(DFGNode* oldNode, DFGNode* newNode) {
         for (auto& [k, v] : constants) if (v == oldNode) v = newNode;

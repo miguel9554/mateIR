@@ -363,18 +363,8 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             return checkedGet(node->muxArmData(static_cast<size_t>(armIndex)).node, node);
         }
 
-        case DFGOp::UNARY_PLUS:    return getUnaryVal();
         case DFGOp::UNARY_NEGATE:  return getUnaryVal().negated();
         case DFGOp::BITWISE_NOT:   return getUnaryVal().bitwiseNot();
-        case DFGOp::LOGICAL_NOT:   return boolValue(getUnaryVal().isZero());
-        case DFGOp::LOGICAL_AND: {
-            auto [lhs, rhs] = getBinaryVals();
-            return boolValue(!lhs.isZero() && !rhs.isZero());
-        }
-        case DFGOp::LOGICAL_OR: {
-            auto [lhs, rhs] = getBinaryVals();
-            return boolValue(!lhs.isZero() || !rhs.isZero());
-        }
         case DFGOp::BITWISE_AND: {
             auto [lhs, rhs] = getBinaryVals();
             return lhs.bitwiseAnd(rhs);

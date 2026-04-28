@@ -351,12 +351,6 @@ bool inferNodeType(DFGNode* node) {
             return true;
         }
 
-        case DFGOp::UNARY_PLUS:
-        case DFGOp::LOGICAL_NOT:
-        case DFGOp::LOGICAL_AND:
-        case DFGOp::LOGICAL_OR:
-            throw CompilerError(std::format(
-                "Type propagation: unexpected dead temporary op {}", node->str()), node->loc);
     }
 
     throw CompilerError(std::format(

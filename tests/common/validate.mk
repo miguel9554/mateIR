@@ -6,6 +6,8 @@ validate:
 	$(MAKE) -C ../verilator simulate
 	$(MAKE) -C ../custom-sim simulate
 	$(MAKE) -C ../vcd-diff compare
+	! rg -n "UNARY_PLUS|LOGICAL_NOT|LOGICAL_AND|LOGICAL_OR" \
+		../custom-sim/debug_output -g '*.json' -g '*.dot'
 
 waves:
 	$(MAKE) -C ../vcd-diff waves

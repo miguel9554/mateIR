@@ -26,11 +26,7 @@ enum class DFGOp {
     CONCAT_ALIGN,   // Temporary: in[0]=expr, in[1]=high_idx, in[2]=low_idx
     MODULE,         // Submodule instance: name=instance_name, data=module_type_name, in=input_port_drivers
     CAST,           // Type cast: in[0]=source, type set at elaboration (e.g. integer → enum)
-    UNARY_PLUS,
     UNARY_NEGATE,
-    LOGICAL_NOT,
-    LOGICAL_AND,
-    LOGICAL_OR,
     // Arithmetic ops
     ADD,
     SUB,
@@ -85,12 +81,8 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::ASR: return "ASR";
         case DFGOp::MUX: return "MUX";
         case DFGOp::MODULE: return "MODULE";
-        case DFGOp::UNARY_PLUS: return "UNARY_PLUS";
         case DFGOp::UNARY_NEGATE: return "UNARY_NEGATE";
         case DFGOp::BITWISE_NOT: return "BITWISE_NOT";
-        case DFGOp::LOGICAL_NOT: return "LOGICAL_NOT";
-        case DFGOp::LOGICAL_AND:  return "LOGICAL_AND";
-        case DFGOp::LOGICAL_OR:   return "LOGICAL_OR";
         case DFGOp::BITWISE_AND:  return "BITWISE_AND";
         case DFGOp::BITWISE_OR:   return "BITWISE_OR";
         case DFGOp::BITWISE_XOR:  return "BITWISE_XOR";
@@ -135,12 +127,8 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::SHL:    return 2;
         case DFGOp::ASR:    return 2;
 
-        case DFGOp::UNARY_PLUS:      return 1;
         case DFGOp::UNARY_NEGATE:    return 1;
         case DFGOp::BITWISE_NOT:     return 1;
-        case DFGOp::LOGICAL_NOT:     return 1;
-        case DFGOp::LOGICAL_AND:  return 2;
-        case DFGOp::LOGICAL_OR:   return 2;
         case DFGOp::BITWISE_AND:  return 2;
         case DFGOp::BITWISE_OR:   return 2;
         case DFGOp::BITWISE_XOR:  return 2;
@@ -240,10 +228,8 @@ using DFGPayload = std::variant<
 
 inline bool isUnaryDFGOp(DFGOp op) {
     switch (op) {
-        case DFGOp::UNARY_PLUS:
         case DFGOp::UNARY_NEGATE:
         case DFGOp::BITWISE_NOT:
-        case DFGOp::LOGICAL_NOT:
         case DFGOp::REDUCTION_AND:
         case DFGOp::REDUCTION_NAND:
         case DFGOp::REDUCTION_OR:
@@ -268,8 +254,6 @@ inline bool isBinaryDFGOp(DFGOp op) {
         case DFGOp::GE:
         case DFGOp::SHL:
         case DFGOp::ASR:
-        case DFGOp::LOGICAL_AND:
-        case DFGOp::LOGICAL_OR:
         case DFGOp::BITWISE_AND:
         case DFGOp::BITWISE_OR:
         case DFGOp::BITWISE_XOR:
@@ -1003,10 +987,6 @@ public:
         return nodes.back().get();
     }
 
-    DFGNode* unaryPlus(DFGNode* a, const std::string& name = "") {
-        return unaryOp(DFGOp::UNARY_PLUS, a, name);
-    }
-
     DFGNode* unaryNegate(DFGNode* a, const std::string& name = "") {
         return unaryOp(DFGOp::UNARY_NEGATE, a, name);
     }
@@ -1015,17 +995,6 @@ public:
         return unaryOp(DFGOp::BITWISE_NOT, a, name);
     }
 
-    DFGNode* logicalNot(DFGNode* a, const std::string& name = "") {
-        return unaryOp(DFGOp::LOGICAL_NOT, a, name);
-    }
-
-    DFGNode* logicalAnd(DFGNode* a, DFGNode* b, const std::string& name = "") {
-        return binaryOp(DFGOp::LOGICAL_AND, a, b, name);
-    }
-
-    DFGNode* logicalOr(DFGNode* a, DFGNode* b, const std::string& name = "") {
-        return binaryOp(DFGOp::LOGICAL_OR, a, b, name);
-    }
     DFGNode* bitwiseAnd(DFGNode* a, DFGNode* b, const std::string& name = "") {
         return binaryOp(DFGOp::BITWISE_AND, a, b, name);
     }

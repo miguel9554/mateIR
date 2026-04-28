@@ -41,6 +41,20 @@ module uut_recorder(
         .data(_if.PADDR)
     );
     sync_recorder#(
+        .filepath(path("PENABLE.txt")),
+        .TYPE(logic)
+    ) u_PENABLE_recorder(
+        .clk(_if.HCLK),
+        .data(_if.PENABLE)
+    );
+    sync_recorder#(
+        .filepath(path("PSEL.txt")),
+        .TYPE(logic)
+    ) u_PSEL_recorder(
+        .clk(_if.HCLK),
+        .data(_if.PSEL)
+    );
+    sync_recorder#(
         .filepath(path("PWDATA.txt")),
         .TYPE(logic [31:0])
     ) u_PWDATA_recorder(
@@ -53,20 +67,6 @@ module uut_recorder(
     ) u_PWRITE_recorder(
         .clk(_if.HCLK),
         .data(_if.PWRITE)
-    );
-    sync_recorder#(
-        .filepath(path("PSEL.txt")),
-        .TYPE(logic)
-    ) u_PSEL_recorder(
-        .clk(_if.HCLK),
-        .data(_if.PSEL)
-    );
-    sync_recorder#(
-        .filepath(path("PENABLE.txt")),
-        .TYPE(logic)
-    ) u_PENABLE_recorder(
-        .clk(_if.HCLK),
-        .data(_if.PENABLE)
     );
 
 endmodule

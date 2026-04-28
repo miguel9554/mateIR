@@ -1,72 +1,32 @@
 module_name: axi_spi_slave
-
 resets:
   axi_aresetn:
     polarity: negative
   spi_cs:
     polarity: positive
-
 clock_domains:
   axi_aclk:
     polarity: posedge
     inputs_outputs:
-      - axi_master_aw_valid
-      - axi_master_aw_addr
-      - axi_master_aw_prot
-      - axi_master_aw_region
-      - axi_master_aw_len
-      - axi_master_aw_size
-      - axi_master_aw_burst
-      - axi_master_aw_lock
-      - axi_master_aw_cache
-      - axi_master_aw_qos
-      - axi_master_aw_id
-      - axi_master_aw_user
-      - axi_master_aw_ready
-      - axi_master_ar_valid
-      - axi_master_ar_addr
-      - axi_master_ar_prot
-      - axi_master_ar_region
-      - axi_master_ar_len
-      - axi_master_ar_size
-      - axi_master_ar_burst
-      - axi_master_ar_lock
-      - axi_master_ar_cache
-      - axi_master_ar_qos
-      - axi_master_ar_id
-      - axi_master_ar_user
-      - axi_master_ar_ready
-      - axi_master_w_valid
-      - axi_master_w_data
-      - axi_master_w_strb
-      - axi_master_w_user
-      - axi_master_w_last
-      - axi_master_w_ready
-      - axi_master_r_valid
-      - axi_master_r_data
-      - axi_master_r_resp
-      - axi_master_r_last
-      - axi_master_r_id
-      - axi_master_r_user
-      - axi_master_r_ready
-      - axi_master_b_valid
-      - axi_master_b_resp
-      - axi_master_b_id
-      - axi_master_b_user
-      - axi_master_b_ready
-
+    - axi_master_aw_ready
+    - axi_master_ar_ready
+    - axi_master_w_ready
+    - axi_master_r_valid
+    - axi_master_r_data
+    - axi_master_r_resp
+    - axi_master_r_last
+    - axi_master_r_id
+    - axi_master_r_user
+    - axi_master_b_valid
+    - axi_master_b_resp
+    - axi_master_b_id
+    - axi_master_b_user
   spi_sclk:
     polarity: posedge
     inputs_outputs:
-      - spi_sdi0
-      - spi_sdi1
-      - spi_sdi2
-      - spi_sdi3
-      - spi_sdo0
-      - spi_sdo1
-      - spi_sdo2
-      - spi_sdo3
-      - spi_mode
-
+    - spi_sdi0
+    - spi_sdi1
+    - spi_sdi2
+    - spi_sdi3
 async_domain:
-  - test_mode
+- test_mode

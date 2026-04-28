@@ -1,0 +1,6 @@
+module_name: domains_output_classification_fail
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - q

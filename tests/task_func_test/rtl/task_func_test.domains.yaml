@@ -1,20 +1,12 @@
 module_name: task_func_test
-
 resets:
   rst_n:
     polarity: negative
-
 clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - a
-      - b
-      - c
-      - sel
-      - result_out
-      - diff_out
-      - min_out
-      - max_out
-      - pop_out
-      - mux_out
+    - a
+    - b
+    - c
+    - sel

@@ -1,15 +1,10 @@
 module_name: cordic
-
 resets:
   rst_n:
     polarity: negative
-
 clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - start
-      - angle_in
-      - cos_out
-      - sin_out
-      - done
+    - start
+    - angle_in

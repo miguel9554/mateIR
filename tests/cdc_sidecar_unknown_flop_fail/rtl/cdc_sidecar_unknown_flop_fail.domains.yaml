@@ -1,0 +1,7 @@
+module_name: cdc_sidecar_unknown_flop_fail
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs: []
+async_domain:
+- async_in

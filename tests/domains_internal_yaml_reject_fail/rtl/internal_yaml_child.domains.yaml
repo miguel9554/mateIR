@@ -1,0 +1,6 @@
+module_name: internal_yaml_child
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - d

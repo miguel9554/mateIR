@@ -7,19 +7,33 @@
 apb_gpio PASS
 array_indexing PASS
 axi_spi_slave PASS
+cdc_sidecar_async_sync_pass PASS
+cdc_sidecar_cross_clock_pass PASS
+cdc_sidecar_duplicate_flop_fail FAIL duplicate synchronizer flop
+cdc_sidecar_missing_fail FAIL without a declared synchronizer
+cdc_sidecar_unknown_flop_fail FAIL unknown synchronizer flop
 const_only_dynamic_fail FAIL DIV operation requires constant operands
 const_only_ops PASS
 cordic PASS
 counter_top PASS
-cross_module_async_to_sync_fail FAIL cross-module sync type mismatch
+cross_module_async_to_sync_fail FAIL samples Async input without a declared synchronizer
+domains_synchronized_into_reject_fail FAIL synchronized_into is no longer supported
+domains_internal_yaml_reject_fail FAIL main domains YAML is only supported for top module
+domains_output_classification_fail FAIL is not a top-level input
 enum_local_test PASS
 enum_top_test PASS
 full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'
 func_test PASS
 generate_test PASS
+global_domains_chained_clock_alias PASS
+global_domains_clock_alias PASS
+global_domains_const_clock_alias_fail FAIL parent signal 'clk_const' is not a resolved clock input alias
 global_domains_opposite_edges PASS
+global_domains_mux_clock_alias_fail FAIL parent signal 'clk_mux' is not a resolved clock input alias
+global_domains_reset_alias PASS
 global_domains_repeated_instances PASS
 global_domains_unsupported_clock_expr FAIL global_domain_resolve: unsupported clock/reset connection expression
+global_domains_wrapper_clock_alias PASS
 inout_arg_fail FAIL inout ports not supported
 multiple_always_comb_assign FAIL Multiple drivers for target 'z'
 multiple_continuous_assign FAIL Multiple drivers for target 'n'
@@ -27,11 +41,15 @@ multiple_seq_writers_same_flop FAIL Multiple drivers for target 'q.d'
 multiple_submodule_output_drivers FAIL Multiple drivers for target 'n'
 overlapping_partial_writes FAIL Overlapping partial writes for target 'bus'
 partial_then_full_write_conflict FAIL Multiple drivers for target 'bus'
-phase8_multiclock_cdc_fail FAIL cross-domain violation
+phase8_multiclock_cdc_fail FAIL samples Async input without a declared synchronizer
 phase8_same_clock_merge PASS
 pkg_scope_test PASS
 ref_arg_fail FAIL ref ports not supported
 static_func_fail FAIL Only 'automatic' functions/tasks are supported
+static_async_mix PASS
+static_flop_d PASS
+static_sync_mix PASS
+static_top_output PASS
 subword_assign PASS
 task_func_test PASS
 uart PASS

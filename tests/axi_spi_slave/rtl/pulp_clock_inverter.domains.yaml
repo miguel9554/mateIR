@@ -1,5 +1,0 @@
-module_name: pulp_clock_inverter
-
-async_domain:
-  - clk_i
-  - clk_o

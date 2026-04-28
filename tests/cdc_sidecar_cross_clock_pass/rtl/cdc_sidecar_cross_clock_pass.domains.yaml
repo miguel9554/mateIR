@@ -1,0 +1,9 @@
+module_name: cdc_sidecar_cross_clock_pass
+clock_domains:
+  clk_a:
+    polarity: posedge
+    inputs_outputs:
+    - a
+  clk_b:
+    polarity: posedge
+    inputs_outputs: []

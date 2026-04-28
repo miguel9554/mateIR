@@ -184,7 +184,8 @@ void Signal::print(std::ostream& os) const {
     SyncKind kind = syncKind(*this);
     const char* kindName = kind == SyncKind::Sync  ? "sync"  :
                            kind == SyncKind::Clock ? "clock" :
-                           kind == SyncKind::Reset ? "reset" : "async";
+                           kind == SyncKind::Reset ? "reset" :
+                           kind == SyncKind::Static ? "static" : "async";
     os << " sync_kind=" << kindName;
     if (const auto* sync = std::get_if<SyncSignal>(&sync_type)) {
         os << " clock_domain=" << sync->clock_domain.value;
@@ -321,6 +322,7 @@ static std::string syncKindStr(SyncKind sk) {
         case SyncKind::Clock: return "clock";
         case SyncKind::Reset: return "reset";
         case SyncKind::Async: return "async";
+        case SyncKind::Static: return "static";
     }
     return "sync";
 }
@@ -385,6 +387,8 @@ static std::string syncTypeToJson(const SyncType& syncType) {
     } else if (const auto* reset = std::get_if<ResetSignal>(&syncType)) {
         ss << "\"kind\": \"reset\", ";
         ss << "\"reset_domain\": " << reset->reset_domain.value;
+    } else if (std::holds_alternative<StaticSignal>(syncType)) {
+        ss << "\"kind\": \"static\"";
     } else {
         ss << "\"kind\": \"async\"";
     }
@@ -396,6 +400,7 @@ SyncKind syncKind(const SyncType& sync_type) {
     if (std::holds_alternative<SyncSignal>(sync_type)) return SyncKind::Sync;
     if (std::holds_alternative<ClockSignal>(sync_type)) return SyncKind::Clock;
     if (std::holds_alternative<ResetSignal>(sync_type)) return SyncKind::Reset;
+    if (std::holds_alternative<StaticSignal>(sync_type)) return SyncKind::Static;
     return SyncKind::Async;
 }
 

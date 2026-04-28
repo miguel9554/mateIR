@@ -1,0 +1,14 @@
+module_name: global_domains_mux_clock_alias_fail
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - d
+
+async_domain:
+- sel

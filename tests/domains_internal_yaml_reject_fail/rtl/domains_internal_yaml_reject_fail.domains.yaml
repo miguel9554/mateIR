@@ -1,0 +1,6 @@
+module_name: domains_internal_yaml_reject_fail
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - d

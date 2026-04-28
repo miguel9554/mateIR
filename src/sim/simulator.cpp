@@ -564,6 +564,10 @@ void Simulator::buildTimeline() {
         if (async_inputs_.count(name)) continue;
         const auto* sync = std::get_if<SyncSignal>(&input.sync_type);
         if (!sync) {
+            if (std::holds_alternative<StaticSignal>(input.sync_type)) {
+                throw CompilerError(std::format(
+                    "Simulator: top-level input '{}' cannot be static", name));
+            }
             throw CompilerError(std::format(
                 "Simulator: input '{}' has unsupported sync type for synchronous input",
                 name));

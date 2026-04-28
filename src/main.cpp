@@ -20,7 +20,7 @@ void printUsage(const char* progName) {
               << "\nOptions:\n"
               << "  --frontend <name>         HDL frontend: systemverilog (default)\n"
               << "  --top <module>            Top module name (required for multi-file designs)\n"
-              << "  --domains <f1> [f2 ...]   Domain YAML files (one per module)\n"
+              << "  --domains <file>          Top-level domain YAML file\n"
               << "  --analyze                 Run static analysis consumer on mateir\n"
               << "  --simulate                Run cycle-based simulation consumer\n"
               << "  --inputs-dir <dir>        Directory containing input stimuli files\n"

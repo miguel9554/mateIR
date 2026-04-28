@@ -6,6 +6,7 @@
 
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -36,8 +37,47 @@ struct LocalPortDomainFact {
     std::string port_name;
     LocalPortClass cls;
     std::optional<std::string> local_domain_name;
-    std::optional<std::string> synchronized_into;
     std::optional<edge_t> edge;
+};
+
+struct TopClockInputFact {
+    std::string domain_name;
+    std::string input_port;
+    edge_t edge;
+};
+
+struct TopResetInputFact {
+    std::string reset_name;
+    std::string signal_name;
+    edge_t active_edge;
+};
+
+struct TopSyncInputFact {
+    std::string port_name;
+    std::string clock_domain_name;
+};
+
+struct ResolvedTopClockDomainFact {
+    std::string domain_name;
+    ClockId clock_domain;
+    HierSignalRef source;
+    edge_t edge;
+};
+
+struct ResolvedTopResetDomainFact {
+    std::string reset_name;
+    ResetId reset_domain;
+    HierSignalRef source;
+    edge_t active_edge;
+};
+
+struct TopInputDomainFacts {
+    std::map<std::string, TopClockInputFact> clocks;
+    std::map<std::string, TopResetInputFact> resets;
+    std::map<std::string, TopSyncInputFact> sync_inputs;
+    std::set<std::string> async_inputs;
+    std::map<std::string, ResolvedTopClockDomainFact> resolved_clocks;
+    std::map<std::string, ResolvedTopResetDomainFact> resolved_resets;
 };
 
 struct EventTriggerFact {
@@ -86,6 +126,10 @@ struct ResolvedFlopDomainFact {
     ResetDomains reset_domains;
 };
 
+struct ModuleCdcFacts {
+    std::set<std::string> synchronizer_flops;
+};
+
 struct ModuleDomainFacts {
     bool pure_combinational = false;
     std::map<std::string, LocalPortDomainFact> ports;
@@ -96,10 +140,12 @@ struct ModuleDomainFacts {
     std::vector<ChildInputConnectionFact> child_input_connections;
     std::map<std::string, ResolvedInputDomainFact> resolved_input_domains;
     std::map<std::string, ResolvedFlopDomainFact> resolved_flop_domains;
+    ModuleCdcFacts cdc;
 };
 
 struct FrontendDomainFacts {
     std::map<ModuleOccurrenceKey, ModuleDomainFacts> modules;
+    std::optional<TopInputDomainFacts> top_inputs;
 
     ModuleDomainFacts& getOrCreate(const ModuleOccurrenceKey& key);
     const ModuleDomainFacts* find(const ModuleOccurrenceKey& key) const;

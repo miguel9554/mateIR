@@ -1,0 +1,7 @@
+module_name: domains_synchronized_into_reject_fail
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - async_in:
+          synchronized_into: clk

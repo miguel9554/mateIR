@@ -27,6 +27,7 @@ enum class SyncKind {
     Clock,  // is itself a clock signal (async)
     Reset,  // is itself a reset signal (async)
     Async,  // purely async data, no clock domain (e.g. UART rxd)
+    Static, // compile-time/static value, independent of any clock domain
 };
 
 struct IntegerInfo {

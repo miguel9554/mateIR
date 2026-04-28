@@ -1,11 +1,8 @@
 module_name: counter_top
-
 resets:
   a_rst:
     polarity: positive
-
 clock_domains:
   clk:
     polarity: posedge
-    inputs_outputs:
-      - count
+    inputs_outputs: []

@@ -1,2 +1,0 @@
-module_name: spi_slave_cmd_parser
-pure_combinational: true

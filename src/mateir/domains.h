@@ -107,11 +107,16 @@ struct AsyncSignal {
     auto operator<=>(const AsyncSignal&) const = default;
 };
 
+struct StaticSignal {
+    auto operator<=>(const StaticSignal&) const = default;
+};
+
 using SyncType = std::variant<
     SyncSignal,
     ClockSignal,
     ResetSignal,
-    AsyncSignal
+    AsyncSignal,
+    StaticSignal
 >;
 
 } // namespace mate

@@ -1,7 +1,6 @@
 #include "frontends/systemverilog/systemverilog_pipeline.h"
 
 #include "frontends/systemverilog/passes/combo_deps.h"
-#include "frontends/systemverilog/passes/concat_cleanup.h"
 #include "frontends/systemverilog/passes/cdc_annotations.h"
 #include "frontends/systemverilog/passes/condition_normalization.h"
 #include "frontends/systemverilog/passes/constant_fold.h"
@@ -249,29 +248,28 @@ void runMateIRPipeline(MateIR& ir,
 
         runPass(0, "elaboration", []{});
         runPass(1, "dfg_inline", [&]{ inlineDFGs(module); });
-        runPass(2, "concat_cleanup", [&]{ cleanupConcats(*module.dfg); });
-        runPass(3, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(4, "type_propagation", [&]{ propagateTypes(*module.dfg); });
-        runPass(5, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(6, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(7, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(8, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(9, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
+        runPass(2, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(3, "type_propagation", [&]{ propagateTypes(*module.dfg); });
+        runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(5, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(6, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
+        runPass(7, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(8, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/09_flop_resolve_flops.txt", dir));
+            std::ofstream f(std::format("{}/08_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        runPass(10, "load_top_io_domains", [&]{
+        runPass(9, "load_top_io_domains", [&]{
             loadTopIODomains(module, topDomainPath, domainFacts);
         });
-        runPass(11, "cdc_annotations", [&]{
+        runPass(10, "cdc_annotations", [&]{
             loadCdcAnnotations(module, cdcPathsByModule, domainFacts);
         });
-        runPass(12, "global_domain_resolve", [&]{
+        runPass(11, "global_domain_resolve", [&]{
             resolveGlobalDomains(ir, domainFacts);
         });
-        runPass(13, "dce", [&]{
+        runPass(12, "dce", [&]{
             std::unordered_set<DFGNode*> keepAlive;
             std::function<void(const Module&)> collect = [&](const Module& mod) {
                 for (const auto& parameter : mod.parameters)

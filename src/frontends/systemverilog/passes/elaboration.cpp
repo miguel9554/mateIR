@@ -36,6 +36,8 @@ struct PartialSliceDriver {
     int64_t low;
     int64_t high;
     DFGNode* expr;
+    std::optional<std::string> origin;
+    std::optional<SourceLoc> loc;
 };
 
 struct PartialTargetState {
@@ -102,22 +104,13 @@ struct ResolutionContext {
     // assignments and submodule output connections use distinct origins.
     std::string current_write_origin;
 
-    // Packed targets that were normalized into partial-write aggregate mode.
-    // Each target keeps disjoint slice drivers and is materialized as a single
-    // CONCAT of CONCAT_ALIGN nodes.
+    // Packed targets normalized into canonical partial-write state.
+    // Each target keeps disjoint slice drivers and is materialized as a single CONCAT.
     PartialDriverMap partial_drivers;
-
-    struct PartialWrite {
-        int64_t low;
-        int64_t high;
-        std::string origin;
-        std::optional<SourceLoc> loc;
-    };
 
     struct TargetWriteState {
         std::optional<std::string> full_origin;
         std::optional<SourceLoc> full_loc;
-        std::vector<PartialWrite> partial_writes;
     };
 
     // Elaborated target key -> user-visible write state accumulated so far.
@@ -197,10 +190,11 @@ void recordFullWrite(ResolutionContext& ctx,
     if (state.full_origin && *state.full_origin != origin) {
         throwWriteConflict(targetName, "Multiple drivers", writeLoc, state.full_loc);
     }
-
-    for (const auto& partial : state.partial_writes) {
-        if (partial.origin != origin) {
-            throwWriteConflict(targetName, "Multiple drivers", writeLoc, partial.loc);
+    if (auto it = ctx.partial_drivers.find(targetName); it != ctx.partial_drivers.end()) {
+        for (const auto& slice : it->second.slices) {
+            if (slice.origin && *slice.origin != origin) {
+                throwWriteConflict(targetName, "Multiple drivers", writeLoc, slice.loc);
+            }
         }
     }
 
@@ -208,46 +202,6 @@ void recordFullWrite(ResolutionContext& ctx,
         state.full_origin = origin;
         state.full_loc = writeLoc;
     }
-}
-
-void recordPartialWrite(ResolutionContext& ctx,
-                        const std::string& targetName,
-                        int64_t low,
-                        int64_t high,
-                        const std::optional<SourceLoc>& writeLoc,
-                        const std::string& origin) {
-    auto& state = ctx.write_states[canonicalTargetKey(ctx, targetName)];
-
-    if (state.full_origin && *state.full_origin != origin) {
-        throwWriteConflict(targetName, "Multiple drivers", writeLoc, state.full_loc);
-    }
-
-    for (const auto& partial : state.partial_writes) {
-        if (partial.origin == origin) continue;
-        bool overlaps = !(high < partial.low || low > partial.high);
-        if (overlaps) {
-            throwWriteConflict(targetName, "Overlapping partial writes", writeLoc, partial.loc);
-        }
-    }
-
-    state.partial_writes.push_back({low, high, origin, writeLoc});
-}
-
-DFGNode* appendConcatInput(DFG& graph, DFGNode* existingDriver, DFGNode* newPart,
-                           const std::optional<SourceLoc>& loc) {
-    std::vector<DFGNode*> parts;
-    if (existingDriver && existingDriver->kind() == DFGOp::CONCAT) {
-        parts.reserve(existingDriver->concatParts().size() + 1);
-        for (const auto& edge : existingDriver->concatParts()) {
-            parts.push_back(edge.node);
-        }
-    } else if (existingDriver) {
-        parts.push_back(existingDriver);
-    }
-    parts.push_back(newPart);
-    auto* concatNode = graph.concat(parts);
-    if (loc) concatNode->loc = *loc;
-    return concatNode;
 }
 
 static int64_t intPowConst(int64_t base, int64_t exp) {
@@ -478,11 +432,18 @@ static void sortSlices(PartialTargetState& state) {
 }
 
 static bool partialStatesEqual(const PartialTargetState& lhs, const PartialTargetState& rhs) {
+    auto sameLoc = [](const std::optional<SourceLoc>& a, const std::optional<SourceLoc>& b) {
+        if (a.has_value() != b.has_value()) return false;
+        if (!a) return true;
+        return a->str() == b->str();
+    };
     if (lhs.type.width != rhs.type.width || lhs.type.isSigned() != rhs.type.isSigned()) return false;
     if (lhs.slices.size() != rhs.slices.size()) return false;
     for (size_t i = 0; i < lhs.slices.size(); ++i) {
         if (lhs.slices[i].low != rhs.slices[i].low || lhs.slices[i].high != rhs.slices[i].high ||
-                lhs.slices[i].expr != rhs.slices[i].expr) {
+                lhs.slices[i].expr != rhs.slices[i].expr ||
+                lhs.slices[i].origin != rhs.slices[i].origin ||
+                !sameLoc(lhs.slices[i].loc, rhs.slices[i].loc)) {
             return false;
         }
     }
@@ -512,22 +473,14 @@ static DFGNode* materializePartialTarget(ResolutionContext& ctx,
                                          PartialTargetState& state,
                                          const std::optional<SourceLoc>& loc) {
     sortSlices(state);
-    std::vector<DFGNode*> alignNodes;
-    alignNodes.reserve(state.slices.size());
+    std::vector<DFGNode*> parts;
+    parts.reserve(state.slices.size());
     for (const auto& slice : state.slices) {
-        auto* highConst = ctx.graph.constant(slice.high);
-        auto* lowConst = ctx.graph.constant(slice.low);
-        if (loc) {
-            highConst->loc = *loc;
-            lowConst->loc = *loc;
-        }
-        auto* align = ctx.graph.concatAlign(slice.expr, highConst, lowConst);
-        if (loc) align->loc = *loc;
-        alignNodes.push_back(align);
+        parts.push_back(slice.expr);
     }
     DFGNode* driver = nullptr;
-    if (!alignNodes.empty()) {
-        driver = ctx.graph.concat(alignNodes);
+    if (!parts.empty()) {
+        driver = ctx.graph.concat(parts);
         if (loc) driver->loc = *loc;
         connectDriver(ctx, targetName, driver);
     } else if (auto* node = lookupTargetNode(ctx, targetName)) {
@@ -687,7 +640,7 @@ static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver
                 int64_t high = align.high.node->constValue();
                 int64_t low = align.low.node->constValue();
                 if (high < low) std::swap(high, low);
-                slices.push_back({low, high, align.expr.node});
+                slices.push_back({low, high, align.expr.node, std::nullopt, std::nullopt});
                 nextHigh = low - 1;
                 continue;
             }
@@ -701,7 +654,7 @@ static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver
                 break;
             }
             int64_t low = nextHigh - partWidth + 1;
-            slices.push_back({low, nextHigh, part});
+            slices.push_back({low, nextHigh, part, std::nullopt, std::nullopt});
             nextHigh = low - 1;
         }
 
@@ -712,7 +665,7 @@ static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver
         }
     }
 
-    state.slices.push_back({0, type.width - 1, driver});
+    state.slices.push_back({0, type.width - 1, driver, std::nullopt, std::nullopt});
     return state;
 }
 
@@ -854,7 +807,7 @@ static std::optional<PartialTargetState> buildMergedPartialDriver(
             mux->loc = loc;
             result = mux;
         }
-        if (result) merged.slices.push_back({low, high, result});
+        if (result) merged.slices.push_back({low, high, result, std::nullopt, std::nullopt});
     }
     sortSlices(merged);
     return merged;
@@ -1049,6 +1002,10 @@ static void mergeIfBranches(ResolutionContext& ctx,
                 ctx, signalName, branches, fallbackBranch, fallbackPartialBranch, baseline, loc);
             if (merged) {
                 ctx.partial_drivers[signalName] = *merged;
+                for (auto& slice : ctx.partial_drivers[signalName].slices) {
+                    slice.origin = ctx.current_write_origin;
+                    slice.loc = loc;
+                }
                 DFGNode* aggregate = materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
                 if (!ctx.is_sequential && aggregate) {
                     ctx.combDrivers[signalName] = aggregate;
@@ -1138,9 +1095,13 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                 }
                 DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
                 result->loc = loc;
-                if (result) merged.slices.push_back({low, high, result});
+                if (result) merged.slices.push_back({low, high, result, std::nullopt, std::nullopt});
             }
             sortSlices(merged);
+            for (auto& slice : merged.slices) {
+                slice.origin = ctx.current_write_origin;
+                slice.loc = loc;
+            }
             ctx.partial_drivers[signalName] = std::move(merged);
             materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
             if (!ctx.is_sequential) {
@@ -1887,6 +1848,7 @@ static DFGNode* currentWholeDriverForTarget(ResolutionContext& ctx,
 }
 
 static void setPartialSlice(ResolutionContext& ctx,
+                            const std::string& targetName,
                             PartialTargetState& state,
                             int64_t low,
                             int64_t high,
@@ -1899,22 +1861,29 @@ static void setPartialSlice(ResolutionContext& ctx,
             updated.push_back(slice);
             continue;
         }
+        if (slice.origin && *slice.origin != ctx.current_write_origin) {
+            throwWriteConflict(targetName, "Overlapping partial writes", loc, slice.loc);
+        }
         if (slice.high > high) {
             updated.push_back({
                 high + 1,
                 slice.high,
-                buildRelativeSliceExpr(ctx, slice, high + 1, slice.high, loc)
+                buildRelativeSliceExpr(ctx, slice, high + 1, slice.high, loc),
+                slice.origin,
+                slice.loc
             });
         }
         if (slice.low < low) {
             updated.push_back({
                 slice.low,
                 low - 1,
-                buildRelativeSliceExpr(ctx, slice, slice.low, low - 1, loc)
+                buildRelativeSliceExpr(ctx, slice, slice.low, low - 1, loc),
+                slice.origin,
+                slice.loc
             });
         }
     }
-    updated.push_back({low, high, expr});
+    updated.push_back({low, high, expr, ctx.current_write_origin, loc});
     state.slices = std::move(updated);
     sortSlices(state);
 }
@@ -1928,7 +1897,7 @@ static PartialTargetState& ensurePartialTargetState(ResolutionContext& ctx,
     PartialTargetState state;
     state.type = lookupTargetTypeOrThrow(targetName, ctx, loc);
     if (DFGNode* driver = currentWholeDriverForTarget(ctx, targetName, loc)) {
-        state.slices.push_back({0, state.type.width - 1, driver});
+        state.slices.push_back({0, state.type.width - 1, driver, std::nullopt, std::nullopt});
     }
     auto [insertedIt, _] = ctx.partial_drivers.emplace(targetName, std::move(state));
     return insertedIt->second;
@@ -1940,9 +1909,13 @@ static void writePartialTargetSlice(ResolutionContext& ctx,
                                     int64_t low,
                                     DFGNode* expr,
                                     const std::optional<SourceLoc>& loc) {
+    auto& writeState = ctx.write_states[canonicalTargetKey(ctx, targetName)];
+    if (writeState.full_origin && *writeState.full_origin != ctx.current_write_origin) {
+        throwWriteConflict(targetName, "Multiple drivers", loc, writeState.full_loc);
+    }
     auto& state = ensurePartialTargetState(ctx, targetName, loc);
     if (high < low) std::swap(high, low);
-    setPartialSlice(ctx, state, low, high, expr, loc);
+    setPartialSlice(ctx, targetName, state, low, high, expr, loc);
     materializePartialTarget(ctx, targetName, state, loc);
 }
 
@@ -1952,7 +1925,7 @@ static void writeWholeTargetAsPartial(ResolutionContext& ctx,
                                       const std::optional<SourceLoc>& loc) {
     auto& state = ensurePartialTargetState(ctx, targetName, loc);
     state.slices.clear();
-    state.slices.push_back({0, state.type.width - 1, expr});
+    state.slices.push_back({0, state.type.width - 1, expr, ctx.current_write_origin, loc});
     materializePartialTarget(ctx, targetName, state, loc);
 }
 
@@ -3453,7 +3426,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     }
 
     // Build the full element name for LHS by evaluating selectors statically.
-    // Range selects (e.g. word_out[3:0]) are handled via CONCAT/CONCAT_ALIGN.
+    // Range selects (e.g. word_out[3:0]) are handled via canonical partial-write state.
     std::string indexSuffix;
     bool hasRangeSelect = false;
     int64_t rangeHigh = 0, rangeLow = 0;
@@ -3573,7 +3546,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         RHSexprNode = RHSvalue.scalar;
     }
 
-    // Range-select on LHS: build CONCAT_ALIGN -> CONCAT -> target
+    // Range-select on LHS: canonical partial-write update
     if (hasRangeSelect) {
         // Build the target name (no index suffix for range assigns)
         std::string outputName;
@@ -3589,10 +3562,6 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             outputName = baseName + indexSuffix;
         }
 
-        if (!ctx.subroutine_locals.count(outputName))
-            recordPartialWrite(ctx, outputName, std::min(rangeLow, rangeHigh),
-                               std::max(rangeLow, rangeHigh), assignLoc,
-                               ctx.current_write_origin);
         writePartialTargetSlice(ctx, outputName, rangeHigh, rangeLow, RHSexprNode, assignLoc);
 
         if (!ctx.is_sequential) {
@@ -3660,8 +3629,8 @@ void resolveAssignInPlace(
                                             resolveSourceLoc(*syntax, ctx.sm));
 
     ctx.is_sequential = false;
-    ctx.current_write_origin = std::format("continuous-assign:{}",
-                                           reinterpret_cast<uintptr_t>(syntax));
+    auto assignLoc = resolveSourceLoc(*syntax, ctx.sm);
+    ctx.current_write_origin = std::format("continuous-assign:{}", assignLoc.str());
 
     for (const auto* assignExpr : syntax->assignments) {
         if (assignExpr->kind != SyntaxKind::AssignmentExpression) {
@@ -4484,43 +4453,41 @@ void resolveNamedPortConnection(
                 connectName = elemName;
 
             // If the element node exists (unpacked array element), use the normal path.
-            // Otherwise, fall through to the CONCAT_ALIGN path for packed bit-selects.
+            // Otherwise, fall through to the canonical partial-write path for packed bit-selects.
             if (graph.hasSignal("", connectName) || graph.hasOutput("", connectName)) {
                 connectModuleOutput(graph, moduleNode, connectName, subOutputIndex.at(portName),
                                     ctx, resolveSourceLoc(*expr, ctx.sm));
                 return;
             }
 
-            // Packed bit-select on an output port or signal: drive via CONCAT_ALIGN.
-            // Each iteration contributes one CONCAT_ALIGN slice; concat_cleanup merges them.
+            // Packed bit-select on an output port or signal: drive through canonical
+            // partial-write state so frontend never emits CONCAT_ALIGN.
             {
-                DFGNode* targetNode = graph.getOutputNode("", baseName);
-                if (!targetNode) targetNode = graph.getSignalNode("", baseName);
-                if (!targetNode)
+                std::string packedTargetName = baseName;
+                if (!ctx.instance_path.empty() && ctx.local_signals.count(baseName)) {
+                    packedTargetName = ctx.instance_path + "." + baseName;
+                }
+                if (!lookupTargetNode(ctx, packedTargetName))
                     throw CompilerError(
                         "Cannot find signal '" + baseName +
                         "' for bit-select output port connection",
                         resolveSourceLoc(*expr, ctx.sm));
 
                 size_t oi = subOutputIndex.at(portName);
-                auto* highConst = ctx.graph.constant((int64_t)idx);
-                auto* lowConst  = ctx.graph.constant((int64_t)idx);
-                auto* alignNode = ctx.graph.concatAlign(moduleNode, highConst, lowConst);
-                alignNode->replaceInputAt(0, DFGOutput(moduleNode, (int)oi));
-                recordPartialWrite(
-                    ctx, baseName, idx, idx, resolveSourceLoc(*expr, ctx.sm),
-                    std::format("module-output:{}:{}", moduleNode->name, oi));
-
-                auto targetDriver = maybeDriver(targetNode);
-                if (targetDriver && targetDriver->node->kind() == DFGOp::CONCAT) {
-                    auto* concatNode = appendConcatInput(
-                        ctx.graph, targetDriver->node, alignNode,
+                auto oldOrigin = ctx.current_write_origin;
+                ctx.current_write_origin = std::format("module-output:{}:{}", moduleNode->name, oi);
+                try {
+                    auto* outBit = ctx.graph.concat({DFGOutput(moduleNode, static_cast<int>(oi))});
+                    outBit->loc = resolveSourceLoc(*expr, ctx.sm);
+                    writePartialTargetSlice(
+                        ctx, packedTargetName, idx, idx,
+                        outBit,
                         resolveSourceLoc(*expr, ctx.sm));
-                    ctx.graph.connectDriver(targetNode, concatNode);
-                } else {
-                    auto* concatNode = ctx.graph.concat({alignNode});
-                    ctx.graph.connectDriver(targetNode, concatNode);
+                } catch (...) {
+                    ctx.current_write_origin = oldOrigin;
+                    throw;
                 }
+                ctx.current_write_origin = oldOrigin;
             }
             return;
         } else {

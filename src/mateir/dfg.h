@@ -765,9 +765,13 @@ public:
         std::vector<DFGOutput> inputs;
         inputs.reserve(parts.size());
         for (auto* p : parts) inputs.emplace_back(p);
+        return concat(inputs, name);
+    }
+
+    DFGNode* concat(const std::vector<DFGOutput>& parts, const std::string& name = "") {
         auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{std::move(inputs)})
-            : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{std::move(inputs)}, name);
+            ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{parts})
+            : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{parts}, name);
         nodes.push_back(std::move(n));
         if (!name.empty()) {
             signals[name] = nodes.back().get();

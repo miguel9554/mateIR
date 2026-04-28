@@ -434,7 +434,7 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
         }
 
         case DFGOp::CONCAT_ALIGN:
-            throw CompilerError("Simulator: CONCAT_ALIGN should have been cleaned up by concat_cleanup pass", node);
+            throw CompilerError("Simulator: unexpected CONCAT_ALIGN node reached simulation", node);
 
         case DFGOp::MODULE:
             throw CompilerError("Simulator: MODULE nodes should not exist after dfg_inline pass", node);

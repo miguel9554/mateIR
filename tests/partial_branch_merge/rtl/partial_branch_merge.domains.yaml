@@ -1,0 +1,6 @@
+module_name: partial_branch_merge
+async_domain:
+- sel
+- base
+- lo
+- hi

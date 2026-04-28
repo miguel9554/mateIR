@@ -112,7 +112,7 @@
       "type": "object",
       "required": ["kind"],
       "properties": {
-        "kind": { "type": "string", "enum": ["sync", "clock", "reset", "async"] },
+        "kind": { "type": "string", "enum": ["sync", "clock", "reset", "async", "static"] },
         "clock_domain": { "type": "integer", "minimum": 0 },
         "reset_domain": { "type": "integer", "minimum": 0 },
         "reset_domains": {
@@ -129,7 +129,7 @@
       "properties": {
         "name": { "$ref": "#/$defs/identifier" },
         "type": { "$ref": "#/$defs/type" },
-        "sync_kind": { "type": "string", "enum": ["sync", "clock", "reset", "async"] },
+        "sync_kind": { "type": "string", "enum": ["sync", "clock", "reset", "async", "static"] },
         "sync_type": { "$ref": "#/$defs/sync_type" }
       },
       "additionalProperties": false

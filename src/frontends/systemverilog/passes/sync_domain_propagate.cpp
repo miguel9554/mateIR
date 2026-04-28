@@ -310,8 +310,13 @@ SyncType mergeSyncTypes(const std::vector<SyncType>& inputs) {
     std::optional<ClockId> clock;
     ResetDomains resets;
     bool sawSync = false;
+    bool sawStatic = false;
 
     for (const SyncType& input : inputs) {
+        if (std::holds_alternative<StaticSignal>(input)) {
+            sawStatic = true;
+            continue;
+        }
         if (std::holds_alternative<AsyncSignal>(input) ||
                 std::holds_alternative<ClockSignal>(input) ||
                 std::holds_alternative<ResetSignal>(input)) {
@@ -330,7 +335,9 @@ SyncType mergeSyncTypes(const std::vector<SyncType>& inputs) {
         sawSync = true;
     }
 
-    if (!sawSync || !clock) return AsyncSignal{};
+    if (!sawSync || !clock) {
+        return sawStatic ? SyncType{StaticSignal{}} : SyncType{AsyncSignal{}};
+    }
     return SyncSignal{.clock_domain = *clock, .reset_domains = std::move(resets)};
 }
 
@@ -420,7 +427,7 @@ std::map<const DFGNode*, SyncType> propagateNodeSyncTypes(
 
             if (missingInput) continue;
             if (!hasNonConstInput && nodeSync.contains(node)) continue;
-            SyncType computed = hasNonConstInput ? mergeSyncTypes(inputs) : AsyncSignal{};
+            SyncType computed = hasNonConstInput ? mergeSyncTypes(inputs) : StaticSignal{};
 
             auto it = nodeSync.find(node);
             if (it == nodeSync.end() || it->second != computed) {
@@ -490,7 +497,7 @@ std::optional<SyncType> computeSyncTypeFromFanin(
         } else if (auto seed = nodeSync.find(node); seed != nodeSync.end()) {
             result = seed->second;
         } else {
-            result = AsyncSignal{};
+            result = StaticSignal{};
         }
     } else if (inputs.empty()) {
         result = std::nullopt;
@@ -519,8 +526,7 @@ FlopDInputDomain flopDInputDomainForLeaves(
         const std::map<const DFGNode*, SyncType>& nodeSync) {
     if (!hasNonConstFanin(leaves)) {
         return FlopDInputDomain{
-            .sync_type = std::nullopt,
-            .constant_only = true,
+            .sync_type = StaticSignal{},
         };
     }
 
@@ -528,12 +534,10 @@ FlopDInputDomain flopDInputDomainForLeaves(
     if (syncType) {
         return FlopDInputDomain{
             .sync_type = *syncType,
-            .constant_only = false,
         };
     }
     return FlopDInputDomain{
         .sync_type = std::nullopt,
-        .constant_only = false,
     };
 }
 

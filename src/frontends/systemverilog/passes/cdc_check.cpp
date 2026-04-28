@@ -25,6 +25,7 @@ const char* syncKindStr(const SyncType& syncType) {
     if (std::holds_alternative<SyncSignal>(syncType)) return "Sync";
     if (std::holds_alternative<ClockSignal>(syncType)) return "Clock";
     if (std::holds_alternative<ResetSignal>(syncType)) return "Reset";
+    if (std::holds_alternative<StaticSignal>(syncType)) return "Static";
     return "Async";
 }
 
@@ -64,7 +65,6 @@ void validateCdcForModule(
         }
 
         const FlopDInputDomain& dDomain = domainIt->second;
-        if (dDomain.constant_only) continue;
 
         bool isSynchronizer = moduleFacts.cdc.synchronizer_flops.contains(flop.name);
         if (isSynchronizer) continue;
@@ -75,6 +75,8 @@ void validateCdcForModule(
                 "D input has no propagated domain",
                 flop.name, module.name, pathString(path)), firstDLeaf(flop));
         }
+
+        if (std::holds_alternative<StaticSignal>(*dDomain.sync_type)) continue;
 
         if (const auto* sync = std::get_if<SyncSignal>(&*dDomain.sync_type)) {
             if (sync->clock_domain == flop.clock_domain) continue;

@@ -40,6 +40,10 @@ phase8_same_clock_merge PASS
 pkg_scope_test PASS
 ref_arg_fail FAIL ref ports not supported
 static_func_fail FAIL Only 'automatic' functions/tasks are supported
+static_async_mix PASS
+static_flop_d PASS
+static_sync_mix PASS
+static_top_output PASS
 subword_assign PASS
 task_func_test PASS
 uart PASS

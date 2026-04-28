@@ -11,7 +11,6 @@ namespace mate {
 
 struct FlopDInputDomain {
     std::optional<SyncType> sync_type;
-    bool constant_only = false;
 };
 
 struct SyncDomainAnalysis {

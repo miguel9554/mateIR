@@ -1,0 +1,13 @@
+module_name: static_async_mix
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs: []
+
+async_domain:
+- a

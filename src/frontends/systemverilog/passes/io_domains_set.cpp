@@ -55,14 +55,15 @@ std::vector<std::string> expandPattern(
 
 } // anonymous namespace
 
-void setIODomains(Module& module,
-                  const std::string& yamlPath,
-                  FrontendDomainFacts* domainFacts,
-                  InstancePath instancePath) {
-    ModuleDomainFacts* privateFacts = nullptr;
-    if (domainFacts) {
-        privateFacts = &domainFacts->getOrCreate({instancePath, module.name});
-    }
+void loadTopIODomains(Module& module,
+                      const std::string& yamlPath,
+                      FrontendDomainFacts& domainFacts) {
+    ModuleDomainFacts& privateFacts = domainFacts.getOrCreate({{}, module.name});
+    privateFacts.ports.clear();
+    privateFacts.yaml_clocks.clear();
+    privateFacts.yaml_resets.clear();
+    privateFacts.resolved_input_domains.clear();
+    domainFacts.top_inputs = TopInputDomainFacts{};
 
     // 3a. Load & parse YAML
     YAML::Node config = YAML::LoadFile(yamlPath);
@@ -79,17 +80,17 @@ void setIODomains(Module& module,
             yamlModuleName, module.name));
     }
 
-    // Pure combinational modules have no clock/reset domains; skip all classification.
     if (config["pure_combinational"] && config["pure_combinational"].as<bool>()) {
-        module.pure_combinational = true;
-        if (privateFacts) privateFacts->pure_combinational = true;
-        return;
+        throw CompilerError(
+            "io_domains_set: pure_combinational is only supported on internal "
+            "module domains YAML, which is no longer read");
     }
 
-    // Collect all port names
-    std::set<std::string> allPortNames;
-    for (const auto& [name, sig] : module.inputs) allPortNames.insert(name);
-    for (const auto& [name, sig] : module.outputs) allPortNames.insert(name);
+    // Top-level domains YAML classifies only top-level inputs.
+    std::set<std::string> inputPortNames;
+    std::set<std::string> outputPortNames;
+    for (const auto& [name, sig] : module.inputs) inputPortNames.insert(name);
+    for (const auto& [name, sig] : module.outputs) outputPortNames.insert(name);
 
     // 3c. Build port classification
     std::map<std::string, PortClassification> portClassMap;
@@ -127,11 +128,17 @@ void setIODomains(Module& module,
             if (ioList && ioList.IsSequence()) {
                 for (const auto& entry : ioList) {
                     auto ref = parseSignalRef(entry);
-                    auto matches = expandPattern(ref, allPortNames);
+                    auto matches = expandPattern(ref, inputPortNames);
                     if (matches.empty()) {
+                        if (!ref.ends_with('*') && outputPortNames.contains(ref)) {
+                            throw CompilerError(std::format(
+                                "io_domains_set: classified port '{}' is not a top-level input "
+                                "in module '{}'",
+                                ref, module.name));
+                        }
                         throw CompilerError(std::format(
                             "io_domains_set: wildcard '{}' in clock domain '{}' "
-                            "matches no ports in module '{}'",
+                            "matches no top-level input ports in module '{}'",
                             ref, domainName, module.name));
                     }
                     for (const auto& name : matches) {
@@ -147,15 +154,18 @@ void setIODomains(Module& module,
             }
 
             clockDomains[domainName] = std::move(info);
-            if (privateFacts) {
-                const auto& stored = clockDomains.at(domainName);
-                privateFacts->yaml_clocks[domainName] = YamlClockDomainFact{
-                    .domain_name = domainName,
-                    .input_port = stored.input_port,
-                    .edge = clockEdge,
-                    .matched_ports = stored.matched_ports,
-                };
-            }
+            const auto& stored = clockDomains.at(domainName);
+            privateFacts.yaml_clocks[domainName] = YamlClockDomainFact{
+                .domain_name = domainName,
+                .input_port = stored.input_port,
+                .edge = clockEdge,
+                .matched_ports = stored.matched_ports,
+            };
+            domainFacts.top_inputs->clocks[domainName] = TopClockInputFact{
+                .domain_name = domainName,
+                .input_port = stored.input_port,
+                .edge = clockEdge,
+            };
         }
     }
 
@@ -186,14 +196,17 @@ void setIODomains(Module& module,
             portClassMap[info.signal_name] = {PortClass::Reset, ""};
 
             resets[resetName] = std::move(info);
-            if (privateFacts) {
-                const auto& stored = resets.at(resetName);
-                privateFacts->yaml_resets[resetName] = YamlResetDomainFact{
-                    .reset_name = resetName,
-                    .signal_name = stored.signal_name,
-                    .active_edge = resetEdge,
-                };
-            }
+            const auto& stored = resets.at(resetName);
+            privateFacts.yaml_resets[resetName] = YamlResetDomainFact{
+                .reset_name = resetName,
+                .signal_name = stored.signal_name,
+                .active_edge = resetEdge,
+            };
+            domainFacts.top_inputs->resets[resetName] = TopResetInputFact{
+                .reset_name = resetName,
+                .signal_name = stored.signal_name,
+                .active_edge = resetEdge,
+            };
         }
     }
 
@@ -201,11 +214,17 @@ void setIODomains(Module& module,
     if (asyncNode && asyncNode.IsSequence()) {
         for (const auto& entry : asyncNode) {
             auto ref = parseSignalRef(entry);
-            auto matches = expandPattern(ref, allPortNames);
+            auto matches = expandPattern(ref, inputPortNames);
             if (matches.empty()) {
+                if (!ref.ends_with('*') && outputPortNames.contains(ref)) {
+                    throw CompilerError(std::format(
+                        "io_domains_set: classified port '{}' is not a top-level input "
+                        "in module '{}'",
+                        ref, module.name));
+                }
                 throw CompilerError(std::format(
                     "io_domains_set: wildcard '{}' in async_domain "
-                    "matches no ports in module '{}'",
+                    "matches no top-level input ports in module '{}'",
                     ref, module.name));
             }
             for (const auto& name : matches) {
@@ -215,17 +234,18 @@ void setIODomains(Module& module,
                         module.name, name));
                 }
                 portClassMap[name] = {PortClass::Async, ""};
+                domainFacts.top_inputs->async_inputs.insert(name);
             }
         }
     }
 
     // 3d. Structural validation
 
-    // Every classified port must exist in module inputs or outputs
+    // Every classified port must be a top-level input.
     for (const auto& [portName, cls] : portClassMap) {
-        if (!allPortNames.contains(portName)) {
+        if (!inputPortNames.contains(portName)) {
             throw CompilerError(std::format(
-                "io_domains_set: classified port '{}' does not exist in module '{}'",
+                "io_domains_set: classified port '{}' is not a top-level input in module '{}'",
                 portName, module.name));
         }
     }
@@ -248,11 +268,11 @@ void setIODomains(Module& module,
         }
     }
 
-    // Every non-clock, non-reset I/O must be classified
-    for (const auto& portName : allPortNames) {
+    // Every top-level input must be classified.
+    for (const auto& portName : inputPortNames) {
         if (!portClassMap.contains(portName)) {
             throw CompilerError(std::format(
-                "io_domains_set: port '{}' in module '{}' is not classified "
+                "io_domains_set: top-level input '{}' in module '{}' is not classified "
                 "in any clock domain, reset, or async_domain",
                 portName, module.name));
         }
@@ -261,21 +281,25 @@ void setIODomains(Module& module,
     // Store frontend-private local classification facts. Final public IR sync state
     // is assigned later by domains_propagate_and_check after global domains resolve.
     for (const auto& [portName, cls] : portClassMap) {
-        if (privateFacts) {
-            LocalPortClass factClass = LocalPortClass::Sync;
-            switch (cls.cls) {
-                case PortClass::Clock: factClass = LocalPortClass::Clock; break;
-                case PortClass::Reset: factClass = LocalPortClass::Reset; break;
-                case PortClass::Async: factClass = LocalPortClass::Async; break;
-                case PortClass::Sync: factClass = LocalPortClass::Sync; break;
-            }
-            privateFacts->ports[portName] = LocalPortDomainFact{
+        LocalPortClass factClass = LocalPortClass::Sync;
+        switch (cls.cls) {
+            case PortClass::Clock: factClass = LocalPortClass::Clock; break;
+            case PortClass::Reset: factClass = LocalPortClass::Reset; break;
+            case PortClass::Async: factClass = LocalPortClass::Async; break;
+            case PortClass::Sync: factClass = LocalPortClass::Sync; break;
+        }
+        privateFacts.ports[portName] = LocalPortDomainFact{
+            .port_name = portName,
+            .cls = factClass,
+            .local_domain_name = cls.cls == PortClass::Sync
+                ? std::optional<std::string>(cls.clock_name)
+                : std::nullopt,
+            .edge = std::nullopt,
+        };
+        if (cls.cls == PortClass::Sync) {
+            domainFacts.top_inputs->sync_inputs[portName] = TopSyncInputFact{
                 .port_name = portName,
-                .cls = factClass,
-                .local_domain_name = cls.cls == PortClass::Sync
-                    ? std::optional<std::string>(cls.clock_name)
-                    : std::nullopt,
-                .edge = std::nullopt,
+                .clock_domain_name = cls.clock_name,
             };
         }
     }
@@ -286,24 +310,18 @@ void setIODomains(Module& module,
         edge_t edge = (info.polarity == "posedge") ? POSEDGE : NEGEDGE;
 
         for (const auto& portName : info.matched_ports) {
-            if (privateFacts) {
-                auto portIt = privateFacts->ports.find(portName);
-                if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
-            }
+            auto portIt = privateFacts.ports.find(portName);
+            if (portIt != privateFacts.ports.end()) portIt->second.edge = edge;
         }
-        if (privateFacts) {
-            auto portIt = privateFacts->ports.find(info.input_port);
-            if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
-        }
+        auto portIt = privateFacts.ports.find(info.input_port);
+        if (portIt != privateFacts.ports.end()) portIt->second.edge = edge;
     }
 
     // Store each reset's expected polarity in frontend-private facts.
     for (const auto& [resetName, info] : resets) {
         edge_t edge = (info.polarity == "positive") ? POSEDGE : NEGEDGE;
-        if (privateFacts) {
-            auto portIt = privateFacts->ports.find(info.signal_name);
-            if (portIt != privateFacts->ports.end()) portIt->second.edge = edge;
-        }
+        auto portIt = privateFacts.ports.find(info.signal_name);
+        if (portIt != privateFacts.ports.end()) portIt->second.edge = edge;
     }
 }
 

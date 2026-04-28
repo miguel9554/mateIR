@@ -1,10 +1,7 @@
 module_name: global_domains_opposite_edges
-
 clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - a
-      - b
-      - y_pos
-      - y_neg
+    - a
+    - b

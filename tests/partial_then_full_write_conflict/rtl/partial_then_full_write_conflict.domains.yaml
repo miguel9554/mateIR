@@ -1,6 +1,1 @@
 module_name: partial_then_full_write_conflict
-
-pure_combinational: true
-
-async_domain:
-  - z

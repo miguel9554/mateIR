@@ -23,6 +23,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <set>
 #include <unordered_set>
 
@@ -30,9 +31,15 @@ namespace mate {
 
 namespace {
 
-std::map<std::string, std::string> loadDomainPathsByModule(
-        const std::vector<std::string>& domainFiles) {
-    std::map<std::string, std::string> domainPathsByModule;
+std::string loadTopDomainPath(
+        const std::vector<std::string>& domainFiles,
+        const std::string& topModuleName) {
+    if (domainFiles.empty()) {
+        throw CompilerError(std::format(
+            "No top-level domains file provided for module '{}' "
+            "(use --domains to specify)", topModuleName));
+    }
+    std::optional<std::string> topDomainPath;
     for (const auto& path : domainFiles) {
         YAML::Node cfg = YAML::LoadFile(path);
         if (!cfg["module_name"]) {
@@ -40,14 +47,20 @@ std::map<std::string, std::string> loadDomainPathsByModule(
                 "Domain file '{}' is missing 'module_name' key", path));
         }
         std::string modName = cfg["module_name"].as<std::string>();
-        if (domainPathsByModule.contains(modName)) {
+        if (modName != topModuleName) {
             throw CompilerError(std::format(
-                "Duplicate domain file for module '{}': '{}' and '{}'",
-                modName, domainPathsByModule[modName], path));
+                "Domain file '{}' is for non-top module '{}'; main domains YAML "
+                "is only supported for top module '{}'",
+                path, modName, topModuleName));
         }
-        domainPathsByModule[modName] = path;
+        if (topDomainPath) {
+            throw CompilerError(std::format(
+                "Duplicate top-level domain file for module '{}': '{}' and '{}'",
+                topModuleName, *topDomainPath, path));
+        }
+        topDomainPath = path;
     }
-    return domainPathsByModule;
+    return *topDomainPath;
 }
 
 std::map<std::string, std::string> loadCdcPathsByModule(
@@ -127,7 +140,7 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
 }
 
 void runMateIRPipeline(MateIR& ir,
-                       const std::map<std::string, std::string>& domainPathsByModule,
+                       const std::string& topDomainPath,
                        const std::map<std::string, std::string>& cdcPathsByModule,
                        FrontendDomainFacts& domainFacts,
                        const std::vector<DebugNodeSpec>& debugSpecs) {
@@ -243,30 +256,15 @@ void runMateIRPipeline(MateIR& ir,
         runPass(6, "constant_fold", [&]{ constantFold(*module.dfg); });
         runPass(7, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
         runPass(8, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(9, "io_domains_set", [&]{
-            std::function<void(Module&, InstancePath)> setDomains =
-                    [&](Module& mod, InstancePath path) {
-                auto it = domainPathsByModule.find(mod.name);
-                if (it == domainPathsByModule.end()) {
-                    throw CompilerError(std::format(
-                        "No domains file provided for module '{}' "
-                        "(use --domains to specify)", mod.name));
-                }
-                setIODomains(mod, it->second, &domainFacts, path);
-                for (auto& sub : mod.hierarchyInstantiation) {
-                    InstancePath childPath = path;
-                    childPath.elems.push_back(sub.instance_name);
-                    setDomains(sub, childPath);
-                }
-            };
-            setDomains(module, {});
-        });
-        runPass(10, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
+        runPass(9, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/10_flop_resolve_flops.txt", dir));
+            std::ofstream f(std::format("{}/09_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
+        runPass(10, "load_top_io_domains", [&]{
+            loadTopIODomains(module, topDomainPath, domainFacts);
+        });
         runPass(11, "cdc_annotations", [&]{
             loadCdcAnnotations(module, cdcPathsByModule, domainFacts);
         });
@@ -359,9 +357,9 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
     ir.source_files = options.source_files;
     ir.frontend_module_count = extracted.modules.size();
 
-    auto domainPathsByModule = loadDomainPathsByModule(options.domain_files);
+    auto topDomainPath = loadTopDomainPath(options.domain_files, ir.top.name);
     auto cdcPathsByModule = loadCdcPathsByModule(options.source_files, options.domain_files);
-    runMateIRPipeline(ir, domainPathsByModule, cdcPathsByModule, domainFacts, options.debug_dfg_nodes);
+    runMateIRPipeline(ir, topDomainPath, cdcPathsByModule, domainFacts, options.debug_dfg_nodes);
 
     return ir;
 }

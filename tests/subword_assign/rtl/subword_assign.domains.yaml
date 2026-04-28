@@ -1,11 +1,6 @@
 module_name: subword_assign
-
 clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - subword_in
-      - subword_out_1
-      - subword_out_2
-      - word_out_1
-      - word_out_2
+    - subword_in

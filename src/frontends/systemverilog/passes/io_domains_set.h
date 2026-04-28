@@ -5,11 +5,10 @@
 
 namespace mate {
 
-// Parse YAML domain configuration into frontend-private facts.
+// Parse top-level YAML domain configuration into frontend-private facts.
 // Must run after flop_resolve + port_type_propagation.
-void setIODomains(Module& module,
-                  const std::string& yamlPath,
-                  FrontendDomainFacts* domainFacts = nullptr,
-                  InstancePath instancePath = {});
+void loadTopIODomains(Module& module,
+                      const std::string& yamlPath,
+                      FrontendDomainFacts& domainFacts);
 
 } // namespace mate

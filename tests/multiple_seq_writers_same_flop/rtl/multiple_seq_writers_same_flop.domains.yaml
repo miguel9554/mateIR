@@ -1,7 +1,5 @@
 module_name: multiple_seq_writers_same_flop
-
 clock_domains:
   clk:
     polarity: posedge
-    inputs_outputs:
-      - z
+    inputs_outputs: []

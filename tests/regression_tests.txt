@@ -18,6 +18,8 @@ cordic PASS
 counter_top PASS
 cross_module_async_to_sync_fail FAIL cross-module sync type mismatch
 domains_synchronized_into_reject_fail FAIL synchronized_into is no longer supported
+domains_internal_yaml_reject_fail FAIL main domains YAML is only supported for top module
+domains_output_classification_fail FAIL is not a top-level input
 enum_local_test PASS
 enum_top_test PASS
 full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'

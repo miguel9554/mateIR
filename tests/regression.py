@@ -123,7 +123,7 @@ def run_expected_failure(name, expected):
 
     rtl_sources = sorted(str(p) for p in test_dir.joinpath("rtl").glob("*.v"))
     rtl_sources += sorted(str(p) for p in test_dir.joinpath("rtl").glob("*.sv"))
-    domain_files = sorted(str(p) for p in test_dir.joinpath("rtl").glob("*.domains.yaml"))
+    domain_file = test_dir / "rtl" / f"{name}.domains.yaml"
 
     with tempfile.TemporaryDirectory(prefix=f"{name}_stimuli_") as stimuli_dir, \
          tempfile.TemporaryDirectory(prefix=f"{name}_output_") as output_dir:
@@ -139,9 +139,9 @@ def run_expected_failure(name, expected):
             "--flops-initial",
             "zeros",
         ]
-        if domain_files:
+        if domain_file.exists():
             cmd.append("--domains")
-            cmd.extend(domain_files)
+            cmd.append(str(domain_file))
         cmd.extend(extra_args)
         cmd.extend(rtl_sources)
 

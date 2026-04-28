@@ -1,20 +1,16 @@
 module_name: apb_gpio
-
 resets:
   HRESETn:
     polarity: negative
-
 clock_domains:
   HCLK:
     polarity: posedge
     inputs_outputs:
-      - dft_cg_enable_i
-      - P*
-      - gpio_in_sync
-      - gpio_out
-      - gpio_dir
-      - gpio_padcfg
-      - interrupt
-
+    - dft_cg_enable_i
+    - PADDR
+    - PENABLE
+    - PSEL
+    - PWDATA
+    - PWRITE
 async_domain:
-  - gpio_in
+- gpio_in

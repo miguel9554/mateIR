@@ -1,8 +1,6 @@
-module_name: gd_expr_child
-
+module_name: internal_yaml_child
 clock_domains:
-  child_clk:
+  clk:
     polarity: posedge
     inputs_outputs:
       - d
-      - q

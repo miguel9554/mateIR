@@ -1,7 +1,1 @@
 module_name: multiple_submodule_output_drivers
-
-pure_combinational: true
-
-async_domain:
-  - z
-  - y

@@ -1,26 +1,16 @@
 module_name: pkg_scope_test
-
 resets:
   rst_n:
     polarity: negative
-
 clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - op_in
-      - src_in
-      - dst_in
-      - sched_in
-      - dir_in
-      - shape_in
-      - weight_in
-      - data_in
-      - phase_out
-      - result_out
-      - dir_out
-      - valid_out
-      - score_out
-      - alu_flag_out
-      - opp_dir_out
-      - prio_out
+    - op_in
+    - src_in
+    - dst_in
+    - sched_in
+    - dir_in
+    - shape_in
+    - weight_in
+    - data_in

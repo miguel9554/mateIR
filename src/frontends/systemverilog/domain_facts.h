@@ -40,6 +40,30 @@ struct LocalPortDomainFact {
     std::optional<edge_t> edge;
 };
 
+struct TopClockInputFact {
+    std::string domain_name;
+    std::string input_port;
+    edge_t edge;
+};
+
+struct TopResetInputFact {
+    std::string reset_name;
+    std::string signal_name;
+    edge_t active_edge;
+};
+
+struct TopSyncInputFact {
+    std::string port_name;
+    std::string clock_domain_name;
+};
+
+struct TopInputDomainFacts {
+    std::map<std::string, TopClockInputFact> clocks;
+    std::map<std::string, TopResetInputFact> resets;
+    std::map<std::string, TopSyncInputFact> sync_inputs;
+    std::set<std::string> async_inputs;
+};
+
 struct EventTriggerFact {
     edge_t edge;
     std::string local_signal_name;
@@ -105,6 +129,7 @@ struct ModuleDomainFacts {
 
 struct FrontendDomainFacts {
     std::map<ModuleOccurrenceKey, ModuleDomainFacts> modules;
+    std::optional<TopInputDomainFacts> top_inputs;
 
     ModuleDomainFacts& getOrCreate(const ModuleOccurrenceKey& key);
     const ModuleDomainFacts* find(const ModuleOccurrenceKey& key) const;

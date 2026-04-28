@@ -1,8 +1,6 @@
-module_name: gd_pos_child
-
+module_name: domains_output_classification_fail
 clock_domains:
-  child_clk:
+  clk:
     polarity: posedge
     inputs_outputs:
-      - d
       - q

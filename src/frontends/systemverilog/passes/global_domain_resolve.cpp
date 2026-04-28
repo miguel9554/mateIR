@@ -53,6 +53,149 @@ bool isClockOrReset(LocalPortClass cls) {
     return cls == LocalPortClass::Clock || cls == LocalPortClass::Reset;
 }
 
+struct LocalPortDemand {
+    LocalPortClass cls;
+    edge_t edge;
+};
+
+void addDemand(std::map<std::string, LocalPortDemand>& demands,
+               const std::string& signalName,
+               LocalPortClass cls,
+               edge_t edge,
+               const Module& module,
+               const InstancePath& path) {
+    auto it = demands.find(signalName);
+    if (it == demands.end()) {
+        demands[signalName] = LocalPortDemand{.cls = cls, .edge = edge};
+        return;
+    }
+    if (it->second.cls == cls && cls == LocalPortClass::Clock)
+        return;
+    if (it->second.cls != cls || it->second.edge != edge) {
+        throw CompilerError(std::format(
+            "global_domain_resolve: conflicting inferred clock/reset role for "
+            "signal '{}' in module '{}' at {}",
+            signalName, module.name, pathString(path)));
+    }
+}
+
+const ChildInputConnectionFact* findChildInputConnection(
+        const ModuleDomainFacts& parentFacts,
+        const InstancePath& childInstancePath,
+        const Module& child,
+        const std::string& childPort) {
+    const ChildInputConnectionFact* found = nullptr;
+    for (const auto& conn : parentFacts.child_input_connections) {
+        if (conn.child_instance_path != childInstancePath ||
+                conn.child_module_name != child.name ||
+                conn.child_port != childPort) {
+            continue;
+        }
+        if (found) {
+            throw CompilerError(std::format(
+                "global_domain_resolve: multiple connection facts for inferred "
+                "clock/reset port '{}.{}'",
+                pathString(childInstancePath), childPort));
+        }
+        found = &conn;
+    }
+    return found;
+}
+
+std::map<std::string, LocalPortDemand> inferClockResetPortFacts(
+        Module& module,
+        const InstancePath& path,
+        FrontendDomainFacts& facts) {
+    ModuleDomainFacts& moduleFacts = facts.getOrCreate({path, module.name});
+    std::map<std::string, LocalPortDemand> demands;
+
+    for (const auto& [flopName, flopFact] : moduleFacts.flop_domains) {
+        addDemand(demands, flopFact.clock.local_signal_name,
+                  LocalPortClass::Clock, flopFact.clock.edge, module, path);
+        if (flopFact.reset) {
+            addDemand(demands, flopFact.reset->local_signal_name,
+                      LocalPortClass::Reset, flopFact.reset->edge, module, path);
+        }
+    }
+
+    for (auto& child : module.hierarchyInstantiation) {
+        InstancePath childInstancePath = childPath(path, child.instance_name);
+        auto childDemands = inferClockResetPortFacts(child, childInstancePath, facts);
+        for (const auto& [childPort, demand] : childDemands) {
+            const auto* conn = findChildInputConnection(
+                moduleFacts, childInstancePath, child, childPort);
+            if (!conn) {
+                throw CompilerError(std::format(
+                    "global_domain_resolve: missing connection fact for inferred "
+                    "{} port '{}.{}'",
+                    demand.cls == LocalPortClass::Clock ? "clock" : "reset",
+                    pathString(childInstancePath), childPort));
+            }
+            if (conn->expr_kind != ConnectionExprKind::SimpleIdentifier ||
+                    !conn->parent_signal_name) {
+                throw CompilerError(std::format(
+                    "global_domain_resolve: unsupported clock/reset connection "
+                    "expression for {}.{} in parent module '{}' at {}: {}",
+                    pathString(childInstancePath), childPort, module.name,
+                    pathString(path), conn->diagnostic_expr_kind),
+                    conn->loc);
+            }
+            if (module.inputs.contains(*conn->parent_signal_name)) {
+                addDemand(demands, *conn->parent_signal_name, demand.cls,
+                          demand.edge, module, path);
+            }
+        }
+    }
+
+    for (const auto& [signalName, demand] : demands) {
+        auto existing = moduleFacts.ports.find(signalName);
+        if (path.elems.empty()) {
+            if (existing == moduleFacts.ports.end() ||
+                    existing->second.cls != demand.cls ||
+                    !existing->second.edge ||
+                    (demand.cls == LocalPortClass::Reset &&
+                     *existing->second.edge != demand.edge)) {
+                throw CompilerError(std::format(
+                    "global_domain_resolve: top-level signal '{}' in module '{}' "
+                    "is used as a {} but is not declared with matching edge/polarity "
+                    "in the top domains YAML",
+                    signalName, module.name,
+                    demand.cls == LocalPortClass::Clock ? "clock" : "reset"));
+            }
+            continue;
+        }
+
+        if (!module.inputs.contains(signalName)) {
+            throw CompilerError(std::format(
+                "global_domain_resolve: inferred {} signal '{}' in module '{}' at {} "
+                "is not an input port",
+                demand.cls == LocalPortClass::Clock ? "clock" : "reset",
+                signalName, module.name, pathString(path)));
+        }
+
+        if (existing != moduleFacts.ports.end()) {
+            if (existing->second.cls != demand.cls ||
+                    !existing->second.edge ||
+                    *existing->second.edge != demand.edge) {
+                throw CompilerError(std::format(
+                    "global_domain_resolve: existing domain fact for signal '{}' "
+                    "in module '{}' at {} conflicts with inferred clock/reset role",
+                    signalName, module.name, pathString(path)));
+            }
+            continue;
+        }
+
+        moduleFacts.ports[signalName] = LocalPortDomainFact{
+            .port_name = signalName,
+            .cls = demand.cls,
+            .local_domain_name = std::nullopt,
+            .edge = demand.edge,
+        };
+    }
+
+    return demands;
+}
+
 class GlobalDomainResolver {
 public:
     GlobalDomainResolver(MateIR& ir, FrontendDomainFacts& facts)
@@ -416,6 +559,7 @@ private:
 } // namespace
 
 void resolveGlobalDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
+    inferClockResetPortFacts(ir.top, {}, domainFacts);
     GlobalDomainResolver resolver(ir, domainFacts);
     resolver.run();
 }

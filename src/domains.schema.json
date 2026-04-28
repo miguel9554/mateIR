@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "RTL Interface Domain Configuration",
-  "description": "Describes clock domains, reset domains, and asynchronous interface inputs/outputs for an RTL module.",
+  "description": "Describes top-level input clock, reset, synchronous data, and asynchronous data domains for an RTL design boundary.",
   "type": "object",
 
   "required": ["module_name"],
@@ -10,13 +10,13 @@
     "signal_name": {
       "type": "string",
       "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$",
-      "description": "Exact interface port name."
+      "description": "Exact top-level input port name."
     },
 
     "signal_wildcard": {
       "type": "string",
       "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*\\*$",
-      "description": "Wildcard prefix representing a group of ports."
+      "description": "Wildcard prefix representing a group of top-level input ports."
     },
 
     "signal_ref": {
@@ -42,25 +42,25 @@
 
     "pure_combinational": {
       "type": "boolean",
-      "description": "If true, this module is purely combinational: no flops, no clock domains. Port classification is skipped and cross-module sync_kind checks are suppressed for this module."
+      "description": "Deprecated; main domains YAML is top-level-input-only and no longer marks internal combinational modules."
     },
 
     "clock_domains": {
       "type": "object",
-      "description": "Mapping of clock domain names to their configuration.",
+      "description": "Mapping of top-level clock input domains to their configuration.",
 
       "additionalProperties": {
         "type": "object",
         "title": "Clock Domain",
-        "description": "Definition of a synchronous clock domain.",
+          "description": "Definition of a top-level clock input domain.",
 
-        "required": ["polarity", "inputs_outputs"],
+        "required": ["polarity"],
 
         "properties": {
 
           "input_name": {
             "$ref": "#/$defs/signal_name",
-            "description": "Optional clock input port name in the RTL module interface. If omitted, the domain name is used."
+            "description": "Optional top-level clock input port name. If omitted, the domain name is used."
           },
 
           "polarity": {
@@ -71,8 +71,7 @@
 
           "inputs_outputs": {
             "type": "array",
-            "description": "List of module interface inputs/outputs belonging to this clock domain.",
-            "minItems": 1,
+            "description": "List of top-level synchronous data input ports belonging to this clock domain.",
             "items": {
               "$ref": "#/$defs/signal_with_attrs"
             }
@@ -85,12 +84,12 @@
 
     "resets": {
       "type": "object",
-      "description": "Mapping of reset domain names to their configuration.",
+      "description": "Mapping of top-level reset input domains to their configuration.",
 
       "additionalProperties": {
         "type": "object",
         "title": "Reset Domain",
-        "description": "Definition of a reset interface signal.",
+          "description": "Definition of a top-level reset input signal.",
 
         "required": ["polarity"],
 
@@ -98,7 +97,7 @@
 
           "signal_name": {
             "$ref": "#/$defs/signal_name",
-            "description": "Optional reset input port name in the RTL module interface. If omitted, the reset domain name is used."
+            "description": "Optional top-level reset input port name. If omitted, the reset domain name is used."
           },
 
           "polarity": {
@@ -114,7 +113,7 @@
 
     "async_domain": {
       "type": "array",
-      "description": "List of module interface inputs/outputs that are asynchronous to all defined clock domains.",
+      "description": "List of top-level data input ports that are asynchronous to all defined clock domains.",
       "items": {
         "$ref": "#/$defs/signal_with_attrs"
       }

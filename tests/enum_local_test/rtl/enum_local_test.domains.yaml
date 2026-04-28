@@ -1,23 +1,14 @@
 module_name: enum_local_test
-
 resets:
   rst_n:
     polarity: negative
-
 clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - op_in
-      - mode_in
-      - shift_in
-      - prio_in
-      - data_a
-      - data_b
-      - result_out
-      - accum_out
-      - state_out
-      - status_out
-      - color_out
-      - valid_out
-      - overflow_out
+    - op_in
+    - mode_in
+    - shift_in
+    - prio_in
+    - data_a
+    - data_b

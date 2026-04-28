@@ -10,7 +10,7 @@ SIM_BUILD_TARGET ?= sanitized
 SIMULATOR_BUILD_DIR = $(PROJECT_ROOT)/build/sanitized
 
 RTL_SRCS = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
-DOMAINS_YAMLS = $(shell find -L $(RTL_DIR) -name '*.domains.yaml')
+DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 
 SIMULATOR = $(SIMULATOR_BUILD_DIR)/mate
 SANITIZER_ENV = ASAN_OPTIONS=symbolize=1,detect_leaks=0,abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1,halt_on_error=1
@@ -26,7 +26,7 @@ simulate:
 	$(MAKE) -C $(PROJECT_ROOT) $(SIM_BUILD_TARGET)
 	$(SANITIZER_ENV) $(SIMULATOR) --simulate --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
-		--domains $(DOMAINS_YAMLS) \
+		--domains $(DOMAINS_YAML) \
 		--flops-initial zeros \
 		$(DEBUG_NODES_ARG) \
 		$(EXTRA_ARGS) $(RTL_SRCS)
@@ -35,7 +35,7 @@ gdb:
 	$(MAKE) -C $(PROJECT_ROOT) debug
 	gdb --args $(PROJECT_ROOT)/build/debug/mate --simulate --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
-		--domains $(DOMAINS_YAMLS) \
+		--domains $(DOMAINS_YAML) \
 		--flops-initial zeros \
 		$(DEBUG_NODES_ARG) \
 		$(EXTRA_ARGS) $(RTL_SRCS)

@@ -253,7 +253,8 @@ void validateCrossModuleConnections(
                 continue;
             }
 
-            if (module.inputs.contains(*conn.parent_signal_name) &&
+            if (path.elems.empty() &&
+                    module.inputs.contains(*conn.parent_signal_name) &&
                     std::holds_alternative<AsyncSignal>(parentSignal->sync_type) &&
                     !std::holds_alternative<AsyncSignal>(childSignal.sync_type)) {
                 throw CompilerError(std::format(

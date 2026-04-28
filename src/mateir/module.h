@@ -148,8 +148,8 @@ struct Module {
     // Combinational dependency map: output_port -> {input_ports}
     ComboDeps combo_deps;
 
-    // True if this module is purely combinational (no flops, no clock domains).
-    // Set by io_domains_set when the domains YAML has pure_combinational: true.
+    // True if this module is known to be purely combinational.
+    // Legacy field retained while domain inference is being migrated.
     bool pure_combinational = false;
 
     void print(int indent = 0) const;

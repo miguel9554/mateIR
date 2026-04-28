@@ -1,17 +1,10 @@
 module_name: generate_test
-
 resets:
   rst_n:
     polarity: negative
-
 clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - data_in
-      - lane_en
-      - data_out
-      - accum
-      - parity_out
-      - any_active
-      - any_sat
+    - data_in
+    - lane_en

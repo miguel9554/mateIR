@@ -251,7 +251,7 @@ def validate(module: ModuleInfo, domains: DomainConfig):
         if port_dirs[sig] != 'input':
             raise ValueError(f"Async signal '{sig}' must be an input port")
 
-    # All non-special ports must appear in exactly one clock domain
+    # All non-special input ports must appear in exactly one clock domain.
     domain_signals = set()
     for clk, sigs in domains.clock_domains.items():
         for sig in sigs:
@@ -260,16 +260,20 @@ def validate(module: ModuleInfo, domains: DomainConfig):
             domain_signals.add(sig)
 
     for port in module.ports:
+        if port.direction != 'input':
+            continue
         if port.name not in special_signals and port.name not in domain_signals:
             raise ValueError(
-                f"Port '{port.name}' is not in any clock domain, reset, or async_domain"
+                f"Input port '{port.name}' is not in any clock domain, reset, or async_domain"
             )
 
-    # All domain signals must be actual ports
+    # All domain signals must be actual top-level input ports.
     for clk, sigs in domains.clock_domains.items():
         for sig in sigs:
             if sig not in port_names:
                 raise ValueError(f"Domain signal '{sig}' is not a port of module '{module.name}'")
+            if port_dirs[sig] != 'input':
+                raise ValueError(f"Domain signal '{sig}' must be an input port")
 
 
 def gen_uut_if(module: ModuleInfo) -> str:

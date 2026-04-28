@@ -4,6 +4,7 @@
 
 #include <format>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -266,13 +267,20 @@ void seedDeclaredInputSyncTypes(
         std::map<const DFGNode*, SyncType>& nodeSync) {
     const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
 
-    if (!module.pure_combinational) {
-        for (auto& [name, input] : module.inputs) {
-            input.sync_type = expectedPortSyncType(module, path, ir, moduleFacts, input);
-            validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
-            for (auto* leaf : signalLeaves(input))
-                setNodeSync(nodeSync, leaf, input.sync_type);
+    for (auto& [name, input] : module.inputs) {
+        bool shouldSeed = path.elems.empty();
+        if (!shouldSeed) {
+            auto portIt = moduleFacts.ports.find(name);
+            shouldSeed = portIt != moduleFacts.ports.end() &&
+                (portIt->second.cls == LocalPortClass::Clock ||
+                 portIt->second.cls == LocalPortClass::Reset);
         }
+        if (!shouldSeed) continue;
+
+        input.sync_type = expectedPortSyncType(module, path, ir, moduleFacts, input);
+        validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
+        for (auto* leaf : signalLeaves(input))
+            setNodeSync(nodeSync, leaf, input.sync_type);
     }
 
     for (auto& sub : module.hierarchyInstantiation)
@@ -349,6 +357,44 @@ SyncType syncTypeForSignalLeaves(
     return syncTypeForLeaves(signalLeaves(signal), nodeSync);
 }
 
+bool reachesNode(const DFGNode* root,
+                 const std::set<const DFGNode*>& targets,
+                 std::set<const DFGNode*>& visited) {
+    if (!root) return false;
+    if (targets.contains(root)) return true;
+    if (!visited.insert(root).second) return false;
+
+    bool found = false;
+    DFGTraversal::forEachInput(root, [&](size_t, const DFGOutput& input) {
+        if (!found && reachesNode(input.node, targets, visited))
+            found = true;
+    });
+    return found;
+}
+
+std::optional<ClockId> clockDomainForInputFlopD(const Module& module, const Signal& input) {
+    std::set<const DFGNode*> inputLeaves;
+    for (auto* leaf : signalLeaves(input)) {
+        if (leaf) inputLeaves.insert(leaf);
+    }
+    if (inputLeaves.empty()) return std::nullopt;
+
+    std::optional<ClockId> clock;
+    for (const auto& flop : module.flops) {
+        for (auto* dLeaf : flopDLeaves(flop)) {
+            std::set<const DFGNode*> visited;
+            if (!reachesNode(dLeaf, inputLeaves, visited))
+                continue;
+            if (!clock) {
+                clock = flop.clock_domain;
+            } else if (*clock != flop.clock_domain) {
+                return std::nullopt;
+            }
+        }
+    }
+    return clock;
+}
+
 void assignSignalSyncTypes(
         Module& module,
         const InstancePath& path,
@@ -358,10 +404,26 @@ void assignSignalSyncTypes(
     const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
 
     auto assignInput = [&](Signal& input) {
-        if (module.pure_combinational) {
-            input.sync_type = syncTypeForSignalLeaves(input, nodeSync);
-        } else {
+        bool useDeclared = path.elems.empty();
+        if (!useDeclared) {
+            auto portIt = moduleFacts.ports.find(input.name);
+            useDeclared = portIt != moduleFacts.ports.end() &&
+                (portIt->second.cls == LocalPortClass::Clock ||
+                 portIt->second.cls == LocalPortClass::Reset);
+        }
+        if (useDeclared) {
             input.sync_type = expectedPortSyncType(module, path, ir, moduleFacts, input);
+        } else {
+            input.sync_type = syncTypeForSignalLeaves(input, nodeSync);
+            if (!path.elems.empty()) {
+                auto clock = clockDomainForInputFlopD(module, input);
+                if (clock) {
+                    input.sync_type = SyncSignal{
+                        .clock_domain = *clock,
+                        .reset_domains = {},
+                    };
+                }
+            }
         }
         validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
     };

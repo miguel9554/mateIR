@@ -957,6 +957,54 @@ static int64_t selectorCodeCountOrThrow(DFGNode* selectorNode,
     return int64_t(1) << width;
 }
 
+static DFGNode* lowerTruth(DFGNode* value,
+                           ResolutionContext& ctx,
+                           const std::optional<SourceLoc>& loc) {
+    if (value->hasType() && value->type->unpacked_dims.empty() && value->type->width == 1) {
+        return value;
+    }
+
+    auto* node = ctx.graph.reductionOr(value);
+    node->type = Type::makeInteger(1, false);
+    if (loc) node->loc = *loc;
+    return node;
+}
+
+static DFGNode* lowerLogicalNot(DFGNode* value,
+                                ResolutionContext& ctx,
+                                const std::optional<SourceLoc>& loc) {
+    auto* node = ctx.graph.bitwiseNot(lowerTruth(value, ctx, loc));
+    node->type = Type::makeInteger(1, false);
+    if (loc) node->loc = *loc;
+    return node;
+}
+
+static DFGNode* lowerLogicalBinary(DFGOp op,
+                                   DFGNode* lhs,
+                                   DFGNode* rhs,
+                                   ResolutionContext& ctx,
+                                   const std::optional<SourceLoc>& loc) {
+    auto* truthLhs = lowerTruth(lhs, ctx, loc);
+    auto* truthRhs = lowerTruth(rhs, ctx, loc);
+
+    DFGNode* node = nullptr;
+    switch (op) {
+        case DFGOp::BITWISE_AND:
+            node = ctx.graph.bitwiseAnd(truthLhs, truthRhs);
+            break;
+        case DFGOp::BITWISE_OR:
+            node = ctx.graph.bitwiseOr(truthLhs, truthRhs);
+            break;
+        default:
+            throw CompilerError(
+                std::format("Unsupported logical binary lowering op {}", op), loc);
+    }
+
+    node->type = Type::makeInteger(1, false);
+    if (loc) node->loc = *loc;
+    return node;
+}
+
 static int64_t normalizeSelectorCode(int64_t value,
                                      DFGNode* selectorNode,
                                      const std::optional<SourceLoc>& loc) {
@@ -2583,9 +2631,7 @@ static DFGNode* buildExprScalarImpl(
         // Unary operations
         case SyntaxKind::UnaryPlusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            auto* node = ctx.graph.unaryPlus(buildExprDFG(unary.operand, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
-            return node;
+            return buildExprDFG(unary.operand, ctx);
         }
 
         case SyntaxKind::UnaryMinusExpression: {
@@ -2639,9 +2685,8 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::UnaryLogicalNotExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            auto* node = ctx.graph.logicalNot(buildExprDFG(unary.operand, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
-            return node;
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            return lowerLogicalNot(buildExprDFG(unary.operand, ctx), ctx, loc);
         }
 
         case SyntaxKind::UnaryBitwiseNotExpression: {
@@ -2702,12 +2747,11 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::InequalityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
             auto* eqNode = ctx.graph.eq(buildExprDFG(binary.left, ctx),
                                         buildExprDFG(binary.right, ctx));
-            eqNode->loc = resolveSourceLoc(*expr, ctx.sm);
-            auto* notNode = ctx.graph.logicalNot(eqNode);
-            notNode->loc = resolveSourceLoc(*expr, ctx.sm);
-            return notNode;
+            eqNode->loc = loc;
+            return lowerLogicalNot(eqNode, ctx, loc);
         }
 
         case SyntaxKind::LessThanExpression: {
@@ -2770,18 +2814,22 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::LogicalAndExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.logicalAnd(buildExprDFG(binary.left, ctx),
-                                              buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
-            return node;
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            return lowerLogicalBinary(DFGOp::BITWISE_AND,
+                                      buildExprDFG(binary.left, ctx),
+                                      buildExprDFG(binary.right, ctx),
+                                      ctx,
+                                      loc);
         }
 
         case SyntaxKind::LogicalOrExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.logicalOr(buildExprDFG(binary.left, ctx),
-                                             buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
-            return node;
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            return lowerLogicalBinary(DFGOp::BITWISE_OR,
+                                      buildExprDFG(binary.left, ctx),
+                                      buildExprDFG(binary.right, ctx),
+                                      ctx,
+                                      loc);
         }
 
         case SyntaxKind::BinaryAndExpression: {

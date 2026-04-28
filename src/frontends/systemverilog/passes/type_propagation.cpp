@@ -219,7 +219,6 @@ bool inferNodeType(DFGNode* node) {
         }
 
         // Unary arithmetic: same as operand (enum not allowed)
-        case DFGOp::UNARY_PLUS:
         case DFGOp::UNARY_NEGATE:
         case DFGOp::BITWISE_NOT: {
             auto* operand = unaryNode(node);
@@ -227,26 +226,6 @@ bool inferNodeType(DFGNode* node) {
             rejectUnpacked(operand, to_string(node->kind()));
             rejectEnum(operand, to_string(node->kind()));
             node->type = *operand->type;
-            return true;
-        }
-
-        // Logical NOT: 1-bit unsigned
-        case DFGOp::LOGICAL_NOT: {
-            auto* operand = unaryNode(node);
-            if (!operand->hasType()) return false;
-            rejectUnpacked(operand, "LOGICAL_NOT");
-            node->type = makeOneBitUnsigned();
-            return true;
-        }
-
-        // Logical AND/OR: 1-bit unsigned
-        case DFGOp::LOGICAL_OR:
-        case DFGOp::LOGICAL_AND: {
-            auto [lhs, rhs] = binaryNodes(node);
-            if (!lhs->hasType() || !rhs->hasType()) return false;
-            rejectUnpacked(lhs, to_string(node->kind()));
-            rejectUnpacked(rhs, to_string(node->kind()));
-            node->type = makeOneBitUnsigned();
             return true;
         }
 
@@ -371,6 +350,13 @@ bool inferNodeType(DFGNode* node) {
                 high_val == low_val ? false : atype.isSigned());
             return true;
         }
+
+        case DFGOp::UNARY_PLUS:
+        case DFGOp::LOGICAL_NOT:
+        case DFGOp::LOGICAL_AND:
+        case DFGOp::LOGICAL_OR:
+            throw CompilerError(std::format(
+                "Type propagation: unexpected dead temporary op {}", node->str()), node->loc);
     }
 
     throw CompilerError(std::format(

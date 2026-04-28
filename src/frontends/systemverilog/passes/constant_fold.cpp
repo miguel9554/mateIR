@@ -176,28 +176,12 @@ static bool tryConstantFold(DFGNode* node) {
             result = getConst(selected);
             break;
         }
-        case DFGOp::UNARY_PLUS:
-            result = unaryConst();
-            break;
         case DFGOp::UNARY_NEGATE:
             result = -unaryConst();
             break;
         case DFGOp::BITWISE_NOT:
             result = ~unaryConst();
             break;
-        case DFGOp::LOGICAL_NOT:
-            result = (unaryConst() == 0) ? 1 : 0;
-            break;
-        case DFGOp::LOGICAL_AND: {
-            auto [lhs, rhs] = binaryConst();
-            result = (lhs != 0 && rhs != 0) ? 1 : 0;
-            break;
-        }
-        case DFGOp::LOGICAL_OR: {
-            auto [lhs, rhs] = binaryConst();
-            result = (lhs != 0 || rhs != 0) ? 1 : 0;
-            break;
-        }
         case DFGOp::BITWISE_AND: {
             auto [lhs, rhs] = binaryConst();
             result = lhs & rhs;
@@ -443,11 +427,6 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             }
             break;
         }
-        case DFGOp::UNARY_PLUS: {
-            // +x -> x (always)
-            graph.redirectConsumers(node, unaryNode(node));
-            return true;
-        }
         case DFGOp::UNARY_NEGATE: {
             auto* inner = unaryNode(node);
             // -(-x) -> x
@@ -461,15 +440,6 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             auto* inner = unaryNode(node);
             // ~(~x) -> x
             if (inner->kind() == DFGOp::BITWISE_NOT) {
-                graph.redirectConsumers(node, unaryNode(inner));
-                return true;
-            }
-            break;
-        }
-        case DFGOp::LOGICAL_NOT: {
-            auto* inner = unaryNode(node);
-            // !(!x) -> x
-            if (inner->kind() == DFGOp::LOGICAL_NOT) {
                 graph.redirectConsumers(node, unaryNode(inner));
                 return true;
             }

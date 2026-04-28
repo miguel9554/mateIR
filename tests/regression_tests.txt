@@ -35,6 +35,7 @@ global_domains_repeated_instances PASS
 global_domains_unsupported_clock_expr FAIL global_domain_resolve: unsupported clock/reset connection expression
 global_domains_wrapper_clock_alias PASS
 inout_arg_fail FAIL inout ports not supported
+logical_temp_ops PASS
 multiple_always_comb_assign FAIL Multiple drivers for target 'z'
 multiple_continuous_assign FAIL Multiple drivers for target 'n'
 multiple_seq_writers_same_flop FAIL Multiple drivers for target 'q.d'

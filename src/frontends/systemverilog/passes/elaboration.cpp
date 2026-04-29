@@ -5369,7 +5369,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         resolveGenerateMemberInPlace(genBlock, resCtx);
     }
 
-    // Resolve submodules and create MODULE nodes in the DFG
+    // Resolve submodules and record instance bindings for downstream DFG inlining
     for (const auto& moduleInst: unresolved.hierarchyInstantiation){
         std::string submoduleName(moduleInst->type.valueText());
         auto it = moduleLookup.find(submoduleName);

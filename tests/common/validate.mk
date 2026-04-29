@@ -8,6 +8,7 @@ validate:
 	$(MAKE) -C ../vcd-diff compare
 	! rg -n "UNARY_PLUS|LOGICAL_NOT|LOGICAL_AND|LOGICAL_OR" \
 		../custom-sim/debug_output -g '*.json' -g '*.dot'
+	! rg -n "MODULE" ../custom-sim/debug_output -g '*.json' -g '*.dot'
 
 waves:
 	$(MAKE) -C ../vcd-diff waves

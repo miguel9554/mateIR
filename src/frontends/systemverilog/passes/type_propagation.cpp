@@ -117,11 +117,6 @@ bool inferNodeType(DFGNode* node) {
             throw CompilerError(std::format(
                 "Type propagation: CONST node '{}' has no type", node->str()), node->loc);
 
-        case DFGOp::MODULE:
-            throw CompilerError(std::format(
-                "Type propagation: MODULE node '{}' encountered (should have been inlined)",
-                node->name), node->loc);
-
         // SUB: result is always signed (subtraction can produce negative values)
         case DFGOp::SUB: {
             auto [lhs, rhs] = binaryNodes(node);

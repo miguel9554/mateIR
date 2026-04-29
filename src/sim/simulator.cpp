@@ -432,8 +432,6 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             }
             return SimValue::concat(parts);
         }
-        case DFGOp::MODULE:
-            throw CompilerError("Simulator: MODULE nodes should not exist after dfg_inline pass", node);
     }
 
     throw CompilerError(std::format("Simulator: unhandled op {}", to_string(node->kind())), node);

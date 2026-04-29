@@ -22,7 +22,6 @@ enum class DFGOp {
     OUTPUT,     // Primary output (module port)
     SIGNAL,     // Internal signal (named placeholder)
     CONST,      // Constant value (data: int64_t)
-    MODULE,         // Submodule instance: name=instance_name, data=module_type_name, in=input_port_drivers
     UNARY_NEGATE,
     // Arithmetic ops
     ADD,
@@ -75,7 +74,6 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::SHL: return "SHL";
         case DFGOp::ASR: return "ASR";
         case DFGOp::MUX: return "MUX";
-        case DFGOp::MODULE: return "MODULE";
         case DFGOp::UNARY_NEGATE: return "UNARY_NEGATE";
         case DFGOp::BITWISE_NOT: return "BITWISE_NOT";
         case DFGOp::BITWISE_AND:  return "BITWISE_AND";
@@ -102,8 +100,6 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::OUTPUT: return -1;
         // SIGNAL: 0 (undriven during construction) or 1 (driven) — validated separately
         case DFGOp::SIGNAL: return -1;
-        // MODULE: variable input count (depends on ports)
-        case DFGOp::MODULE: return -1;
         // MUX: variable input count, validated separately
         case DFGOp::MUX:    return -1;
 
@@ -165,11 +161,6 @@ struct DFGMuxArm {
     DFGOutput data;
 };
 
-struct DFGModuleInput {
-    std::string port;
-    DFGOutput driver;
-};
-
 struct DFGInputPayload {};
 struct DFGOutputPayload { std::optional<DFGOutput> driver; };
 struct DFGSignalPayload { std::optional<DFGOutput> driver; };
@@ -179,7 +170,6 @@ struct DFGBinaryPayload { DFGOp op; DFGOutput lhs; DFGOutput rhs; };
 struct DFGSlicePayload { DFGOutput source; DFGOutput high; DFGOutput low; };
 struct DFGConcatPayload { std::vector<DFGOutput> parts; };
 struct DFGMuxPayload { DFGOutput selector; std::vector<DFGMuxArm> arms; };
-struct DFGModulePayload { std::string module_type; std::vector<std::string> output_names; std::vector<DFGModuleInput> inputs; };
 
 struct DFGUnaryInputs {
     DFGOutput operand;
@@ -205,8 +195,7 @@ using DFGPayload = std::variant<
     DFGBinaryPayload,
     DFGSlicePayload,
     DFGConcatPayload,
-    DFGMuxPayload,
-    DFGModulePayload
+    DFGMuxPayload
 >;
 
 inline bool isUnaryDFGOp(DFGOp op) {
@@ -263,7 +252,6 @@ struct DFGNode {
 private:
     DFGPayload payload_;
     mutable std::vector<DFGOutput> input_cache_;
-    mutable std::vector<std::string> input_name_cache_;
     mutable std::vector<int64_t> mux_value_cache_;
 
 public:
@@ -285,7 +273,6 @@ public:
         if (std::holds_alternative<DFGSlicePayload>(payload_)) return DFGOp::SLICE;
         if (std::holds_alternative<DFGConcatPayload>(payload_)) return DFGOp::CONCAT;
         if (std::holds_alternative<DFGMuxPayload>(payload_)) return DFGOp::MUX;
-        if (std::holds_alternative<DFGModulePayload>(payload_)) return DFGOp::MODULE;
         throw CompilerError("DFGNode: invalid payload", this);
     }
 
@@ -310,8 +297,6 @@ private:
         } else if (auto* p = std::get_if<DFGMuxPayload>(&payload_)) {
             input_cache_.push_back(p->selector);
             for (const auto& arm : p->arms) input_cache_.push_back(arm.data);
-        } else if (auto* p = std::get_if<DFGModulePayload>(&payload_)) {
-            for (const auto& input : p->inputs) input_cache_.push_back(input.driver);
         }
         return input_cache_;
     }
@@ -346,23 +331,6 @@ public:
     }
 
     int64_t constValue() const { return std::get<DFGConstPayload>(payload_).value; }
-    const std::string& moduleType() const { return std::get<DFGModulePayload>(payload_).module_type; }
-
-    const std::vector<std::string>& outputNames() const {
-        return std::get<DFGModulePayload>(payload_).output_names;
-    }
-
-    const std::vector<std::string>& inputNames() const {
-        input_name_cache_.clear();
-        for (const auto& input : std::get<DFGModulePayload>(payload_).inputs) {
-            input_name_cache_.push_back(input.port);
-        }
-        return input_name_cache_;
-    }
-
-    const std::vector<DFGModuleInput>& moduleInputs() const {
-        return std::get<DFGModulePayload>(payload_).inputs;
-    }
 
     const std::vector<int64_t>& muxValues() const {
         mux_value_cache_.clear();
@@ -372,33 +340,9 @@ public:
         return mux_value_cache_;
     }
 
-    int num_outputs() const {
-        if (auto* p = std::get_if<DFGModulePayload>(&payload_)) {
-            return p->output_names.empty() ? 1 : static_cast<int>(p->output_names.size());
-        }
-        return 1;
-    }
-
-    int output_index(const std::string& oname) const {
-        const auto& names = outputNames();
-        for (int i = 0; i < static_cast<int>(names.size()); i++)
-            if (names[i] == oname) return i;
-        return -1;
-    }
-
-    int input_index(const std::string& iname) const {
-        const auto& names = inputNames();
-        for (int i = 0; i < static_cast<int>(names.size()); i++)
-            if (names[i] == iname) return i;
-        return -1;
-    }
+    int num_outputs() const { return 1; }
 
     DFGOutput output(int port = 0) { return {this, port}; }
-    DFGOutput output(const std::string& oname) {
-        int index = output_index(oname);
-        if (index < 0) throw CompilerError(std::format("DFG output '{}' not found on {}", oname, str()), this);
-        return {this, index};
-    }
 
     bool isMux() const { return opValue() == DFGOp::MUX; }
     DFGOutput muxSelector() const { return std::get<DFGMuxPayload>(payload_).selector; }
@@ -465,15 +409,6 @@ public:
         throw CompilerError(std::format("clearDriver: target {} is not OUTPUT or SIGNAL", str()), this);
     }
 
-    void appendModuleInput(std::string portName, DFGOutput driver) {
-        auto& payload = std::get<DFGModulePayload>(payload_);
-        for (const auto& existing : payload.inputs) {
-            if (existing.port == portName)
-                throw CompilerError(std::format("MODULE {} has duplicate input port {}", name, portName), this);
-        }
-        payload.inputs.push_back({std::move(portName), driver});
-    }
-
     void rewriteToConst(int64_t value) {
         payload_ = DFGConstPayload{value};
         name.clear();
@@ -523,9 +458,6 @@ public:
             else p->arms.at(index - 1).data = replacement;
             return;
         }
-        if (auto* p = std::get_if<DFGModulePayload>(&payload_)) {
-            p->inputs.at(index).driver = replacement; return;
-        }
         throw CompilerError("replaceInputAt: node has no inputs", this);
     }
 
@@ -549,7 +481,6 @@ public:
         if (!instance_path.empty()) result += "@" + instance_path;
         if (!name.empty()) result += "(" + name + ")";
         if (opValue() == DFGOp::CONST) result += "[" + std::to_string(constValue()) + "]";
-        if (opValue() == DFGOp::MODULE) result += "{" + moduleType() + "}";
         return result;
     }
 };
@@ -895,24 +826,6 @@ public:
         return mux(sel, {1, 0}, {t, f}, name);
     }
 
-    // Create a MODULE instance node
-    // moduleName = the type of module being instantiated
-    // instanceName = the name of this instance
-    // in = drivers for each input port (added after creation)
-    DFGNode* module(const std::string& moduleName, const std::string& instanceName,
-                    const std::vector<std::string>& outputPortNames = {}) {
-        nodes.push_back(std::make_unique<DFGNode>(
-            DFGNode::ConstructionKey{}, DFGModulePayload{moduleName, outputPortNames, {}}, instanceName));
-        return nodes.back().get();
-    }
-
-    // Add an input port binding to a MODULE node, keeping in and input_names in sync.
-    void addModuleInput(DFGNode* moduleNode, std::string portName, DFGOutput driver) {
-        if (!moduleNode || moduleNode->kind() != DFGOp::MODULE)
-            throw CompilerError("addModuleInput: target is not a MODULE node");
-        moduleNode->appendModuleInput(std::move(portName), driver);
-    }
-
     // Helper for unary operations (single input)
     DFGNode* binaryOp(DFGOp op, DFGNode* a, DFGNode* b, const std::string& name = "") {
         if (!isBinaryDFGOp(op))
@@ -1025,22 +938,6 @@ public:
                 throw CompilerError(std::format(
                     "DFG validate: SIGNAL {} has {} inputs (expected 0 or 1)",
                     node->name, actual), node.get());
-
-            // MODULE: input_names must be parallel to in
-            if (node->kind() == DFGOp::MODULE && node->inputNames().size() != node->rawInputs().size())
-                throw CompilerError(std::format(
-                    "DFG validate: MODULE {} has {} inputs but {} input_names",
-                    node->name, node->rawInputs().size(), node->inputNames().size()), node.get());
-
-            // MODULE: no duplicate input port names
-            if (node->kind() == DFGOp::MODULE) {
-                const auto& inputNames = node->inputNames();
-                std::set<std::string> seen(inputNames.begin(), inputNames.end());
-                if (seen.size() != inputNames.size())
-                    throw CompilerError(std::format(
-                        "DFG validate: MODULE {} has duplicate input port names",
-                        node->name), node.get());
-            }
 
             // Variable-count ops with specific constraints
             if (node->kind() == DFGOp::OUTPUT && actual > 1) {

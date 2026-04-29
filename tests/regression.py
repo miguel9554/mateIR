@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Run regression tests defined in a plain-text manifest."""
+import argparse
+import os
 import shlex
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -95,7 +98,10 @@ def run_validate(name):
     """Run make validate for a test case. Returns (success, output)."""
     work_dir = TESTS_DIR / name / "work" / "validate"
     result = subprocess.run(
-        ["make", "validate"],
+        # SIM_BUILD_TARGET=noop prevents each per-test sub-make from re-invoking
+        # cmake on the shared build directory, which would race when tests run in
+        # parallel. The simulator is built once upfront before this point.
+        ["make", "validate", "SIM_BUILD_TARGET=noop"],
         cwd=work_dir,
         capture_output=True,
         text=True,
@@ -105,7 +111,7 @@ def run_validate(name):
 
 
 def ensure_simulator():
-    """Build the sanitized simulator used by expected-failure tests."""
+    """Build the sanitized simulator before running tests."""
     result = subprocess.run(
         ["make", "-C", str(REPO_ROOT), "sanitized"],
         capture_output=True,
@@ -156,7 +162,28 @@ def run_expected_failure(name, expected):
     return ok, output
 
 
+def run_case(case):
+    """Run a single test case. Returns (name, ok, output)."""
+    name = case["name"]
+    if case["kind"] == "validate":
+        # run_clean(name)
+        ok, output = run_validate(name)
+    else:
+        ok, output = run_expected_failure(name, case["expected_error"])
+    return name, ok, output
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Run regression tests.")
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Number of tests to run in parallel (default: number of CPUs)",
+    )
+    args = parser.parse_args()
+
     try:
         cases = load_test_cases()
     except RuntimeError as exc:
@@ -167,30 +194,27 @@ def main():
         print("No test cases found.")
         sys.exit(1)
 
-    has_expected_failure = any(case["kind"] == "expected_failure" for case in cases)
-    if has_expected_failure:
-        print("Building diagnostic simulator for expected-failure tests...", flush=True)
-        ok, output = ensure_simulator()
-        if not ok:
-            print(f"{RED}Failed to build diagnostic simulator{RESET}")
-            print(output)
-            sys.exit(1)
+    print("Building simulator...", flush=True)
+    ok, output = ensure_simulator()
+    if not ok:
+        print(f"{RED}Failed to build simulator{RESET}")
+        print(output)
+        sys.exit(1)
+
+    jobs = max(1, args.jobs)
+    print(f"Running {len(cases)} tests with {jobs} worker(s)...", flush=True)
 
     results = {}
-    for case in cases:
-        name = case["name"]
-        kind = case["kind"]
-        print(f"Running {name}...", flush=True)
-        if kind == "validate":
-            # run_clean(name)
-            ok, output = run_validate(name)
-        else:
-            ok, output = run_expected_failure(name, case["expected_error"])
-        results[name] = (ok, output)
-        if ok:
-            print(f"  {GREEN}PASS{RESET}")
-        else:
-            print(f"  {RED}FAIL{RESET}")
+    completed = 0
+    total = len(cases)
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {executor.submit(run_case, case): case for case in cases}
+        for future in as_completed(futures):
+            name, ok, output = future.result()
+            results[name] = (ok, output)
+            completed += 1
+            status = f"{GREEN}PASS{RESET}" if ok else f"{RED}FAIL{RESET}"
+            print(f"  [{completed}/{total}] {status}  {name}", flush=True)
 
     # Print failure details first
     failures = [(n, out) for n, (ok, out) in results.items() if not ok]

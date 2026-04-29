@@ -22,6 +22,7 @@ domains_internal_yaml_reject_fail FAIL main domains YAML is only supported for t
 domains_output_classification_fail FAIL is not a top-level input
 enum_local_test PASS
 enum_top_test PASS
+enum_cast_width_fail FAIL cast width mismatch
 full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'
 func_test PASS
 generate_test PASS
@@ -35,21 +36,26 @@ global_domains_repeated_instances PASS
 global_domains_unsupported_clock_expr FAIL global_domain_resolve: unsupported clock/reset connection expression
 global_domains_wrapper_clock_alias PASS
 inout_arg_fail FAIL inout ports not supported
+logical_temp_ops PASS
 multiple_always_comb_assign FAIL Multiple drivers for target 'z'
 multiple_continuous_assign FAIL Multiple drivers for target 'n'
 multiple_seq_writers_same_flop FAIL Multiple drivers for target 'q.d'
 multiple_submodule_output_drivers FAIL Multiple drivers for target 'n'
 overlapping_partial_writes FAIL Overlapping partial writes for target 'bus'
 partial_then_full_write_conflict FAIL Multiple drivers for target 'bus'
+partial_branch_merge PASS
 phase8_multiclock_cdc_fail FAIL samples Async input without a declared synchronizer
 phase8_same_clock_merge PASS
 pkg_scope_test PASS
 ref_arg_fail FAIL ref ports not supported
+same_origin_partial_overwrite PASS
 static_func_fail FAIL Only 'automatic' functions/tasks are supported
 static_async_mix PASS
 static_flop_d PASS
 static_sync_mix PASS
 static_top_output PASS
+submodule_output_bitselect_partial PASS
+submodule_multi_output_partial PASS
 subword_assign PASS
 task_func_test PASS
 uart PASS

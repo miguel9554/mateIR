@@ -3,40 +3,36 @@
 #include <algorithm>
 #include <format>
 #include <functional>
+#include <set>
 #include <string>
 
 namespace mate {
 
 namespace {
 
-void inlineModuleNode(Module& parent, DFGNode* moduleNode) {
-    const std::string& moduleTypeName = moduleNode->moduleType();
-    const std::string& instanceName = moduleNode->name;
+void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
+    const std::string& moduleTypeName = binding.module_type;
+    const std::string& instanceName = binding.instance_name;
 
-    // Find the sub Module by instance name
-    Module* sub = nullptr;
-    for (auto& s : parent.hierarchyInstantiation) {
-        if (s.instance_name == instanceName) {
-            sub = &s;
-            break;
-        }
-    }
-    if (!sub) {
+    auto it = std::find_if(parent.hierarchyInstantiation.begin(),
+                           parent.hierarchyInstantiation.end(),
+                           [&](auto& s) { return s.instance_name == instanceName; });
+    if (it == parent.hierarchyInstantiation.end()) {
         throw CompilerError(std::format(
-            "inlineDFGs: MODULE node '{}' (type '{}') "
-            "not found in hierarchyInstantiation",
-            instanceName, moduleTypeName), moduleNode);
+            "inlineDFGs: instance binding '{}' (type '{}') not found in hierarchyInstantiation",
+            instanceName, moduleTypeName));
     }
+    Module* sub = &(*it);
     if (!sub->dfg) {
         throw CompilerError(std::format(
             "inlineDFGs: DFG for instance '{}' (type '{}') has already been consumed",
-            instanceName, moduleTypeName), moduleNode);
+            instanceName, moduleTypeName));
     }
 
     // Step 1: Rewire inputs — replace uses of sub INPUT nodes with parent drivers
-    for (const auto& binding : moduleNode->moduleInputs()) {
-        const std::string& portName = binding.port;
-        DFGOutput driver = binding.driver;
+    for (const auto& inputBinding : binding.inputs) {
+        const std::string& portName = inputBinding.port_name;
+        DFGOutput driver = inputBinding.driver;
 
         DFGNode* subInputNode = sub->dfg->getInputNode("", portName);
         if (!subInputNode) continue;
@@ -69,20 +65,11 @@ void inlineModuleNode(Module& parent, DFGNode* moduleNode) {
             fixDescendants(child);
     }
 
-    // Step 2: Rewire outputs — replace {moduleNode, portIdx} references in parent
-    for (auto& node : parent.dfg->nodes) {
-        DFGTraversal::forEachInput(node.get(), [&](size_t inputIndex, const DFGOutput& inp) {
-            if (inp.node == moduleNode) {
-                int portIdx = inp.port;
-                if (portIdx < static_cast<int>(moduleNode->outputNames().size())) {
-                    const std::string& outName = moduleNode->outputNames()[portIdx];
-                    DFGNode* subOutputNode = sub->dfg->getOutputNode("", outName);
-                    if (subOutputNode) {
-                        node->replaceInputAt(inputIndex, DFGOutput{subOutputNode, 0});
-                    }
-                }
-            }
-        });
+    // Step 2: Rewire parent-side child output placeholders to actual child outputs.
+    for (const auto& [portName, placeholder] : binding.output_placeholders) {
+        DFGNode* subOutputNode = sub->dfg->getOutputNode("", portName);
+        if (!subOutputNode) continue;
+        parent.dfg->redirectConsumers(placeholder, DFGOutput{subOutputNode, 0});
     }
 
     // Step 3: Set instance_path on all sub nodes (must happen before adopt so
@@ -114,16 +101,7 @@ void inlineModuleNode(Module& parent, DFGNode* moduleNode) {
     }
     sub->dfg->nodes.clear();
 
-    // Step 6: Remove MODULE node from parent.dfg
-    auto& parentNodes = parent.dfg->nodes;
-    parentNodes.erase(
-        std::remove_if(parentNodes.begin(), parentNodes.end(),
-            [moduleNode](const std::unique_ptr<DFGNode>& n) {
-                return n.get() == moduleNode;
-            }),
-        parentNodes.end());
-
-    // Step 7: Null sub DFG — binding pointers remain valid since the DFGNode
+    // Step 6: Null sub DFG — binding pointers remain valid since the DFGNode
     // objects now live in parent.dfg->nodes.
     sub->dfg.reset();
 }
@@ -138,17 +116,26 @@ void inlineDFGs(Module& top) {
 
     if (!top.dfg) return;
 
-    // Collect all MODULE nodes before modifying the nodes vector
-    std::vector<DFGNode*> moduleNodes;
-    for (const auto& node : top.dfg->nodes) {
-        if (node->kind() == DFGOp::MODULE) {
-            moduleNodes.push_back(node.get());
+    std::set<std::string> seenInstanceNames;
+    for (const auto& child : top.hierarchyInstantiation) {
+        if (!seenInstanceNames.insert(child.instance_name).second) {
+            throw CompilerError(std::format(
+                "inlineDFGs: duplicate child instance_name '{}' in module '{}'",
+                child.instance_name, top.name));
+        }
+    }
+    for (const auto& binding : top.instance_bindings) {
+        if (!seenInstanceNames.contains(binding.instance_name)) {
+            throw CompilerError(std::format(
+                "inlineDFGs: instance binding '{}' has no matching child module in '{}'",
+                binding.instance_name, top.name));
         }
     }
 
-    for (DFGNode* moduleNode : moduleNodes) {
-        inlineModuleNode(top, moduleNode);
+    for (auto& binding : top.instance_bindings) {
+        inlineModuleNode(top, binding);
     }
+    top.instance_bindings.clear();
 }
 
 } // namespace mate

@@ -130,13 +130,14 @@ The compiler runs the following passes in order on the top module's flat DFG:
 |---|------|-------------|
 | 0 | elaboration | Verilog AST → Module + DFG per module |
 | 1 | dfg_inline | Inline submodule DFGs into the top-level flat DFG |
-| 2 | concat_cleanup | Resolve temporary CONCAT_ALIGN nodes from partial LHS assigns |
-| 3 | constant_fold | Fold constant expressions; simplify constant-selector MUXes |
-| 4 | type_propagation | Infer bit-widths across the DFG |
-| 5–8 | condition_normalization + constant_fold (×2) | Normalise and re-fold MUX conditions |
-| 9 | flop_resolve | Identify clock/reset from `always_ff` triggers; strip reset MUX; tag ports |
-| 10 | dce | Dead-code elimination |
-| 11 | io_domains_set | Apply `.domains.yaml`; assign clock domains to all ports and flops |
+| 2 | constant_fold | Fold constant expressions; simplify constant-selector MUXes |
+| 3 | type_propagation | Infer bit-widths across the DFG |
+| 4–7 | condition_normalization + constant_fold (×2) | Normalise and re-fold MUX conditions |
+| 8 | flop_resolve | Identify clock/reset from `always_ff` triggers; strip reset MUX; tag ports |
+| 9 | load_top_io_domains | Apply `.domains.yaml`; assign top-level IO domains |
+| 10 | cdc_annotations | Load explicit CDC synchronizer annotations |
+| 11 | global_domain_resolve | Propagate clock domains through hierarchy |
+| 12 | dce | Dead-code elimination |
 
 After the pipeline, combinational dependency analysis validates that there are
 no combinational loops in the design.

@@ -62,28 +62,10 @@ std::string DFG::renderDot(const std::string& graphName,
             case DFGOp::SHL: ss << "<<<"; break;
             case DFGOp::ASR: ss << ">>>"; break;
             case DFGOp::MUX: ss << "MUX"; break;
-            case DFGOp::MODULE:
-                ss << "MODULE\\n" << node->name;
-                ss << "\\n(" << node->moduleType() << ")";
-                if (!node->outputNames().empty()) {
-                    ss << "\\nouts: ";
-                    const auto& outputNames = node->outputNames();
-                    for (size_t oi = 0; oi < outputNames.size(); ++oi) {
-                        if (oi > 0) ss << ", ";
-                        ss << outputNames[oi];
-                    }
-                }
-                break;
             case DFGOp::SLICE: ss << "SLICE"; break;
             case DFGOp::CONCAT: ss << "CONCAT"; break;
-            case DFGOp::CONCAT_ALIGN: ss << "CONCAT_ALIGN"; break;
-            case DFGOp::CAST: ss << "CAST"; break;
-            case DFGOp::UNARY_PLUS: ss << "+"; break;
             case DFGOp::UNARY_NEGATE: ss << "-"; break;
             case DFGOp::BITWISE_NOT: ss << "~"; break;
-            case DFGOp::LOGICAL_NOT: ss << "!"; break;
-            case DFGOp::LOGICAL_AND:  ss << "&&"; break;
-            case DFGOp::LOGICAL_OR:   ss << "||"; break;
             case DFGOp::BITWISE_AND:  ss << "&"; break;
             case DFGOp::BITWISE_OR:   ss << "|"; break;
             case DFGOp::BITWISE_XOR:  ss << "^"; break;
@@ -128,11 +110,6 @@ std::string DFG::renderDot(const std::string& graphName,
                 break;
             case DFGOp::SLICE:
                 if (j == 0) return "src";
-                if (j == 1) return "hi";
-                if (j == 2) return "lo";
-                break;
-            case DFGOp::CONCAT_ALIGN:
-                if (j == 0) return "expr";
                 if (j == 1) return "hi";
                 if (j == 2) return "lo";
                 break;
@@ -225,21 +202,6 @@ std::string DFG::renderJson(int indent, const std::set<const DFGNode*>* filter) 
         if (node->kind() == DFGOp::CONST) {
             ss << indentStr(indent + 3) << "\"value\": " << node->constValue() << ",\n";
         }
-        if (node->kind() == DFGOp::MODULE) {
-            ss << indentStr(indent + 3) << "\"module_type\": \"" << node->moduleType() << "\",\n";
-        }
-
-        // Add output_names for multi-output nodes
-        if (node->kind() == DFGOp::MODULE && !node->outputNames().empty()) {
-            ss << indentStr(indent + 3) << "\"output_names\": [";
-            const auto& outputNames = node->outputNames();
-            for (size_t j = 0; j < outputNames.size(); ++j) {
-                ss << "\"" << outputNames[j] << "\"";
-                if (j < outputNames.size() - 1) ss << ", ";
-            }
-            ss << "],\n";
-        }
-
         // Add type info if available
         if (node->hasType()) {
             ss << indentStr(indent + 3) << "\"type\": {\"width\": " << node->type->width

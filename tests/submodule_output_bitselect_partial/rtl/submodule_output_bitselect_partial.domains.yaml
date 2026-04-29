@@ -1,0 +1,3 @@
+module_name: submodule_output_bitselect_partial
+async_domain:
+- in_bus

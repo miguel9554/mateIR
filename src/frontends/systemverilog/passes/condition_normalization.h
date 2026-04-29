@@ -5,7 +5,6 @@
 namespace mate {
 
 // Normalize boolean conditions in a DFG:
-// - Eliminate LOGICAL_NOT (rewrite to BITWISE_NOT or EQ)
 // - Simplify 1-bit EQ-with-constant
 // - Cancel double BITWISE_NOT
 // - Normalize MUX selectors (remove negated selectors by swapping arms)

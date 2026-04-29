@@ -36,6 +36,8 @@ struct PartialSliceDriver {
     int64_t low;
     int64_t high;
     DFGNode* expr;
+    std::optional<std::string> origin;
+    std::optional<SourceLoc> loc;
 };
 
 struct PartialTargetState {
@@ -102,22 +104,13 @@ struct ResolutionContext {
     // assignments and submodule output connections use distinct origins.
     std::string current_write_origin;
 
-    // Packed targets that were normalized into partial-write aggregate mode.
-    // Each target keeps disjoint slice drivers and is materialized as a single
-    // CONCAT of CONCAT_ALIGN nodes.
+    // Packed targets normalized into canonical partial-write state.
+    // Each target keeps disjoint slice drivers and is materialized as a single CONCAT.
     PartialDriverMap partial_drivers;
-
-    struct PartialWrite {
-        int64_t low;
-        int64_t high;
-        std::string origin;
-        std::optional<SourceLoc> loc;
-    };
 
     struct TargetWriteState {
         std::optional<std::string> full_origin;
         std::optional<SourceLoc> full_loc;
-        std::vector<PartialWrite> partial_writes;
     };
 
     // Elaborated target key -> user-visible write state accumulated so far.
@@ -197,10 +190,11 @@ void recordFullWrite(ResolutionContext& ctx,
     if (state.full_origin && *state.full_origin != origin) {
         throwWriteConflict(targetName, "Multiple drivers", writeLoc, state.full_loc);
     }
-
-    for (const auto& partial : state.partial_writes) {
-        if (partial.origin != origin) {
-            throwWriteConflict(targetName, "Multiple drivers", writeLoc, partial.loc);
+    if (auto it = ctx.partial_drivers.find(targetName); it != ctx.partial_drivers.end()) {
+        for (const auto& slice : it->second.slices) {
+            if (slice.origin && *slice.origin != origin) {
+                throwWriteConflict(targetName, "Multiple drivers", writeLoc, slice.loc);
+            }
         }
     }
 
@@ -208,46 +202,6 @@ void recordFullWrite(ResolutionContext& ctx,
         state.full_origin = origin;
         state.full_loc = writeLoc;
     }
-}
-
-void recordPartialWrite(ResolutionContext& ctx,
-                        const std::string& targetName,
-                        int64_t low,
-                        int64_t high,
-                        const std::optional<SourceLoc>& writeLoc,
-                        const std::string& origin) {
-    auto& state = ctx.write_states[canonicalTargetKey(ctx, targetName)];
-
-    if (state.full_origin && *state.full_origin != origin) {
-        throwWriteConflict(targetName, "Multiple drivers", writeLoc, state.full_loc);
-    }
-
-    for (const auto& partial : state.partial_writes) {
-        if (partial.origin == origin) continue;
-        bool overlaps = !(high < partial.low || low > partial.high);
-        if (overlaps) {
-            throwWriteConflict(targetName, "Overlapping partial writes", writeLoc, partial.loc);
-        }
-    }
-
-    state.partial_writes.push_back({low, high, origin, writeLoc});
-}
-
-DFGNode* appendConcatInput(DFG& graph, DFGNode* existingDriver, DFGNode* newPart,
-                           const std::optional<SourceLoc>& loc) {
-    std::vector<DFGNode*> parts;
-    if (existingDriver && existingDriver->kind() == DFGOp::CONCAT) {
-        parts.reserve(existingDriver->concatParts().size() + 1);
-        for (const auto& edge : existingDriver->concatParts()) {
-            parts.push_back(edge.node);
-        }
-    } else if (existingDriver) {
-        parts.push_back(existingDriver);
-    }
-    parts.push_back(newPart);
-    auto* concatNode = graph.concat(parts);
-    if (loc) concatNode->loc = *loc;
-    return concatNode;
 }
 
 static int64_t intPowConst(int64_t base, int64_t exp) {
@@ -341,6 +295,9 @@ struct ExprValue {
 // Build an expression that may be scalar or array-valued.
 static ExprValue buildExprValue(const slang::syntax::ExpressionSyntax* expr,
                                 ResolutionContext& ctx);
+
+static ExprValue buildScalarExprValue(const slang::syntax::ExpressionSyntax* expr,
+                                      ResolutionContext& ctx);
 
 // Build a scalar-only expression. Throws if the expression resolves to an array.
 static DFGNode* buildExprDFG(const slang::syntax::ExpressionSyntax* expr,
@@ -475,11 +432,18 @@ static void sortSlices(PartialTargetState& state) {
 }
 
 static bool partialStatesEqual(const PartialTargetState& lhs, const PartialTargetState& rhs) {
+    auto sameLoc = [](const std::optional<SourceLoc>& a, const std::optional<SourceLoc>& b) {
+        if (a.has_value() != b.has_value()) return false;
+        if (!a) return true;
+        return a->str() == b->str();
+    };
     if (lhs.type.width != rhs.type.width || lhs.type.isSigned() != rhs.type.isSigned()) return false;
     if (lhs.slices.size() != rhs.slices.size()) return false;
     for (size_t i = 0; i < lhs.slices.size(); ++i) {
         if (lhs.slices[i].low != rhs.slices[i].low || lhs.slices[i].high != rhs.slices[i].high ||
-                lhs.slices[i].expr != rhs.slices[i].expr) {
+                lhs.slices[i].expr != rhs.slices[i].expr ||
+                lhs.slices[i].origin != rhs.slices[i].origin ||
+                !sameLoc(lhs.slices[i].loc, rhs.slices[i].loc)) {
             return false;
         }
     }
@@ -509,22 +473,14 @@ static DFGNode* materializePartialTarget(ResolutionContext& ctx,
                                          PartialTargetState& state,
                                          const std::optional<SourceLoc>& loc) {
     sortSlices(state);
-    std::vector<DFGNode*> alignNodes;
-    alignNodes.reserve(state.slices.size());
+    std::vector<DFGNode*> parts;
+    parts.reserve(state.slices.size());
     for (const auto& slice : state.slices) {
-        auto* highConst = ctx.graph.constant(slice.high);
-        auto* lowConst = ctx.graph.constant(slice.low);
-        if (loc) {
-            highConst->loc = *loc;
-            lowConst->loc = *loc;
-        }
-        auto* align = ctx.graph.concatAlign(slice.expr, highConst, lowConst);
-        if (loc) align->loc = *loc;
-        alignNodes.push_back(align);
+        parts.push_back(slice.expr);
     }
     DFGNode* driver = nullptr;
-    if (!alignNodes.empty()) {
-        driver = ctx.graph.concat(alignNodes);
+    if (!parts.empty()) {
+        driver = ctx.graph.concat(parts);
         if (loc) driver->loc = *loc;
         connectDriver(ctx, targetName, driver);
     } else if (auto* node = lookupTargetNode(ctx, targetName)) {
@@ -674,21 +630,6 @@ static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver
                 break;
             }
 
-            if (part->kind() == DFGOp::CONCAT_ALIGN) {
-                auto align = part->concatAlignInputs();
-                if (align.high.node->kind() != DFGOp::CONST ||
-                    align.low.node->kind() != DFGOp::CONST) {
-                    ok = false;
-                    break;
-                }
-                int64_t high = align.high.node->constValue();
-                int64_t low = align.low.node->constValue();
-                if (high < low) std::swap(high, low);
-                slices.push_back({low, high, align.expr.node});
-                nextHigh = low - 1;
-                continue;
-            }
-
             int partWidth = 0;
             if (part->type.has_value()) {
                 partWidth = part->type->width;
@@ -698,7 +639,7 @@ static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver
                 break;
             }
             int64_t low = nextHigh - partWidth + 1;
-            slices.push_back({low, nextHigh, part});
+            slices.push_back({low, nextHigh, part, std::nullopt, std::nullopt});
             nextHigh = low - 1;
         }
 
@@ -709,7 +650,7 @@ static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver
         }
     }
 
-    state.slices.push_back({0, type.width - 1, driver});
+    state.slices.push_back({0, type.width - 1, driver, std::nullopt, std::nullopt});
     return state;
 }
 
@@ -851,7 +792,7 @@ static std::optional<PartialTargetState> buildMergedPartialDriver(
             mux->loc = loc;
             result = mux;
         }
-        if (result) merged.slices.push_back({low, high, result});
+        if (result) merged.slices.push_back({low, high, result, std::nullopt, std::nullopt});
     }
     sortSlices(merged);
     return merged;
@@ -863,6 +804,11 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
                                   const std::optional<DriverMap>& fallbackBranch,
                                   const DriverSnapshot& baseline,
                                   const std::optional<SourceLoc>& loc) {
+    std::string targetBaseName = targetName;
+    if (targetBaseName.ends_with(".d") || targetBaseName.ends_with(".q")) {
+        targetBaseName = targetBaseName.substr(0, targetBaseName.size() - 2);
+    }
+    const Type* targetType = lookupDeclaredType(targetBaseName, ctx);
     DFGNode* retained = getRetainedDriver(ctx, targetName, baseline, loc);
     auto branchValue = [&](const DriverMap& modified) -> DFGNode* {
         if (auto it = modified.find(targetName); it != modified.end()) {
@@ -888,6 +834,9 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
         if (selected == result) continue;
         auto* mux = ctx.graph.mux(it->condition, selected, result);
         mux->loc = loc;
+        if (targetType && targetType->isEnum()) {
+            mux->type = *targetType;
+        }
         result = mux;
     }
     return result;
@@ -957,6 +906,54 @@ static int64_t selectorCodeCountOrThrow(DFGNode* selectorNode,
     return int64_t(1) << width;
 }
 
+static DFGNode* lowerTruth(DFGNode* value,
+                           ResolutionContext& ctx,
+                           const std::optional<SourceLoc>& loc) {
+    if (value->hasType() && value->type->unpacked_dims.empty() && value->type->width == 1) {
+        return value;
+    }
+
+    auto* node = ctx.graph.reductionOr(value);
+    node->type = Type::makeInteger(1, false);
+    if (loc) node->loc = *loc;
+    return node;
+}
+
+static DFGNode* lowerLogicalNot(DFGNode* value,
+                                ResolutionContext& ctx,
+                                const std::optional<SourceLoc>& loc) {
+    auto* node = ctx.graph.bitwiseNot(lowerTruth(value, ctx, loc));
+    node->type = Type::makeInteger(1, false);
+    if (loc) node->loc = *loc;
+    return node;
+}
+
+static DFGNode* lowerLogicalBinary(DFGOp op,
+                                   DFGNode* lhs,
+                                   DFGNode* rhs,
+                                   ResolutionContext& ctx,
+                                   const std::optional<SourceLoc>& loc) {
+    auto* truthLhs = lowerTruth(lhs, ctx, loc);
+    auto* truthRhs = lowerTruth(rhs, ctx, loc);
+
+    DFGNode* node = nullptr;
+    switch (op) {
+        case DFGOp::BITWISE_AND:
+            node = ctx.graph.bitwiseAnd(truthLhs, truthRhs);
+            break;
+        case DFGOp::BITWISE_OR:
+            node = ctx.graph.bitwiseOr(truthLhs, truthRhs);
+            break;
+        default:
+            throw CompilerError(
+                std::format("Unsupported logical binary lowering op {}", op), loc);
+    }
+
+    node->type = Type::makeInteger(1, false);
+    if (loc) node->loc = *loc;
+    return node;
+}
+
 static int64_t normalizeSelectorCode(int64_t value,
                                      DFGNode* selectorNode,
                                      const std::optional<SourceLoc>& loc) {
@@ -990,6 +987,10 @@ static void mergeIfBranches(ResolutionContext& ctx,
                 ctx, signalName, branches, fallbackBranch, fallbackPartialBranch, baseline, loc);
             if (merged) {
                 ctx.partial_drivers[signalName] = *merged;
+                for (auto& slice : ctx.partial_drivers[signalName].slices) {
+                    slice.origin = ctx.current_write_origin;
+                    slice.loc = loc;
+                }
                 DFGNode* aggregate = materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
                 if (!ctx.is_sequential && aggregate) {
                     ctx.combDrivers[signalName] = aggregate;
@@ -1079,9 +1080,13 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                 }
                 DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
                 result->loc = loc;
-                if (result) merged.slices.push_back({low, high, result});
+                if (result) merged.slices.push_back({low, high, result, std::nullopt, std::nullopt});
             }
             sortSlices(merged);
+            for (auto& slice : merged.slices) {
+                slice.origin = ctx.current_write_origin;
+                slice.loc = loc;
+            }
             ctx.partial_drivers[signalName] = std::move(merged);
             materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
             if (!ctx.is_sequential) {
@@ -1124,6 +1129,14 @@ static void mergeCaseBranches(ResolutionContext& ctx,
 
         DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
         result->loc = loc;
+        std::string targetBaseName = signalName;
+        if (targetBaseName.ends_with(".d") || targetBaseName.ends_with(".q")) {
+            targetBaseName = targetBaseName.substr(0, targetBaseName.size() - 2);
+        }
+        const Type* targetType = lookupDeclaredType(targetBaseName, ctx);
+        if (targetType && targetType->isEnum()) {
+            result->type = *targetType;
+        }
 
         connectDriver(ctx, signalName, result);
         if (!ctx.is_sequential) {
@@ -1676,8 +1689,8 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
 
     if (!ctx.is_sequential) {
         if (auto it = ctx.combDrivers.find(baseName); it != ctx.combDrivers.end()) {
-            Type type = it->second->type.value_or(
-                declaredType ? *declaredType : Type::makeInteger(0, false));
+            Type type = declaredType ? *declaredType :
+                it->second->type.value_or(Type::makeInteger(0, false));
             return ExprValue{.type = type, .scalar = it->second, .leaves = {}};
         }
     }
@@ -1820,6 +1833,7 @@ static DFGNode* currentWholeDriverForTarget(ResolutionContext& ctx,
 }
 
 static void setPartialSlice(ResolutionContext& ctx,
+                            const std::string& targetName,
                             PartialTargetState& state,
                             int64_t low,
                             int64_t high,
@@ -1832,22 +1846,29 @@ static void setPartialSlice(ResolutionContext& ctx,
             updated.push_back(slice);
             continue;
         }
+        if (slice.origin && *slice.origin != ctx.current_write_origin) {
+            throwWriteConflict(targetName, "Overlapping partial writes", loc, slice.loc);
+        }
         if (slice.high > high) {
             updated.push_back({
                 high + 1,
                 slice.high,
-                buildRelativeSliceExpr(ctx, slice, high + 1, slice.high, loc)
+                buildRelativeSliceExpr(ctx, slice, high + 1, slice.high, loc),
+                slice.origin,
+                slice.loc
             });
         }
         if (slice.low < low) {
             updated.push_back({
                 slice.low,
                 low - 1,
-                buildRelativeSliceExpr(ctx, slice, slice.low, low - 1, loc)
+                buildRelativeSliceExpr(ctx, slice, slice.low, low - 1, loc),
+                slice.origin,
+                slice.loc
             });
         }
     }
-    updated.push_back({low, high, expr});
+    updated.push_back({low, high, expr, ctx.current_write_origin, loc});
     state.slices = std::move(updated);
     sortSlices(state);
 }
@@ -1861,7 +1882,7 @@ static PartialTargetState& ensurePartialTargetState(ResolutionContext& ctx,
     PartialTargetState state;
     state.type = lookupTargetTypeOrThrow(targetName, ctx, loc);
     if (DFGNode* driver = currentWholeDriverForTarget(ctx, targetName, loc)) {
-        state.slices.push_back({0, state.type.width - 1, driver});
+        state.slices.push_back({0, state.type.width - 1, driver, std::nullopt, std::nullopt});
     }
     auto [insertedIt, _] = ctx.partial_drivers.emplace(targetName, std::move(state));
     return insertedIt->second;
@@ -1873,9 +1894,13 @@ static void writePartialTargetSlice(ResolutionContext& ctx,
                                     int64_t low,
                                     DFGNode* expr,
                                     const std::optional<SourceLoc>& loc) {
+    auto& writeState = ctx.write_states[canonicalTargetKey(ctx, targetName)];
+    if (writeState.full_origin && *writeState.full_origin != ctx.current_write_origin) {
+        throwWriteConflict(targetName, "Multiple drivers", loc, writeState.full_loc);
+    }
     auto& state = ensurePartialTargetState(ctx, targetName, loc);
     if (high < low) std::swap(high, low);
-    setPartialSlice(ctx, state, low, high, expr, loc);
+    setPartialSlice(ctx, targetName, state, low, high, expr, loc);
     materializePartialTarget(ctx, targetName, state, loc);
 }
 
@@ -1885,27 +1910,162 @@ static void writeWholeTargetAsPartial(ResolutionContext& ctx,
                                       const std::optional<SourceLoc>& loc) {
     auto& state = ensurePartialTargetState(ctx, targetName, loc);
     state.slices.clear();
-    state.slices.push_back({0, state.type.width - 1, expr});
+    state.slices.push_back({0, state.type.width - 1, expr, ctx.current_write_origin, loc});
     materializePartialTarget(ctx, targetName, state, loc);
 }
 
-static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
-                                            DFGNode* expr,
-                                            const std::optional<Type>& targetType,
-                                            const std::optional<SourceLoc>& loc) {
+static std::string frontendTypeName(const Type& type) {
+    return type.isEnum() ? type.enumInfo().type_name : "integer";
+}
+
+static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
+                                ResolutionContext& ctx,
+                                const std::optional<SourceLoc>& loc) {
+    if (castExpr.left->kind == SyntaxKind::NamedType) {
+        auto& namedType = castExpr.left->as<NamedTypeSyntax>();
+        if (namedType.name->kind == SyntaxKind::ScopedName) {
+            auto& scoped = namedType.name->as<ScopedNameSyntax>();
+            std::string pkgName = std::string(
+                scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string typeName = std::string(
+                scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            auto pkgIt = ctx.pkgRegistry.find(pkgName);
+            if (pkgIt == ctx.pkgRegistry.end()) {
+                throw CompilerError("Unknown package in cast: " + pkgName, loc);
+            }
+            auto it = pkgIt->second.enumTypes.find(typeName);
+            if (it == pkgIt->second.enumTypes.end()) {
+                throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
+            }
+            return it->second;
+        }
+
+        std::string typeName = std::string(
+            namedType.name->as<IdentifierNameSyntax>().identifier.valueText());
+        auto it = ctx.enumRegistry.find(typeName);
+        if (it == ctx.enumRegistry.end()) {
+            throw CompilerError("Unknown enum type in cast: " + typeName, loc);
+        }
+        return it->second;
+    }
+
+    if (castExpr.left->kind == SyntaxKind::IdentifierName) {
+        std::string typeName = std::string(
+            castExpr.left->as<IdentifierNameSyntax>().identifier.valueText());
+        auto it = ctx.enumRegistry.find(typeName);
+        if (it == ctx.enumRegistry.end()) {
+            throw CompilerError("Unknown enum type in cast: " + typeName, loc);
+        }
+        return it->second;
+    }
+
+    if (castExpr.left->kind == SyntaxKind::ScopedName) {
+        auto& scoped = castExpr.left->as<ScopedNameSyntax>();
+        std::string pkgName = std::string(
+            scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+        std::string typeName = std::string(
+            scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+        auto pkgIt = ctx.pkgRegistry.find(pkgName);
+        if (pkgIt == ctx.pkgRegistry.end()) {
+            throw CompilerError("Unknown package in cast: " + pkgName, loc);
+        }
+        auto it = pkgIt->second.enumTypes.find(typeName);
+        if (it == pkgIt->second.enumTypes.end()) {
+            throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
+        }
+        return it->second;
+    }
+
+    throw CompilerError("Only enum type casts are supported (e.g. state_t'(expr))", loc);
+}
+
+static void validateEnumCastWidth(const ExprValue& sourceValue,
+                                  const Type& targetType,
+                                  const std::optional<SourceLoc>& loc) {
+    if (!sourceValue.scalar || !sourceValue.scalar->hasType()) return;
+    if (sourceValue.scalar->kind() == DFGOp::CONST) return;
+    if (sourceValue.type.width > 0 && sourceValue.type.width != targetType.width) {
+        throw CompilerError(std::format(
+            "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
+            sourceValue.type.width, targetType.enumInfo().type_name, targetType.width), loc);
+    }
+}
+
+static void validateEnumEquality(const ExprValue& lhs,
+                                 const ExprValue& rhs,
+                                 const std::optional<SourceLoc>& loc) {
+    bool lhsEnum = lhs.type.isEnum();
+    bool rhsEnum = rhs.type.isEnum();
+    if (lhsEnum || rhsEnum) {
+        if (!lhsEnum || !rhsEnum ||
+            lhs.type.enumInfo().type_name != rhs.type.enumInfo().type_name) {
+            throw CompilerError(std::format(
+                "Type error: cannot compare '{}' and '{}' with ==",
+                lhsEnum ? lhs.type.enumInfo().type_name : "integer",
+                rhsEnum ? rhs.type.enumInfo().type_name : "integer"), loc);
+        }
+    }
+}
+
+static Type mergeFrontendDataTypes(const ExprValue& lhs,
+                                   const ExprValue& rhs,
+                                   const std::optional<SourceLoc>& loc) {
+    if (lhs.type.isEnum() || rhs.type.isEnum()) {
+        if (!lhs.type.isEnum() || !rhs.type.isEnum() ||
+            lhs.type.enumInfo().type_name != rhs.type.enumInfo().type_name) {
+            throw CompilerError(std::format(
+                "Type error: MUX branches have incompatible types '{}' and '{}'",
+                frontendTypeName(lhs.type), frontendTypeName(rhs.type)), loc);
+        }
+        return lhs.type;
+    }
+    return Type::makeInteger(std::max(lhs.type.width, rhs.type.width),
+                             lhs.type.isSigned() && rhs.type.isSigned());
+}
+
+static ExprValue retagConstOrReturnValue(ExprValue value,
+                                         const Type& targetType,
+                                         const std::optional<SourceLoc>& loc) {
+    if (!value.scalar) {
+        throw CompilerError("Enum cast requires a scalar expression", loc);
+    }
+    if (value.scalar->kind() == DFGOp::CONST) {
+        value.scalar->type = targetType;
+    }
+    value.type = targetType;
+    return value;
+}
+
+static void rejectFrontendEnum(const ExprValue& value,
+                               const char* opName,
+                               const std::optional<SourceLoc>& loc) {
+    if (value.type.isEnum()) {
+        throw CompilerError(std::format(
+            "Type error: enum type '{}' cannot be used with operator {}",
+            value.type.enumInfo().type_name, opName), loc);
+    }
+}
+
+static ExprValue coerceAssignmentExprToWidth(ResolutionContext& ctx,
+                                             ExprValue value,
+                                             const std::optional<Type>& targetType,
+                                             const std::optional<SourceLoc>& loc) {
+    DFGNode* expr = value.scalar;
     int targetWidth = targetType ? targetType->width : 0;
     bool targetSigned = targetType ? targetType->isSigned() : false;
-    if (!expr || targetWidth <= 0) return expr;
+    if (!expr || targetWidth <= 0) return value;
 
     if (expr->kind() == DFGOp::CONST) {
         expr->type = targetType ? *targetType : Type::makeInteger(targetWidth, targetSigned);
-        return expr;
+        value.type = *expr->type;
+        return value;
     }
 
-    if (!expr->hasType()) return expr;
+    if (!expr->hasType()) return value;
     if (targetType && expr->type->kind == targetType->kind &&
         expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
-        return expr;
+        value.type = *targetType;
+        return value;
     }
 
     if (expr->type->width > targetWidth) {
@@ -1919,21 +2079,37 @@ static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
         truncated->type = Type::makeInteger(targetWidth, targetSigned);
         if (loc) truncated->loc = *loc;
         expr = truncated;
+        value.scalar = expr;
+        value.type = *expr->type;
     }
 
     if (targetType && targetType->isEnum()) {
-        if (expr->type->width != targetWidth) return expr;
-        auto* castNode = ctx.graph.cast(expr);
-        castNode->type = *targetType;
-        if (loc) castNode->loc = *loc;
-        return castNode;
+        if (!expr->hasType() || expr->type->width != targetWidth) {
+            int sourceWidth = expr->hasType() ? expr->type->width : value.type.width;
+            throw CompilerError(std::format(
+                "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
+                sourceWidth, targetType->enumInfo().type_name, targetWidth), loc);
+        }
+        value.type = *targetType;
+        return value;
     }
 
     if (expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
-        return expr;
+        value.type = *expr->type;
+        return value;
     }
 
-    return expr;
+    return value;
+}
+
+static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
+                                            DFGNode* expr,
+                                            const std::optional<Type>& targetType,
+                                            const std::optional<SourceLoc>& loc) {
+    Type exprType = expr && expr->hasType() ? *expr->type : Type{};
+    ExprValue coerced = coerceAssignmentExprToWidth(
+        ctx, ExprValue{.type = exprType, .scalar = expr, .leaves = {}}, targetType, loc);
+    return coerced.scalar;
 }
 
 DFGNode* tryBuildConstantExprNode(const ExpressionSyntax* expr, ResolutionContext& ctx) {
@@ -1953,6 +2129,20 @@ static ExprValue buildExprValue(
 ) {
     if (!expr) {
         throw CompilerError("Cannot build DFG from null expression");
+    }
+
+    if (expr->kind == SyntaxKind::ParenthesizedExpression) {
+        auto& paren = expr->as<ParenthesizedExpressionSyntax>();
+        return buildExprValue(paren.expression, ctx);
+    }
+
+    if (expr->kind == SyntaxKind::CastExpression) {
+        auto loc = resolveSourceLoc(*expr, ctx.sm);
+        auto& castExpr = expr->as<CastExpressionSyntax>();
+        Type castType = resolveEnumCastType(castExpr, ctx, loc);
+        ExprValue inner = buildScalarExprValue(castExpr.right->expression, ctx);
+        validateEnumCastWidth(inner, castType, loc);
+        return retagConstOrReturnValue(inner, castType, loc);
     }
 
     if (expr->kind == SyntaxKind::IdentifierName) {
@@ -2125,6 +2315,14 @@ static DFGNode* buildExprDFG(
         const ExpressionSyntax* expr,
         ResolutionContext& ctx
 ) {
+    ExprValue value = buildScalarExprValue(expr, ctx);
+    return value.scalar;
+}
+
+static ExprValue buildScalarExprValue(
+        const ExpressionSyntax* expr,
+        ResolutionContext& ctx
+) {
     ExprValue value = buildExprValue(expr, ctx);
     if (!value.type.unpacked_dims.empty()) {
         throw CompilerError("Array-valued expression used where scalar expression is required",
@@ -2134,7 +2332,7 @@ static DFGNode* buildExprDFG(
         throw CompilerError("Expression did not produce a scalar DFG node",
                             resolveSourceLoc(*expr, ctx.sm));
     }
-    return value.scalar;
+    return value;
 }
 
 // Build DFG node directly from slang expression syntax
@@ -2583,14 +2781,14 @@ static DFGNode* buildExprScalarImpl(
         // Unary operations
         case SyntaxKind::UnaryPlusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            auto* node = ctx.graph.unaryPlus(buildExprDFG(unary.operand, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
-            return node;
+            return buildExprDFG(unary.operand, ctx);
         }
 
         case SyntaxKind::UnaryMinusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            auto* node = ctx.graph.unaryNegate(buildExprDFG(unary.operand, ctx));
+            auto operand = buildScalarExprValue(unary.operand, ctx);
+            rejectFrontendEnum(operand, "UNARY_NEGATE", resolveSourceLoc(*expr, ctx.sm));
+            auto* node = ctx.graph.unaryNegate(operand.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
@@ -2639,14 +2837,15 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::UnaryLogicalNotExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            auto* node = ctx.graph.logicalNot(buildExprDFG(unary.operand, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
-            return node;
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            return lowerLogicalNot(buildExprDFG(unary.operand, ctx), ctx, loc);
         }
 
         case SyntaxKind::UnaryBitwiseNotExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseNot(buildExprDFG(unary.operand, ctx));
+            auto operand = buildScalarExprValue(unary.operand, ctx);
+            rejectFrontendEnum(operand, "BITWISE_NOT", resolveSourceLoc(*expr, ctx.sm));
+            auto* node = ctx.graph.bitwiseNot(operand.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
@@ -2654,24 +2853,36 @@ static DFGNode* buildExprScalarImpl(
         // Binary operations
         case SyntaxKind::AddExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.add(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "ADD", loc);
+            rejectFrontendEnum(rhs, "ADD", loc);
+            auto* node = ctx.graph.add(lhs.scalar, rhs.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
 
         case SyntaxKind::SubtractExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.sub(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "SUB", loc);
+            rejectFrontendEnum(rhs, "SUB", loc);
+            auto* node = ctx.graph.sub(lhs.scalar, rhs.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
 
         case SyntaxKind::MultiplyExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.mul(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "MUL", loc);
+            rejectFrontendEnum(rhs, "MUL", loc);
+            auto* node = ctx.graph.mul(lhs.scalar, rhs.scalar);
             node->loc = resolveSourceLoc(*expr, ctx.sm);
             return node;
         }
@@ -2694,69 +2905,99 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::EqualityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.eq(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            validateEnumEquality(lhs, rhs, loc);
+            auto* node = ctx.graph.eq(lhs.scalar, rhs.scalar);
+            node->loc = loc;
+            if (lhs.type.isEnum() || rhs.type.isEnum()) {
+                node->type = Type::makeInteger(1, false);
+            }
             return node;
         }
 
         case SyntaxKind::InequalityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* eqNode = ctx.graph.eq(buildExprDFG(binary.left, ctx),
-                                        buildExprDFG(binary.right, ctx));
-            eqNode->loc = resolveSourceLoc(*expr, ctx.sm);
-            auto* notNode = ctx.graph.logicalNot(eqNode);
-            notNode->loc = resolveSourceLoc(*expr, ctx.sm);
-            return notNode;
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            validateEnumEquality(lhs, rhs, loc);
+            auto* eqNode = ctx.graph.eq(lhs.scalar, rhs.scalar);
+            eqNode->loc = loc;
+            if (lhs.type.isEnum() || rhs.type.isEnum()) {
+                eqNode->type = Type::makeInteger(1, false);
+            }
+            return lowerLogicalNot(eqNode, ctx, loc);
         }
 
         case SyntaxKind::LessThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.lt(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "LT", loc);
+            rejectFrontendEnum(rhs, "LT", loc);
+            auto* node = ctx.graph.lt(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::LessThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.le(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "LE", loc);
+            rejectFrontendEnum(rhs, "LE", loc);
+            auto* node = ctx.graph.le(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::GreaterThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.gt(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "GT", loc);
+            rejectFrontendEnum(rhs, "GT", loc);
+            auto* node = ctx.graph.gt(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::GreaterThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.ge(buildExprDFG(binary.left, ctx),
-                                      buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "GE", loc);
+            rejectFrontendEnum(rhs, "GE", loc);
+            auto* node = ctx.graph.ge(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::LogicalShiftLeftExpression:
         case SyntaxKind::ArithmeticShiftLeftExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.shl(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            rejectFrontendEnum(lhs, "SHL", loc);
+            auto* node = ctx.graph.shl(lhs.scalar, buildExprDFG(binary.right, ctx));
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::LogicalShiftRightExpression:
         case SyntaxKind::ArithmeticShiftRightExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.asr(buildExprDFG(binary.left, ctx),
-                                       buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            rejectFrontendEnum(lhs, "ASR", loc);
+            auto* node = ctx.graph.asr(lhs.scalar, buildExprDFG(binary.right, ctx));
+            node->loc = loc;
             return node;
         }
 
@@ -2770,49 +3011,69 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::LogicalAndExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.logicalAnd(buildExprDFG(binary.left, ctx),
-                                              buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
-            return node;
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            return lowerLogicalBinary(DFGOp::BITWISE_AND,
+                                      buildExprDFG(binary.left, ctx),
+                                      buildExprDFG(binary.right, ctx),
+                                      ctx,
+                                      loc);
         }
 
         case SyntaxKind::LogicalOrExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.logicalOr(buildExprDFG(binary.left, ctx),
-                                             buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
-            return node;
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            return lowerLogicalBinary(DFGOp::BITWISE_OR,
+                                      buildExprDFG(binary.left, ctx),
+                                      buildExprDFG(binary.right, ctx),
+                                      ctx,
+                                      loc);
         }
 
         case SyntaxKind::BinaryAndExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseAnd(buildExprDFG(binary.left, ctx),
-                                              buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "BITWISE_AND", loc);
+            rejectFrontendEnum(rhs, "BITWISE_AND", loc);
+            auto* node = ctx.graph.bitwiseAnd(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::BinaryOrExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseOr(buildExprDFG(binary.left, ctx),
-                                             buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "BITWISE_OR", loc);
+            rejectFrontendEnum(rhs, "BITWISE_OR", loc);
+            auto* node = ctx.graph.bitwiseOr(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::BinaryXorExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseXor(buildExprDFG(binary.left, ctx),
-                                              buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "BITWISE_XOR", loc);
+            rejectFrontendEnum(rhs, "BITWISE_XOR", loc);
+            auto* node = ctx.graph.bitwiseXor(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
         case SyntaxKind::BinaryXnorExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto* node = ctx.graph.bitwiseXnor(buildExprDFG(binary.left, ctx),
-                                               buildExprDFG(binary.right, ctx));
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            auto rhs = buildScalarExprValue(binary.right, ctx);
+            rejectFrontendEnum(lhs, "BITWISE_XNOR", loc);
+            rejectFrontendEnum(rhs, "BITWISE_XNOR", loc);
+            auto* node = ctx.graph.bitwiseXnor(lhs.scalar, rhs.scalar);
+            node->loc = loc;
             return node;
         }
 
@@ -2827,67 +3088,20 @@ static DFGNode* buildExprScalarImpl(
                                     resolveSourceLoc(*expr, ctx.sm));
             }
             auto* condNode = buildExprDFG(cond.predicate->conditions[0]->expr, ctx);
-            auto* trueNode = buildExprDFG(cond.left, ctx);
-            auto* falseNode = buildExprDFG(cond.right, ctx);
-            auto* node = ctx.graph.mux(condNode, trueNode, falseNode);
-            node->loc = resolveSourceLoc(*expr, ctx.sm);
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto trueValue = buildScalarExprValue(cond.left, ctx);
+            auto falseValue = buildScalarExprValue(cond.right, ctx);
+            Type mergedType = mergeFrontendDataTypes(trueValue, falseValue, loc);
+            auto* node = ctx.graph.mux(condNode, trueValue.scalar, falseValue.scalar);
+            node->loc = loc;
+            if (trueValue.type.isEnum() || falseValue.type.isEnum()) {
+                node->type = mergedType;
+            }
             return node;
         }
 
         case SyntaxKind::CastExpression: {
-            auto& castExpr = expr->as<CastExpressionSyntax>();
-            // Only enum type casts are supported: enum_t'(expr) or pkg::enum_t'(expr)
-            Type castType;
-            if (castExpr.left->kind == SyntaxKind::NamedType) {
-                auto& namedType = castExpr.left->as<NamedTypeSyntax>();
-                if (namedType.name->kind == SyntaxKind::ScopedName) {
-                    auto& scoped = namedType.name->as<ScopedNameSyntax>();
-                    std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
-                    std::string typeName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
-                    auto pkgIt = ctx.pkgRegistry.find(pkgName);
-                    if (pkgIt == ctx.pkgRegistry.end())
-                        throw CompilerError("Unknown package in cast: " + pkgName, resolveSourceLoc(*expr, ctx.sm));
-                    auto it = pkgIt->second.enumTypes.find(typeName);
-                    if (it == pkgIt->second.enumTypes.end())
-                        throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, resolveSourceLoc(*expr, ctx.sm));
-                    castType = it->second;
-                } else {
-                    std::string typeName = std::string(
-                        namedType.name->as<IdentifierNameSyntax>().identifier.valueText());
-                    auto it = ctx.enumRegistry.find(typeName);
-                    if (it == ctx.enumRegistry.end())
-                        throw CompilerError("Unknown enum type in cast: " + typeName, resolveSourceLoc(*expr, ctx.sm));
-                    castType = it->second;
-                }
-            } else if (castExpr.left->kind == SyntaxKind::IdentifierName) {
-                std::string typeName = std::string(
-                    castExpr.left->as<IdentifierNameSyntax>().identifier.valueText());
-                auto it = ctx.enumRegistry.find(typeName);
-                if (it == ctx.enumRegistry.end())
-                    throw CompilerError("Unknown enum type in cast: " + typeName, resolveSourceLoc(*expr, ctx.sm));
-                castType = it->second;
-            } else if (castExpr.left->kind == SyntaxKind::ScopedName) {
-                // Qualified cast: pkg::type'(expr) — left is a ScopedName expression
-                auto& scoped = castExpr.left->as<ScopedNameSyntax>();
-                std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
-                std::string typeName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
-                auto pkgIt = ctx.pkgRegistry.find(pkgName);
-                if (pkgIt == ctx.pkgRegistry.end())
-                    throw CompilerError("Unknown package in cast: " + pkgName, resolveSourceLoc(*expr, ctx.sm));
-                auto it = pkgIt->second.enumTypes.find(typeName);
-                if (it == pkgIt->second.enumTypes.end())
-                    throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, resolveSourceLoc(*expr, ctx.sm));
-                castType = it->second;
-            } else {
-                throw CompilerError(
-                    "Only enum type casts are supported (e.g. state_t'(expr))",
-                    resolveSourceLoc(*expr, ctx.sm));
-            }
-            DFGNode* inner = buildExprDFG(castExpr.right->expression, ctx);
-            auto* castNode = ctx.graph.cast(inner);
-            castNode->type = castType;
-            castNode->loc  = resolveSourceLoc(*expr, ctx.sm);
-            return castNode;
+            return buildScalarExprValue(expr, ctx).scalar;
         }
 
         case SyntaxKind::InvocationExpression: {
@@ -3197,7 +3411,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     }
 
     // Build the full element name for LHS by evaluating selectors statically.
-    // Range selects (e.g. word_out[3:0]) are handled via CONCAT/CONCAT_ALIGN.
+    // Range selects (e.g. word_out[3:0]) are handled via canonical partial-write state.
     std::string indexSuffix;
     bool hasRangeSelect = false;
     int64_t rangeHigh = 0, rangeLow = 0;
@@ -3312,10 +3526,12 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         assignmentTargetType = *currentSelectedType;
     }
     if (assignmentTargetType && assignmentTargetType->width > 0) {
-        RHSexprNode = coerceAssignmentExprToWidth(ctx, RHSexprNode, assignmentTargetType, assignLoc);
+        RHSvalue.scalar = RHSexprNode;
+        RHSvalue = coerceAssignmentExprToWidth(ctx, RHSvalue, assignmentTargetType, assignLoc);
+        RHSexprNode = RHSvalue.scalar;
     }
 
-    // Range-select on LHS: build CONCAT_ALIGN -> CONCAT -> target
+    // Range-select on LHS: canonical partial-write update
     if (hasRangeSelect) {
         // Build the target name (no index suffix for range assigns)
         std::string outputName;
@@ -3331,10 +3547,6 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             outputName = baseName + indexSuffix;
         }
 
-        if (!ctx.subroutine_locals.count(outputName))
-            recordPartialWrite(ctx, outputName, std::min(rangeLow, rangeHigh),
-                               std::max(rangeLow, rangeHigh), assignLoc,
-                               ctx.current_write_origin);
         writePartialTargetSlice(ctx, outputName, rangeHigh, rangeLow, RHSexprNode, assignLoc);
 
         if (!ctx.is_sequential) {
@@ -3402,8 +3614,8 @@ void resolveAssignInPlace(
                                             resolveSourceLoc(*syntax, ctx.sm));
 
     ctx.is_sequential = false;
-    ctx.current_write_origin = std::format("continuous-assign:{}",
-                                           reinterpret_cast<uintptr_t>(syntax));
+    auto assignLoc = resolveSourceLoc(*syntax, ctx.sm);
+    ctx.current_write_origin = std::format("continuous-assign:{}", assignLoc.str());
 
     for (const auto* assignExpr : syntax->assignments) {
         if (assignExpr->kind != SyntaxKind::AssignmentExpression) {
@@ -4143,14 +4355,30 @@ const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr) {
 }
 
 // Connect an output port of the submodule to a parent signal
-void connectModuleOutput(DFG& graph, DFGNode* moduleNode,
-                         const std::string& parentSignalName, size_t outputIdx,
+static DFGNode* getOrCreateOutputPlaceholder(DFG& graph,
+                                             ModuleInstanceBinding& binding,
+                                             const Module& resolvedSub,
+                                             const std::string& portName) {
+    auto [it, inserted] = binding.output_placeholders.try_emplace(
+        portName, graph.placeholderSignal(""));
+    if (inserted) {
+        if (auto outIt = resolvedSub.outputs.find(portName); outIt != resolvedSub.outputs.end()) {
+            it->second->type = outIt->second.type;
+        }
+    }
+    return it->second;
+}
+
+void connectModuleOutput(DFG& graph, ModuleInstanceBinding& binding,
+                         const Module& resolvedSub,
+                         const std::string& portName,
+                         const std::string& parentSignalName,
                          ResolutionContext& ctx,
                          const std::optional<SourceLoc>& writeLoc) {
-    DFGOutput modOut(moduleNode, static_cast<int>(outputIdx));
+    DFGOutput modOut(getOrCreateOutputPlaceholder(graph, binding, resolvedSub, portName));
     recordFullWrite(
         ctx, parentSignalName, writeLoc,
-        std::format("module-output:{}:{}", moduleNode->name, outputIdx));
+        std::format("module-output:{}:{}", binding.instance_name, portName));
     if (graph.hasOutput("", parentSignalName)) {
         graph.connectOutput("", parentSignalName, modOut);
     } else if (graph.hasSignal("", parentSignalName)) {
@@ -4160,11 +4388,10 @@ void connectModuleOutput(DFG& graph, DFGNode* moduleNode,
 
 void resolveNamedPortConnection(
         const NamedPortConnectionSyntax& named,
-        DFG& graph, DFGNode* moduleNode,
+        DFG& graph, ModuleInstanceBinding& binding,
         Module& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
-        const std::map<std::string, size_t>& subOutputIndex,
         ResolutionContext& ctx) {
 
     // Extract port name
@@ -4178,11 +4405,11 @@ void resolveNamedPortConnection(
         }
         auto* expr = extractPortExpr(*named.expr);
         auto* driver = buildExprDFG(expr, ctx);
-        ctx.graph.addModuleInput(moduleNode, portName, driver);
+        binding.inputs.push_back({portName, DFGOutput(driver)});
         if (ctx.domain_facts) {
             auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
             ChildInputConnectionFact connFact{
-                .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, moduleNode->name),
+                .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, binding.instance_name),
                 .child_module_name = resolvedSub.name,
                 .child_port = portName,
                 .expr_kind = expr->kind == SyntaxKind::IdentifierName
@@ -4226,43 +4453,42 @@ void resolveNamedPortConnection(
                 connectName = elemName;
 
             // If the element node exists (unpacked array element), use the normal path.
-            // Otherwise, fall through to the CONCAT_ALIGN path for packed bit-selects.
+            // Otherwise, fall through to the canonical partial-write path for packed bit-selects.
             if (graph.hasSignal("", connectName) || graph.hasOutput("", connectName)) {
-                connectModuleOutput(graph, moduleNode, connectName, subOutputIndex.at(portName),
+                connectModuleOutput(graph, binding, resolvedSub, portName, connectName,
                                     ctx, resolveSourceLoc(*expr, ctx.sm));
                 return;
             }
 
-            // Packed bit-select on an output port or signal: drive via CONCAT_ALIGN.
-            // Each iteration contributes one CONCAT_ALIGN slice; concat_cleanup merges them.
+            // Packed bit-select on an output port or signal: drive through canonical
+            // partial-write state.
             {
-                DFGNode* targetNode = graph.getOutputNode("", baseName);
-                if (!targetNode) targetNode = graph.getSignalNode("", baseName);
-                if (!targetNode)
+                std::string packedTargetName = baseName;
+                if (!ctx.instance_path.empty() && ctx.local_signals.count(baseName)) {
+                    packedTargetName = ctx.instance_path + "." + baseName;
+                }
+                if (!lookupTargetNode(ctx, packedTargetName))
                     throw CompilerError(
                         "Cannot find signal '" + baseName +
                         "' for bit-select output port connection",
                         resolveSourceLoc(*expr, ctx.sm));
 
-                size_t oi = subOutputIndex.at(portName);
-                auto* highConst = ctx.graph.constant((int64_t)idx);
-                auto* lowConst  = ctx.graph.constant((int64_t)idx);
-                auto* alignNode = ctx.graph.concatAlign(moduleNode, highConst, lowConst);
-                alignNode->replaceInputAt(0, DFGOutput(moduleNode, (int)oi));
-                recordPartialWrite(
-                    ctx, baseName, idx, idx, resolveSourceLoc(*expr, ctx.sm),
-                    std::format("module-output:{}:{}", moduleNode->name, oi));
-
-                auto targetDriver = maybeDriver(targetNode);
-                if (targetDriver && targetDriver->node->kind() == DFGOp::CONCAT) {
-                    auto* concatNode = appendConcatInput(
-                        ctx.graph, targetDriver->node, alignNode,
+                auto oldOrigin = ctx.current_write_origin;
+                ctx.current_write_origin = std::format(
+                    "module-output:{}:{}", binding.instance_name, portName);
+                try {
+                    auto* outBit = getOrCreateOutputPlaceholder(
+                        graph, binding, resolvedSub, portName);
+                    outBit->loc = resolveSourceLoc(*expr, ctx.sm);
+                    writePartialTargetSlice(
+                        ctx, packedTargetName, idx, idx,
+                        outBit,
                         resolveSourceLoc(*expr, ctx.sm));
-                    ctx.graph.connectDriver(targetNode, concatNode);
-                } else {
-                    auto* concatNode = ctx.graph.concat({alignNode});
-                    ctx.graph.connectDriver(targetNode, concatNode);
+                } catch (...) {
+                    ctx.current_write_origin = oldOrigin;
+                    throw;
                 }
+                ctx.current_write_origin = oldOrigin;
             }
             return;
         } else {
@@ -4270,8 +4496,8 @@ void resolveNamedPortConnection(
                 "Only simple identifier expressions supported for output port connections",
                 resolveSourceLoc(*expr, ctx.sm));
         }
-        connectModuleOutput(graph, moduleNode,
-                            connectName, subOutputIndex.at(portName),
+        connectModuleOutput(graph, binding, resolvedSub,
+                            portName, connectName,
                             ctx, resolveSourceLoc(*expr, ctx.sm));
     } else {
         throw CompilerError(
@@ -4280,55 +4506,89 @@ void resolveNamedPortConnection(
 }
 
 void resolveWildcardPortConnection(
-        DFG& graph, DFGNode* moduleNode,
+        DFG& graph, ModuleInstanceBinding& binding,
         Module& resolvedSub,
         ResolutionContext& ctx) {
     for (const auto& [name, inp] : resolvedSub.inputs) {
         auto* driver = graph.lookupSignal("", name);
         if (driver) {
-            graph.addModuleInput(moduleNode, name, driver);
+            binding.inputs.push_back({name, DFGOutput(driver)});
             if (ctx.domain_facts) {
                 auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
                 facts.child_input_connections.push_back(ChildInputConnectionFact{
-                    .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, moduleNode->name),
+                    .child_instance_path = appendInstancePath(ctx.occurrence.instance_path, binding.instance_name),
                     .child_module_name = resolvedSub.name,
                     .child_port = name,
                     .expr_kind = ConnectionExprKind::SimpleIdentifier,
                     .parent_signal_name = name,
                     .diagnostic_expr_kind = std::string(toString(SyntaxKind::IdentifierName)),
-                    .loc = moduleNode->loc,
+                    .loc = binding.loc,
                 });
             }
         }
     }
-    size_t oi = 0;
     for (const auto& [name, out] : resolvedSub.outputs) {
-        connectModuleOutput(graph, moduleNode, name, oi++, ctx, moduleNode->loc);
+        connectModuleOutput(graph, binding, resolvedSub, name, name, ctx, binding.loc);
     }
 }
 
 void resolvePortConnection(
         const PortConnectionSyntax* conn,
-        DFG& graph, DFGNode* moduleNode,
+        DFG& graph, ModuleInstanceBinding& binding,
         Module& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
-        const std::map<std::string, size_t>& subOutputIndex,
         ResolutionContext& ctx) {
     switch (conn->kind) {
         case SyntaxKind::NamedPortConnection:
             resolveNamedPortConnection(conn->as<NamedPortConnectionSyntax>(),
-                                       graph, moduleNode, resolvedSub,
+                                       graph, binding, resolvedSub,
                                        subInputNames, subOutputNames,
-                                       subOutputIndex, ctx);
+                                       ctx);
             break;
         case SyntaxKind::WildcardPortConnection:
-            resolveWildcardPortConnection(graph, moduleNode, resolvedSub, ctx);
+            resolveWildcardPortConnection(graph, binding, resolvedSub, ctx);
             break;
         default:
             throw CompilerError(
                 "Unsupported port connection kind: " + std::string(toString(conn->kind)));
     }
+}
+
+static void instantiateSubmoduleInstance(
+        const UnresolvedModule& unresolvedSubmodule,
+        const std::string& submoduleName,
+        const HierarchicalInstanceSyntax& instanceSyntax,
+        const std::string& effectiveInstanceName,
+        const ParameterContext& instCtx,
+        const InstancePath& childOccurrencePath,
+        ResolutionContext& ctx) {
+    auto resolvedSub = resolveModule(unresolvedSubmodule, instCtx,
+                                     ctx.moduleLookup, ctx.sm,
+                                     ctx.pkgRegistry, ctx.globalImports,
+                                     childOccurrencePath,
+                                     ctx.domain_facts);
+
+    std::set<std::string> subInputNames, subOutputNames;
+    for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
+    for (const auto& [name, out] : resolvedSub.outputs) subOutputNames.insert(name);
+
+    ModuleInstanceBinding binding{
+        .instance_name = effectiveInstanceName,
+        .module_type = submoduleName,
+        .inputs = {},
+        .output_placeholders = {},
+        .loc = resolveSourceLoc(instanceSyntax, ctx.sm),
+    };
+
+    for (const auto* conn : instanceSyntax.connections) {
+        resolvePortConnection(conn, ctx.graph, binding,
+                              resolvedSub, subInputNames, subOutputNames, ctx);
+    }
+
+    resolvedSub.instance_name = effectiveInstanceName;
+    ctx.thisModule->instance_bindings.push_back(std::move(binding));
+    ctx.thisModule->hierarchyInstantiation.push_back(std::move(resolvedSub));
 }
 
 // Evaluate the next genvar value from a for-loop iteration expression.
@@ -4783,33 +5043,9 @@ void resolveGenerateMemberInPlace(
 
                 InstancePath childOccurrencePath =
                     appendInstancePath(ctx.occurrence.instance_path, qualifiedName);
-                auto resolvedSub = resolveModule(*it->second, instCtx,
-                                                ctx.moduleLookup, ctx.sm,
-                                                ctx.pkgRegistry, ctx.globalImports,
-                                                childOccurrencePath,
-                                                ctx.domain_facts);
-
-                std::set<std::string> subInputNames, subOutputNames;
-                std::map<std::string, size_t> subOutputIndex;
-                for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
-                size_t oi = 0;
-                for (const auto& [name, out] : resolvedSub.outputs) {
-                    subOutputNames.insert(name);
-                    subOutputIndex[name] = oi++;
-                }
-                std::vector<std::string> outputPortNames;
-                for (const auto& [name, out] : resolvedSub.outputs)
-                    outputPortNames.push_back(name);
-
-                auto* moduleNode = ctx.graph.module(submoduleName, qualifiedName, outputPortNames);
-                moduleNode->loc = resolveSourceLoc(*inst, ctx.sm);
-
-                for (const auto* conn : inst->connections)
-                    resolvePortConnection(conn, ctx.graph, moduleNode, resolvedSub,
-                                         subInputNames, subOutputNames, subOutputIndex, ctx);
-
-                resolvedSub.instance_name = qualifiedName;
-                ctx.thisModule->hierarchyInstantiation.push_back(std::move(resolvedSub));
+                instantiateSubmoduleInstance(*it->second, submoduleName, *inst,
+                                             qualifiedName, instCtx,
+                                             childOccurrencePath, ctx);
             }
             break;
         }
@@ -5133,7 +5369,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         resolveGenerateMemberInPlace(genBlock, resCtx);
     }
 
-    // Resolve submodules and create MODULE nodes in the DFG
+    // Resolve submodules and record instance bindings for downstream DFG inlining
     for (const auto& moduleInst: unresolved.hierarchyInstantiation){
         std::string submoduleName(moduleInst->type.valueText());
         auto it = moduleLookup.find(submoduleName);
@@ -5156,36 +5392,9 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
             }
 
             InstancePath childOccurrencePath = appendInstancePath(occurrencePath, instanceName);
-            auto resolvedSub = resolveModule(*it->second, instCtx, moduleLookup, sourceManager,
-                                            pkgRegistry, globalImports, childOccurrencePath,
-                                            domainFacts);
-
-            // Build sets of input/output port names for the submodule
-            std::set<std::string> subInputNames, subOutputNames;
-            std::map<std::string, size_t> subOutputIndex;
-            for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
-            size_t oi = 0;
-            for (const auto& [name, out] : resolvedSub.outputs) {
-                subOutputNames.insert(name);
-                subOutputIndex[name] = oi++;
-            }
-
-            // Create MODULE node in the DFG with output port names
-            std::vector<std::string> outputPortNames;
-            for (const auto& [name, out] : resolvedSub.outputs) {
-                outputPortNames.push_back(name);
-            }
-            auto* moduleNode = graph.module(submoduleName, instanceName, outputPortNames);
-            moduleNode->loc = resolveSourceLoc(*inst, sourceManager);
-
-            for (const auto* conn : inst->connections) {
-                resolvePortConnection(conn, graph, moduleNode,
-                                      resolvedSub, subInputNames, subOutputNames,
-                                      subOutputIndex, resCtx);
-            }
-
-            resolvedSub.instance_name = instanceName;
-            resolved.hierarchyInstantiation.push_back(std::move(resolvedSub));
+            instantiateSubmoduleInstance(*it->second, submoduleName, *inst,
+                                         instanceName, instCtx,
+                                         childOccurrencePath, resCtx);
         }
     }
 

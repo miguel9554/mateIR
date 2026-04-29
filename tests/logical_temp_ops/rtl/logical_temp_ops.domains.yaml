@@ -1,0 +1,13 @@
+module_name: logical_temp_ops
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - flag
+    - vec_a
+    - vec_b

@@ -117,24 +117,6 @@ bool inferNodeType(DFGNode* node) {
             throw CompilerError(std::format(
                 "Type propagation: CONST node '{}' has no type", node->str()), node->loc);
 
-        case DFGOp::MODULE:
-            throw CompilerError(std::format(
-                "Type propagation: MODULE node '{}' encountered (should have been inlined)",
-                node->name), node->loc);
-
-        // CAST: type is pre-set at elaboration; validate source width matches
-        case DFGOp::CAST: {
-            auto* src = node->castSource().node;
-            if (!src->hasType()) return false;
-            // node->type was set at elaboration and is the target enum type
-            if (src->type->width != node->type->width)
-                throw CompilerError(std::format(
-                    "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
-                    src->type->width, node->type->enumInfo().type_name, node->type->width),
-                    node->loc);
-            return false;  // already typed; no change
-        }
-
         // SUB: result is always signed (subtraction can produce negative values)
         case DFGOp::SUB: {
             auto [lhs, rhs] = binaryNodes(node);
@@ -219,7 +201,6 @@ bool inferNodeType(DFGNode* node) {
         }
 
         // Unary arithmetic: same as operand (enum not allowed)
-        case DFGOp::UNARY_PLUS:
         case DFGOp::UNARY_NEGATE:
         case DFGOp::BITWISE_NOT: {
             auto* operand = unaryNode(node);
@@ -227,26 +208,6 @@ bool inferNodeType(DFGNode* node) {
             rejectUnpacked(operand, to_string(node->kind()));
             rejectEnum(operand, to_string(node->kind()));
             node->type = *operand->type;
-            return true;
-        }
-
-        // Logical NOT: 1-bit unsigned
-        case DFGOp::LOGICAL_NOT: {
-            auto* operand = unaryNode(node);
-            if (!operand->hasType()) return false;
-            rejectUnpacked(operand, "LOGICAL_NOT");
-            node->type = makeOneBitUnsigned();
-            return true;
-        }
-
-        // Logical AND/OR: 1-bit unsigned
-        case DFGOp::LOGICAL_OR:
-        case DFGOp::LOGICAL_AND: {
-            auto [lhs, rhs] = binaryNodes(node);
-            if (!lhs->hasType() || !rhs->hasType()) return false;
-            rejectUnpacked(lhs, to_string(node->kind()));
-            rejectUnpacked(rhs, to_string(node->kind()));
-            node->type = makeOneBitUnsigned();
             return true;
         }
 
@@ -306,15 +267,6 @@ bool inferNodeType(DFGNode* node) {
             node->type = Type::makeInteger(totalWidth, false);
             return true;
         }
-
-        // CONCAT_ALIGN: pass-through type from expression input (in[0])
-        case DFGOp::CONCAT_ALIGN: {
-            auto* expr = node->concatAlignInputs().expr.node;
-            if (!expr->hasType()) return false;
-            node->type = *expr->type;
-            return true;
-        }
-
         // SLICE: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
         // Dynamic indexing must be lowered to MUX during elaboration; a SLICE
         // node with non-constant indices is a compiler bug.
@@ -371,6 +323,7 @@ bool inferNodeType(DFGNode* node) {
                 high_val == low_val ? false : atype.isSigned());
             return true;
         }
+
     }
 
     throw CompilerError(std::format(

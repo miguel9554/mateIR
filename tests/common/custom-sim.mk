@@ -24,6 +24,7 @@ DEBUG_NODES_ARG = $(if $(DEBUG_NODES),--debug-nodes $(DEBUG_NODES),)
 
 simulate:
 	$(MAKE) -C $(PROJECT_ROOT) $(SIM_BUILD_TARGET)
+	rm -rf debug_output
 	$(SANITIZER_ENV) $(SIMULATOR) --simulate --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
 		--domains $(DOMAINS_YAML) \
@@ -44,4 +45,4 @@ svg:
 	find debug_output -name '*.dot' -exec sh -c 'dot -Tsvg -o "$${1%.dot}.svg" "$$1"' _ {} \;
 
 clean:
-	rm -rf $(OUTPUT_DIR)
+	rm -rf $(OUTPUT_DIR) debug_output

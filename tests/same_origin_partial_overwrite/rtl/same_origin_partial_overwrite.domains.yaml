@@ -1,0 +1,4 @@
+module_name: same_origin_partial_overwrite
+async_domain:
+- a
+- b

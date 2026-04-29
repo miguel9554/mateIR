@@ -363,18 +363,8 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             return checkedGet(node->muxArmData(static_cast<size_t>(armIndex)).node, node);
         }
 
-        case DFGOp::UNARY_PLUS:    return getUnaryVal();
         case DFGOp::UNARY_NEGATE:  return getUnaryVal().negated();
         case DFGOp::BITWISE_NOT:   return getUnaryVal().bitwiseNot();
-        case DFGOp::LOGICAL_NOT:   return boolValue(getUnaryVal().isZero());
-        case DFGOp::LOGICAL_AND: {
-            auto [lhs, rhs] = getBinaryVals();
-            return boolValue(!lhs.isZero() && !rhs.isZero());
-        }
-        case DFGOp::LOGICAL_OR: {
-            auto [lhs, rhs] = getBinaryVals();
-            return boolValue(!lhs.isZero() || !rhs.isZero());
-        }
         case DFGOp::BITWISE_AND: {
             auto [lhs, rhs] = getBinaryVals();
             return lhs.bitwiseAnd(rhs);
@@ -442,16 +432,6 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             }
             return SimValue::concat(parts);
         }
-
-        case DFGOp::CONCAT_ALIGN:
-            throw CompilerError("Simulator: CONCAT_ALIGN should have been cleaned up by concat_cleanup pass", node);
-
-        case DFGOp::CAST:
-            // CAST is a type-only operation; at simulation time the bits are unchanged.
-            return checkedGet(node->castSource().node, node);
-
-        case DFGOp::MODULE:
-            throw CompilerError("Simulator: MODULE nodes should not exist after dfg_inline pass", node);
     }
 
     throw CompilerError(std::format("Simulator: unhandled op {}", to_string(node->kind())), node);

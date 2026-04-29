@@ -2,7 +2,6 @@
 
 #include "util/source_loc.h"
 
-#include <cassert>
 #include <unordered_set>
 #include <vector>
 
@@ -54,27 +53,7 @@ static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
 // ---------------------------------------------------------------------------
 
 static bool tryNormalize(DFG& graph, DFGNode* node) {
-    // Rule 1: LOGICAL_NOT elimination
-    if (node->kind() == DFGOp::LOGICAL_NOT) {
-        auto* operand = node->unaryInputs().operand.node;
-        if (!operand->hasType()) {
-            throw CompilerError(std::format("Cannot normalize LOGICAL_NOT: operand {} has no type", operand->str()), node);
-        }
-
-        if (operand->type->width == 1) {
-            // 1-bit: rewrite to BITWISE_NOT
-            node->rewriteToUnary(DFGOp::BITWISE_NOT, DFGOutput(operand));
-            return true;
-        } else {
-            // Multi-bit: rewrite to EQ(operand, 0)
-            auto* zero = graph.constant(0);
-            zero->loc = node->loc;
-            node->rewriteToBinary(DFGOp::EQ, DFGOutput(operand), DFGOutput(zero));
-            return true;
-        }
-    }
-
-    // Rule 2: 1-bit EQ-with-constant simplification
+    // Rule 1: 1-bit EQ-with-constant simplification
     if (node->kind() == DFGOp::EQ) {
         auto binary = node->binaryInputs();
         auto* lhs = binary.lhs.node;
@@ -109,7 +88,7 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
         }
     }
 
-    // Rule 3: Double BITWISE_NOT cancellation
+    // Rule 2: Double BITWISE_NOT cancellation
     if (node->kind() == DFGOp::BITWISE_NOT) {
         auto* inner = node->unaryInputs().operand.node;
         if (inner->kind() == DFGOp::BITWISE_NOT) {
@@ -118,7 +97,7 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
         }
     }
 
-    // Rule 4: MUX selector normalization
+    // Rule 3: MUX selector normalization
     if (node->kind() == DFGOp::MUX) {
         if (!node->isBinaryMux()) {
             return false;
@@ -156,12 +135,6 @@ bool normalizeConditions(DFG& graph) {
         }
         anyChanged |= changed;
     } while (changed);
-
-    // Post-condition: no LOGICAL_NOT nodes should remain
-    for (auto& node : graph.nodes) {
-        assert(node->kind() != DFGOp::LOGICAL_NOT &&
-               "LOGICAL_NOT should have been eliminated by condition normalization");
-    }
 
     return anyChanged;
 }

@@ -98,7 +98,10 @@ def run_validate(name):
     """Run make validate for a test case. Returns (success, output)."""
     work_dir = TESTS_DIR / name / "work" / "validate"
     result = subprocess.run(
-        ["make", "validate"],
+        # SIM_BUILD_TARGET=noop prevents each per-test sub-make from re-invoking
+        # cmake on the shared build directory, which would race when tests run in
+        # parallel. The simulator is built once upfront before this point.
+        ["make", "validate", "SIM_BUILD_TARGET=noop"],
         cwd=work_dir,
         capture_output=True,
         text=True,
@@ -108,7 +111,7 @@ def run_validate(name):
 
 
 def ensure_simulator():
-    """Build the sanitized simulator used by expected-failure tests."""
+    """Build the sanitized simulator before running tests."""
     result = subprocess.run(
         ["make", "-C", str(REPO_ROOT), "sanitized"],
         capture_output=True,
@@ -191,14 +194,12 @@ def main():
         print("No test cases found.")
         sys.exit(1)
 
-    has_expected_failure = any(case["kind"] == "expected_failure" for case in cases)
-    if has_expected_failure:
-        print("Building diagnostic simulator for expected-failure tests...", flush=True)
-        ok, output = ensure_simulator()
-        if not ok:
-            print(f"{RED}Failed to build diagnostic simulator{RESET}")
-            print(output)
-            sys.exit(1)
+    print("Building simulator...", flush=True)
+    ok, output = ensure_simulator()
+    if not ok:
+        print(f"{RED}Failed to build simulator{RESET}")
+        print(output)
+        sys.exit(1)
 
     jobs = max(1, args.jobs)
     print(f"Running {len(cases)} tests with {jobs} worker(s)...", flush=True)

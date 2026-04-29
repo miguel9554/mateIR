@@ -1,4 +1,4 @@
-.PHONY: all build dev debug sanitized release ensure-debug-slang test regression gdb clean
+.PHONY: all build dev debug sanitized release ensure-debug-slang test regression gdb clean noop
 
 all: dev
 
@@ -36,3 +36,5 @@ gdb: debug
 
 clean:
 	rm -rf build/dev build/debug build/sanitized build/release build/vcd-compare
+
+noop:

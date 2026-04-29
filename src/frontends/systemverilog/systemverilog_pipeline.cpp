@@ -1,6 +1,5 @@
 #include "frontends/systemverilog/systemverilog_pipeline.h"
 
-#include "frontends/systemverilog/passes/combo_deps.h"
 #include "frontends/systemverilog/passes/cdc_annotations.h"
 #include "frontends/systemverilog/passes/condition_normalization.h"
 #include "frontends/systemverilog/passes/constant_fold.h"
@@ -299,7 +298,6 @@ void runMateIRPipeline(MateIR& ir,
             std::ofstream f(std::format("{}/11_domains_propagate_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        computeComboDeps(module);
         validateNoCombLoops(module);
 
         if (!debugSpecs.empty()) {

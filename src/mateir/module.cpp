@@ -447,7 +447,6 @@ static std::string moduleToJson(const Module& m, int indent) {
     ss << ind(indent) << "{\n";
     ss << ind(indent+1) << "\"name\": \"" << m.name << "\",\n";
     ss << ind(indent+1) << "\"instance_name\": \"" << m.instance_name << "\",\n";
-    ss << ind(indent+1) << "\"pure_combinational\": " << (m.pure_combinational ? "true" : "false") << ",\n";
 
     // Parameters
     ss << ind(indent+1) << "\"parameters\": [\n";

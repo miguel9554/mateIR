@@ -80,12 +80,6 @@ void loadTopIODomains(Module& module,
             yamlModuleName, module.name));
     }
 
-    if (config["pure_combinational"] && config["pure_combinational"].as<bool>()) {
-        throw CompilerError(
-            "io_domains_set: pure_combinational is only supported on internal "
-            "module domains YAML, which is no longer read");
-    }
-
     // Top-level domains YAML classifies only top-level inputs.
     std::set<std::string> inputPortNames;
     std::set<std::string> outputPortNames;

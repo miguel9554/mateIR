@@ -13,9 +13,6 @@ void collectModule(const Module& module, StaticAnalysisSummary& summary) {
     summary.signals += module.signals.size();
     summary.flops += module.flops.size();
     if (module.dfg) summary.dfg_nodes += module.dfg->nodes.size();
-    for (const auto& [output, deps] : module.combo_deps) {
-        summary.comb_dependency_edges += deps.size();
-    }
     validateNoCombLoops(module);
     for (const auto& sub : module.hierarchyInstantiation)
         collectModule(sub, summary);
@@ -39,8 +36,7 @@ void StaticAnalysisConsumer::consume(const MateIR& ir) {
     out_ << "  outputs: " << summary.outputs << "\n";
     out_ << "  signals: " << summary.signals << "\n";
     out_ << "  flops: " << summary.flops << "\n";
-    out_ << "  dfg_nodes: " << summary.dfg_nodes << "\n";
-    out_ << "  comb_dependency_edges: " << summary.comb_dependency_edges << "\n";
+    out_ << "  dfg_nodes: "              << summary.dfg_nodes     << "\n";
 }
 
 StaticAnalysisSummary analyzeMateIR(const MateIR& ir) {

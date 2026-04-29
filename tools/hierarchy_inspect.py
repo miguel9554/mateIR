@@ -124,9 +124,8 @@ def cmd_tree(root, args):
     def _print(node, depth):
         inst = node.get("instance_name") or node.get("name", "?")
         mod  = node.get("name", "")
-        pure = "  (comb)" if node.get("pure_combinational") else ""
         label = inst if inst == mod else f"{inst}  ({mod})"
-        print("  " * depth + label + pure)
+        print("  " * depth + label)
         for sub in node.get("submodules", []):
             _print(sub, depth + 1)
     _print(root, 0)

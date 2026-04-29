@@ -48,12 +48,6 @@ void validateModuleFacts(const Module& module,
             module.name, pathString(path)));
     }
 
-    if (moduleFacts->pure_combinational != module.pure_combinational) {
-        throw CompilerError(std::format(
-            "frontend_domain_facts: pure_combinational mismatch for module '{}' at {}",
-            module.name, pathString(path)));
-    }
-
     for (const auto& [portName, portFact] : moduleFacts->ports) {
         const Signal* sig = findPort(module, portName);
         if (!sig) {

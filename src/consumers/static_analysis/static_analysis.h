@@ -14,7 +14,6 @@ struct StaticAnalysisSummary {
     size_t signals = 0;
     size_t flops = 0;
     size_t dfg_nodes = 0;
-    size_t comb_dependency_edges = 0;
 };
 
 class StaticAnalysisConsumer final : public IRConsumer {

@@ -165,14 +165,13 @@
     "module": {
       "type": "object",
       "required": [
-        "name", "instance_name", "pure_combinational",
+        "name", "instance_name",
         "parameters", "localparams", "inputs", "outputs",
         "signals", "flops", "submodules"
       ],
       "properties": {
         "name": { "$ref": "#/$defs/identifier" },
         "instance_name": { "type": "string" },
-        "pure_combinational": { "type": "boolean" },
         "parameters": {
           "type": "array",
           "items": { "$ref": "#/$defs/param" }

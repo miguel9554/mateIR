@@ -7,7 +7,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -122,9 +121,6 @@ struct FlopInfo {
     void print(std::ostream& os, int indent = 0) const;
 };
 
-// Per-module combinational dependency map: output_port -> {input_ports it depends on}
-using ComboDeps = std::map<std::string, std::set<std::string>>;
-
 struct ModuleInstanceInputBinding {
     std::string port_name;
     DFGOutput driver;
@@ -158,13 +154,6 @@ struct Module {
 
     // Single DFG containing this module's logic.
     std::unique_ptr<DFG> dfg;
-
-    // Combinational dependency map: output_port -> {input_ports}
-    ComboDeps combo_deps;
-
-    // True if this module is known to be purely combinational.
-    // Legacy field retained while domain inference is being migrated.
-    bool pure_combinational = false;
 
     void print(int indent = 0) const;
 };

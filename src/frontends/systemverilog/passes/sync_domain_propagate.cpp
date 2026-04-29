@@ -573,7 +573,7 @@ void assignSignalSyncTypes(
 
     auto assignDrivenSignal = [&](Signal& signal) {
         SyncType propagated = syncTypeForSignalLeaves(signal, nodeSync);
-        if (!module.pure_combinational && moduleFacts.ports.contains(signal.name)) {
+        if (moduleFacts.ports.contains(signal.name)) {
             SyncType expected = expectedPortSyncType(module, path, ir, facts, moduleFacts, signal);
             if (std::holds_alternative<AsyncSignal>(propagated) &&
                     !std::holds_alternative<AsyncSignal>(expected)) {

@@ -131,7 +131,6 @@ struct ModuleCdcFacts {
 };
 
 struct ModuleDomainFacts {
-    bool pure_combinational = false;
     std::map<std::string, LocalPortDomainFact> ports;
     std::map<std::string, YamlClockDomainFact> yaml_clocks;
     std::map<std::string, YamlResetDomainFact> yaml_resets;

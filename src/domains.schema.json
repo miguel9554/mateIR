@@ -40,11 +40,6 @@
       "pattern": "^[a-zA-Z_][a-zA-Z0-9_$]*$"
     },
 
-    "pure_combinational": {
-      "type": "boolean",
-      "description": "Deprecated; main domains YAML is top-level-input-only and no longer marks internal combinational modules."
-    },
-
     "clock_domains": {
       "type": "object",
       "description": "Mapping of top-level clock input domains to their configuration.",

@@ -22,11 +22,11 @@ enum class DFGOp {
     OUTPUT,     // Primary output (module port)
     SIGNAL,     // Internal signal (named placeholder)
     CONST,      // Constant value (data: int64_t)
-    UNARY_NEGATE,
     // Arithmetic ops
     ADD,
     SUB,
     MUL,
+    UNARY_NEGATE,
     // Bit extraction / concatenation ops
     SLICE,      // Static bit-slice: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
     CONCAT,     // Concatenation: in[0..N-1] = parts, MSB-first

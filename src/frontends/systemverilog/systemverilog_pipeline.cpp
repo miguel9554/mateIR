@@ -252,24 +252,22 @@ void runMateIRPipeline(MateIR& ir,
         runPass(3, "type_propagation", [&]{ propagateTypes(*module.dfg); });
         runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
         runPass(5, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(6, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(7, "constant_fold", [&]{ constantFold(*module.dfg); });
-        runPass(8, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
+        runPass(6, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/08_flop_resolve_flops.txt", dir));
+            std::ofstream f(std::format("{}/06_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        runPass(9, "load_top_io_domains", [&]{
+        runPass(7, "load_top_io_domains", [&]{
             loadTopIODomains(module, topDomainPath, domainFacts);
         });
-        runPass(10, "cdc_annotations", [&]{
+        runPass(8, "cdc_annotations", [&]{
             loadCdcAnnotations(module, cdcPathsByModule, domainFacts);
         });
-        runPass(11, "global_domain_resolve", [&]{
+        runPass(9, "global_domain_resolve", [&]{
             resolveGlobalDomains(ir, domainFacts);
         });
-        runPass(12, "dce", [&]{
+        runPass(10, "dce", [&]{
             std::unordered_set<DFGNode*> keepAlive;
             std::function<void(const Module&)> collect = [&](const Module& mod) {
                 for (const auto& parameter : mod.parameters)
@@ -295,10 +293,10 @@ void runMateIRPipeline(MateIR& ir,
         module.dfg->validateNoOrphans();
         module.dfg->validateStrictLiveDFG();
         validateFrontendDomainFacts(module, domainFacts);
-        runPass(14, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(ir, domainFacts); });
+        runPass(11, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(ir, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/14_domains_propagate_flops.txt", dir));
+            std::ofstream f(std::format("{}/11_domains_propagate_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
         computeComboDeps(module);

@@ -202,6 +202,51 @@ std::optional<SignalLeafRef> findModuleNamedLeaf(
     return findSignalLeafRef(module.signals, leaf_name);
 }
 
+void collectModuleRoots(const Module& module,
+                        std::unordered_set<DFGNode*>& roots,
+                        const ModuleRootSelection& selection) {
+    auto insertSignalLeaves = [&roots](const std::map<std::string, Signal>& signals) {
+        for (const auto& [_, signal] : signals) {
+            for (auto* leaf : signalLeaves(signal)) {
+                if (leaf) roots.insert(leaf);
+            }
+        }
+    };
+
+    if (selection.parameters) {
+        for (const auto& parameter : module.parameters) {
+            if (parameter.dfg_node) roots.insert(parameter.dfg_node);
+        }
+    }
+    if (selection.localparams) {
+        for (const auto& parameter : module.localparams) {
+            if (parameter.dfg_node) roots.insert(parameter.dfg_node);
+        }
+    }
+    if (selection.inputs) insertSignalLeaves(module.inputs);
+    if (selection.outputs) insertSignalLeaves(module.outputs);
+    if (selection.signals) insertSignalLeaves(module.signals);
+    if (selection.flop_d) {
+        for (const auto& flop : module.flops) {
+            for (auto* leaf : flopDLeaves(flop)) {
+                if (leaf) roots.insert(leaf);
+            }
+        }
+    }
+    if (selection.flop_q) {
+        for (const auto& flop : module.flops) {
+            for (auto* leaf : flopQLeaves(flop)) {
+                if (leaf) roots.insert(leaf);
+            }
+        }
+    }
+
+    if (!selection.recurse_hierarchy) return;
+    for (const auto& sub : module.hierarchyInstantiation) {
+        collectModuleRoots(sub, roots, selection);
+    }
+}
+
 void FlopInfo::print(std::ostream& os, int indent) const {
     auto indent_str = [](int n) { return std::string(n * 2, ' '); };
 

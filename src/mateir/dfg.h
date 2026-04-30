@@ -556,18 +556,13 @@ struct DFG {
     DFGNode* getOutputNode(const std::string& instance_path, const std::string& name) const {
         return getGraphOutput(instance_path, name);
     }
-    DFGNode* getSignalNode(const std::string& instance_path, const std::string& name) const {
-        auto it = signals.find(nodeKey(instance_path, name)); return it != signals.end() ? it->second : nullptr;
-    }
     bool hasOutput(const std::string& instance_path, const std::string& name) const {
         return hasGraphOutput(instance_path, name);
     }
-    bool hasSignal(const std::string& instance_path, const std::string& name) const { return signals.count(nodeKey(instance_path, name)) > 0; }
 
     // Read-only iteration for passes
     const std::map<std::string, DFGNode*>& getInputsMap()    const { return inputs; }
     const std::map<std::string, DFGNode*>& getOutputsMap()   const { return outputs; }
-    const std::map<std::string, DFGNode*>& getSignalsMap()   const { return signals; }
     const std::map<std::string, DFGNode*>& getConstantsMap() const { return constants; }
 
     // Create a GraphOutput placeholder node with no driver yet.
@@ -600,7 +595,6 @@ struct DFG {
         for (auto& [k, v] : constants) if (v == oldNode) v = newNode;
         for (auto& [k, v] : inputs)    if (v == oldNode) v = newNode;
         for (auto& [k, v] : outputs)   if (v == oldNode) v = newNode;
-        for (auto& [k, v] : signals)   if (v == oldNode) v = newNode;
     }
 
     // Redirect all consumers of oldNode to replacement, and update named maps.
@@ -638,7 +632,6 @@ struct DFG {
         std::erase_if(constants, [&alive](const auto& kv) { return !alive.count(kv.second); });
         std::erase_if(inputs,    [&alive](const auto& kv) { return !alive.count(kv.second); });
         std::erase_if(outputs,   [&alive](const auto& kv) { return !alive.count(kv.second); });
-        std::erase_if(signals,   [&alive](const auto& kv) { return !alive.count(kv.second); });
     }
 
 private:
@@ -650,7 +643,6 @@ private:
     std::map<std::string, DFGNode*> constants;
     std::map<std::string, DFGNode*> inputs;
     std::map<std::string, DFGNode*> outputs;
-    std::map<std::string, DFGNode*> signals;
 
 public:
 
@@ -689,10 +681,6 @@ public:
     DFGNode* signal(const std::string& instance_path, const std::string& name) {
         nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGSignalPayload{}, name));
         nodes.back()->instance_path = instance_path;
-        auto result = signals.insert({nodeKey(instance_path, name), nodes.back().get()});
-        if (!result.second) {
-            throw CompilerError(std::format("Signal {} already exists", name));
-        }
         return nodes.back().get();
     }
 
@@ -703,9 +691,6 @@ public:
             ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGSlicePayload{source, high, low})
             : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGSlicePayload{source, high, low}, name);
         nodes.push_back(std::move(n));
-        if (!name.empty()) {
-            signals[name] = nodes.back().get();
-        }
         return nodes.back().get();
     }
 
@@ -722,26 +707,7 @@ public:
             ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{parts})
             : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{parts}, name);
         nodes.push_back(std::move(n));
-        if (!name.empty()) {
-            signals[name] = nodes.back().get();
-        }
         return nodes.back().get();
-    }
-
-    // Lookup signal for READING in expressions
-    // Returns the node representing the signal's value
-    DFGNode* lookupSignal(const std::string& instance_path, const std::string& name) const {
-        std::string key = nodeKey(instance_path, name);
-        if (auto it = inputs.find(key); it != inputs.end()) return it->second;
-        if (auto it = signals.find(key); it != signals.end()) return it->second;
-        if (auto it = constants.find(key); it != constants.end()) return it->second;
-        if (auto it = outputs.find(key); it != outputs.end()) {
-            // For outputs, return the driver if connected (reading output value)
-            auto* outNode = it->second;
-            auto driver = outNode->driver();
-            return driver ? driver->node : outNode;
-        }
-        return nullptr;
     }
 
     // Low-level: connect a single driver to an OUTPUT or SIGNAL node.
@@ -763,15 +729,6 @@ public:
     // Compatibility wrapper kept for incremental migration.
     void connectOutput(const std::string& instance_path, const std::string& name, DFGOutput driver) {
         connectGraphOutput(instance_path, name, driver);
-    }
-
-    // Connect a driver to an existing signal node
-    void connectSignal(const std::string& instance_path, const std::string& name, DFGOutput driver) {
-        auto it = signals.find(nodeKey(instance_path, name));
-        if (it == signals.end()) {
-            throw CompilerError(std::format("Signal {} not found", name));
-        }
-        connectDriver(it->second, driver);
     }
 
     // An output can be recreated, if it's assigned again.
@@ -856,9 +813,6 @@ public:
             ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGMuxPayload{DFGOutput(sel), std::move(arms)})
             : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGMuxPayload{DFGOutput(sel), std::move(arms)}, name);
         nodes.push_back(std::move(n));
-        if (!name.empty()) {
-            signals[name] = nodes.back().get();
-        }
         return nodes.back().get();
     }
 
@@ -874,7 +828,6 @@ public:
             ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGBinaryPayload{op, DFGOutput(a), DFGOutput(b)})
             : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGBinaryPayload{op, DFGOutput(a), DFGOutput(b)}, name);
         nodes.push_back(std::move(n));
-        if (!name.empty()) signals[name] = nodes.back().get();
         return nodes.back().get();
     }
 
@@ -885,9 +838,6 @@ public:
             ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGUnaryPayload{op, DFGOutput(a)})
             : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGUnaryPayload{op, DFGOutput(a)}, name);
         nodes.push_back(std::move(n));
-        if (!name.empty()) {
-            signals[name] = nodes.back().get();
-        }
         return nodes.back().get();
     }
 

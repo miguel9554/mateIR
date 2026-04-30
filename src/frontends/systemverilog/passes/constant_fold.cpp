@@ -54,16 +54,16 @@ static void postOrderVisit(DFGNode* node,
     order.push_back(node);
 }
 
-static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
+static std::vector<DFGNode*> buildPostOrder(
+        DFG& graph,
+        const std::unordered_set<DFGNode*>& extraRoots) {
     std::unordered_set<DFGNode*> visited;
     std::vector<DFGNode*> order;
-    // Start from outputs and signals (root nodes)
+    // Start from graph outputs and explicit external roots.
     for (auto& [name, node] : graph.getOutputsMap()) {
         postOrderVisit(node, visited, order);
     }
-    for (auto& [name, node] : graph.getSignalsMap()) {
-        postOrderVisit(node, visited, order);
-    }
+    for (auto* node : extraRoots) postOrderVisit(node, visited, order);
     // Do NOT visit orphaned nodes (not reachable from any output/signal).
     // Visiting orphaned nodes causes constant_fold to loop forever: when
     // redirectConsumers() silently no-ops on an already-orphaned node,
@@ -455,12 +455,13 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
 // Main pass
 // ---------------------------------------------------------------------------
 
-bool constantFold(DFG& graph) {
+bool constantFold(DFG& graph,
+                  const std::unordered_set<DFGNode*>& extraRoots) {
     bool anyChanged = false;
     bool changed;
     do {
         changed = false;
-        auto order = buildPostOrder(graph);
+        auto order = buildPostOrder(graph, extraRoots);
         for (DFGNode* node : order) {
             if (tryConstantFold(node))               { changed = true; continue; }
             if (tryAlgebraicSimplify(graph, node))    { changed = true; continue; }

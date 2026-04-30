@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace mate {
@@ -40,6 +41,17 @@ struct SignalLeafRef {
     DFGNode* node = nullptr;
     std::string leaf_name;
     size_t leaf_index = 0;
+};
+
+struct ModuleRootSelection {
+    bool parameters = false;
+    bool localparams = false;
+    bool inputs = false;
+    bool outputs = false;
+    bool signals = false;
+    bool flop_d = false;
+    bool flop_q = false;
+    bool recurse_hierarchy = false;
 };
 
 // ============================================================================
@@ -91,6 +103,9 @@ std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
 std::optional<SignalLeafRef> findModuleNamedLeaf(
     const Module& module,
     const std::string& leaf_name);
+void collectModuleRoots(const Module& module,
+                        std::unordered_set<DFGNode*>& roots,
+                        const ModuleRootSelection& selection);
 
 SyncKind syncKind(const SyncType& sync_type);
 SyncKind syncKind(const Signal& signal);

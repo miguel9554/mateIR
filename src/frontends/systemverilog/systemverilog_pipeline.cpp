@@ -251,10 +251,19 @@ void runMateIRPipeline(MateIR& ir,
 
         runPass(0, "elaboration", []{});
         runPass(1, "dfg_inline", [&]{ inlineDFGs(module); });
-        runPass(2, "constant_fold", [&]{ constantFold(*module.dfg); });
+        auto collectRoots = [&](const ModuleRootSelection& selection) {
+            std::unordered_set<DFGNode*> roots;
+            collectModuleRoots(module, roots, selection);
+            return roots;
+        };
+        const auto preOptRoots = collectRoots(ModuleRootSelection{
+            .signals = true,
+            .recurse_hierarchy = true,
+        });
+        runPass(2, "constant_fold", [&]{ constantFold(*module.dfg, preOptRoots); });
         runPass(3, "type_propagation", [&]{ propagateTypes(*module.dfg); });
-        runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg); });
-        runPass(5, "constant_fold", [&]{ constantFold(*module.dfg); });
+        runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg, preOptRoots); });
+        runPass(5, "constant_fold", [&]{ constantFold(*module.dfg, preOptRoots); });
         runPass(6, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
@@ -271,26 +280,16 @@ void runMateIRPipeline(MateIR& ir,
             resolveGlobalDomains(ir, domainFacts);
         });
         runPass(10, "dce", [&]{
-            std::unordered_set<DFGNode*> keepAlive;
-            std::function<void(const Module&)> collect = [&](const Module& mod) {
-                for (const auto& parameter : mod.parameters)
-                    if (parameter.dfg_node) keepAlive.insert(parameter.dfg_node);
-                for (const auto& parameter : mod.localparams)
-                    if (parameter.dfg_node) keepAlive.insert(parameter.dfg_node);
-                for (const auto& [name, sig] : mod.inputs)
-                    for (auto* leaf : signalLeaves(sig)) if (leaf) keepAlive.insert(leaf);
-                for (const auto& [name, sig] : mod.outputs)
-                    for (auto* leaf : signalLeaves(sig)) if (leaf) keepAlive.insert(leaf);
-                for (const auto& [name, sig] : mod.signals)
-                    for (auto* leaf : signalLeaves(sig)) if (leaf) keepAlive.insert(leaf);
-                for (const auto& flop : mod.flops) {
-                    for (auto* leaf : flopDLeaves(flop)) if (leaf) keepAlive.insert(leaf);
-                    for (auto* leaf : flopQLeaves(flop)) if (leaf) keepAlive.insert(leaf);
-                }
-                for (const auto& sub : mod.hierarchyInstantiation)
-                    collect(sub);
-            };
-            collect(module);
+            auto keepAlive = collectRoots(ModuleRootSelection{
+                .parameters = true,
+                .localparams = true,
+                .inputs = true,
+                .outputs = true,
+                .signals = true,
+                .flop_d = true,
+                .flop_q = true,
+                .recurse_hierarchy = true,
+            });
             eliminateDeadCode(*module.dfg, keepAlive);
         });
         module.dfg->validateNoOrphans();

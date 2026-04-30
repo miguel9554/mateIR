@@ -4229,14 +4229,14 @@ Signal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx
 void prePopulateInput(DFG& graph, Signal& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
-        auto* node = graph.input("", sig.name);
+        auto* node = graph.createGraphInput("", sig.name);
         node->type = sig.type;
         sig.binding.leaves.push_back(node);
     } else {
         Type leafType = sig.type;
         leafType.unpacked_dims.clear();
         for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
-            auto* node = graph.input("", sig.name + suffix);
+            auto* node = graph.createGraphInput("", sig.name + suffix);
             node->type = leafType;
             sig.binding.leaves.push_back(node);
         }
@@ -4249,14 +4249,14 @@ void prePopulateInput(DFG& graph, Signal& sig) {
 void prePopulateOutput(DFG& graph, Signal& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
-        auto* node = graph.outputPlaceholder("", sig.name);
+        auto* node = graph.createGraphOutput("", sig.name);
         node->type = sig.type;
         sig.binding.leaves.push_back(node);
     } else {
         Type leafType = sig.type;
         leafType.unpacked_dims.clear();
         for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
-            auto* node = graph.outputPlaceholder("", sig.name + suffix);
+            auto* node = graph.createGraphOutput("", sig.name + suffix);
             node->type = leafType;
             sig.binding.leaves.push_back(node);
         }
@@ -4294,9 +4294,9 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
 
     if (type.unpacked_dims.empty()) {
         // Scalar flop: one sink (.d) and one source (.q).
-        auto* dNode = graph.outputPlaceholder("", name + ".d");
+        auto* dNode = graph.createGraphOutput("", name + ".d");
         dNode->type = type;
-        auto* qNode = graph.input("", name + ".q");
+        auto* qNode = graph.createGraphInput("", name + ".q");
         qNode->type = type;
         flop.binding.d_leaves.push_back(dNode);
         flop.binding.q_leaves.push_back(qNode);
@@ -4307,11 +4307,11 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
         auto elemType = type;
         elemType.unpacked_dims.clear();
 
-        auto* dElem = graph.outputPlaceholder("", name + idxSuffix + ".d");
+        auto* dElem = graph.createGraphOutput("", name + idxSuffix + ".d");
         dElem->type = elemType;
         flop.binding.d_leaves.push_back(dElem);
 
-        auto* qElem = graph.input("", name + idxSuffix + ".q");
+        auto* qElem = graph.createGraphInput("", name + idxSuffix + ".q");
         qElem->type = elemType;
         flop.binding.q_leaves.push_back(qElem);
     }
@@ -4721,9 +4721,9 @@ static void resolveGenerateScopeDecls(
                 throw CompilerError(
                     "Generate-scope flop arrays not yet supported: " + name);
 
-            auto* d_node = ctx.graph.outputPlaceholder(ctx.instance_path, name + ".d");
+            auto* d_node = ctx.graph.createGraphOutput(ctx.instance_path, name + ".d");
             d_node->type = type;
-            auto* q_node = ctx.graph.input(ctx.instance_path, name + ".q");
+            auto* q_node = ctx.graph.createGraphInput(ctx.instance_path, name + ".q");
             q_node->type = type;
 
             ctx.local_signals[name + ".d"] = d_node;

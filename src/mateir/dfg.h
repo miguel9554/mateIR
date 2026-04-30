@@ -18,8 +18,8 @@ namespace mate {
 
 enum class DFGOp {
     // Identity ops
-    INPUT,      // Primary input (module port)
-    OUTPUT,     // Primary output (module port)
+    INPUT,      // Graph source boundary node (module inputs + flop .q leaves)
+    OUTPUT,     // Graph sink boundary node (module outputs + flop .d leaves)
     SIGNAL,     // Internal signal (named placeholder)
     CONST,      // Constant value (data: int64_t)
     // Arithmetic ops
@@ -562,11 +562,6 @@ struct DFG {
         }
         return nodes.back().get();
     }
-    // Compatibility wrapper kept for incremental migration.
-    DFGNode* outputPlaceholder(const std::string& instance_path, const std::string& name) {
-        return createGraphOutput(instance_path, name);
-    }
-
     // Create an anonymous SIGNAL placeholder node with no driver.
     // Not inserted in named maps, so it is not rooted by DCE.
     DFGNode* placeholderSignal(const std::string& instance_path = "") {
@@ -640,11 +635,6 @@ public:
         }
         return nodes.back().get();
     }
-    // Compatibility wrapper kept for incremental migration.
-    DFGNode* input(const std::string& instance_path, const std::string& name) {
-        return createGraphInput(instance_path, name);
-    }
-
     DFGNode* named_constant(int64_t v, const std::string& instance_path, const std::string& name) {
         nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConstPayload{v}, name));
         nodes.back()->instance_path = instance_path;
@@ -708,29 +698,6 @@ public:
         }
         connectDriver(it->second, driver);
     }
-    // An output can be recreated, if it's assigned again.
-    DFGNode* output(DFGNode* a, const std::string& instance_path, const std::string& name, bool rename) {
-        auto n = std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGOutputPayload{DFGOutput(a)}, name);
-        n->instance_path = instance_path;
-        nodes.push_back(std::move(n));
-        std::string key = nodeKey(instance_path, name);
-        auto result = outputs.insert({key, nodes.back().get()});
-        if (!result.second) {
-            if (!rename) throw CompilerError(std::format("Output {} already exists", name));
-            // Remove old output node from the nodes vector
-            auto oldNode = outputs[key];
-            auto it = std::find_if(nodes.begin(), nodes.end(),
-                [oldNode](const std::unique_ptr<DFGNode>& n) {
-                    return n.get() == oldNode;
-                });
-            if (it != nodes.end()) {
-                nodes.erase(it);
-            }
-            outputs[key] = nodes.back().get();
-        }
-        return nodes.back().get();
-    }
-
     DFGNode* add(DFGNode* a, DFGNode* b, const std::string& name = "") {
         return binaryOp(DFGOp::ADD, a, b, name);
     }

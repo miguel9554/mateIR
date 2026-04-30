@@ -145,6 +145,63 @@ DFGNode* scalarFlopQNode(const FlopInfo& flop) {
     return flop.binding.q_leaves[0];
 }
 
+std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal) {
+    std::vector<SignalLeafRef> refs;
+    refs.reserve(signal.binding.leaves.size());
+    if (signal.type.unpacked_dims.empty()) {
+        refs.push_back(SignalLeafRef{
+            .signal = &signal,
+            .node = signal.binding.leaves.empty() ? nullptr : signal.binding.leaves.front(),
+            .leaf_name = signal.name,
+            .leaf_index = 0,
+        });
+        return refs;
+    }
+
+    const auto suffixes = unpackedIndexSuffixes(signal.type);
+    const size_t count = std::min(suffixes.size(), signal.binding.leaves.size());
+    for (size_t i = 0; i < count; ++i) {
+        refs.push_back(SignalLeafRef{
+            .signal = &signal,
+            .node = signal.binding.leaves[i],
+            .leaf_name = signal.name + suffixes[i],
+            .leaf_index = i,
+        });
+    }
+    return refs;
+}
+
+std::optional<SignalLeafRef> findSignalLeafRef(
+    const std::map<std::string, Signal>& signals,
+    const std::string& leaf_name) {
+    if (auto it = signals.find(leaf_name); it != signals.end()) {
+        auto refs = signalLeafRefs(it->second);
+        if (refs.size() == 1) return refs.front();
+    }
+
+    for (const auto& [_, signal] : signals) {
+        for (const auto& ref : signalLeafRefs(signal)) {
+            if (ref.leaf_name == leaf_name) return ref;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
+    const Module& module,
+    const std::string& leaf_name) {
+    if (auto output = findSignalLeafRef(module.outputs, leaf_name)) return output;
+    return findSignalLeafRef(module.signals, leaf_name);
+}
+
+std::optional<SignalLeafRef> findModuleNamedLeaf(
+    const Module& module,
+    const std::string& leaf_name) {
+    if (auto input = findSignalLeafRef(module.inputs, leaf_name)) return input;
+    if (auto output = findSignalLeafRef(module.outputs, leaf_name)) return output;
+    return findSignalLeafRef(module.signals, leaf_name);
+}
+
 void FlopInfo::print(std::ostream& os, int indent) const {
     auto indent_str = [](int n) { return std::string(n * 2, ' '); };
 

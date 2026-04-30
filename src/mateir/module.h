@@ -33,6 +33,14 @@ struct FlopBinding {
 
 struct Signal;
 struct FlopInfo;
+struct Module;
+
+struct SignalLeafRef {
+    const Signal* signal = nullptr;
+    DFGNode* node = nullptr;
+    std::string leaf_name;
+    size_t leaf_index = 0;
+};
 
 // ============================================================================
 // Leaf layout helpers
@@ -73,6 +81,16 @@ const std::vector<DFGNode*>& flopDLeaves(const FlopInfo& flop);
 const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop);
 DFGNode* scalarFlopDNode(const FlopInfo& flop);
 DFGNode* scalarFlopQNode(const FlopInfo& flop);
+std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal);
+std::optional<SignalLeafRef> findSignalLeafRef(
+    const std::map<std::string, Signal>& signals,
+    const std::string& leaf_name);
+std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
+    const Module& module,
+    const std::string& leaf_name);
+std::optional<SignalLeafRef> findModuleNamedLeaf(
+    const Module& module,
+    const std::string& leaf_name);
 
 SyncKind syncKind(const SyncType& sync_type);
 SyncKind syncKind(const Signal& signal);

@@ -60,31 +60,17 @@ InstancePath childPath(InstancePath path, const std::string& instanceName) {
 }
 
 const DFGNode* findLocalNode(
-        const DFG* dfg,
-        const InstancePath& path,
+        const Module& module,
         const std::string& signalName) {
-    if (!dfg) return nullptr;
-    std::string dfgPath = dfgInstancePath(path);
-    if (auto* node = dfg->getInputNode(dfgPath, signalName)) return node;
-    if (auto* node = dfg->getSignalNode(dfgPath, signalName)) return node;
-    if (auto* node = dfg->getOutputNode(dfgPath, signalName)) return node;
-    for (const auto& node : dfg->nodes) {
-        if (node->instance_path == dfgPath && node->name == signalName &&
-                (node->kind() == DFGOp::INPUT ||
-                 node->kind() == DFGOp::SIGNAL ||
-                 node->kind() == DFGOp::OUTPUT)) {
-            return node.get();
-        }
-    }
-    return nullptr;
+    auto leaf = findModuleNamedLeaf(module, signalName);
+    return leaf ? leaf->node : nullptr;
 }
 
 std::optional<std::string> transparentAliasTarget(
-        const DFG* dfg,
         const Module& module,
         const InstancePath& path,
         const std::string& signalName) {
-    const DFGNode* node = findLocalNode(dfg, path, signalName);
+    const DFGNode* node = findLocalNode(module, signalName);
     if (!node) return std::nullopt;
     if (node->kind() != DFGOp::SIGNAL && node->kind() != DFGOp::OUTPUT)
         return std::nullopt;
@@ -111,7 +97,6 @@ std::optional<std::string> transparentAliasTarget(
 }
 
 std::optional<std::string> resolveAliasToLocalInput(
-        const DFG* dfg,
         const Module& module,
         const InstancePath& path,
         const std::string& signalName) {
@@ -119,7 +104,7 @@ std::optional<std::string> resolveAliasToLocalInput(
     std::string current = signalName;
     while (visited.insert(current).second) {
         if (module.inputs.contains(current)) return current;
-        auto next = transparentAliasTarget(dfg, module, path, current);
+        auto next = transparentAliasTarget(module, path, current);
         if (!next) return std::nullopt;
         current = *next;
     }
@@ -262,14 +247,13 @@ const ChildInputConnectionFact* findChildInputConnection(
 std::map<LocalPortDemandKey, LocalPortDemand> inferClockResetPortFacts(
         Module& module,
         const InstancePath& path,
-        const DFG* dfg,
         FrontendDomainFacts& facts) {
     ModuleDomainFacts& moduleFacts = facts.getOrCreate({path, module.name});
     auto demands = collectLocalClockResetDemands(module, path, moduleFacts);
 
     for (auto& child : module.hierarchyInstantiation) {
         InstancePath childInstancePath = childPath(path, child.instance_name);
-        auto childDemands = inferClockResetPortFacts(child, childInstancePath, dfg, facts);
+        auto childDemands = inferClockResetPortFacts(child, childInstancePath, facts);
         for (const auto& childDemandKey : sortedDemandKeys(childDemands)) {
             const auto& demand = childDemands.at(childDemandKey);
             const auto* conn = findChildInputConnection(
@@ -291,7 +275,7 @@ std::map<LocalPortDemandKey, LocalPortDemand> inferClockResetPortFacts(
                     conn->loc);
             }
             auto inputName = resolveAliasToLocalInput(
-                dfg, module, path, *conn->parent_signal_name);
+                module, path, *conn->parent_signal_name);
             if (inputName) {
                 addDemand(demands, *inputName, demand.cls,
                           demand.edge, module, path);
@@ -659,7 +643,7 @@ private:
             if (auto it = sourceMap.find(current); it != sourceMap.end())
                 return it->second;
 
-            auto next = transparentAliasTarget(ir_.top.dfg.get(), module, path, current);
+            auto next = transparentAliasTarget(module, path, current);
             if (!next) return std::nullopt;
             current = *next;
         }
@@ -799,7 +783,7 @@ private:
 } // namespace
 
 void resolveGlobalDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
-    inferClockResetPortFacts(ir.top, {}, ir.top.dfg.get(), domainFacts);
+    inferClockResetPortFacts(ir.top, {}, domainFacts);
     GlobalDomainResolver resolver(ir, domainFacts);
     resolver.run();
 }

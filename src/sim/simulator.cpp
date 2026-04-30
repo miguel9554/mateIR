@@ -713,8 +713,11 @@ std::set<ResetId> Simulator::activeResetDomains() const {
 // ============================================================================
 
 void Simulator::recordOutputs() {
-    for (const auto& [name, node] : module_.dfg->getOutputsMap()) {
-        recorded_values_[name].push_back(root_->checkedGet(node));
+    for (const auto& [_, output] : module_.outputs) {
+        for (const auto& leaf : signalLeafRefs(output)) {
+            if (!leaf.node) continue;
+            recorded_values_[leaf.leaf_name].push_back(root_->checkedGet(leaf.node));
+        }
     }
 }
 

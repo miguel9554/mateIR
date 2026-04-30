@@ -506,17 +506,29 @@ static void resolveFlopsForModule(Module& resolved,
         }
     }
 
-    // Check that no signal or output logic depends on clock/reset.
-    // Filter to nodes belonging to this module's instance_path only: the flat DFG
-    // contains all modules' nodes, and sibling/ancestor nodes may still have their
-    // reset MUXes intact (processing is bottom-up).
-    for (const auto& [name, node] : graph.getSignalsMap()) {
-        if (node->instance_path != dfgInstancePath) continue;
-        check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
+    // Check that module-visible logic and resolved flop functional .d logic do
+    // not depend on clock/reset signals.
+    for (const auto& [_, signal] : resolved.signals) {
+        for (const auto& leaf : signalLeafRefs(signal)) {
+            if (!leaf.node) continue;
+            check_logic_no_clock_reset(leaf.node, leaf.leaf_name, resolved.name, clocks, resets);
+        }
     }
-    for (const auto& [name, node] : graph.getOutputsMap()) {
-        if (node->instance_path != dfgInstancePath) continue;
-        check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
+    for (const auto& [_, output] : resolved.outputs) {
+        for (const auto& leaf : signalLeafRefs(output)) {
+            if (!leaf.node) continue;
+            check_logic_no_clock_reset(leaf.node, leaf.leaf_name, resolved.name, clocks, resets);
+        }
+    }
+    for (const auto& flop : resolved.flops) {
+        for (size_t i = 0; i < flop.binding.d_leaves.size(); ++i) {
+            auto* dLeaf = flop.binding.d_leaves[i];
+            if (!dLeaf) continue;
+            const std::string rootName = flop.binding.d_leaves.size() == 1
+                ? flop.name + ".d"
+                : std::format("{}[{}].d", flop.name, i);
+            check_logic_no_clock_reset(dLeaf, rootName, resolved.name, clocks, resets);
+        }
     }
 
 }

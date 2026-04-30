@@ -97,6 +97,19 @@ std::map<std::string, std::string> loadCdcPathsByModule(
     return cdcPathsByModule;
 }
 
+bool debugPathMatches(const std::string& currentPath,
+                      const std::string& modulePath) {
+    return modulePath.empty() ||
+           currentPath == modulePath ||
+           currentPath.ends_with("." + modulePath);
+}
+
+const DFGNode* findDebugLeaf(const Module& module,
+                             const std::string& nodeName) {
+    auto leaf = findModuleOutputOrSignalLeaf(module, nodeName);
+    return leaf ? leaf->node : nullptr;
+}
+
 void validateDebugSpecsBeforePipeline(const Module& topModule,
                                       const std::vector<DebugNodeSpec>& specs) {
     if (specs.empty()) return;
@@ -104,19 +117,15 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
     std::set<size_t> foundSpecs;
     std::function<void(const Module&, const std::string&)> validate =
             [&](const Module& module, const std::string& currentPath) {
-        if (!module.dfg) return;
         for (const auto& sub : module.hierarchyInstantiation)
-            validate(sub, currentPath + "." + sub.name);
+            validate(sub, currentPath + "." + sub.instance_name);
 
         for (size_t i = 0; i < specs.size(); i++) {
             const auto& spec = specs[i];
-            if (!spec.module_path.empty() &&
-                currentPath != spec.module_path &&
-                !currentPath.ends_with("." + spec.module_path))
+            if (!debugPathMatches(currentPath, spec.module_path))
                 continue;
 
-            bool found = module.dfg->hasSignal("", spec.node_name) ||
-                         module.dfg->hasOutput("", spec.node_name);
+            bool found = findDebugLeaf(module, spec.node_name) != nullptr;
 
             if (!found && !spec.module_path.empty())
                 throw CompilerError(std::format(
@@ -160,13 +169,13 @@ void runMateIRPipeline(MateIR& ir,
                                    const std::string& nodeName) -> const DFGNode* {
             std::function<const DFGNode*(const Module&, const std::string&)> recurse =
                 [&](const Module& mod, const std::string& prefix) -> const DFGNode* {
+                    if (debugPathMatches(prefix, modulePath)) {
+                        if (auto* n = findDebugLeaf(mod, nodeName)) return n;
+                    }
                     for (const auto& sub : mod.hierarchyInstantiation) {
-                        std::string subPath = prefix.empty() ? sub.instance_name
-                                                             : prefix + "." + sub.instance_name;
-                        if (sub.name == modulePath) {
-                            if (auto* n = module.dfg->getSignalNode(subPath, nodeName)) return n;
-                            if (auto* n = module.dfg->getOutputNode(subPath, nodeName)) return n;
-                        }
+                        const std::string subPath = prefix.empty()
+                            ? sub.instance_name
+                            : prefix + "." + sub.instance_name;
                         if (auto* n = recurse(sub, subPath)) return n;
                     }
                     return nullptr;
@@ -203,15 +212,10 @@ void runMateIRPipeline(MateIR& ir,
                     const auto& spec = debugSpecs[specIdx];
 
                     const DFGNode* node = nullptr;
-                    bool pathMatches = spec.module_path.empty() ||
-                                       currentPath == spec.module_path ||
-                                       currentPath.ends_with("." + spec.module_path);
+                    bool pathMatches = debugPathMatches(currentPath, spec.module_path);
 
                     if (pathMatches) {
-                        if (auto* n = module.dfg->getSignalNode("", spec.node_name))
-                            node = n;
-                        else if (auto* n = module.dfg->getOutputNode("", spec.node_name))
-                            node = n;
+                        node = findDebugLeaf(module, spec.node_name);
 
                         if (!node) {
                             if (!spec.module_path.empty())
@@ -304,12 +308,9 @@ void runMateIRPipeline(MateIR& ir,
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             for (const auto& spec : debugSpecs) {
                 const DFGNode* node = nullptr;
-                bool pathMatches = spec.module_path.empty() ||
-                                   currentPath == spec.module_path ||
-                                   currentPath.ends_with("." + spec.module_path);
+                bool pathMatches = debugPathMatches(currentPath, spec.module_path);
                 if (pathMatches) {
-                    if (auto* n = module.dfg->getSignalNode("", spec.node_name)) node = n;
-                    else if (auto* n = module.dfg->getOutputNode("", spec.node_name)) node = n;
+                    node = findDebugLeaf(module, spec.node_name);
                 } else {
                     node = findInlinedNode(spec.module_path, spec.node_name);
                 }

@@ -678,7 +678,7 @@ void Simulator::advanceSyncInputs(const std::set<ClockId>& active_clocks) {
         if (pos + 1 < sync_input_data_[name].size()) {
             pos++;
         }
-        if (auto* inputNode = module_.dfg->getInputNode("", name)) {
+        if (auto* inputNode = module_.dfg->getGraphInput("", name)) {
             root_->values[inputNode] = sync_input_data_[name][pos];
         }
     }
@@ -792,7 +792,7 @@ void Simulator::run() {
                         name, evt.time));
                 }
                 async_prev[name] = evt.value;
-                if (auto* inputNode = module_.dfg->getInputNode("", name)) {
+                if (auto* inputNode = module_.dfg->getGraphInput("", name)) {
                     root_->values[inputNode] = evt.value;
                 }
                 // Also initialize the root's async_values for edge detection
@@ -809,7 +809,7 @@ void Simulator::run() {
 
     // 3. Set sync input values from first line of their files
     for (const auto& [name, data] : sync_input_data_) {
-        if (auto* inputNode = module_.dfg->getInputNode("", name)) {
+        if (auto* inputNode = module_.dfg->getGraphInput("", name)) {
             root_->values[inputNode] = data[0];
         }
     }
@@ -869,7 +869,7 @@ void Simulator::run() {
             const SimValue& old_val = async_prev[name];
 
             root_->async_values[name] = new_val;
-            if (auto* inputNode = module_.dfg->getInputNode("", name)) {
+            if (auto* inputNode = module_.dfg->getGraphInput("", name)) {
                 root_->values[inputNode] = new_val;
             }
 

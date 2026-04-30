@@ -281,7 +281,7 @@ FlopInfo extractFlopClockAndReset(
     auto flop = flopIn;
     DFGNode* dNode = nullptr;
     if (!flopIn.type.unpacked_dims.empty() && flop_name != flopIn.name) {
-        dNode = graph.getOutputNode(instance_path, flop_name + ".d");
+        dNode = graph.getGraphOutput(instance_path, flop_name + ".d");
     } else {
         dNode = scalarFlopDNode(flopIn);
     }
@@ -425,7 +425,7 @@ static void resolveFlopsForModule(Module& resolved,
     for (auto& [outName, output] : resolved.outputs) {
         if (!privateFacts.flop_triggers.contains(outName)) continue;
         if (output.type.unpacked_dims.empty()) {
-            DFGNode* qNode = graph.getInputNode(dfgInstancePath, outName + ".q");
+            DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + ".q");
             if (qNode) {
                 graph.connectDriver(scalarSignalNode(output), {qNode, 0});
             }
@@ -434,10 +434,10 @@ static void resolveFlopsForModule(Module& resolved,
             const auto& leaves = signalLeaves(output);
             for (size_t i = 0; i < suffixes.size(); ++i) {
                 const auto& suffix = suffixes[i];
-                DFGNode* qNode = graph.getInputNode(dfgInstancePath, outName + suffix + ".q");
+                DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + suffix + ".q");
                 DFGNode* outNode = i < leaves.size()
                     ? leaves[i]
-                    : graph.getOutputNode(dfgInstancePath, outName + suffix);
+                    : graph.getGraphOutput(dfgInstancePath, outName + suffix);
                 if (qNode && outNode) {
                     graph.connectDriver(outNode, {qNode, 0});
                 }
@@ -455,8 +455,8 @@ static void resolveFlopsForModule(Module& resolved,
                     graph, resolved, name, dfgInstancePath, flop, privateFacts, functional_logic));
             // After flop_resolve, every FlopInfo represents one physical flop leaf.
             {
-                auto* dNode = graph.getOutputNode(dfgInstancePath, name + ".d");
-                auto* qNode = graph.getInputNode(dfgInstancePath, name + ".q");
+                auto* dNode = graph.getGraphOutput(dfgInstancePath, name + ".d");
+                auto* qNode = graph.getGraphInput(dfgInstancePath, name + ".q");
                 resolved_flops.back().binding = FlopBinding{
                     .d_leaves = {dNode},
                     .q_leaves = {qNode},

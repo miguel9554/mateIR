@@ -527,17 +527,41 @@ namespace mate {
 struct DFG {
     std::vector<std::unique_ptr<DFGNode>> nodes;
 
-    // Named-node lookup (nullptr if absent)
-    DFGNode* getInputNode(const std::string& instance_path, const std::string& name) const {
+    // Graph-boundary lookup (nullptr if absent)
+    DFGNode* getGraphInput(const std::string& instance_path, const std::string& name) const {
         auto it = inputs.find(nodeKey(instance_path, name)); return it != inputs.end() ? it->second : nullptr;
     }
-    DFGNode* getOutputNode(const std::string& instance_path, const std::string& name) const {
+    DFGNode* getGraphOutput(const std::string& instance_path, const std::string& name) const {
         auto it = outputs.find(nodeKey(instance_path, name)); return it != outputs.end() ? it->second : nullptr;
+    }
+    bool hasGraphInput(const std::string& instance_path, const std::string& name) const {
+        return inputs.count(nodeKey(instance_path, name)) > 0;
+    }
+    bool hasGraphOutput(const std::string& instance_path, const std::string& name) const {
+        return outputs.count(nodeKey(instance_path, name)) > 0;
+    }
+    template<typename Fn>
+    void forEachGraphInput(Fn&& fn) const {
+        for (const auto& [key, node] : inputs) fn(key, node);
+    }
+    template<typename Fn>
+    void forEachGraphOutput(Fn&& fn) const {
+        for (const auto& [key, node] : outputs) fn(key, node);
+    }
+
+    // Compatibility wrappers kept for incremental migration.
+    DFGNode* getInputNode(const std::string& instance_path, const std::string& name) const {
+        return getGraphInput(instance_path, name);
+    }
+    DFGNode* getOutputNode(const std::string& instance_path, const std::string& name) const {
+        return getGraphOutput(instance_path, name);
     }
     DFGNode* getSignalNode(const std::string& instance_path, const std::string& name) const {
         auto it = signals.find(nodeKey(instance_path, name)); return it != signals.end() ? it->second : nullptr;
     }
-    bool hasOutput(const std::string& instance_path, const std::string& name) const { return outputs.count(nodeKey(instance_path, name)) > 0; }
+    bool hasOutput(const std::string& instance_path, const std::string& name) const {
+        return hasGraphOutput(instance_path, name);
+    }
     bool hasSignal(const std::string& instance_path, const std::string& name) const { return signals.count(nodeKey(instance_path, name)) > 0; }
 
     // Read-only iteration for passes
@@ -546,8 +570,8 @@ struct DFG {
     const std::map<std::string, DFGNode*>& getSignalsMap()   const { return signals; }
     const std::map<std::string, DFGNode*>& getConstantsMap() const { return constants; }
 
-    // Create an OUTPUT placeholder node with no driver yet
-    DFGNode* outputPlaceholder(const std::string& instance_path, const std::string& name) {
+    // Create a GraphOutput placeholder node with no driver yet.
+    DFGNode* createGraphOutput(const std::string& instance_path, const std::string& name) {
         auto n = std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGOutputPayload{}, name);
         n->instance_path = instance_path;
         nodes.push_back(std::move(n));
@@ -556,6 +580,10 @@ struct DFG {
             throw CompilerError(std::format("Output {} already exists", name));
         }
         return nodes.back().get();
+    }
+    // Compatibility wrapper kept for incremental migration.
+    DFGNode* outputPlaceholder(const std::string& instance_path, const std::string& name) {
+        return createGraphOutput(instance_path, name);
     }
 
     // Create an anonymous SIGNAL placeholder node with no driver.
@@ -587,19 +615,23 @@ struct DFG {
         redirectConsumers(oldNode, DFGOutput(newNode));
     }
 
-    // Adopt an existing node into the inputs map (for DFG inlining).
+    // Adopt an existing node into the graph-input map (for DFG inlining).
     // The node must already be in this DFG's nodes vector.
     // Map key is computed from node->instance_path + node->name.
-    void adoptInput(DFGNode* node) {
+    void adoptGraphInput(DFGNode* node) {
         inputs[nodeKey(node->instance_path, node->name)] = node;
     }
+    // Compatibility wrapper kept for incremental migration.
+    void adoptInput(DFGNode* node) { adoptGraphInput(node); }
 
-    // Adopt an existing node into the outputs map (for DFG inlining).
+    // Adopt an existing node into the graph-output map (for DFG inlining).
     // The node must already be in this DFG's nodes vector.
     // Map key is computed from node->instance_path + node->name.
-    void adoptOutput(DFGNode* node) {
+    void adoptGraphOutput(DFGNode* node) {
         outputs[nodeKey(node->instance_path, node->name)] = node;
     }
+    // Compatibility wrapper kept for incremental migration.
+    void adoptOutput(DFGNode* node) { adoptGraphOutput(node); }
 
     // Remove map entries whose node is not in the alive set (used by DCE)
     void pruneByAliveSet(const std::unordered_set<DFGNode*>& alive) {
@@ -624,7 +656,7 @@ public:
 
     // INPUT nodes, they have no inputs.
 
-    DFGNode* input(const std::string& instance_path, const std::string& name) {
+    DFGNode* createGraphInput(const std::string& instance_path, const std::string& name) {
         nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGInputPayload{}, name));
         nodes.back()->instance_path = instance_path;
         auto result = inputs.insert({nodeKey(instance_path, name), nodes.back().get()});
@@ -633,6 +665,10 @@ public:
             throw CompilerError(std::format("Input {} already exists", name));
         }
         return nodes.back().get();
+    }
+    // Compatibility wrapper kept for incremental migration.
+    DFGNode* input(const std::string& instance_path, const std::string& name) {
+        return createGraphInput(instance_path, name);
     }
 
     DFGNode* named_constant(int64_t v, const std::string& instance_path, const std::string& name) {
@@ -716,13 +752,17 @@ public:
         target->setDriver(driver);
     }
 
-    // Connect a driver to an existing output node
-    void connectOutput(const std::string& instance_path, const std::string& name, DFGOutput driver) {
+    // Connect a driver to an existing graph-output node.
+    void connectGraphOutput(const std::string& instance_path, const std::string& name, DFGOutput driver) {
         auto it = outputs.find(nodeKey(instance_path, name));
         if (it == outputs.end()) {
             throw CompilerError(std::format("Output {} not found", name));
         }
         connectDriver(it->second, driver);
+    }
+    // Compatibility wrapper kept for incremental migration.
+    void connectOutput(const std::string& instance_path, const std::string& name, DFGOutput driver) {
+        connectGraphOutput(instance_path, name, driver);
     }
 
     // Connect a driver to an existing signal node

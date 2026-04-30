@@ -13,9 +13,9 @@ bool eliminateDeadCode(DFG& graph,
 
     // Roots: graph outputs.
     // .d OUTPUT nodes are in the outputs map and are automatically rooted.
-    for (auto& [name, node] : graph.getOutputsMap()) {
+    graph.forEachGraphOutput([&](const auto&, DFGNode* node) {
         if (alive.insert(node).second) worklist.push_back(node);
-    }
+    });
     for (auto* node : extraRoots) {
         if (node && alive.insert(node).second) worklist.push_back(node);
     }

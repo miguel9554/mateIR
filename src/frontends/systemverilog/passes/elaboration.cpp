@@ -3154,9 +3154,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             ctx.graph.connectDriver(localIt->second, driver);
             return;
         }
-        if (ctx.graph.hasOutput("", outputName)) {
-            ctx.graph.connectOutput("", outputName, driver);
-        } else if (auto* target = lookupNamedNodeInModule(ctx, outputName)) {
+        if (auto* target = lookupTargetNode(ctx, outputName)) {
             ctx.graph.connectDriver(target, driver);
         } else {
             throw CompilerError("Cannot assign to undeclared: " + outputName,
@@ -3797,9 +3795,7 @@ static DFGNode* inlineSubroutineCall(
         ctx.combDrivers[actualIdent] = it->second;
         // Also wire to the DFG graph node for module-level signals/outputs
         if (!ctx.subroutine_locals.count(actualIdent)) {
-            if (ctx.graph.hasOutput("", actualIdent))
-                ctx.graph.connectOutput("", actualIdent, it->second);
-            else if (auto* target = lookupNamedNodeInModule(ctx, actualIdent))
+            if (auto* target = lookupTargetNode(ctx, actualIdent))
                 ctx.graph.connectDriver(target, it->second);
         }
     }
@@ -4389,9 +4385,7 @@ void connectModuleOutput(DFG& graph, ModuleInstanceBinding& binding,
     recordFullWrite(
         ctx, parentSignalName, writeLoc,
         std::format("module-output:{}:{}", binding.instance_name, portName));
-    if (graph.hasOutput("", parentSignalName)) {
-        graph.connectOutput("", parentSignalName, modOut);
-    } else if (auto* target = lookupNamedNodeInModule(ctx, parentSignalName)) {
+    if (auto* target = lookupTargetNode(ctx, parentSignalName)) {
         graph.connectDriver(target, modOut);
     }
 }
@@ -4464,7 +4458,7 @@ void resolveNamedPortConnection(
 
             // If the element node exists (unpacked array element), use the normal path.
             // Otherwise, fall through to the canonical partial-write path for packed bit-selects.
-            if (lookupNamedNodeInModule(ctx, connectName) || graph.hasOutput("", connectName)) {
+            if (lookupTargetNode(ctx, connectName)) {
                 connectModuleOutput(graph, binding, resolvedSub, portName, connectName,
                                     ctx, resolveSourceLoc(*expr, ctx.sm));
                 return;

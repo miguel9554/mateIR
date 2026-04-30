@@ -549,20 +549,6 @@ struct DFG {
         for (const auto& [key, node] : outputs) fn(key, node);
     }
 
-    // Compatibility wrappers kept for incremental migration.
-    DFGNode* getInputNode(const std::string& instance_path, const std::string& name) const {
-        return getGraphInput(instance_path, name);
-    }
-    DFGNode* getOutputNode(const std::string& instance_path, const std::string& name) const {
-        return getGraphOutput(instance_path, name);
-    }
-    bool hasOutput(const std::string& instance_path, const std::string& name) const {
-        return hasGraphOutput(instance_path, name);
-    }
-
-    // Read-only iteration for passes
-    const std::map<std::string, DFGNode*>& getInputsMap()    const { return inputs; }
-    const std::map<std::string, DFGNode*>& getOutputsMap()   const { return outputs; }
     const std::map<std::string, DFGNode*>& getConstantsMap() const { return constants; }
 
     // Create a GraphOutput placeholder node with no driver yet.
@@ -615,8 +601,6 @@ struct DFG {
     void adoptGraphInput(DFGNode* node) {
         inputs[nodeKey(node->instance_path, node->name)] = node;
     }
-    // Compatibility wrapper kept for incremental migration.
-    void adoptInput(DFGNode* node) { adoptGraphInput(node); }
 
     // Adopt an existing node into the graph-output map (for DFG inlining).
     // The node must already be in this DFG's nodes vector.
@@ -624,8 +608,6 @@ struct DFG {
     void adoptGraphOutput(DFGNode* node) {
         outputs[nodeKey(node->instance_path, node->name)] = node;
     }
-    // Compatibility wrapper kept for incremental migration.
-    void adoptOutput(DFGNode* node) { adoptGraphOutput(node); }
 
     // Remove map entries whose node is not in the alive set (used by DCE)
     void pruneByAliveSet(const std::unordered_set<DFGNode*>& alive) {
@@ -726,11 +708,6 @@ public:
         }
         connectDriver(it->second, driver);
     }
-    // Compatibility wrapper kept for incremental migration.
-    void connectOutput(const std::string& instance_path, const std::string& name, DFGOutput driver) {
-        connectGraphOutput(instance_path, name, driver);
-    }
-
     // An output can be recreated, if it's assigned again.
     DFGNode* output(DFGNode* a, const std::string& instance_path, const std::string& name, bool rename) {
         auto n = std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGOutputPayload{DFGOutput(a)}, name);

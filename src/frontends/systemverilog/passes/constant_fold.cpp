@@ -60,9 +60,9 @@ static std::vector<DFGNode*> buildPostOrder(
     std::unordered_set<DFGNode*> visited;
     std::vector<DFGNode*> order;
     // Start from graph outputs and explicit external roots.
-    for (auto& [name, node] : graph.getOutputsMap()) {
+    graph.forEachGraphOutput([&](const auto&, DFGNode* node) {
         postOrderVisit(node, visited, order);
-    }
+    });
     for (auto* node : extraRoots) postOrderVisit(node, visited, order);
     // Do NOT visit orphaned nodes (not reachable from any output/signal).
     // Visiting orphaned nodes causes constant_fold to loop forever: when

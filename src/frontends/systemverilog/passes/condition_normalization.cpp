@@ -39,9 +39,9 @@ static std::vector<DFGNode*> buildPostOrder(
         const std::unordered_set<DFGNode*>& extraRoots) {
     std::unordered_set<DFGNode*> visited;
     std::vector<DFGNode*> order;
-    for (auto& [name, node] : graph.getOutputsMap()) {
+    graph.forEachGraphOutput([&](const auto&, DFGNode* node) {
         postOrderVisit(node, visited, order);
-    }
+    });
     for (auto* node : extraRoots) {
         postOrderVisit(node, visited, order);
     }

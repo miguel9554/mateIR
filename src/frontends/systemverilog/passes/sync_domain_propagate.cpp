@@ -374,14 +374,14 @@ void seedDeclaredInputSyncTypes(
         std::map<const DFGNode*, SyncType>& nodeSync) {
     const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
 
-    for (auto& [name, input] : module.inputs) {
-        if (!path.elems.empty()) continue;
+    forEachInputNode(module, [&](ModuleNode& input) {
+        if (!path.elems.empty()) return;
 
         input.sync_type = expectedPortSyncType(module, path, ir, facts, moduleFacts, input);
         validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
         for (auto* leaf : signalLeaves(input))
             setNodeSync(nodeSync, leaf, input.sync_type);
-    }
+    });
 
     for (auto& sub : module.hierarchyInstantiation)
         seedDeclaredInputSyncTypes(sub, childPath(path, sub.instance_name), ir, facts, nodeSync);

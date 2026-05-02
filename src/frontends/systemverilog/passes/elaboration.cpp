@@ -4327,8 +4327,8 @@ static DFGNode* getOrCreateOutputPlaceholder(DFG& graph,
     auto [it, inserted] = binding.output_placeholders.try_emplace(
         portName, graph.placeholderSignal(""));
     if (inserted) {
-        if (auto outIt = resolvedSub.outputs.find(portName); outIt != resolvedSub.outputs.end()) {
-            it->second->type = outIt->second.type;
+        if (auto* output = findOutputNode(resolvedSub, portName)) {
+            it->second->type = output->type;
         }
     }
     return it->second;
@@ -4472,7 +4472,8 @@ void resolveWildcardPortConnection(
         DFG& graph, ModuleInstanceBinding& binding,
         Module& resolvedSub,
         ResolutionContext& ctx) {
-    for (const auto& [name, inp] : resolvedSub.inputs) {
+    forEachInputNode(resolvedSub, [&](const ModuleNode& inp) {
+        const std::string& name = inp.name;
         auto* driver = lookupNamedNodeInModule(ctx, name);
         if (driver) {
             binding.inputs.push_back({name, DFGOutput(driver)});
@@ -4489,10 +4490,11 @@ void resolveWildcardPortConnection(
                 });
             }
         }
-    }
-    for (const auto& [name, out] : resolvedSub.outputs) {
+    });
+    forEachOutputNode(resolvedSub, [&](const ModuleNode& out) {
+        const std::string& name = out.name;
         connectModuleOutput(graph, binding, resolvedSub, name, name, ctx, binding.loc);
-    }
+    });
 }
 
 void resolvePortConnection(
@@ -4533,8 +4535,8 @@ static void instantiateSubmoduleInstance(
                                      ctx.domain_facts);
 
     std::set<std::string> subInputNames, subOutputNames;
-    for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
-    for (const auto& [name, out] : resolvedSub.outputs) subOutputNames.insert(name);
+    forEachInputNode(resolvedSub, [&](const ModuleNode& inp) { subInputNames.insert(inp.name); });
+    forEachOutputNode(resolvedSub, [&](const ModuleNode& out) { subOutputNames.insert(out.name); });
 
     ModuleInstanceBinding binding{
         .instance_name = effectiveInstanceName,
@@ -5286,14 +5288,14 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     }
 
     // Pre-populate module INPUTS (ports only)
-    for (auto& [name, input] : resolved.inputs) {
+    forEachInputNode(resolved, [&](ModuleNode& input) {
         prePopulateInput(graph, input);
-    }
+    });
 
     // Pre-populate module OUTPUTS (ports only, no driver yet)
-    for (auto& [name, output] : resolved.outputs) {
+    forEachOutputNode(resolved, [&](ModuleNode& output) {
         prePopulateOutput(graph, output);
-    }
+    });
 
     // Pre-populate FLOP .d/.q DFG nodes directly from resolved.flops
     for (auto& flop : resolved.flops) {
@@ -5301,9 +5303,9 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     }
 
     // Pre-populate internal SIGNALS (not ports, not flops)
-    for (auto& [name, signal] : resolved.signals) {
+    forEachSignalNode(resolved, [&](ModuleNode& signal) {
         prePopulateSignal(graph, signal);
-    }
+    });
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context

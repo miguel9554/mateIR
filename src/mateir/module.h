@@ -226,33 +226,71 @@ const ModuleNode* findSignalNode(const Module& module, const std::string& name);
 ModuleNode* findSignalNode(Module& module, const std::string& name);
 
 template<typename Fn>
+void forEachNodeIf(const Module& module, Fn&& fn) {
+    for (const auto& [_, node] : module.nodes) {
+        if (fn(node)) break;
+    }
+}
+
+template<typename Fn>
+void forEachNodeIf(Module& module, Fn&& fn) {
+    for (auto& [_, node] : module.nodes) {
+        if (fn(node)) break;
+    }
+}
+
+template<typename Fn>
 void forEachInputNode(const Module& module, Fn&& fn) {
-    for (const auto& [_, node] : module.inputs) fn(node);
+    forEachNodeIf(module, [&](const ModuleNode& node) {
+        if (isInputNode(node)) fn(node);
+        return false;
+    });
 }
 
 template<typename Fn>
 void forEachInputNode(Module& module, Fn&& fn) {
-    for (auto& [_, node] : module.inputs) fn(node);
+    forEachNodeIf(module, [&](ModuleNode& node) {
+        if (!isInputNode(node)) return false;
+        fn(node);
+        module.inputs[node.name] = node;
+        return false;
+    });
 }
 
 template<typename Fn>
 void forEachOutputNode(const Module& module, Fn&& fn) {
-    for (const auto& [_, node] : module.outputs) fn(node);
+    forEachNodeIf(module, [&](const ModuleNode& node) {
+        if (isOutputNode(node)) fn(node);
+        return false;
+    });
 }
 
 template<typename Fn>
 void forEachOutputNode(Module& module, Fn&& fn) {
-    for (auto& [_, node] : module.outputs) fn(node);
+    forEachNodeIf(module, [&](ModuleNode& node) {
+        if (!isOutputNode(node)) return false;
+        fn(node);
+        module.outputs[node.name] = node;
+        return false;
+    });
 }
 
 template<typename Fn>
 void forEachSignalNode(const Module& module, Fn&& fn) {
-    for (const auto& [_, node] : module.signals) fn(node);
+    forEachNodeIf(module, [&](const ModuleNode& node) {
+        if (isSignalNode(node)) fn(node);
+        return false;
+    });
 }
 
 template<typename Fn>
 void forEachSignalNode(Module& module, Fn&& fn) {
-    for (auto& [_, node] : module.signals) fn(node);
+    forEachNodeIf(module, [&](ModuleNode& node) {
+        if (!isSignalNode(node)) return false;
+        fn(node);
+        module.signals[node.name] = node;
+        return false;
+    });
 }
 
 template<typename Fn>
@@ -269,12 +307,18 @@ void forEachDrivenNode(Module& module, Fn&& fn) {
 
 template<typename Fn>
 void forEachNamedValueNode(const Module& module, Fn&& fn) {
-    for (const auto& [_, node] : module.nodes) fn(node);
+    forEachNodeIf(module, [&](const ModuleNode& node) {
+        fn(node);
+        return false;
+    });
 }
 
 template<typename Fn>
 void forEachNamedValueNode(Module& module, Fn&& fn) {
-    for (auto& [_, node] : module.nodes) fn(node);
+    forEachNodeIf(module, [&](ModuleNode& node) {
+        fn(node);
+        return false;
+    });
 }
 
 void validateModuleNodeNamespace(const Module& module);

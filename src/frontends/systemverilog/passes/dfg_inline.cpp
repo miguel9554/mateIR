@@ -53,11 +53,11 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
         // Recursively fix input bindings in deeper descendants that were wired to
         // subInputNode during a prior inner inlining pass.
         std::function<void(Module&)> fixDescendants = [&](Module& mod) {
-            for (auto& [name, inp] : mod.inputs) {
+            forEachInputNode(mod, [&](ModuleNode& inp) {
                 for (auto*& leaf : inp.binding.leaves) {
                     if (leaf == subInputNode) leaf = driver.node;
                 }
-            }
+            });
             for (auto& child : mod.hierarchyInstantiation)
                 fixDescendants(child);
         };

@@ -115,7 +115,7 @@ void validateModuleFacts(const Module& module,
                 "frontend_domain_facts: child connection fact references missing instance '{}' in module '{}'",
                 pathString(connFact.child_instance_path), module.name));
         }
-        if (!childIt->inputs.contains(connFact.child_port)) {
+        if (!findInputNode(*childIt, connFact.child_port)) {
             throw CompilerError(std::format(
                 "frontend_domain_facts: child connection fact references missing input "
                 "port '{}' on child module '{}' in module '{}'",

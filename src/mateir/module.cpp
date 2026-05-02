@@ -265,9 +265,9 @@ ModuleNode& addSignalNode(Module& module, const ModuleNode& node) {
 void rebuildModuleNodeIndex(Module& module) {
     validateModuleNodeNamespace(module);
     module.nodes.clear();
-    forEachInputNode(module, [&](const ModuleNode& node) { module.nodes[node.name] = node; });
-    forEachOutputNode(module, [&](const ModuleNode& node) { module.nodes[node.name] = node; });
-    forEachSignalNode(module, [&](const ModuleNode& node) { module.nodes[node.name] = node; });
+    for (const auto& [_, node] : module.inputs) module.nodes[node.name] = node;
+    for (const auto& [_, node] : module.outputs) module.nodes[node.name] = node;
+    for (const auto& [_, node] : module.signals) module.nodes[node.name] = node;
 }
 
 void rebuildModuleNodeIndexRecursively(Module& module) {
@@ -414,21 +414,47 @@ std::optional<SignalLeafRef> findSignalLeafRef(
 std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
     const Module& module,
     const std::string& leaf_name) {
-    if (auto output = findSignalLeafRef(module.outputs, leaf_name)) return output;
-    return findSignalLeafRef(module.signals, leaf_name);
+    std::optional<SignalLeafRef> found;
+    forEachOutputNode(module, [&](const ModuleNode& node) {
+        if (found) return;
+        for (const auto& ref : signalLeafRefs(node)) {
+            if (ref.leaf_name == leaf_name) {
+                found = ref;
+                return;
+            }
+        }
+    });
+    if (found) return found;
+    forEachSignalNode(module, [&](const ModuleNode& node) {
+        if (found) return;
+        for (const auto& ref : signalLeafRefs(node)) {
+            if (ref.leaf_name == leaf_name) {
+                found = ref;
+                return;
+            }
+        }
+    });
+    return found;
 }
 
 std::optional<SignalLeafRef> findModuleNamedLeaf(
     const Module& module,
     const std::string& leaf_name) {
-    if (auto input = findSignalLeafRef(module.inputs, leaf_name)) return input;
-    if (auto output = findSignalLeafRef(module.outputs, leaf_name)) return output;
-    return findSignalLeafRef(module.signals, leaf_name);
+    std::optional<SignalLeafRef> found;
+    forEachNamedValueNode(module, [&](const ModuleNode& node) {
+        if (found) return;
+        for (const auto& ref : signalLeafRefs(node)) {
+            if (ref.leaf_name == leaf_name) {
+                found = ref;
+                return;
+            }
+        }
+    });
+    return found;
 }
 
 DFGNode* findModuleDebugLeafNode(Module& module, const std::string& leaf_name) {
-    if (auto output = findSignalLeafRef(module.outputs, leaf_name)) return output->node;
-    if (auto signal = findSignalLeafRef(module.signals, leaf_name)) return signal->node;
+    if (auto output = findModuleOutputOrSignalLeaf(module, leaf_name)) return output->node;
 
     for (const auto& flop : module.flops) {
         for (const auto& leaf : flopDLeafRefs(flop)) {
@@ -450,11 +476,9 @@ const DFGNode* findModuleDebugLeafNode(const Module& module, const std::string& 
 void collectModuleRoots(const Module& module,
                         std::unordered_set<DFGNode*>& roots,
                         const ModuleRootSelection& selection) {
-    auto insertSignalLeaves = [&roots](const std::map<std::string, Signal>& signals) {
-        for (const auto& [_, signal] : signals) {
-            for (auto* leaf : signalLeaves(signal)) {
-                if (leaf) roots.insert(leaf);
-            }
+    auto insertSignalLeaves = [&roots](const ModuleNode& signal) {
+        for (auto* leaf : signalLeaves(signal)) {
+            if (leaf) roots.insert(leaf);
         }
     };
 
@@ -468,9 +492,9 @@ void collectModuleRoots(const Module& module,
             if (parameter.dfg_node) roots.insert(parameter.dfg_node);
         }
     }
-    if (selection.inputs) insertSignalLeaves(module.inputs);
-    if (selection.outputs) insertSignalLeaves(module.outputs);
-    if (selection.signals) insertSignalLeaves(module.signals);
+    if (selection.inputs) forEachInputNode(module, insertSignalLeaves);
+    if (selection.outputs) forEachOutputNode(module, insertSignalLeaves);
+    if (selection.signals) forEachSignalNode(module, insertSignalLeaves);
     if (selection.flop_d) {
         for (const auto& flop : module.flops) {
             for (auto* leaf : flopDLeaves(flop)) {
@@ -563,25 +587,25 @@ void Module::print(int indent) const {
     }
 
     std::cout << indent_str(indent + 1) << "Inputs:" << std::endl;
-    for (const auto& [name, in] : this->inputs) {
+    forEachInputNode(*this, [&](const ModuleNode& in) {
         std::cout << indent_str(indent + 2);
         in.print(std::cout);
         std::cout << std::endl;
-    }
+    });
 
     std::cout << indent_str(indent + 1) << "Outputs:" << std::endl;
-    for (const auto& [name, out] : this->outputs) {
+    forEachOutputNode(*this, [&](const ModuleNode& out) {
         std::cout << indent_str(indent + 2);
         out.print(std::cout);
         std::cout << std::endl;
-    }
+    });
 
     std::cout << indent_str(indent + 1) << "Signals:" << std::endl;
-    for (const auto& [name, signal] : this->signals) {
+    forEachSignalNode(*this, [&](const ModuleNode& signal) {
         std::cout << indent_str(indent + 2);
         signal.print(std::cout);
         std::cout << std::endl;
-    }
+    });
 
     std::cout << indent_str(indent + 1) << "Flops:" << std::endl;
     for (const auto& flop : this->flops) {
@@ -818,31 +842,31 @@ static std::string moduleToJson(const Module& m, int indent) {
     // Inputs
     ss << ind(indent+1) << "\"inputs\": [\n";
     first = true;
-    for (const auto& [name, sig] : m.inputs) {
+    forEachInputNode(m, [&](const ModuleNode& sig) {
         if (!first) ss << ",\n";
         ss << ind(indent+2) << signalToJson(sig);
         first = false;
-    }
+    });
     ss << "\n" << ind(indent+1) << "],\n";
 
     // Outputs
     ss << ind(indent+1) << "\"outputs\": [\n";
     first = true;
-    for (const auto& [name, sig] : m.outputs) {
+    forEachOutputNode(m, [&](const ModuleNode& sig) {
         if (!first) ss << ",\n";
         ss << ind(indent+2) << signalToJson(sig);
         first = false;
-    }
+    });
     ss << "\n" << ind(indent+1) << "],\n";
 
     // Signals
     ss << ind(indent+1) << "\"signals\": [\n";
     first = true;
-    for (const auto& [name, sig] : m.signals) {
+    forEachSignalNode(m, [&](const ModuleNode& sig) {
         if (!first) ss << ",\n";
         ss << ind(indent+2) << signalToJson(sig);
         first = false;
-    }
+    });
     ss << "\n" << ind(indent+1) << "],\n";
 
     // Flops

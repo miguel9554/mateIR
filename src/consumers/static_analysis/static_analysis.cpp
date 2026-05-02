@@ -8,9 +8,9 @@ namespace {
 
 void collectModule(const Module& module, StaticAnalysisSummary& summary) {
     summary.modules++;
-    summary.inputs += module.inputs.size();
-    summary.outputs += module.outputs.size();
-    summary.signals += module.signals.size();
+    forEachInputNode(module, [&](const ModuleNode&) { summary.inputs++; });
+    forEachOutputNode(module, [&](const ModuleNode&) { summary.outputs++; });
+    forEachSignalNode(module, [&](const ModuleNode&) { summary.signals++; });
     summary.flops += module.flops.size();
     if (module.dfg) summary.dfg_nodes += module.dfg->nodes.size();
     validateNoCombLoops(module);

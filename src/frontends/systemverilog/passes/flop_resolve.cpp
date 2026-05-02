@@ -37,8 +37,8 @@ InstancePath childPath(InstancePath path, const std::string& instanceName) {
 }
 
 DFGNode* nodeForTrigger(const Module& resolved, const EventTriggerFact& trigger) {
-    auto it = resolved.inputs.find(trigger.local_signal_name);
-    return it != resolved.inputs.end() ? scalarSignalNode(it->second) : nullptr;
+    const auto* input = findInputNode(resolved, trigger.local_signal_name);
+    return input ? scalarSignalNode(*input) : nullptr;
 }
 
 bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
@@ -422,8 +422,9 @@ static void resolveFlopsForModule(Module& resolved,
     // Connect flop output port nodes to their .q INPUT nodes.
     // Uses output bindings directly since after DFG inlining submodule output
     // ports may not be in the flat top DFG's outputs map (only .d nodes are adopted).
-    for (auto& [outName, output] : resolved.outputs) {
-        if (!privateFacts.flop_triggers.contains(outName)) continue;
+    forEachOutputNode(resolved, [&](ModuleNode& output) {
+        const std::string& outName = output.name;
+        if (!privateFacts.flop_triggers.contains(outName)) return;
         if (output.type.unpacked_dims.empty()) {
             DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + ".q");
             if (qNode) {
@@ -443,7 +444,7 @@ static void resolveFlopsForModule(Module& resolved,
                 }
             }
         }
-    }
+    });
 
     // Extract clock/reset info and validate functional logic
     std::vector<FlopInfo> resolved_flops;
@@ -470,13 +471,13 @@ static void resolveFlopsForModule(Module& resolved,
 
             // Helper to find exactly one signal
             auto find_unique_input = [&](const std::string& sig_name, const char* role) -> Signal& {
-                auto it = resolved.inputs.find(sig_name);
-                if (it == resolved.inputs.end())
+                auto* input = findInputNode(resolved, sig_name);
+                if (!input)
                     throw CompilerError(std::format(
                         "flop_resolve: flop '{}' in module '{}' references {} signal '{}' "
                         "which is not an input port",
                         name, resolved.name, role, sig_name));
-                return it->second;
+                return *input;
             };
 
             // Validate clock/reset are input ports; final SyncType assignment happens
@@ -508,18 +509,12 @@ static void resolveFlopsForModule(Module& resolved,
 
     // Check that module-visible logic and resolved flop functional .d logic do
     // not depend on clock/reset signals.
-    for (const auto& [_, signal] : resolved.signals) {
+    forEachDrivenNode(resolved, [&](const ModuleNode& signal) {
         for (const auto& leaf : signalLeafRefs(signal)) {
             if (!leaf.node) continue;
             check_logic_no_clock_reset(leaf.node, leaf.leaf_name, resolved.name, clocks, resets);
         }
-    }
-    for (const auto& [_, output] : resolved.outputs) {
-        for (const auto& leaf : signalLeafRefs(output)) {
-            if (!leaf.node) continue;
-            check_logic_no_clock_reset(leaf.node, leaf.leaf_name, resolved.name, clocks, resets);
-        }
-    }
+    });
     for (const auto& flop : resolved.flops) {
         for (size_t i = 0; i < flop.binding.d_leaves.size(); ++i) {
             auto* dLeaf = flop.binding.d_leaves[i];

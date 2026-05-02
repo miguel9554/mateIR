@@ -280,17 +280,19 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
         return gen_scopes.emplace(path, std::move(entry)).first->second;
     };
 
-    for (const auto& [name, sig] : mod.inputs) {
-        if (name.ends_with(".q")) continue;  // shown in flops section
+    forEachInputNode(mod, [&](const ModuleNode& sig) {
+        const std::string& name = sig.name;
+        if (name.ends_with(".q")) return;  // shown in flops section
         if (isDomainInput(sig)) {
             addDomainInputEntry(inputs_mod, name, sig);
         } else {
             addSignalEntries(inputs_mod, name, sig, alive);
         }
-    }
+    });
 
-    for (const auto& [name, sig] : mod.signals) {
-        if (name.ends_with(".q") || name.ends_with(".d")) continue;
+    forEachSignalNode(mod, [&](const ModuleNode& sig) {
+        const std::string& name = sig.name;
+        if (name.ends_with(".q") || name.ends_with(".d")) return;
         auto dot = name.rfind('.');
         if (dot == std::string::npos) {
             addSignalEntries(signals_mod, name, sig, alive);
@@ -298,7 +300,7 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
             addSignalEntries(getGenScope(name.substr(0, dot)).get_or_create_signals(),
                              name.substr(dot + 1), sig, alive);
         }
-    }
+    });
 
     for (const auto& flop : mod.flops) {
         auto dot = flop.name.rfind('.');
@@ -312,10 +314,11 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
         }
     }
 
-    for (const auto& [name, sig] : mod.outputs) {
-        if (name.ends_with(".d")) continue;  // flop inputs, not module outputs
+    forEachOutputNode(mod, [&](const ModuleNode& sig) {
+        const std::string& name = sig.name;
+        if (name.ends_with(".d")) return;  // flop inputs, not module outputs
         addSignalEntries(outputs_mod, name, sig, alive);
-    }
+    });
 
     for (const auto& sub : mod.hierarchyInstantiation) {
         const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
@@ -352,24 +355,26 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
         return getOrCreateNestedScope(scope, gen_scopes, path);
     };
 
-    for (const auto& [name, sig] : mod.inputs) {
-        if (name.ends_with(".q")) continue;
+    forEachInputNode(mod, [&](const ModuleNode& sig) {
+        const std::string& name = sig.name;
+        if (name.ends_with(".q")) return;
         if (isDomainInput(sig)) {
             addDomainInputEntry(scope, name, sig);
         } else {
             addSignalEntries(scope, name, sig, alive);
         }
-    }
+    });
 
-    for (const auto& [name, sig] : mod.signals) {
-        if (name.ends_with(".q") || name.ends_with(".d")) continue;
+    forEachSignalNode(mod, [&](const ModuleNode& sig) {
+        const std::string& name = sig.name;
+        if (name.ends_with(".q") || name.ends_with(".d")) return;
         auto dot = name.rfind('.');
         if (dot == std::string::npos) {
             addSignalEntries(scope, name, sig, alive);
         } else {
             addSignalEntries(getGenScope(name.substr(0, dot)), name.substr(dot + 1), sig, alive);
         }
-    }
+    });
 
     for (const auto& flop : mod.flops) {
         std::string vcd_name = flop.name;
@@ -386,10 +391,11 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
         }
     }
 
-    for (const auto& [name, sig] : mod.outputs) {
-        if (name.ends_with(".d")) continue;
+    forEachOutputNode(mod, [&](const ModuleNode& sig) {
+        const std::string& name = sig.name;
+        if (name.ends_with(".d")) return;
         addSignalEntries(scope, name, sig, alive);
-    }
+    });
 
     for (const auto& sub : mod.hierarchyInstantiation) {
         const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;

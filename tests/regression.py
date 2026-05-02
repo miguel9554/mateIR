@@ -13,6 +13,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
 SIMULATOR = REPO_ROOT / "build" / "sanitized" / "mate"
 MANIFEST = TESTS_DIR / "regression_tests.txt"
+DFG_API_GUARD = TESTS_DIR / "check_dfg_api_surface.py"
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -121,6 +122,17 @@ def ensure_simulator():
     return result.returncode == 0, output
 
 
+def run_dfg_api_guard():
+    """Run source-level API guard checks before build/test."""
+    result = subprocess.run(
+        [sys.executable, str(DFG_API_GUARD)],
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+    return result.returncode == 0, output
+
+
 def run_expected_failure(name, expected):
     """Run an expected-failure compile test. Returns (success, output)."""
     test_dir = TESTS_DIR / name
@@ -192,6 +204,13 @@ def main():
 
     if not cases:
         print("No test cases found.")
+        sys.exit(1)
+
+    print("Checking DFG API guardrails...", flush=True)
+    ok, output = run_dfg_api_guard()
+    if not ok:
+        print(f"{RED}DFG API guard failed{RESET}")
+        print(output)
         sys.exit(1)
 
     print("Building simulator...", flush=True)

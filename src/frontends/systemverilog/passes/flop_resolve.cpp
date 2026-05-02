@@ -281,7 +281,7 @@ FlopInfo extractFlopClockAndReset(
     auto flop = flopIn;
     DFGNode* dNode = nullptr;
     if (!flopIn.type.unpacked_dims.empty() && flop_name != flopIn.name) {
-        dNode = graph.getOutputNode(instance_path, flop_name + ".d");
+        dNode = graph.getGraphOutput(instance_path, flop_name + ".d");
     } else {
         dNode = scalarFlopDNode(flopIn);
     }
@@ -425,7 +425,7 @@ static void resolveFlopsForModule(Module& resolved,
     for (auto& [outName, output] : resolved.outputs) {
         if (!privateFacts.flop_triggers.contains(outName)) continue;
         if (output.type.unpacked_dims.empty()) {
-            DFGNode* qNode = graph.getInputNode(dfgInstancePath, outName + ".q");
+            DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + ".q");
             if (qNode) {
                 graph.connectDriver(scalarSignalNode(output), {qNode, 0});
             }
@@ -434,10 +434,10 @@ static void resolveFlopsForModule(Module& resolved,
             const auto& leaves = signalLeaves(output);
             for (size_t i = 0; i < suffixes.size(); ++i) {
                 const auto& suffix = suffixes[i];
-                DFGNode* qNode = graph.getInputNode(dfgInstancePath, outName + suffix + ".q");
+                DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + suffix + ".q");
                 DFGNode* outNode = i < leaves.size()
                     ? leaves[i]
-                    : graph.getOutputNode(dfgInstancePath, outName + suffix);
+                    : graph.getGraphOutput(dfgInstancePath, outName + suffix);
                 if (qNode && outNode) {
                     graph.connectDriver(outNode, {qNode, 0});
                 }
@@ -455,8 +455,8 @@ static void resolveFlopsForModule(Module& resolved,
                     graph, resolved, name, dfgInstancePath, flop, privateFacts, functional_logic));
             // After flop_resolve, every FlopInfo represents one physical flop leaf.
             {
-                auto* dNode = graph.getOutputNode(dfgInstancePath, name + ".d");
-                auto* qNode = graph.getInputNode(dfgInstancePath, name + ".q");
+                auto* dNode = graph.getGraphOutput(dfgInstancePath, name + ".d");
+                auto* qNode = graph.getGraphInput(dfgInstancePath, name + ".q");
                 resolved_flops.back().binding = FlopBinding{
                     .d_leaves = {dNode},
                     .q_leaves = {qNode},
@@ -506,17 +506,29 @@ static void resolveFlopsForModule(Module& resolved,
         }
     }
 
-    // Check that no signal or output logic depends on clock/reset.
-    // Filter to nodes belonging to this module's instance_path only: the flat DFG
-    // contains all modules' nodes, and sibling/ancestor nodes may still have their
-    // reset MUXes intact (processing is bottom-up).
-    for (const auto& [name, node] : graph.getSignalsMap()) {
-        if (node->instance_path != dfgInstancePath) continue;
-        check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
+    // Check that module-visible logic and resolved flop functional .d logic do
+    // not depend on clock/reset signals.
+    for (const auto& [_, signal] : resolved.signals) {
+        for (const auto& leaf : signalLeafRefs(signal)) {
+            if (!leaf.node) continue;
+            check_logic_no_clock_reset(leaf.node, leaf.leaf_name, resolved.name, clocks, resets);
+        }
     }
-    for (const auto& [name, node] : graph.getOutputsMap()) {
-        if (node->instance_path != dfgInstancePath) continue;
-        check_logic_no_clock_reset(node, name, resolved.name, clocks, resets);
+    for (const auto& [_, output] : resolved.outputs) {
+        for (const auto& leaf : signalLeafRefs(output)) {
+            if (!leaf.node) continue;
+            check_logic_no_clock_reset(leaf.node, leaf.leaf_name, resolved.name, clocks, resets);
+        }
+    }
+    for (const auto& flop : resolved.flops) {
+        for (size_t i = 0; i < flop.binding.d_leaves.size(); ++i) {
+            auto* dLeaf = flop.binding.d_leaves[i];
+            if (!dLeaf) continue;
+            const std::string rootName = flop.binding.d_leaves.size() == 1
+                ? flop.name + ".d"
+                : std::format("{}[{}].d", flop.name, i);
+            check_logic_no_clock_reset(dLeaf, rootName, resolved.name, clocks, resets);
+        }
     }
 
 }

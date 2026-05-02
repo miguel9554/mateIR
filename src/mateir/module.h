@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace mate {
@@ -33,6 +34,33 @@ struct FlopBinding {
 
 struct Signal;
 struct FlopInfo;
+struct Module;
+
+struct SignalLeafRef {
+    const Signal* signal = nullptr;
+    DFGNode* node = nullptr;
+    std::string leaf_name;
+    size_t leaf_index = 0;
+};
+
+struct FlopLeafRef {
+    const FlopInfo* flop = nullptr;
+    DFGNode* node = nullptr;
+    std::string leaf_name;
+    size_t leaf_index = 0;
+    bool is_q_leaf = false;
+};
+
+struct ModuleRootSelection {
+    bool parameters = false;
+    bool localparams = false;
+    bool inputs = false;
+    bool outputs = false;
+    bool signals = false;
+    bool flop_d = false;
+    bool flop_q = false;
+    bool recurse_hierarchy = false;
+};
 
 // ============================================================================
 // Leaf layout helpers
@@ -73,6 +101,23 @@ const std::vector<DFGNode*>& flopDLeaves(const FlopInfo& flop);
 const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop);
 DFGNode* scalarFlopDNode(const FlopInfo& flop);
 DFGNode* scalarFlopQNode(const FlopInfo& flop);
+std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal);
+std::vector<FlopLeafRef> flopDLeafRefs(const FlopInfo& flop);
+std::vector<FlopLeafRef> flopQLeafRefs(const FlopInfo& flop);
+std::optional<SignalLeafRef> findSignalLeafRef(
+    const std::map<std::string, Signal>& signals,
+    const std::string& leaf_name);
+std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
+    const Module& module,
+    const std::string& leaf_name);
+std::optional<SignalLeafRef> findModuleNamedLeaf(
+    const Module& module,
+    const std::string& leaf_name);
+DFGNode* findModuleDebugLeafNode(Module& module, const std::string& leaf_name);
+const DFGNode* findModuleDebugLeafNode(const Module& module, const std::string& leaf_name);
+void collectModuleRoots(const Module& module,
+                        std::unordered_set<DFGNode*>& roots,
+                        const ModuleRootSelection& selection);
 
 SyncKind syncKind(const SyncType& sync_type);
 SyncKind syncKind(const Signal& signal);

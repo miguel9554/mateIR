@@ -351,27 +351,54 @@ static std::optional<DFGOutput> maybeDriver(const DFGNode* node) {
     return node->driver();
 }
 
+static DFGNode* lookupNamedNodeInModule(const ResolutionContext& ctx,
+                                        const std::string& name) {
+    if (auto leaf = findModuleNamedLeaf(*ctx.thisModule, name)) return leaf->node;
+    if (auto* debugLeaf = findModuleDebugLeafNode(*ctx.thisModule, name)) return debugLeaf;
+    for (const auto& parameter : ctx.thisModule->parameters) {
+        if (parameter.name == name) return parameter.dfg_node;
+    }
+    for (const auto& parameter : ctx.thisModule->localparams) {
+        if (parameter.name == name) return parameter.dfg_node;
+    }
+    return nullptr;
+}
+
+template<typename Fn>
+static void forEachVisibleDriverTarget(const ResolutionContext& ctx, Fn&& fn) {
+    for (const auto& [_, output] : ctx.thisModule->outputs) {
+        for (const auto& leaf : signalLeafRefs(output)) {
+            if (leaf.node) fn(leaf.leaf_name, leaf.node);
+        }
+    }
+    for (const auto& [_, signal] : ctx.thisModule->signals) {
+        for (const auto& leaf : signalLeafRefs(signal)) {
+            if (leaf.node) fn(leaf.leaf_name, leaf.node);
+        }
+    }
+    for (const auto& flop : ctx.thisModule->flops) {
+        for (const auto& leaf : flopDLeafRefs(flop)) {
+            if (leaf.node) {
+                fn(leaf.leaf_name, leaf.node);
+            }
+        }
+    }
+    for (const auto& [name, node] : ctx.local_signals) {
+        if (node) fn(name, node);
+    }
+}
+
 static DriverSnapshot snapshotDrivers(const ResolutionContext& ctx) {
     DriverSnapshot snapshot;
     snapshot.combDrivers = ctx.combDrivers;
     snapshot.partialDrivers = ctx.partial_drivers;
     DriverMap drivers;
     if (!ctx.is_subroutine_scope) {
-        for (const auto& [outName, outNode] : ctx.graph.getOutputsMap()) {
-            if (!ctx.partial_drivers.contains(outName)) {
-                if (auto driver = maybeDriver(outNode)) drivers[outName] = driver->node;
-            }
-        }
-        for (const auto& [sigName, sigNode] : ctx.graph.getSignalsMap()) {
-            if (!ctx.partial_drivers.contains(sigName)) {
-                if (auto driver = maybeDriver(sigNode)) drivers[sigName] = driver->node;
-            }
-        }
-        for (const auto& [name, node] : ctx.local_signals) {
+        forEachVisibleDriverTarget(ctx, [&](const std::string& name, DFGNode* node) {
             if (!ctx.partial_drivers.contains(name)) {
                 if (auto driver = maybeDriver(node)) drivers[name] = driver->node;
             }
-        }
+        });
     }
     for (const auto& [name, node] : ctx.combDrivers) {
         if (ctx.subroutine_locals.count(name)) drivers[name] = node;
@@ -384,9 +411,7 @@ static DFGNode* lookupTargetNode(ResolutionContext& ctx, const std::string& name
     if (auto localIt = ctx.local_signals.find(name); localIt != ctx.local_signals.end()) {
         return localIt->second;
     }
-    if (ctx.graph.hasOutput("", name)) return ctx.graph.getOutputNode("", name);
-    if (ctx.graph.hasSignal("", name)) return ctx.graph.getSignalNode("", name);
-    return nullptr;
+    return lookupNamedNodeInModule(ctx, name);
 }
 
 static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNode* driver) {
@@ -398,10 +423,8 @@ static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNo
         ctx.graph.connectDriver(localIt->second, driver);
         return;
     }
-    if (ctx.graph.hasOutput("", name)) {
-        ctx.graph.connectOutput("", name, driver);
-    } else if (ctx.graph.hasSignal("", name)) {
-        ctx.graph.connectSignal("", name, driver);
+    if (auto* target = lookupNamedNodeInModule(ctx, name)) {
+        ctx.graph.connectDriver(target, driver);
     }
 }
 
@@ -412,15 +435,9 @@ static void clearVisibleDrivers(ResolutionContext& ctx) {
         }
     };
     if (ctx.is_subroutine_scope) return;
-    for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
+    forEachVisibleDriverTarget(ctx, [&](const std::string&, DFGNode* node) {
         clearNodeDriver(node);
-    }
-    for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
-        clearNodeDriver(node);
-    }
-    for (const auto& [name, node] : ctx.local_signals) {
-        clearNodeDriver(node);
-    }
+    });
 }
 
 static void sortSlices(PartialTargetState& state) {
@@ -500,60 +517,28 @@ static void restoreDrivers(ResolutionContext& ctx, const DriverSnapshot& snapsho
         materializePartialTarget(ctx, name, state, std::nullopt);
     }
     if (!ctx.is_subroutine_scope) {
-        for (const auto& [name, node] : ctx.graph.getOutputsMap()) {
+        forEachVisibleDriverTarget(ctx, [&](const std::string& name, DFGNode* node) {
             if ((!node->type || node->type->unpacked_dims.empty()) &&
                     maybeDriver(node) && !snapshot.visibleDrivers.contains(name) &&
                     !snapshot.partialDrivers.contains(name)) {
                 node->clearDriver();
             }
-        }
-        for (const auto& [name, node] : ctx.graph.getSignalsMap()) {
-            if ((!node->type || node->type->unpacked_dims.empty()) &&
-                    maybeDriver(node) && !snapshot.visibleDrivers.contains(name) &&
-                    !snapshot.partialDrivers.contains(name)) {
-                node->clearDriver();
-            }
-        }
-        for (const auto& [name, node] : ctx.local_signals) {
-            if ((!node->type || node->type->unpacked_dims.empty()) &&
-                    maybeDriver(node) && !snapshot.visibleDrivers.contains(name) &&
-                    !snapshot.partialDrivers.contains(name)) {
-                node->clearDriver();
-            }
-        }
+        });
     }
 }
 
 static DriverMap modifiedDriversSince(const ResolutionContext& ctx, const DriverSnapshot& baseline) {
     DriverMap modified;
     if (!ctx.is_subroutine_scope) {
-        for (const auto& [outName, outNode] : ctx.graph.getOutputsMap()) {
-            if (ctx.partial_drivers.contains(outName)) continue;
-            if (auto driver = maybeDriver(outNode)) {
-                auto it = baseline.visibleDrivers.find(outName);
-                if (it == baseline.visibleDrivers.end() || it->second != driver->node) {
-                    modified[outName] = driver->node;
-                }
-            }
-        }
-        for (const auto& [sigName, sigNode] : ctx.graph.getSignalsMap()) {
-            if (ctx.partial_drivers.contains(sigName)) continue;
-            if (auto driver = maybeDriver(sigNode)) {
-                auto it = baseline.visibleDrivers.find(sigName);
-                if (it == baseline.visibleDrivers.end() || it->second != driver->node) {
-                    modified[sigName] = driver->node;
-                }
-            }
-        }
-        for (const auto& [name, node] : ctx.local_signals) {
-            if (ctx.partial_drivers.contains(name)) continue;
+        forEachVisibleDriverTarget(ctx, [&](const std::string& name, DFGNode* node) {
+            if (ctx.partial_drivers.contains(name)) return;
             if (auto driver = maybeDriver(node)) {
                 auto it = baseline.visibleDrivers.find(name);
                 if (it == baseline.visibleDrivers.end() || it->second != driver->node) {
                     modified[name] = driver->node;
                 }
             }
-        }
+        });
     }
     for (const auto& [name, node] : ctx.combDrivers) {
         if (!ctx.subroutine_locals.count(name)) continue;
@@ -603,7 +588,7 @@ static DFGNode* getRetainedDriver(ResolutionContext& ctx,
     if (auto localIt = ctx.local_signals.find(qName); localIt != ctx.local_signals.end()) {
         qNode = localIt->second;
     } else {
-        qNode = ctx.graph.lookupSignal("", qName);
+        qNode = lookupNamedNodeInModule(ctx, qName);
     }
     if (!qNode) {
         throw CompilerError("Could not find .q signal: " + qName, loc);
@@ -1553,7 +1538,7 @@ Type resolveType(
 
 DFGNode* resolveIdentifier(
         const std::string baseName,
-        DFG& graph,
+        ResolutionContext& ctx,
         bool throw_on_not_found,
         const std::set<std::string>& flopNames
 ){
@@ -1563,8 +1548,7 @@ DFGNode* resolveIdentifier(
     if (flopNames.contains(baseName)) {
         signalName = baseName + ".q";
     }
-    // Use lookupSignal helper - DO NOT CREATE
-    DFGNode* node = graph.lookupSignal("", signalName);
+    DFGNode* node = lookupNamedNodeInModule(ctx, signalName);
     if (throw_on_not_found && node == nullptr) {
         throw CompilerError("Undeclared signal: '" + signalName + "'");
     }
@@ -1609,7 +1593,7 @@ const Type* lookupDeclaredTypeWithSuffix(const std::string& baseName,
     if (localIt != ctx.local_signals.end() && localIt->second && localIt->second->hasType()) {
         return &(*localIt->second->type);
     }
-    if (auto* signal = ctx.graph.lookupSignal("", fullName); signal && signal->hasType()) {
+    if (auto* signal = lookupNamedNodeInModule(ctx, fullName); signal && signal->hasType()) {
         return &(*signal->type);
     }
     return nullptr;
@@ -1655,7 +1639,7 @@ static DFGNode* lookupLeafNode(ResolutionContext& ctx, const std::string& name) 
     if (auto it = ctx.local_signals.find(name); it != ctx.local_signals.end()) {
         return it->second;
     }
-    return ctx.graph.lookupSignal("", name);
+    return lookupNamedNodeInModule(ctx, name);
 }
 
 static std::vector<DFGNode*> lookupArrayLeaves(ResolutionContext& ctx,
@@ -1701,7 +1685,7 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
         return ExprValue{.type = *it->second->type, .scalar = it->second, .leaves = {}};
     }
 
-    DFGNode* node = resolveIdentifier(baseName, ctx.graph, false, ctx.flopNames);
+    DFGNode* node = resolveIdentifier(baseName, ctx, false, ctx.flopNames);
     if (!node) {
         auto eit = ctx.enumMemberValues.find(baseName);
         if (eit != ctx.enumMemberValues.end()) {
@@ -1828,7 +1812,7 @@ static DFGNode* currentWholeDriverForTarget(ResolutionContext& ctx,
     if (auto localIt = ctx.local_signals.find(qName); localIt != ctx.local_signals.end()) {
         return localIt->second;
     }
-    if (auto* qNode = ctx.graph.lookupSignal("", qName)) return qNode;
+    if (auto* qNode = lookupNamedNodeInModule(ctx, qName)) return qNode;
     throw CompilerError("Could not find .q signal: " + qName, loc);
 }
 
@@ -2393,7 +2377,7 @@ static DFGNode* buildExprScalarImpl(
                 if (it != ctx.local_signals.end()) return it->second;
             }
             // Check if baseName is a genvar/enum-member: in params but not in the DFG
-            if (ctx.graph.lookupSignal("", baseName) == nullptr) {
+            if (lookupNamedNodeInModule(ctx, baseName) == nullptr) {
                 // Check enum members/localparams first (for properly-typed CONST nodes)
                 auto eit = ctx.enumMemberValues.find(baseName);
                 if (eit != ctx.enumMemberValues.end()) {
@@ -2411,7 +2395,7 @@ static DFGNode* buildExprScalarImpl(
             }
             const auto node = resolveIdentifier(
                     baseName,
-                    ctx.graph,
+                    ctx,
                     true,
                     ctx.flopNames
             );
@@ -2453,7 +2437,7 @@ static DFGNode* buildExprScalarImpl(
                 } else {
                     node = resolveIdentifier(
                             baseName,
-                            ctx.graph,
+                            ctx,
                             true,
                             ctx.flopNames
                     );
@@ -2494,7 +2478,7 @@ static DFGNode* buildExprScalarImpl(
                                     baseName = elemKey;
                                     continue;
                                 }
-                                if (auto* elemNode = ctx.graph.lookupSignal("", elemKey)) {
+                                if (auto* elemNode = lookupNamedNodeInModule(ctx, elemKey)) {
                                     indexedSignalNode = elemNode;
                                     if (indexedSignalNode->hasType()) {
                                         currentSelectedType = *indexedSignalNode->type;
@@ -3142,10 +3126,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             ctx.graph.connectDriver(localIt->second, driver);
             return;
         }
-        if (ctx.graph.hasOutput("", outputName)) {
-            ctx.graph.connectOutput("", outputName, driver);
-        } else if (ctx.graph.hasSignal("", outputName)) {
-            ctx.graph.connectSignal("", outputName, driver);
+        if (auto* target = lookupTargetNode(ctx, outputName)) {
+            ctx.graph.connectDriver(target, driver);
         } else {
             throw CompilerError("Cannot assign to undeclared: " + outputName,
                                 assignLoc);
@@ -3322,9 +3304,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 if (localIt != ctx.local_signals.end()) node = localIt->second;
             }
             if (!node) {
-                node = ctx.graph.getSignalNode("", lookupName)
-                    ? ctx.graph.getSignalNode("", lookupName)
-                    : ctx.graph.getOutputNode("", lookupName);
+                node = lookupNamedNodeInModule(ctx, lookupName);
             }
             if (!node || !node->hasType()) {
                 throw CompilerError(
@@ -3787,10 +3767,8 @@ static DFGNode* inlineSubroutineCall(
         ctx.combDrivers[actualIdent] = it->second;
         // Also wire to the DFG graph node for module-level signals/outputs
         if (!ctx.subroutine_locals.count(actualIdent)) {
-            if (ctx.graph.hasOutput("", actualIdent))
-                ctx.graph.connectOutput("", actualIdent, it->second);
-            else if (ctx.graph.hasSignal("", actualIdent))
-                ctx.graph.connectSignal("", actualIdent, it->second);
+            if (auto* target = lookupTargetNode(ctx, actualIdent))
+                ctx.graph.connectDriver(target, it->second);
         }
     }
 
@@ -4223,14 +4201,14 @@ Signal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx
 void prePopulateInput(DFG& graph, Signal& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
-        auto* node = graph.input("", sig.name);
+        auto* node = graph.createGraphInput("", sig.name);
         node->type = sig.type;
         sig.binding.leaves.push_back(node);
     } else {
         Type leafType = sig.type;
         leafType.unpacked_dims.clear();
         for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
-            auto* node = graph.input("", sig.name + suffix);
+            auto* node = graph.createGraphInput("", sig.name + suffix);
             node->type = leafType;
             sig.binding.leaves.push_back(node);
         }
@@ -4243,14 +4221,14 @@ void prePopulateInput(DFG& graph, Signal& sig) {
 void prePopulateOutput(DFG& graph, Signal& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
-        auto* node = graph.outputPlaceholder("", sig.name);
+        auto* node = graph.createGraphOutput("", sig.name);
         node->type = sig.type;
         sig.binding.leaves.push_back(node);
     } else {
         Type leafType = sig.type;
         leafType.unpacked_dims.clear();
         for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
-            auto* node = graph.outputPlaceholder("", sig.name + suffix);
+            auto* node = graph.createGraphOutput("", sig.name + suffix);
             node->type = leafType;
             sig.binding.leaves.push_back(node);
         }
@@ -4288,9 +4266,9 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
 
     if (type.unpacked_dims.empty()) {
         // Scalar flop: one sink (.d) and one source (.q).
-        auto* dNode = graph.outputPlaceholder("", name + ".d");
+        auto* dNode = graph.createGraphOutput("", name + ".d");
         dNode->type = type;
-        auto* qNode = graph.input("", name + ".q");
+        auto* qNode = graph.createGraphInput("", name + ".q");
         qNode->type = type;
         flop.binding.d_leaves.push_back(dNode);
         flop.binding.q_leaves.push_back(qNode);
@@ -4301,11 +4279,11 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
         auto elemType = type;
         elemType.unpacked_dims.clear();
 
-        auto* dElem = graph.outputPlaceholder("", name + idxSuffix + ".d");
+        auto* dElem = graph.createGraphOutput("", name + idxSuffix + ".d");
         dElem->type = elemType;
         flop.binding.d_leaves.push_back(dElem);
 
-        auto* qElem = graph.input("", name + idxSuffix + ".q");
+        auto* qElem = graph.createGraphInput("", name + idxSuffix + ".q");
         qElem->type = elemType;
         flop.binding.q_leaves.push_back(qElem);
     }
@@ -4379,10 +4357,8 @@ void connectModuleOutput(DFG& graph, ModuleInstanceBinding& binding,
     recordFullWrite(
         ctx, parentSignalName, writeLoc,
         std::format("module-output:{}:{}", binding.instance_name, portName));
-    if (graph.hasOutput("", parentSignalName)) {
-        graph.connectOutput("", parentSignalName, modOut);
-    } else if (graph.hasSignal("", parentSignalName)) {
-        graph.connectSignal("", parentSignalName, modOut);
+    if (auto* target = lookupTargetNode(ctx, parentSignalName)) {
+        graph.connectDriver(target, modOut);
     }
 }
 
@@ -4454,7 +4430,7 @@ void resolveNamedPortConnection(
 
             // If the element node exists (unpacked array element), use the normal path.
             // Otherwise, fall through to the canonical partial-write path for packed bit-selects.
-            if (graph.hasSignal("", connectName) || graph.hasOutput("", connectName)) {
+            if (lookupTargetNode(ctx, connectName)) {
                 connectModuleOutput(graph, binding, resolvedSub, portName, connectName,
                                     ctx, resolveSourceLoc(*expr, ctx.sm));
                 return;
@@ -4510,7 +4486,7 @@ void resolveWildcardPortConnection(
         Module& resolvedSub,
         ResolutionContext& ctx) {
     for (const auto& [name, inp] : resolvedSub.inputs) {
-        auto* driver = graph.lookupSignal("", name);
+        auto* driver = lookupNamedNodeInModule(ctx, name);
         if (driver) {
             binding.inputs.push_back({name, DFGOutput(driver)});
             if (ctx.domain_facts) {
@@ -4717,9 +4693,9 @@ static void resolveGenerateScopeDecls(
                 throw CompilerError(
                     "Generate-scope flop arrays not yet supported: " + name);
 
-            auto* d_node = ctx.graph.outputPlaceholder(ctx.instance_path, name + ".d");
+            auto* d_node = ctx.graph.createGraphOutput(ctx.instance_path, name + ".d");
             d_node->type = type;
-            auto* q_node = ctx.graph.input(ctx.instance_path, name + ".q");
+            auto* q_node = ctx.graph.createGraphInput(ctx.instance_path, name + ".q");
             q_node->type = type;
 
             ctx.local_signals[name + ".d"] = d_node;
@@ -5302,15 +5278,16 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     DFG& graph = *resolved.dfg;
 
     // Pre-populate module PARAMETERS
-    for (const auto& parameter : resolved.parameters) {
-        graph.named_constant(parameter.value, "", parameter.name);
+    for (auto& parameter : resolved.parameters) {
+        parameter.dfg_node = graph.named_constant(parameter.value, "", parameter.name);
     }
 
     // Pre-populate module LOCALPARAMS
     // For enum-typed localparams, fix the node type and inject into enumMemberValues
     // so that buildExprDFG returns properly-typed CONST nodes for them.
-    for (const auto& parameter : resolved.localparams) {
+    for (auto& parameter : resolved.localparams) {
         auto* node = graph.named_constant(parameter.value, "", parameter.name);
+        parameter.dfg_node = node;
         if (parameter.type.isEnum()) {
             node->type = parameter.type;
             enumMemberValues[parameter.name] = {static_cast<int64_t>(parameter.value), parameter.type};
@@ -5336,12 +5313,6 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     for (auto& [name, signal] : resolved.signals) {
         prePopulateSignal(graph, signal);
     }
-
-    // Back-patch DFG node pointers into resolved parameters.
-    for (auto& parameter : resolved.parameters)
-        parameter.dfg_node = graph.lookupSignal("", parameter.name);
-    for (auto& parameter : resolved.localparams)
-        parameter.dfg_node = graph.lookupSignal("", parameter.name);
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context

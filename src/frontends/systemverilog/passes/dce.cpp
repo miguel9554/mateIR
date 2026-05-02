@@ -11,14 +11,11 @@ bool eliminateDeadCode(DFG& graph,
     std::unordered_set<DFGNode*> alive;
     std::vector<DFGNode*> worklist;
 
-    // Roots: outputs and signals
-    // .d OUTPUT nodes are in the outputs map → automatically roots
-    for (auto& [name, node] : graph.getOutputsMap()) {
+    // Roots: graph outputs.
+    // .d OUTPUT nodes are in the outputs map and are automatically rooted.
+    graph.forEachGraphOutput([&](const auto&, DFGNode* node) {
         if (alive.insert(node).second) worklist.push_back(node);
-    }
-    for (auto& [name, node] : graph.getSignalsMap()) {
-        if (alive.insert(node).second) worklist.push_back(node);
-    }
+    });
     for (auto* node : extraRoots) {
         if (node && alive.insert(node).second) worklist.push_back(node);
     }

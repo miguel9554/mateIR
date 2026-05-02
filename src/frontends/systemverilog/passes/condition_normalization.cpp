@@ -34,16 +34,18 @@ static void postOrderVisit(DFGNode* node,
     order.push_back(node);
 }
 
-static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
+static std::vector<DFGNode*> buildPostOrder(
+        DFG& graph,
+        const std::unordered_set<DFGNode*>& extraRoots) {
     std::unordered_set<DFGNode*> visited;
     std::vector<DFGNode*> order;
-    for (auto& [name, node] : graph.getOutputsMap()) {
+    graph.forEachGraphOutput([&](const auto&, DFGNode* node) {
+        postOrderVisit(node, visited, order);
+    });
+    for (auto* node : extraRoots) {
         postOrderVisit(node, visited, order);
     }
-    for (auto& [name, node] : graph.getSignalsMap()) {
-        postOrderVisit(node, visited, order);
-    }
-    // Only traverse the live graph reachable from named outputs and signals.
+    // Only traverse the live graph reachable from graph outputs and explicit roots.
     // Dead nodes (redirected by a prior rule) are not visited; DCE removes them.
     return order;
 }
@@ -122,12 +124,13 @@ static bool tryNormalize(DFG& graph, DFGNode* node) {
 // Main pass
 // ---------------------------------------------------------------------------
 
-bool normalizeConditions(DFG& graph) {
+bool normalizeConditions(DFG& graph,
+                         const std::unordered_set<DFGNode*>& extraRoots) {
     bool anyChanged = false;
     bool changed;
     do {
         changed = false;
-        auto order = buildPostOrder(graph);
+        auto order = buildPostOrder(graph, extraRoots);
         for (DFGNode* node : order) {
             if (tryNormalize(graph, node)) {
                 changed = true;

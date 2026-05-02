@@ -34,7 +34,7 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
         const std::string& portName = inputBinding.port_name;
         DFGOutput driver = inputBinding.driver;
 
-        DFGNode* subInputNode = sub->dfg->getInputNode("", portName);
+        DFGNode* subInputNode = sub->dfg->getGraphInput("", portName);
         if (!subInputNode) continue;
 
         // Replace all uses of subInputNode in sub.dfg with the parent driver
@@ -67,13 +67,13 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
 
     // Step 2: Rewire parent-side child output placeholders to actual child outputs.
     for (const auto& [portName, placeholder] : binding.output_placeholders) {
-        DFGNode* subOutputNode = sub->dfg->getOutputNode("", portName);
+        DFGNode* subOutputNode = sub->dfg->getGraphOutput("", portName);
         if (!subOutputNode) continue;
         parent.dfg->redirectConsumers(placeholder, DFGOutput{subOutputNode, 0});
     }
 
     // Step 3: Set instance_path on all sub nodes (must happen before adopt so
-    // adoptOutput/adoptInput can compute the correct map key).
+    // adoptGraphOutput/adoptGraphInput can compute the correct map key).
     for (auto& node : sub->dfg->nodes) {
         if (node->instance_path.empty()) {
             node->instance_path = instanceName;
@@ -82,18 +82,18 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
         }
     }
 
-    // Step 4: Adopt sub .d OUTPUT and .q INPUT nodes into parent's named maps.
-    // Map key is computed from node->instance_path + node->name by adoptOutput/adoptInput.
-    for (const auto& [name, node] : sub->dfg->getOutputsMap()) {
-        if (name.ends_with(".d")) {
-            parent.dfg->adoptOutput(node);
+    // Step 4: Adopt sub .d GraphOutput and .q GraphInput nodes into the parent boundary maps.
+    // Map key is computed from node->instance_path + node->name by adoptGraphOutput/adoptGraphInput.
+    sub->dfg->forEachGraphOutput([&](const std::string&, DFGNode* node) {
+        if (node->name.ends_with(".d")) {
+            parent.dfg->adoptGraphOutput(node);
         }
-    }
-    for (const auto& [name, node] : sub->dfg->getInputsMap()) {
-        if (name.ends_with(".q")) {
-            parent.dfg->adoptInput(node);
+    });
+    sub->dfg->forEachGraphInput([&](const std::string&, DFGNode* node) {
+        if (node->name.ends_with(".q")) {
+            parent.dfg->adoptGraphInput(node);
         }
-    }
+    });
 
     // Step 5: Move nodes from sub.dfg to parent.dfg
     for (auto& node : sub->dfg->nodes) {

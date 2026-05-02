@@ -122,12 +122,12 @@ static size_t expectedModuleNodeLeafCount(const Type& type) {
     return type.unpacked_dims.empty() ? 1 : unpackedIndexSuffixes(type).size();
 }
 
-static void validateModuleNodeBindingShape(const ModuleNode& signal) {
-    const size_t expected = expectedModuleNodeLeafCount(signal.type);
-    if (signal.binding.leaves.size() != expected) {
+static void validateModuleNodeBindingShape(const ModuleNode& module_node) {
+    const size_t expected = expectedModuleNodeLeafCount(module_node.type);
+    if (module_node.binding.leaves.size() != expected) {
         throw CompilerError(std::format(
-            "signal '{}' binding mismatch: expected {} leaf/leaves, got {}",
-            signal.name, expected, signal.binding.leaves.size()));
+            "module node '{}' binding mismatch: expected {} leaf/leaves, got {}",
+            module_node.name, expected, module_node.binding.leaves.size()));
     }
 }
 
@@ -262,18 +262,18 @@ static void validateFlopBindingShape(const FlopInfo& flop,
     }
 }
 
-const std::vector<DFGNode*>& moduleNodeLeaves(const ModuleNode& signal) {
-    validateModuleNodeBindingShape(signal);
-    return signal.binding.leaves;
+const std::vector<DFGNode*>& moduleNodeLeaves(const ModuleNode& module_node) {
+    validateModuleNodeBindingShape(module_node);
+    return module_node.binding.leaves;
 }
 
-DFGNode* scalarModuleNode(const ModuleNode& signal) {
+DFGNode* scalarModuleNode(const ModuleNode& module_node) {
     try {
-        return scalarLeaf(signal.binding);
+        return scalarLeaf(module_node.binding);
     } catch (const CompilerError&) {
         throw CompilerError(std::format(
-            "scalarModuleNode: signal '{}' is not scalar-bound ({} leaves)",
-            signal.name, signal.binding.leaves.size()));
+            "scalarModuleNode: module node '{}' is not scalar-bound ({} leaves)",
+            module_node.name, module_node.binding.leaves.size()));
     }
 }
 
@@ -305,26 +305,26 @@ DFGNode* scalarFlopQNode(const FlopInfo& flop) {
     return flop.binding.q_leaves[0];
 }
 
-std::vector<ModuleNodeLeafRef> moduleNodeLeafRefs(const ModuleNode& signal) {
-    validateModuleNodeBindingShape(signal);
+std::vector<ModuleNodeLeafRef> moduleNodeLeafRefs(const ModuleNode& module_node) {
+    validateModuleNodeBindingShape(module_node);
     std::vector<ModuleNodeLeafRef> refs;
-    refs.reserve(signal.binding.leaves.size());
-    if (signal.type.unpacked_dims.empty()) {
+    refs.reserve(module_node.binding.leaves.size());
+    if (module_node.type.unpacked_dims.empty()) {
         refs.push_back(ModuleNodeLeafRef{
-            .module_node = &signal,
-            .node = signal.binding.leaves.front(),
-            .leaf_name = signal.name,
+            .module_node = &module_node,
+            .node = module_node.binding.leaves.front(),
+            .leaf_name = module_node.name,
             .leaf_index = 0,
         });
         return refs;
     }
 
-    const auto suffixes = unpackedIndexSuffixes(signal.type);
+    const auto suffixes = unpackedIndexSuffixes(module_node.type);
     for (size_t i = 0; i < suffixes.size(); ++i) {
         refs.push_back(ModuleNodeLeafRef{
-            .module_node = &signal,
-            .node = signal.binding.leaves[i],
-            .leaf_name = signal.name + suffixes[i],
+            .module_node = &module_node,
+            .node = module_node.binding.leaves[i],
+            .leaf_name = module_node.name + suffixes[i],
             .leaf_index = i,
         });
     }
@@ -436,8 +436,8 @@ const DFGNode* findModuleDebugLeafNode(const Module& module, const std::string& 
 void collectModuleRoots(const Module& module,
                         std::unordered_set<DFGNode*>& roots,
                         const ModuleRootSelection& selection) {
-    auto insertModuleNodeLeaves = [&roots](const ModuleNode& signal) {
-        for (auto* leaf : moduleNodeLeaves(signal)) {
+    auto insertModuleNodeLeaves = [&roots](const ModuleNode& module_node) {
+        for (auto* leaf : moduleNodeLeaves(module_node)) {
             if (leaf) roots.insert(leaf);
         }
     };
@@ -454,7 +454,7 @@ void collectModuleRoots(const Module& module,
     }
     if (selection.inputs) forEachInputNode(module, insertModuleNodeLeaves);
     if (selection.outputs) forEachOutputNode(module, insertModuleNodeLeaves);
-    if (selection.signals) forEachInternalNode(module, insertModuleNodeLeaves);
+    if (selection.internal_nodes) forEachInternalNode(module, insertModuleNodeLeaves);
     if (selection.flop_d) {
         for (const auto& flop : module.flops) {
             for (auto* leaf : flopDLeaves(flop)) {
@@ -560,10 +560,10 @@ void Module::print(int indent) const {
         std::cout << std::endl;
     });
 
-    std::cout << indent_str(indent + 1) << "Signals:" << std::endl;
-    forEachInternalNode(*this, [&](const ModuleNode& signal) {
+    std::cout << indent_str(indent + 1) << "Internals:" << std::endl;
+    forEachInternalNode(*this, [&](const ModuleNode& module_node) {
         std::cout << indent_str(indent + 2);
-        signal.print(std::cout);
+        module_node.print(std::cout);
         std::cout << std::endl;
     });
 
@@ -735,8 +735,8 @@ SyncKind syncKind(const SyncType& sync_type) {
     return SyncKind::Async;
 }
 
-SyncKind syncKind(const ModuleNode& signal) {
-    return syncKind(signal.sync_type);
+SyncKind syncKind(const ModuleNode& module_node) {
+    return syncKind(module_node.sync_type);
 }
 
 static std::string moduleNodeToJson(const ModuleNode& s) {

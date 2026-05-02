@@ -236,7 +236,7 @@ bool extract_reset(
 
     // Match the MUX selector to one of the triggers (the reset). Compare by node identity
     // rather than name, because after DFG inlining the trigger's INPUT node is replaced
-    // by the parent's signal node (with a different name), and the input binding tracks
+    // by the parent's bound node (with a different name), and the input binding tracks
     // that replacement.
     if (nodeForTrigger(resolved, triggers[0]) == mux_sel) {
         reset = triggers[0];
@@ -509,8 +509,8 @@ static void resolveFlopsForModule(Module& resolved,
 
     // Check that module-visible logic and resolved flop functional .d logic do
     // not depend on clock/reset signals.
-    forEachDrivenNode(resolved, [&](const ModuleNode& signal) {
-        for (const auto& leaf : moduleNodeLeafRefs(signal)) {
+    forEachDrivenNode(resolved, [&](const ModuleNode& module_node) {
+        for (const auto& leaf : moduleNodeLeafRefs(module_node)) {
             if (!leaf.node) continue;
             check_logic_no_clock_reset(leaf.node, leaf.leaf_name, resolved.name, clocks, resets);
         }

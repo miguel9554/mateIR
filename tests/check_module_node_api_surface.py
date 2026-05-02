@@ -51,8 +51,8 @@ EXEMPT_LINE_PATTERNS = [
     r"resolved\.signals with qualified name",  # existing comment
     r"\bsummary\.(inputs|outputs|signals)\b",
     r"\bsummary->(inputs|outputs|signals)\b",
-    r"\bselection\.(inputs|outputs|signals)\b",
-    r"\bselection->(inputs|outputs|signals)\b",
+    r"\bselection\.(inputs|outputs|internal_nodes)\b",
+    r"\bselection->(inputs|outputs|internal_nodes)\b",
     r"\.inputs\s*=\s*\{\s*\}",     # designated init for ModuleInstanceBinding
 ]
 

@@ -17,7 +17,7 @@ namespace mate {
 // Leaf binding structures
 // ============================================================================
 
-// Declaration-order DFG leaves for a signal.
+// Declaration-order DFG leaves for a module node.
 // Scalars and packed vectors have exactly one leaf.
 // Unpacked arrays have one leaf per flattened element (declaration order,
 // outermost dimension first).
@@ -25,7 +25,7 @@ struct ModuleNodeBinding {
     std::vector<DFGNode*> leaves;
 };
 
-// Per-leaf .d (sink) and .q (source) bindings for a flop signal.
+// Per-leaf .d (sink) and .q (source) bindings for a flop named value.
 // Scalar flops use the one-leaf case.
 struct FlopBinding {
     std::vector<DFGNode*> d_leaves;
@@ -56,7 +56,7 @@ struct ModuleRootSelection {
     bool localparams = false;
     bool inputs = false;
     bool outputs = false;
-    bool signals = false;
+    bool internal_nodes = false;
     bool flop_d = false;
     bool flop_q = false;
     bool recurse_hierarchy = false;
@@ -86,7 +86,7 @@ Type dropFirstUnpackedDim(Type type);
 // Return the element type of the first unpacked dimension (same as dropFirstUnpackedDim).
 Type unpackedElementType(const Type& type);
 
-// Return the single leaf for a scalar/packed-vector signal (asserts leaf count == 1).
+// Return the single leaf for a scalar/packed-vector module node (asserts leaf count == 1).
 DFGNode* scalarLeaf(const ModuleNodeBinding& binding);
 
 // Return the leaf for a given set of unpacked indices.

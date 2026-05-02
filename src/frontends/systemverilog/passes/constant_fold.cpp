@@ -64,7 +64,7 @@ static std::vector<DFGNode*> buildPostOrder(
         postOrderVisit(node, visited, order);
     });
     for (auto* node : extraRoots) postOrderVisit(node, visited, order);
-    // Do NOT visit orphaned nodes (not reachable from any output/signal).
+    // Do NOT visit orphaned nodes (not reachable from any output/internal node).
     // Visiting orphaned nodes causes constant_fold to loop forever: when
     // redirectConsumers() silently no-ops on an already-orphaned node,
     // tryAlgebraicSimplify still returns true, so 'changed' is set and the

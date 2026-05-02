@@ -219,32 +219,32 @@ ResetId requireResolvedTopReset(
 std::optional<SyncType> topPortSyncType(
         const MateIR& ir,
         const FrontendDomainFacts& facts,
-        const ModuleNode& signal) {
+        const ModuleNode& port_node) {
     if (!facts.top_inputs) return std::nullopt;
 
     for (const auto& [domainName, clock] : facts.top_inputs->clocks) {
-        if (clock.input_port == signal.name) {
+        if (clock.input_port == port_node.name) {
             return ClockSignal{
-                requireResolvedTopClock(ir, facts, domainName, signal.name),
+                requireResolvedTopClock(ir, facts, domainName, port_node.name),
             };
         }
     }
     for (const auto& [resetName, reset] : facts.top_inputs->resets) {
-        if (reset.signal_name == signal.name) {
+        if (reset.signal_name == port_node.name) {
             return ResetSignal{
-                requireResolvedTopReset(ir, facts, resetName, signal.name),
+                requireResolvedTopReset(ir, facts, resetName, port_node.name),
             };
         }
     }
-    if (auto syncIt = facts.top_inputs->sync_inputs.find(signal.name);
+    if (auto syncIt = facts.top_inputs->sync_inputs.find(port_node.name);
             syncIt != facts.top_inputs->sync_inputs.end()) {
         return SyncSignal{
             .clock_domain = requireResolvedTopClock(
-                ir, facts, syncIt->second.clock_domain_name, signal.name),
+                ir, facts, syncIt->second.clock_domain_name, port_node.name),
             .reset_domains = {},
         };
     }
-    if (facts.top_inputs->async_inputs.contains(signal.name)) {
+    if (facts.top_inputs->async_inputs.contains(port_node.name)) {
         return AsyncSignal{};
     }
     return std::nullopt;
@@ -256,24 +256,24 @@ SyncType expectedPortSyncType(
         const MateIR& ir,
         const FrontendDomainFacts& facts,
         const ModuleDomainFacts& moduleFacts,
-        const ModuleNode& signal) {
+        const ModuleNode& port_node) {
     if (path.elems.empty()) {
-        auto topType = topPortSyncType(ir, facts, signal);
+        auto topType = topPortSyncType(ir, facts, port_node);
         if (!topType) {
             throw CompilerError(std::format(
                 "domains_propagate_and_check: missing top-level input domain for '{}' "
                 "in module '{}'",
-                signal.name, module.name));
+                port_node.name, module.name));
         }
         return *topType;
     }
 
-    auto it = moduleFacts.ports.find(signal.name);
+    auto it = moduleFacts.ports.find(port_node.name);
     if (it == moduleFacts.ports.end()) {
         throw CompilerError(std::format(
             "domains_propagate_and_check: missing port domain fact for '{}' "
             "in module '{}' at {}",
-            signal.name, module.name, pathString(path)));
+            port_node.name, module.name, pathString(path)));
     }
 
     const LocalPortDomainFact& portFact = it->second;
@@ -281,12 +281,12 @@ SyncType expectedPortSyncType(
         case LocalPortClass::Clock:
             return ClockSignal{
                 requireClockDomainForLocalClock(
-                    module, path, ir, moduleFacts, signal.name, signal.name),
+                    module, path, ir, moduleFacts, port_node.name, port_node.name),
             };
         case LocalPortClass::Reset:
             return ResetSignal{
                 requireResetDomainForLocalReset(
-                    module, path, ir, moduleFacts, signal.name, signal.name),
+                    module, path, ir, moduleFacts, port_node.name, port_node.name),
             };
         case LocalPortClass::Async:
             return AsyncSignal{};
@@ -295,11 +295,11 @@ SyncType expectedPortSyncType(
                 throw CompilerError(std::format(
                     "domains_propagate_and_check: sync port '{}' in module '{}' at {} "
                     "has no local clock domain fact",
-                    signal.name, module.name, pathString(path)));
+                    port_node.name, module.name, pathString(path)));
             }
             return SyncSignal{
                 .clock_domain = requireClockDomainForLocalClock(
-                    module, path, ir, moduleFacts, *portFact.local_domain_name, signal.name),
+                    module, path, ir, moduleFacts, *portFact.local_domain_name, port_node.name),
                 .reset_domains = {},
             };
     }
@@ -542,9 +542,9 @@ FlopDInputDomain flopDInputDomainForLeaves(
 }
 
 SyncType syncTypeForModuleNodeLeaves(
-        const ModuleNode& signal,
+        const ModuleNode& module_node,
         const std::map<const DFGNode*, SyncType>& nodeSync) {
-    return syncTypeForLeaves(moduleNodeLeaves(signal), nodeSync);
+    return syncTypeForLeaves(moduleNodeLeaves(module_node), nodeSync);
 }
 
 void assignModuleNodeSyncTypes(
@@ -571,20 +571,21 @@ void assignModuleNodeSyncTypes(
         validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
     };
 
-    auto assignDrivenModuleNode = [&](ModuleNode& signal) {
-        SyncType propagated = syncTypeForModuleNodeLeaves(signal, nodeSync);
-        if (moduleFacts.ports.contains(signal.name)) {
-            SyncType expected = expectedPortSyncType(module, path, ir, facts, moduleFacts, signal);
+    auto assignDrivenModuleNode = [&](ModuleNode& module_node) {
+        SyncType propagated = syncTypeForModuleNodeLeaves(module_node, nodeSync);
+        if (moduleFacts.ports.contains(module_node.name)) {
+            SyncType expected = expectedPortSyncType(
+                module, path, ir, facts, moduleFacts, module_node);
             if (std::holds_alternative<AsyncSignal>(propagated) &&
                     !std::holds_alternative<AsyncSignal>(expected)) {
-                signal.sync_type = std::move(expected);
+                module_node.sync_type = std::move(expected);
             } else {
-                signal.sync_type = std::move(propagated);
+                module_node.sync_type = std::move(propagated);
             }
         } else {
-            signal.sync_type = std::move(propagated);
+            module_node.sync_type = std::move(propagated);
         }
-        validateSyncTypeIds(ir, signal.sync_type, module, path, signal.name);
+        validateSyncTypeIds(ir, module_node.sync_type, module, path, module_node.name);
     };
 
     forEachInputNode(module, assignInput);

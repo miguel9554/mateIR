@@ -83,8 +83,8 @@ void loadTopIODomains(Module& module,
     // Top-level domains YAML classifies only top-level inputs.
     std::set<std::string> inputPortNames;
     std::set<std::string> outputPortNames;
-    for (const auto& [name, sig] : module.inputs) inputPortNames.insert(name);
-    for (const auto& [name, sig] : module.outputs) outputPortNames.insert(name);
+    forEachInputNode(module, [&](const ModuleNode& sig) { inputPortNames.insert(sig.name); });
+    forEachOutputNode(module, [&](const ModuleNode& sig) { outputPortNames.insert(sig.name); });
 
     // 3c. Build port classification
     std::map<std::string, PortClassification> portClassMap;
@@ -247,7 +247,7 @@ void loadTopIODomains(Module& module,
 
     // Clock input ports must be inputs
     for (const auto& [domainName, info] : clockDomains) {
-        if (!module.inputs.contains(info.input_port)) {
+        if (!findInputNode(module, info.input_port)) {
             throw CompilerError(std::format(
                 "io_domains_set: module '{}': clock '{}' (port '{}') is not a module input",
                 module.name, domainName, info.input_port));
@@ -256,7 +256,7 @@ void loadTopIODomains(Module& module,
 
     // Reset input ports must be inputs
     for (const auto& [resetName, info] : resets) {
-        if (!module.inputs.contains(info.signal_name)) {
+        if (!findInputNode(module, info.signal_name)) {
             throw CompilerError(std::format(
                 "io_domains_set: module '{}': reset '{}' (port '{}') is not a module input",
                 module.name, resetName, info.signal_name));

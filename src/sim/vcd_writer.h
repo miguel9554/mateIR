@@ -77,16 +77,16 @@ private:
                   const std::unordered_set<const DFGNode*>& alive);
 
     // Shared helper: adds a VCD entry for node into values_.
-    bool isDomainInput(const Signal& sig) const;
-    std::string requireTopInputSourceName(const Signal& sig,
+    bool isDomainInput(const ModuleNode& sig) const;
+    std::string requireTopInputSourceName(const ModuleNode& sig,
                                           const std::string& context) const;
     void addDomainInputEntry(vcd_tracer::module& scope, const std::string& name,
-                             const Signal& sig);
+                             const ModuleNode& sig);
     void addEntry(vcd_tracer::module& scope, const std::string& name,
                   const DFGNode* node,
                   const std::unordered_set<const DFGNode*>& alive);
     void addSignalEntries(vcd_tracer::module& scope, const std::string& name,
-                          const Signal& sig,
+                          const ModuleNode& sig,
                           const std::unordered_set<const DFGNode*>& alive);
     void addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
                         const std::unordered_set<const DFGNode*>& alive);

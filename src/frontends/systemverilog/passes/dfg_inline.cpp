@@ -44,8 +44,8 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
 
         // Update input binding metadata: subInputNode will be dead after
         // rewiring and removed by DCE.
-        if (auto it = sub->inputs.find(portName); it != sub->inputs.end()) {
-            for (auto*& leaf : it->second.binding.leaves) {
+        if (auto* input = findInputNode(*sub, portName); input) {
+            for (auto*& leaf : input->binding.leaves) {
                 if (leaf == subInputNode) leaf = driver.node;
             }
         }
@@ -53,11 +53,11 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
         // Recursively fix input bindings in deeper descendants that were wired to
         // subInputNode during a prior inner inlining pass.
         std::function<void(Module&)> fixDescendants = [&](Module& mod) {
-            for (auto& [name, inp] : mod.inputs) {
+            forEachInputNode(mod, [&](ModuleNode& inp) {
                 for (auto*& leaf : inp.binding.leaves) {
                     if (leaf == subInputNode) leaf = driver.node;
                 }
-            }
+            });
             for (auto& child : mod.hierarchyInstantiation)
                 fixDescendants(child);
         };
@@ -136,6 +136,7 @@ void inlineDFGs(Module& top) {
         inlineModuleNode(top, binding);
     }
     top.instance_bindings.clear();
+    rebuildModuleNodeIndexRecursively(top);
 }
 
 } // namespace mate

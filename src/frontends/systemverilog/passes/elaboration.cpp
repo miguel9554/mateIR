@@ -67,10 +67,10 @@ struct ResolutionContext {
     FrontendDomainFacts* domain_facts;
     ModuleOccurrenceKey occurrence;
 
-    // In combinational blocks, tracks the current driver for each signal.
-    // When a signal is assigned (e.g., `x = expr`), the driver is stored here.
+    // In combinational blocks, tracks the current driver for each named target.
+    // When a target is assigned (e.g., `x = expr`), the driver is stored here.
     // Subsequent reads of `x` in the same block return this driver instead of
-    // the signal node, avoiding structural cycles from patterns like:
+    // the bound DFG node, avoiding structural cycles from patterns like:
     //   x = 42 + count;
     //   x = 43 + x;   // RHS `x` must resolve to ADD(42, count), not SIGNAL(x)
     std::map<std::string, DFGNode*> combDrivers;
@@ -78,11 +78,11 @@ struct ResolutionContext {
     // Generate-scope fields:
     // instance_path: the generate scope path (e.g. "g_lane[0]") — empty for top-level
     std::string instance_path;
-    // local_signals: baseName → DFG node for signals/flops declared in this generate scope
+    // local_nodes: baseName → DFG node for internals/flops declared in this generate scope
     // Flops: "name" → q_node, "name.d" → d_node, "name.q" → q_node
     // Wires: "name[i]" → leaf_node (for arrays; no aggregate base-name entry)
-    //        "name" → signal_node (for scalars)
-    std::map<std::string, DFGNode*> local_signals;
+    //        "name" → node (for scalars)
+    std::map<std::string, DFGNode*> local_nodes;
     // local_array_types: base name → full Type (including unpacked_dims) for
     // generate-scope array signals. Used by lookupDeclaredType since there is no
     // aggregate node for arrays after the leaf-binding refactor.
@@ -152,7 +152,7 @@ InstancePath appendInstancePath(InstancePath path, const std::string& instanceNa
 }
 
 std::string canonicalTargetKey(const ResolutionContext& ctx, const std::string& targetName) {
-    if (ctx.local_signals.contains(targetName) && !ctx.instance_path.empty()) {
+    if (ctx.local_nodes.contains(targetName) && !ctx.instance_path.empty()) {
         return ctx.instance_path + "." + targetName;
     }
     return targetName;
@@ -278,7 +278,7 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
 }
 
 // Exception thrown by return statements during function inlining
-struct ReturnSignal {
+struct ReturnValue {
     DFGNode* value; // nullptr for void return
 };
 
@@ -364,18 +364,24 @@ static DFGNode* lookupNamedNodeInModule(const ResolutionContext& ctx,
     return nullptr;
 }
 
+static DFGNode* lookupDrivenNodeInModule(const ResolutionContext& ctx,
+                                         const std::string& name) {
+    if (auto leaf = findModuleDrivenLeaf(*ctx.thisModule, name)) return leaf->node;
+    for (const auto& flop : ctx.thisModule->flops) {
+        for (const auto& leaf : flopDLeafRefs(flop)) {
+            if (leaf.leaf_name == name) return leaf.node;
+        }
+    }
+    return nullptr;
+}
+
 template<typename Fn>
 static void forEachVisibleDriverTarget(const ResolutionContext& ctx, Fn&& fn) {
-    for (const auto& [_, output] : ctx.thisModule->outputs) {
-        for (const auto& leaf : signalLeafRefs(output)) {
+    forEachDrivenNode(*ctx.thisModule, [&](const ModuleNode& module_node) {
+        for (const auto& leaf : moduleNodeLeafRefs(module_node)) {
             if (leaf.node) fn(leaf.leaf_name, leaf.node);
         }
-    }
-    for (const auto& [_, signal] : ctx.thisModule->signals) {
-        for (const auto& leaf : signalLeafRefs(signal)) {
-            if (leaf.node) fn(leaf.leaf_name, leaf.node);
-        }
-    }
+    });
     for (const auto& flop : ctx.thisModule->flops) {
         for (const auto& leaf : flopDLeafRefs(flop)) {
             if (leaf.node) {
@@ -383,7 +389,7 @@ static void forEachVisibleDriverTarget(const ResolutionContext& ctx, Fn&& fn) {
             }
         }
     }
-    for (const auto& [name, node] : ctx.local_signals) {
+    for (const auto& [name, node] : ctx.local_nodes) {
         if (node) fn(name, node);
     }
 }
@@ -408,10 +414,10 @@ static DriverSnapshot snapshotDrivers(const ResolutionContext& ctx) {
 }
 
 static DFGNode* lookupTargetNode(ResolutionContext& ctx, const std::string& name) {
-    if (auto localIt = ctx.local_signals.find(name); localIt != ctx.local_signals.end()) {
+    if (auto localIt = ctx.local_nodes.find(name); localIt != ctx.local_nodes.end()) {
         return localIt->second;
     }
-    return lookupNamedNodeInModule(ctx, name);
+    return lookupDrivenNodeInModule(ctx, name);
 }
 
 static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNode* driver) {
@@ -419,11 +425,11 @@ static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNo
         ctx.combDrivers[name] = driver;
         return;
     }
-    if (auto localIt = ctx.local_signals.find(name); localIt != ctx.local_signals.end()) {
+    if (auto localIt = ctx.local_nodes.find(name); localIt != ctx.local_nodes.end()) {
         ctx.graph.connectDriver(localIt->second, driver);
         return;
     }
-    if (auto* target = lookupNamedNodeInModule(ctx, name)) {
+    if (auto* target = lookupDrivenNodeInModule(ctx, name)) {
         ctx.graph.connectDriver(target, driver);
     }
 }
@@ -565,7 +571,7 @@ static PartialDriverMap modifiedPartialDriversSince(const ResolutionContext& ctx
 static void executeConditionalBranch(const StatementSyntax& stmt, ResolutionContext& ctx) {
     try {
         resolveStatementInPlace(&stmt, ctx);
-    } catch (const ReturnSignal& r) {
+    } catch (const ReturnValue& r) {
         if (ctx.current_return_var.empty()) throw;
         if (r.value) ctx.combDrivers[ctx.current_return_var] = r.value;
     }
@@ -585,7 +591,7 @@ static DFGNode* getRetainedDriver(ResolutionContext& ctx,
         qName = qName.substr(0, qName.length() - 2) + ".q";
     }
     DFGNode* qNode = nullptr;
-    if (auto localIt = ctx.local_signals.find(qName); localIt != ctx.local_signals.end()) {
+    if (auto localIt = ctx.local_nodes.find(qName); localIt != ctx.local_nodes.end()) {
         qNode = localIt->second;
     } else {
         qNode = lookupNamedNodeInModule(ctx, qName);
@@ -769,7 +775,7 @@ static std::optional<PartialTargetState> buildMergedPartialDriver(
             if (!selected && !result) continue;
             if (!selected || !result) {
                 throw CompilerError(
-                    "Signal '" + targetName + "' not assigned in all branches and has no default/fallback",
+                    "Target '" + targetName + "' not assigned in all branches and has no default/fallback",
                     loc);
             }
             if (selected == result) continue;
@@ -805,7 +811,7 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
     DFGNode* result = fallbackBranch ? branchValue(*fallbackBranch) : retained;
     if (!result) {
         throw CompilerError(
-            "Signal '" + targetName + "' not assigned in all branches and has no default/fallback",
+            "Target '" + targetName + "' not assigned in all branches and has no default/fallback",
             loc);
     }
 
@@ -813,7 +819,7 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
         DFGNode* selected = branchValue(it->modifiedDrivers);
         if (!selected) {
             throw CompilerError(
-                "Signal '" + targetName + "' not assigned in all branches and has no default/fallback",
+                "Target '" + targetName + "' not assigned in all branches and has no default/fallback",
                 loc);
         }
         if (selected == result) continue;
@@ -1057,7 +1063,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                     DFGNode* value = state ? exprForSliceInterval(ctx, *state, low, high, loc) : nullptr;
                     if (!value) {
                         throw CompilerError(
-                            "Signal '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
+                            "Target '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
                             loc);
                     }
                     selectorValues.push_back(selectorValue);
@@ -1105,7 +1111,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             }
             if (!value) {
                 throw CompilerError(
-                    "Signal '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
+                    "Target '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
                     loc);
             }
             selectorValues.push_back(selectorValue);
@@ -1561,20 +1567,12 @@ const Type* lookupDeclaredType(const std::string& baseName,
     if (auto it = ctx.local_array_types.find(baseName); it != ctx.local_array_types.end()) {
         return &it->second;
     }
-    auto localIt = ctx.local_signals.find(baseName);
-    if (localIt != ctx.local_signals.end() && localIt->second && localIt->second->hasType()) {
+    auto localIt = ctx.local_nodes.find(baseName);
+    if (localIt != ctx.local_nodes.end() && localIt->second && localIt->second->hasType()) {
         return &(*localIt->second->type);
     }
 
-    if (auto it = ctx.thisModule->inputs.find(baseName); it != ctx.thisModule->inputs.end()) {
-        return &it->second.type;
-    }
-    if (auto it = ctx.thisModule->outputs.find(baseName); it != ctx.thisModule->outputs.end()) {
-        return &it->second.type;
-    }
-    if (auto it = ctx.thisModule->signals.find(baseName); it != ctx.thisModule->signals.end()) {
-        return &it->second.type;
-    }
+    if (auto* node = findNode(*ctx.thisModule, baseName)) return &node->type;
     for (const auto& flop : ctx.thisModule->flops) {
         if (flop.name == baseName) {
             return &flop.type;
@@ -1589,8 +1587,8 @@ const Type* lookupDeclaredTypeWithSuffix(const std::string& baseName,
                                                  const ResolutionContext& ctx) {
     if (indexSuffix.empty()) return lookupDeclaredType(baseName, ctx);
     const std::string fullName = baseName + indexSuffix;
-    auto localIt = ctx.local_signals.find(fullName);
-    if (localIt != ctx.local_signals.end() && localIt->second && localIt->second->hasType()) {
+    auto localIt = ctx.local_nodes.find(fullName);
+    if (localIt != ctx.local_nodes.end() && localIt->second && localIt->second->hasType()) {
         return &(*localIt->second->type);
     }
     if (auto* signal = lookupNamedNodeInModule(ctx, fullName); signal && signal->hasType()) {
@@ -1636,7 +1634,7 @@ static DFGNode* lookupLeafNode(ResolutionContext& ctx, const std::string& name) 
             return it->second;
         }
     }
-    if (auto it = ctx.local_signals.find(name); it != ctx.local_signals.end()) {
+    if (auto it = ctx.local_nodes.find(name); it != ctx.local_nodes.end()) {
         return it->second;
     }
     return lookupNamedNodeInModule(ctx, name);
@@ -1678,9 +1676,9 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
             return ExprValue{.type = type, .scalar = it->second, .leaves = {}};
         }
     }
-    if (auto it = ctx.local_signals.find(baseName); it != ctx.local_signals.end()) {
+    if (auto it = ctx.local_nodes.find(baseName); it != ctx.local_nodes.end()) {
         if (!it->second || !it->second->hasType()) {
-            throw CompilerError("Untyped local signal: " + baseName, loc);
+            throw CompilerError("Untyped local node: " + baseName, loc);
         }
         return ExprValue{.type = *it->second->type, .scalar = it->second, .leaves = {}};
     }
@@ -1809,7 +1807,7 @@ static DFGNode* currentWholeDriverForTarget(ResolutionContext& ctx,
     if (qName.ends_with(".d")) {
         qName = qName.substr(0, qName.length() - 2) + ".q";
     }
-    if (auto localIt = ctx.local_signals.find(qName); localIt != ctx.local_signals.end()) {
+    if (auto localIt = ctx.local_nodes.find(qName); localIt != ctx.local_nodes.end()) {
         return localIt->second;
     }
     if (auto* qNode = lookupNamedNodeInModule(ctx, qName)) return qNode;
@@ -2363,18 +2361,18 @@ static DFGNode* buildExprScalarImpl(
         case SyntaxKind::IdentifierName: {
             auto& name = expr->as<IdentifierNameSyntax>();
             std::string baseName(name.identifier.valueText());
-            // In combinational blocks, if this signal was already assigned,
-            // use the current driver (not the signal node) to avoid cycles.
+            // In combinational blocks, if this target was already assigned,
+            // use the current driver (not the bound DFG node) to avoid cycles.
             if (!ctx.is_sequential) {
                 auto it = ctx.combDrivers.find(baseName);
                 if (it != ctx.combDrivers.end()) {
                     return it->second;
                 }
             }
-            // Check generate-scope local signals/flops first
+            // Check generate-scope local nodes/flops first.
             {
-                auto it = ctx.local_signals.find(baseName);
-                if (it != ctx.local_signals.end()) return it->second;
+                auto it = ctx.local_nodes.find(baseName);
+                if (it != ctx.local_nodes.end()) return it->second;
             }
             // Check if baseName is a genvar/enum-member: in params but not in the DFG
             if (lookupNamedNodeInModule(ctx, baseName) == nullptr) {
@@ -2430,9 +2428,9 @@ static DFGNode* buildExprScalarImpl(
                 }
             }
             if (!node) {
-                // Check generate-scope local signals first
-                auto localIt = ctx.local_signals.find(baseName);
-                if (localIt != ctx.local_signals.end()) {
+                // Check generate-scope local nodes first.
+                auto localIt = ctx.local_nodes.find(baseName);
+                if (localIt != ctx.local_nodes.end()) {
                     node = localIt->second;
                 } else {
                     node = resolveIdentifier(
@@ -2465,8 +2463,8 @@ static DFGNode* buildExprScalarImpl(
                             int64_t idx = evaluateConstantExpr(bitSelect.expr, ctx.params);
                             if (currentSelectedType && !currentSelectedType->unpacked_dims.empty()) {
                                 std::string elemKey = baseName + "[" + std::to_string(idx) + "]";
-                                if (auto elemIt = ctx.local_signals.find(elemKey);
-                                        elemIt != ctx.local_signals.end()) {
+                                if (auto elemIt = ctx.local_nodes.find(elemKey);
+                                        elemIt != ctx.local_nodes.end()) {
                                     indexedSignalNode = elemIt->second;
                                     if (indexedSignalNode->hasType()) {
                                         currentSelectedType = *indexedSignalNode->type;
@@ -3118,11 +3116,11 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         return base;
     };
 
-    // Helper: connect a driver to an output/signal node, checking local_signals first
+    // Helper: connect a driver to an output/internal node, checking local nodes first.
     auto connectNode = [&](const std::string& outputName, DFGOutput driver) {
         if (ctx.subroutine_locals.count(outputName)) return;  // local var: combDrivers only
-        auto localIt = ctx.local_signals.find(outputName);
-        if (localIt != ctx.local_signals.end()) {
+        auto localIt = ctx.local_nodes.find(outputName);
+        if (localIt != ctx.local_nodes.end()) {
             ctx.graph.connectDriver(localIt->second, driver);
             return;
         }
@@ -3297,11 +3295,11 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             // Look up the pre-populated node to get declared width.
             std::string lookupName = (ctx.is_sequential && isFlopName(name))
                 ? name + ".d" : name;
-            // Check local_signals first, then module-level DFG
+            // Check local_nodes first, then module-level DFG
             DFGNode* node = nullptr;
             {
-                auto localIt = ctx.local_signals.find(lookupName);
-                if (localIt != ctx.local_signals.end()) node = localIt->second;
+                auto localIt = ctx.local_nodes.find(lookupName);
+                if (localIt != ctx.local_nodes.end()) node = localIt->second;
             }
             if (!node) {
                 node = lookupNamedNodeInModule(ctx, lookupName);
@@ -3566,7 +3564,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 }
             }
         } else {
-            // Connect driver to existing output or signal node (checks local_signals first)
+            // Connect driver to existing output/internal node (checks local nodes first).
             connectNode(outputName, RHSexprNode);
 
             // Track the current driver so subsequent reads in this block see it
@@ -3669,7 +3667,7 @@ static DFGNode* inlineSubroutineCall(
     // 3. Build sub-context: copy then reset mutable state
     ResolutionContext sub = ctx;
     sub.combDrivers.clear();
-    sub.local_signals.clear();
+    sub.local_nodes.clear();
     sub.local_flop_names.clear();
     sub.write_states.clear();
     sub.subroutine_locals.clear();
@@ -3750,7 +3748,7 @@ static DFGNode* inlineSubroutineCall(
         // No explicit return: read implicit function-name variable from combDrivers
         auto it = sub.combDrivers.find(retName);
         if (it != sub.combDrivers.end()) result = it->second;
-    } catch (const ReturnSignal& r) {
+    } catch (const ReturnValue& r) {
         result = r.value;
     }
 
@@ -3765,7 +3763,7 @@ static DFGNode* inlineSubroutineCall(
             throw CompilerError("Output argument '" + formalOut + "' not assigned in task body",
                                 resolveSourceLoc(invoc, ctx.sm));
         ctx.combDrivers[actualIdent] = it->second;
-        // Also wire to the DFG graph node for module-level signals/outputs
+        // Also wire to the DFG graph node for module-level outputs/internals.
         if (!ctx.subroutine_locals.count(actualIdent)) {
             if (auto* target = lookupTargetNode(ctx, actualIdent))
                 ctx.graph.connectDriver(target, it->second);
@@ -3833,7 +3831,7 @@ void resolveConditionalStatementInPlace(
         // Non-constant predicate; fall through to structural branch merging.
     }
 
-    // construct the signal node for the predicate expression
+    // Construct the predicate node used by branch merges.
     auto conditionNode = buildExprDFG(predicateExpr, ctx);
     const auto baselineDrivers = snapshotDrivers(ctx);
 
@@ -4002,7 +4000,7 @@ void resolveForLoopStatementInPlace(
             ctx.sm, ctx.is_sequential, ctx.triggers,
             ctx.domain_facts, ctx.occurrence,
             ctx.combDrivers,
-            ctx.instance_path, ctx.local_signals, ctx.local_array_types, ctx.local_flop_names,
+            ctx.instance_path, ctx.local_nodes, ctx.local_array_types, ctx.local_flop_names,
             ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
             ctx.moduleLookup, ctx.globalImports,
             ctx.current_write_origin, ctx.partial_drivers, ctx.write_states,
@@ -4053,7 +4051,7 @@ void resolveStatementInPlace(
         case SyntaxKind::ReturnStatement: {
             auto& ret = statement->as<ReturnStatementSyntax>();
             DFGNode* val = ret.returnValue ? buildExprDFG(ret.returnValue, ctx) : nullptr;
-            throw ReturnSignal{val};
+            throw ReturnValue{val};
         }
 
         default:
@@ -4168,11 +4166,11 @@ void resolveProceduralTimingInPlace(
     resolveStatementInPlace(statement, ctx);
 }
 
-Signal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx,
+ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterContext& ctx,
                              const EnumRegistry& enumRegistry,
                              const PackageRegistry* pkgRegistry = nullptr,
                              const slang::SourceManager* sm = nullptr) {
-    Signal resolved;
+    ModuleNode resolved;
     resolved.name = signal.name;
 
     resolved.type = resolveType(
@@ -4198,7 +4196,7 @@ Signal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx
 
 // Pre-populate module input (port) with all bit indices
 // For vector inputs, creates base node + individual element nodes
-void prePopulateInput(DFG& graph, Signal& sig) {
+void prePopulateInput(DFG& graph, ModuleNode& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
         auto* node = graph.createGraphInput("", sig.name);
@@ -4218,7 +4216,7 @@ void prePopulateInput(DFG& graph, Signal& sig) {
 // Pre-populate module output (port) with all bit indices
 // Creates OUTPUT nodes with no driver
 // For vector outputs, creates base node + individual element nodes
-void prePopulateOutput(DFG& graph, Signal& sig) {
+void prePopulateOutput(DFG& graph, ModuleNode& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
         auto* node = graph.createGraphOutput("", sig.name);
@@ -4238,7 +4236,7 @@ void prePopulateOutput(DFG& graph, Signal& sig) {
 // Pre-populate internal signal with all bit indices.
 // Only called for plain (non-flop) signals; .d/.q nodes are handled by
 // prePopulateFlopNodes below.
-void prePopulateSignal(DFG& graph, Signal& sig) {
+void prePopulateModuleNode(DFG& graph, ModuleNode& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
         auto* node = graph.signal("", sig.name);
@@ -4340,8 +4338,8 @@ static DFGNode* getOrCreateOutputPlaceholder(DFG& graph,
     auto [it, inserted] = binding.output_placeholders.try_emplace(
         portName, graph.placeholderSignal(""));
     if (inserted) {
-        if (auto outIt = resolvedSub.outputs.find(portName); outIt != resolvedSub.outputs.end()) {
-            it->second->type = outIt->second.type;
+        if (auto* output = findOutputNode(resolvedSub, portName)) {
+            it->second->type = output->type;
         }
     }
     return it->second;
@@ -4423,7 +4421,7 @@ void resolveNamedPortConnection(
                 ctx.params, ctx.sm, *isel.selectors[0]);
             std::string elemName = baseName + "[" + std::to_string(idx) + "]";
             // Qualify if the element lives in the current generate scope
-            if (ctx.local_signals.count(elemName) && !ctx.instance_path.empty())
+            if (ctx.local_nodes.count(elemName) && !ctx.instance_path.empty())
                 connectName = ctx.instance_path + "." + elemName;
             else
                 connectName = elemName;
@@ -4436,11 +4434,11 @@ void resolveNamedPortConnection(
                 return;
             }
 
-            // Packed bit-select on an output port or signal: drive through canonical
+            // Packed bit-select on an output port or internal node: drive through canonical
             // partial-write state.
             {
                 std::string packedTargetName = baseName;
-                if (!ctx.instance_path.empty() && ctx.local_signals.count(baseName)) {
+                if (!ctx.instance_path.empty() && ctx.local_nodes.count(baseName)) {
                     packedTargetName = ctx.instance_path + "." + baseName;
                 }
                 if (!lookupTargetNode(ctx, packedTargetName))
@@ -4485,7 +4483,8 @@ void resolveWildcardPortConnection(
         DFG& graph, ModuleInstanceBinding& binding,
         Module& resolvedSub,
         ResolutionContext& ctx) {
-    for (const auto& [name, inp] : resolvedSub.inputs) {
+    forEachInputNode(resolvedSub, [&](const ModuleNode& inp) {
+        const std::string& name = inp.name;
         auto* driver = lookupNamedNodeInModule(ctx, name);
         if (driver) {
             binding.inputs.push_back({name, DFGOutput(driver)});
@@ -4502,10 +4501,11 @@ void resolveWildcardPortConnection(
                 });
             }
         }
-    }
-    for (const auto& [name, out] : resolvedSub.outputs) {
+    });
+    forEachOutputNode(resolvedSub, [&](const ModuleNode& out) {
+        const std::string& name = out.name;
         connectModuleOutput(graph, binding, resolvedSub, name, name, ctx, binding.loc);
-    }
+    });
 }
 
 void resolvePortConnection(
@@ -4546,8 +4546,8 @@ static void instantiateSubmoduleInstance(
                                      ctx.domain_facts);
 
     std::set<std::string> subInputNames, subOutputNames;
-    for (const auto& [name, inp] : resolvedSub.inputs) subInputNames.insert(name);
-    for (const auto& [name, out] : resolvedSub.outputs) subOutputNames.insert(name);
+    forEachInputNode(resolvedSub, [&](const ModuleNode& inp) { subInputNames.insert(inp.name); });
+    forEachOutputNode(resolvedSub, [&](const ModuleNode& out) { subOutputNames.insert(out.name); });
 
     ModuleInstanceBinding binding{
         .instance_name = effectiveInstanceName,
@@ -4698,9 +4698,9 @@ static void resolveGenerateScopeDecls(
             auto* q_node = ctx.graph.createGraphInput(ctx.instance_path, name + ".q");
             q_node->type = type;
 
-            ctx.local_signals[name + ".d"] = d_node;
-            ctx.local_signals[name + ".q"] = q_node;
-            ctx.local_signals[name]         = q_node;  // reads return .q
+            ctx.local_nodes[name + ".d"] = d_node;
+            ctx.local_nodes[name + ".q"] = q_node;
+            ctx.local_nodes[name]         = q_node;  // reads return .q
 
             // Qualified name used for FlopInfo and frontend-private trigger facts
             std::string qualifiedName = ctx.instance_path.empty()
@@ -4720,16 +4720,16 @@ static void resolveGenerateScopeDecls(
             if (type.unpacked_dims.empty()) {
                 auto* node = ctx.graph.signal(ctx.instance_path, name);
                 node->type = type;
-                ctx.local_signals[name] = node;
-                // Add to resolved.signals with qualified name so the VCD writer can
-                // place this signal under the correct generate-scope hierarchy.
+                ctx.local_nodes[name] = node;
+                // Add to resolved named-value nodes with qualified name so the VCD writer can
+                // place this node under the correct generate-scope hierarchy.
                 if (!ctx.instance_path.empty()) {
                     std::string qualName = ctx.instance_path + "." + name;
-                    Signal genSig;
-                genSig.name     = qualName;
-                genSig.type     = type;
-                genSig.binding.leaves = {node};
-                ctx.thisModule->signals[qualName] = genSig;
+                    ModuleNode genSig;
+                    genSig.name = qualName;
+                    genSig.type = type;
+                    genSig.binding.leaves = {node};
+                    addInternalNode(*ctx.thisModule, genSig);
                 }
             } else {
                 ctx.local_array_types[name] = type;
@@ -4737,18 +4737,18 @@ static void resolveGenerateScopeDecls(
                 Type leafType = type;
                 leafType.unpacked_dims.clear();
 
-                Signal genSig;
+                ModuleNode genSig;
                 genSig.name = ctx.instance_path.empty() ? name : ctx.instance_path + "." + name;
                 genSig.type = type;
 
                 for (const auto& suffix : unpackedIndexSuffixes(type)) {
                     auto* leaf = ctx.graph.signal(ctx.instance_path, name + suffix);
                     leaf->type = leafType;
-                    ctx.local_signals[name + suffix] = leaf;
+                    ctx.local_nodes[name + suffix] = leaf;
                     genSig.binding.leaves.push_back(leaf);
                 }
                 if (!ctx.instance_path.empty()) {
-                    ctx.thisModule->signals[genSig.name] = genSig;
+                    addInternalNode(*ctx.thisModule, genSig);
                 }
             }
         }
@@ -4777,9 +4777,9 @@ static void resolveGenerateScopeDecls(
         for (auto* decl : netDecl.declarators) {
             if (!decl->initializer) continue;
             std::string name(decl->name.valueText());
-            auto it = ctx.local_signals.find(name);
-            if (it == ctx.local_signals.end())
-                throw CompilerError("Net declaration initializer: signal not found: " + name);
+            auto it = ctx.local_nodes.find(name);
+            if (it == ctx.local_nodes.end())
+                throw CompilerError("Net declaration initializer: node not found: " + name);
             auto* sigNode = it->second;
             auto* rhsNode = buildExprDFG(decl->initializer->expr, ctx);
             ctx.graph.connectDriver(sigNode, rhsNode);
@@ -4891,11 +4891,11 @@ void resolveGenerateMemberInPlace(
                 std::string childPath = (ctx.instance_path.empty() ? "" : ctx.instance_path + ".")
                                         + blockName + "[" + std::to_string(genval) + "]";
 
-                // Per-iteration context: inherits parent local_signals for outer-scope access
+                // Per-iteration context: inherits parent local_nodes for outer-scope access
                 ResolutionContext iterResCtx{
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
                     ctx.sm, false, {}, ctx.domain_facts, ctx.occurrence, {},
-                    childPath, ctx.local_signals,
+                    childPath, ctx.local_nodes,
                     ctx.local_array_types, {},
                     ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
                     ctx.moduleLookup, ctx.globalImports,
@@ -5223,29 +5223,29 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
-        auto sig = resolveSignal(input, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
-        resolved.inputs[sig.name] = sig;
+        auto sig = resolveModuleNode(input, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
+        addInputNode(resolved, sig);
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
-        auto sig = resolveSignal(output, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
-        resolved.outputs[sig.name] = sig;
+        auto sig = resolveModuleNode(output, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
+        addOutputNode(resolved, sig);
     }
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
-        auto sig = resolveSignal(signal, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
-        resolved.signals[sig.name] = sig;
+        auto sig = resolveModuleNode(signal, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
+        addInternalNode(resolved, sig);
     }
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;
     for (const auto& flop : unresolved.flops) {
-        const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager));
+        const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager));
         resolved.flops.push_back(FlopInfo{
-                .name = resolvedSignal.name,
-                .type = resolvedSignal.type,
+                .name = resolvedModuleNode.name,
+                .type = resolvedModuleNode.type,
                 .flop_type = FLOP_D,
                 .reset_value = std::nullopt,
                 .clock_domain = InvalidClockId,
@@ -5295,24 +5295,24 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     }
 
     // Pre-populate module INPUTS (ports only)
-    for (auto& [name, input] : resolved.inputs) {
+    forEachInputNode(resolved, [&](ModuleNode& input) {
         prePopulateInput(graph, input);
-    }
+    });
 
     // Pre-populate module OUTPUTS (ports only, no driver yet)
-    for (auto& [name, output] : resolved.outputs) {
+    forEachOutputNode(resolved, [&](ModuleNode& output) {
         prePopulateOutput(graph, output);
-    }
+    });
 
     // Pre-populate FLOP .d/.q DFG nodes directly from resolved.flops
     for (auto& flop : resolved.flops) {
         prePopulateFlopNodes(graph, flop);
     }
 
-    // Pre-populate internal SIGNALS (not ports, not flops)
-    for (auto& [name, signal] : resolved.signals) {
-        prePopulateSignal(graph, signal);
-    }
+    // Pre-populate internal nodes (not ports, not flops).
+    forEachInternalNode(resolved, [&](ModuleNode& module_node) {
+        prePopulateModuleNode(graph, module_node);
+    });
 
     // === Resolve all blocks into the shared graph ===
     // Create resolution context
@@ -5369,6 +5369,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
     }
 
+    rebuildModuleNodeIndexRecursively(resolved);
     return resolved;
 }
 

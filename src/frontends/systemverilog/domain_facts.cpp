@@ -22,10 +22,8 @@ InstancePath childPath(InstancePath path, const std::string& instanceName) {
     return path;
 }
 
-const Signal* findPort(const Module& module, const std::string& name) {
-    if (auto it = module.inputs.find(name); it != module.inputs.end()) return &it->second;
-    if (auto it = module.outputs.find(name); it != module.outputs.end()) return &it->second;
-    return nullptr;
+const ModuleNode* findModulePort(const Module& module, const std::string& name) {
+    return mate::findPort(module, name);
 }
 
 std::string pathString(const InstancePath& path) {
@@ -49,7 +47,7 @@ void validateModuleFacts(const Module& module,
     }
 
     for (const auto& [portName, portFact] : moduleFacts->ports) {
-        const Signal* sig = findPort(module, portName);
+        const ModuleNode* sig = findModulePort(module, portName);
         if (!sig) {
             throw CompilerError(std::format(
                 "frontend_domain_facts: private port fact '{}' missing public port in module '{}'",
@@ -117,7 +115,7 @@ void validateModuleFacts(const Module& module,
                 "frontend_domain_facts: child connection fact references missing instance '{}' in module '{}'",
                 pathString(connFact.child_instance_path), module.name));
         }
-        if (!childIt->inputs.contains(connFact.child_port)) {
+        if (!findInputNode(*childIt, connFact.child_port)) {
             throw CompilerError(std::format(
                 "frontend_domain_facts: child connection fact references missing input "
                 "port '{}' on child module '{}' in module '{}'",

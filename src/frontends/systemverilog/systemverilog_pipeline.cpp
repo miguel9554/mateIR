@@ -256,7 +256,7 @@ void runMateIRPipeline(MateIR& ir,
             return roots;
         };
         const auto preOptRoots = collectRoots(ModuleRootSelection{
-            .signals = true,
+            .internal_nodes = true,
             .recurse_hierarchy = true,
         });
         runPass(2, "constant_fold", [&]{ constantFold(*module.dfg, preOptRoots); });
@@ -284,7 +284,7 @@ void runMateIRPipeline(MateIR& ir,
                 .localparams = true,
                 .inputs = true,
                 .outputs = true,
-                .signals = true,
+                .internal_nodes = true,
                 .flop_d = true,
                 .flop_q = true,
                 .recurse_hierarchy = true,

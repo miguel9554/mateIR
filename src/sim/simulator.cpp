@@ -531,17 +531,19 @@ void Simulator::buildTopInputDomainMaps() {
 
 void Simulator::buildTimeline() {
     // Determine which inputs are async (clocks, resets, and async data) from resolved input types
-    for (const auto& [name, input] : module_.inputs) {
+    forEachInputNode(module_, [&](const ModuleNode& input) {
+        const std::string& name = input.name;
         if (std::holds_alternative<ClockSignal>(input.sync_type) ||
             std::holds_alternative<ResetSignal>(input.sync_type) ||
             std::holds_alternative<AsyncSignal>(input.sync_type)) {
             async_inputs_.insert(name);
         }
-    }
+    });
 
     // Map each sync input to its clock domain.
-    for (const auto& [name, input] : module_.inputs) {
-        if (async_inputs_.count(name)) continue;
+    forEachInputNode(module_, [&](const ModuleNode& input) {
+        const std::string& name = input.name;
+        if (async_inputs_.count(name)) return;
         const auto* sync = std::get_if<SyncSignal>(&input.sync_type);
         if (!sync) {
             if (std::holds_alternative<StaticSignal>(input.sync_type)) {
@@ -560,7 +562,7 @@ void Simulator::buildTimeline() {
                 name, id.value));
         }
         sync_input_clock_[name] = id;
-    }
+    });
 
         // Parse async input files: "time value" format per line
     for (const auto& name : async_inputs_) {
@@ -584,19 +586,18 @@ void Simulator::buildTimeline() {
             }
             SimValue parsedValue;
             try {
-                auto inputIt = module_.inputs.find(name);
-                if (inputIt == module_.inputs.end()) {
+                auto* input = findInputNode(module_, name);
+                if (!input) {
                     throw CompilerError(std::format(
                         "Simulator: unknown async input '{}'", name));
                 }
-                const auto& input = inputIt->second;
-                if (input.type.width <= 0)
+                if (input->type.width <= 0)
                     throw CompilerError(std::format(
                         "Simulator: async input '{}' has no resolved type width", name));
                 parsedValue = SimValue::fromHexString(
                     value_token,
-                    input.type.width,
-                    input.type.isSigned());
+                    input->type.width,
+                    input->type.isSigned());
             } catch (const std::invalid_argument&) {
                 throw CompilerError(std::format(
                     "Simulator: async file '{}' has bad value "
@@ -617,8 +618,9 @@ void Simulator::buildTimeline() {
 // ============================================================================
 
 void Simulator::loadSyncInputs() {
-    for (const auto& [name, input] : module_.inputs) {
-        if (!std::holds_alternative<SyncSignal>(input.sync_type)) continue;
+    forEachInputNode(module_, [&](const ModuleNode& input) {
+        const std::string& name = input.name;
+        if (!std::holds_alternative<SyncSignal>(input.sync_type)) return;
         // (variable 'name' used by the rest of the loop body below)
 
         std::string path = config_.inputs_dir + "/" + name + ".txt";
@@ -661,7 +663,7 @@ void Simulator::loadSyncInputs() {
 
         sync_input_data_[name] = std::move(values);
         sync_input_pos_[name] = 0;
-    }
+    });
 }
 
 // ============================================================================
@@ -713,12 +715,12 @@ std::set<ResetId> Simulator::activeResetDomains() const {
 // ============================================================================
 
 void Simulator::recordOutputs() {
-    for (const auto& [_, output] : module_.outputs) {
-        for (const auto& leaf : signalLeafRefs(output)) {
+    forEachOutputNode(module_, [&](const ModuleNode& output) {
+        for (const auto& leaf : moduleNodeLeafRefs(output)) {
             if (!leaf.node) continue;
             recorded_values_[leaf.leaf_name].push_back(root_->checkedGet(leaf.node));
         }
-    }
+    });
 }
 
 void Simulator::writeOutputFiles() {

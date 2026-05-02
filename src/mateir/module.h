@@ -17,27 +17,27 @@ namespace mate {
 // Leaf binding structures
 // ============================================================================
 
-// Declaration-order DFG leaves for a signal.
+// Declaration-order DFG leaves for a module node.
 // Scalars and packed vectors have exactly one leaf.
 // Unpacked arrays have one leaf per flattened element (declaration order,
 // outermost dimension first).
-struct SignalBinding {
+struct ModuleNodeBinding {
     std::vector<DFGNode*> leaves;
 };
 
-// Per-leaf .d (sink) and .q (source) bindings for a flop signal.
+// Per-leaf .d (sink) and .q (source) bindings for a flop named value.
 // Scalar flops use the one-leaf case.
 struct FlopBinding {
     std::vector<DFGNode*> d_leaves;
     std::vector<DFGNode*> q_leaves;
 };
 
-struct Signal;
+struct ModuleNode;
 struct FlopInfo;
 struct Module;
 
-struct SignalLeafRef {
-    const Signal* signal = nullptr;
+struct ModuleNodeLeafRef {
+    const ModuleNode* module_node = nullptr;
     DFGNode* node = nullptr;
     std::string leaf_name;
     size_t leaf_index = 0;
@@ -56,7 +56,7 @@ struct ModuleRootSelection {
     bool localparams = false;
     bool inputs = false;
     bool outputs = false;
-    bool signals = false;
+    bool internal_nodes = false;
     bool flop_d = false;
     bool flop_q = false;
     bool recurse_hierarchy = false;
@@ -86,31 +86,28 @@ Type dropFirstUnpackedDim(Type type);
 // Return the element type of the first unpacked dimension (same as dropFirstUnpackedDim).
 Type unpackedElementType(const Type& type);
 
-// Return the single leaf for a scalar/packed-vector signal (asserts leaf count == 1).
-DFGNode* scalarLeaf(const SignalBinding& binding);
+// Return the single leaf for a scalar/packed-vector module node (asserts leaf count == 1).
+DFGNode* scalarLeaf(const ModuleNodeBinding& binding);
 
 // Return the leaf for a given set of unpacked indices.
-DFGNode* leafAt(const SignalBinding& binding,
+DFGNode* leafAt(const ModuleNodeBinding& binding,
                 const Type& type,
                 const std::vector<int64_t>& indices);
 
-// Authoritative signal/flop binding accessors.
-const std::vector<DFGNode*>& signalLeaves(const Signal& signal);
-DFGNode* scalarSignalNode(const Signal& signal);
+// Authoritative module-node/flop binding accessors.
+const std::vector<DFGNode*>& moduleNodeLeaves(const ModuleNode& module_node);
+DFGNode* scalarModuleNode(const ModuleNode& module_node);
 const std::vector<DFGNode*>& flopDLeaves(const FlopInfo& flop);
 const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop);
 DFGNode* scalarFlopDNode(const FlopInfo& flop);
 DFGNode* scalarFlopQNode(const FlopInfo& flop);
-std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal);
+std::vector<ModuleNodeLeafRef> moduleNodeLeafRefs(const ModuleNode& module_node);
 std::vector<FlopLeafRef> flopDLeafRefs(const FlopInfo& flop);
 std::vector<FlopLeafRef> flopQLeafRefs(const FlopInfo& flop);
-std::optional<SignalLeafRef> findSignalLeafRef(
-    const std::map<std::string, Signal>& signals,
-    const std::string& leaf_name);
-std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
+std::optional<ModuleNodeLeafRef> findModuleDrivenLeaf(
     const Module& module,
     const std::string& leaf_name);
-std::optional<SignalLeafRef> findModuleNamedLeaf(
+std::optional<ModuleNodeLeafRef> findModuleNamedLeaf(
     const Module& module,
     const std::string& leaf_name);
 DFGNode* findModuleDebugLeafNode(Module& module, const std::string& leaf_name);
@@ -120,31 +117,34 @@ void collectModuleRoots(const Module& module,
                         const ModuleRootSelection& selection);
 
 SyncKind syncKind(const SyncType& sync_type);
-SyncKind syncKind(const Signal& signal);
+SyncKind syncKind(const ModuleNode& module_node);
+
+enum class ModuleNodeRole { Input, Output, Internal };
 
 // ============================================================================
-// Signal and parameter structures
+// ModuleNode and parameter structures
 // ============================================================================
 
-struct SignalBase {
+struct NamedValueBase {
     std::string name;
     Type type;
 
     void print(std::ostream& os) const;
 };
 
-struct Signal : SignalBase {
+struct ModuleNode : NamedValueBase {
+    ModuleNodeRole role = ModuleNodeRole::Internal;
     SyncType sync_type = AsyncSignal{};
     // Leaf bindings in declaration order. This is the authoritative source.
-    SignalBinding binding;
+    ModuleNodeBinding binding;
     void print(std::ostream& os) const;
 };
 
-struct Param : SignalBase {
+struct Param : NamedValueBase {
     double value = 0;
     DFGNode* dfg_node = nullptr;  // direct pointer to the corresponding CONST node
     void print(std::ostream& os) const {
-        SignalBase::print(os);
+        NamedValueBase::print(os);
         os << " value=" << value;
     }
 };
@@ -188,9 +188,7 @@ struct Module {
     std::string instance_name;  // instance name (empty for the top module)
     std::vector<Param> parameters;
     std::vector<Param> localparams;
-    std::map<std::string, Signal> inputs;
-    std::map<std::string, Signal> outputs;
-    std::map<std::string, Signal> signals;
+    std::map<std::string, ModuleNode> nodes;
     std::vector<FlopInfo> flops;
 
     // TODO a list of instantiated modules.
@@ -202,6 +200,124 @@ struct Module {
 
     void print(int indent = 0) const;
 };
+
+bool isInputNode(const ModuleNode& node);
+bool isOutputNode(const ModuleNode& node);
+bool isInternalNode(const ModuleNode& node);
+bool isPortNode(const ModuleNode& node);
+bool isDrivenNode(const ModuleNode& node);
+
+const ModuleNode* findNode(const Module& module, const std::string& name);
+ModuleNode* findNode(Module& module, const std::string& name);
+const ModuleNode* findPort(const Module& module, const std::string& name);
+ModuleNode* findPort(Module& module, const std::string& name);
+const ModuleNode* findInputNode(const Module& module, const std::string& name);
+ModuleNode* findInputNode(Module& module, const std::string& name);
+const ModuleNode* findOutputNode(const Module& module, const std::string& name);
+ModuleNode* findOutputNode(Module& module, const std::string& name);
+const ModuleNode* findInternalNode(const Module& module, const std::string& name);
+ModuleNode* findInternalNode(Module& module, const std::string& name);
+
+template<typename Fn>
+void forEachNodeIf(const Module& module, Fn&& fn) {
+    for (const auto& [_, node] : module.nodes) {
+        if (fn(node)) break;
+    }
+}
+
+template<typename Fn>
+void forEachNodeIf(Module& module, Fn&& fn) {
+    for (auto& [_, node] : module.nodes) {
+        if (fn(node)) break;
+    }
+}
+
+template<typename Fn>
+void forEachInputNode(const Module& module, Fn&& fn) {
+    forEachNodeIf(module, [&](const ModuleNode& node) {
+        if (isInputNode(node)) fn(node);
+        return false;
+    });
+}
+
+template<typename Fn>
+void forEachInputNode(Module& module, Fn&& fn) {
+    forEachNodeIf(module, [&](ModuleNode& node) {
+        if (!isInputNode(node)) return false;
+        fn(node);
+        return false;
+    });
+}
+
+template<typename Fn>
+void forEachOutputNode(const Module& module, Fn&& fn) {
+    forEachNodeIf(module, [&](const ModuleNode& node) {
+        if (isOutputNode(node)) fn(node);
+        return false;
+    });
+}
+
+template<typename Fn>
+void forEachOutputNode(Module& module, Fn&& fn) {
+    forEachNodeIf(module, [&](ModuleNode& node) {
+        if (!isOutputNode(node)) return false;
+        fn(node);
+        return false;
+    });
+}
+
+template<typename Fn>
+void forEachInternalNode(const Module& module, Fn&& fn) {
+    forEachNodeIf(module, [&](const ModuleNode& node) {
+        if (isInternalNode(node)) fn(node);
+        return false;
+    });
+}
+
+template<typename Fn>
+void forEachInternalNode(Module& module, Fn&& fn) {
+    forEachNodeIf(module, [&](ModuleNode& node) {
+        if (!isInternalNode(node)) return false;
+        fn(node);
+        return false;
+    });
+}
+
+template<typename Fn>
+void forEachDrivenNode(const Module& module, Fn&& fn) {
+    forEachOutputNode(module, fn);
+    forEachInternalNode(module, fn);
+}
+
+template<typename Fn>
+void forEachDrivenNode(Module& module, Fn&& fn) {
+    forEachOutputNode(module, fn);
+    forEachInternalNode(module, fn);
+}
+
+template<typename Fn>
+void forEachNamedValueNode(const Module& module, Fn&& fn) {
+    forEachNodeIf(module, [&](const ModuleNode& node) {
+        fn(node);
+        return false;
+    });
+}
+
+template<typename Fn>
+void forEachNamedValueNode(Module& module, Fn&& fn) {
+    forEachNodeIf(module, [&](ModuleNode& node) {
+        fn(node);
+        return false;
+    });
+}
+
+void validateModuleNodeNamespace(const Module& module);
+ModuleNode& addModuleNode(Module& module, const ModuleNode& node);
+ModuleNode& addInputNode(Module& module, const ModuleNode& node);
+ModuleNode& addOutputNode(Module& module, const ModuleNode& node);
+ModuleNode& addInternalNode(Module& module, const ModuleNode& node);
+void rebuildModuleNodeIndex(Module& module);
+void rebuildModuleNodeIndexRecursively(Module& module);
 
 // ============================================================================
 // Parameter context for resolution

@@ -12,6 +12,19 @@
 
 namespace mate {
 
+namespace {
+
+const char* moduleNodeRoleName(ModuleNodeRole role) {
+    switch (role) {
+        case ModuleNodeRole::Input: return "input";
+        case ModuleNodeRole::Output: return "output";
+        case ModuleNodeRole::Signal: return "signal";
+    }
+    return "signal";
+}
+
+} // namespace
+
 // ============================================================================
 // Leaf layout helpers
 // ============================================================================
@@ -116,6 +129,150 @@ static void validateSignalBindingShape(const Signal& signal) {
             "signal '{}' binding mismatch: expected {} leaf/leaves, got {}",
             signal.name, expected, signal.binding.leaves.size()));
     }
+}
+
+bool isInputNode(const ModuleNode& node) {
+    return node.role == ModuleNodeRole::Input;
+}
+
+bool isOutputNode(const ModuleNode& node) {
+    return node.role == ModuleNodeRole::Output;
+}
+
+bool isSignalNode(const ModuleNode& node) {
+    return node.role == ModuleNodeRole::Signal;
+}
+
+bool isPortNode(const ModuleNode& node) {
+    return isInputNode(node) || isOutputNode(node);
+}
+
+bool isDrivenNode(const ModuleNode& node) {
+    return isOutputNode(node) || isSignalNode(node);
+}
+
+const ModuleNode* findNode(const Module& module, const std::string& name) {
+    auto it = module.nodes.find(name);
+    return it == module.nodes.end() ? nullptr : &it->second;
+}
+
+ModuleNode* findNode(Module& module, const std::string& name) {
+    auto it = module.nodes.find(name);
+    return it == module.nodes.end() ? nullptr : &it->second;
+}
+
+const ModuleNode* findPort(const Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isPortNode(*node)) return node;
+    return nullptr;
+}
+
+ModuleNode* findPort(Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isPortNode(*node)) return node;
+    return nullptr;
+}
+
+const ModuleNode* findInputNode(const Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isInputNode(*node)) return node;
+    return nullptr;
+}
+
+ModuleNode* findInputNode(Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isInputNode(*node)) return node;
+    return nullptr;
+}
+
+const ModuleNode* findOutputNode(const Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isOutputNode(*node)) return node;
+    return nullptr;
+}
+
+ModuleNode* findOutputNode(Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isOutputNode(*node)) return node;
+    return nullptr;
+}
+
+const ModuleNode* findSignalNode(const Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isSignalNode(*node)) return node;
+    return nullptr;
+}
+
+ModuleNode* findSignalNode(Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isSignalNode(*node)) return node;
+    return nullptr;
+}
+
+void validateModuleNodeNamespace(const Module& module) {
+    std::map<std::string, ModuleNodeRole> seen;
+    auto track = [&](const std::map<std::string, Signal>& nodes, ModuleNodeRole role) {
+        for (const auto& [name, node] : nodes) {
+            auto [it, inserted] = seen.emplace(name, role);
+            if (!inserted && it->second != role) {
+                throw CompilerError(std::format(
+                    "module '{}' has duplicate named-value node '{}' across roles '{}' and '{}'",
+                    module.name, name, moduleNodeRoleName(it->second), moduleNodeRoleName(role)));
+            }
+            if (node.name != name) {
+                throw CompilerError(std::format(
+                    "module '{}' has mismatched node key/name for '{}'", module.name, name));
+            }
+        }
+    };
+    track(module.inputs, ModuleNodeRole::Input);
+    track(module.outputs, ModuleNodeRole::Output);
+    track(module.signals, ModuleNodeRole::Signal);
+}
+
+ModuleNode& addModuleNode(Module& module, const ModuleNode& node) {
+    ModuleNode copy = node;
+    if (auto it = module.nodes.find(copy.name); it != module.nodes.end() && it->second.role != copy.role) {
+        throw CompilerError(std::format(
+            "module '{}' has duplicate named-value node '{}' across roles '{}' and '{}'",
+            module.name, copy.name, moduleNodeRoleName(it->second.role), moduleNodeRoleName(copy.role)));
+    }
+    auto& roleMap = isInputNode(copy)   ? module.inputs :
+                    isOutputNode(copy)  ? module.outputs :
+                                          module.signals;
+
+    auto roleIt = roleMap.find(copy.name);
+    if (roleIt != roleMap.end()) {
+        roleIt->second = copy;
+    } else {
+        roleMap.emplace(copy.name, copy);
+    }
+    auto [it, inserted] = module.nodes.insert_or_assign(copy.name, copy);
+    (void) inserted;
+    return it->second;
+}
+
+ModuleNode& addInputNode(Module& module, const ModuleNode& node) {
+    ModuleNode copy = node;
+    copy.role = ModuleNodeRole::Input;
+    return addModuleNode(module, copy);
+}
+
+ModuleNode& addOutputNode(Module& module, const ModuleNode& node) {
+    ModuleNode copy = node;
+    copy.role = ModuleNodeRole::Output;
+    return addModuleNode(module, copy);
+}
+
+ModuleNode& addSignalNode(Module& module, const ModuleNode& node) {
+    ModuleNode copy = node;
+    copy.role = ModuleNodeRole::Signal;
+    return addModuleNode(module, copy);
+}
+
+void rebuildModuleNodeIndex(Module& module) {
+    validateModuleNodeNamespace(module);
+    module.nodes.clear();
+    forEachInputNode(module, [&](const ModuleNode& node) { module.nodes[node.name] = node; });
+    forEachOutputNode(module, [&](const ModuleNode& node) { module.nodes[node.name] = node; });
+    forEachSignalNode(module, [&](const ModuleNode& node) { module.nodes[node.name] = node; });
+}
+
+void rebuildModuleNodeIndexRecursively(Module& module) {
+    rebuildModuleNodeIndex(module);
+    for (auto& sub : module.hierarchyInstantiation) rebuildModuleNodeIndexRecursively(sub);
 }
 
 static void validateFlopBindingShape(const FlopInfo& flop,
@@ -369,7 +526,7 @@ void SignalBase::print(std::ostream& os) const {
     }
 }
 
-void Signal::print(std::ostream& os) const {
+void ModuleNode::print(std::ostream& os) const {
     SignalBase::print(os);
     SyncKind kind = syncKind(*this);
     const char* kindName = kind == SyncKind::Sync  ? "sync"  :

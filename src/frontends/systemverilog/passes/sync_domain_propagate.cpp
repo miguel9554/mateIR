@@ -587,9 +587,8 @@ void assignSignalSyncTypes(
         validateSyncTypeIds(ir, signal.sync_type, module, path, signal.name);
     };
 
-    for (auto& [name, input] : module.inputs) assignInput(input);
-    for (auto& [name, output] : module.outputs) assignDrivenSignal(output);
-    for (auto& [name, signal] : module.signals) assignDrivenSignal(signal);
+    forEachInputNode(module, assignInput);
+    forEachDrivenNode(module, assignDrivenSignal);
 
     for (auto& sub : module.hierarchyInstantiation)
         assignSignalSyncTypes(sub, childPath(path, sub.instance_name), ir, facts, nodeSync);
@@ -620,6 +619,7 @@ SyncDomainAnalysis propagateSyncDomains(
     analysis.node_sync = propagateNodeSyncTypes(*module.dfg, std::move(analysis.node_sync));
 
     assignSignalSyncTypes(module, {}, ir, domainFacts, analysis.node_sync);
+    rebuildModuleNodeIndexRecursively(module);
     collectFlopDSyncTypes(module, analysis.node_sync, analysis.flop_d_domains);
     return analysis;
 }

@@ -32,7 +32,8 @@ struct FlopBinding {
     std::vector<DFGNode*> q_leaves;
 };
 
-struct Signal;
+struct ModuleNode;
+using Signal = ModuleNode;
 struct FlopInfo;
 struct Module;
 
@@ -122,6 +123,8 @@ void collectModuleRoots(const Module& module,
 SyncKind syncKind(const SyncType& sync_type);
 SyncKind syncKind(const Signal& signal);
 
+enum class ModuleNodeRole { Input, Output, Signal };
+
 // ============================================================================
 // Signal and parameter structures
 // ============================================================================
@@ -133,7 +136,8 @@ struct SignalBase {
     void print(std::ostream& os) const;
 };
 
-struct Signal : SignalBase {
+struct ModuleNode : SignalBase {
+    ModuleNodeRole role = ModuleNodeRole::Signal;
     SyncType sync_type = AsyncSignal{};
     // Leaf bindings in declaration order. This is the authoritative source.
     SignalBinding binding;
@@ -188,6 +192,7 @@ struct Module {
     std::string instance_name;  // instance name (empty for the top module)
     std::vector<Param> parameters;
     std::vector<Param> localparams;
+    std::map<std::string, ModuleNode> nodes;
     std::map<std::string, Signal> inputs;
     std::map<std::string, Signal> outputs;
     std::map<std::string, Signal> signals;
@@ -202,6 +207,83 @@ struct Module {
 
     void print(int indent = 0) const;
 };
+
+bool isInputNode(const ModuleNode& node);
+bool isOutputNode(const ModuleNode& node);
+bool isSignalNode(const ModuleNode& node);
+bool isPortNode(const ModuleNode& node);
+bool isDrivenNode(const ModuleNode& node);
+
+const ModuleNode* findNode(const Module& module, const std::string& name);
+ModuleNode* findNode(Module& module, const std::string& name);
+const ModuleNode* findPort(const Module& module, const std::string& name);
+ModuleNode* findPort(Module& module, const std::string& name);
+const ModuleNode* findInputNode(const Module& module, const std::string& name);
+ModuleNode* findInputNode(Module& module, const std::string& name);
+const ModuleNode* findOutputNode(const Module& module, const std::string& name);
+ModuleNode* findOutputNode(Module& module, const std::string& name);
+const ModuleNode* findSignalNode(const Module& module, const std::string& name);
+ModuleNode* findSignalNode(Module& module, const std::string& name);
+
+template<typename Fn>
+void forEachInputNode(const Module& module, Fn&& fn) {
+    for (const auto& [_, node] : module.inputs) fn(node);
+}
+
+template<typename Fn>
+void forEachInputNode(Module& module, Fn&& fn) {
+    for (auto& [_, node] : module.inputs) fn(node);
+}
+
+template<typename Fn>
+void forEachOutputNode(const Module& module, Fn&& fn) {
+    for (const auto& [_, node] : module.outputs) fn(node);
+}
+
+template<typename Fn>
+void forEachOutputNode(Module& module, Fn&& fn) {
+    for (auto& [_, node] : module.outputs) fn(node);
+}
+
+template<typename Fn>
+void forEachSignalNode(const Module& module, Fn&& fn) {
+    for (const auto& [_, node] : module.signals) fn(node);
+}
+
+template<typename Fn>
+void forEachSignalNode(Module& module, Fn&& fn) {
+    for (auto& [_, node] : module.signals) fn(node);
+}
+
+template<typename Fn>
+void forEachDrivenNode(const Module& module, Fn&& fn) {
+    forEachOutputNode(module, fn);
+    forEachSignalNode(module, fn);
+}
+
+template<typename Fn>
+void forEachDrivenNode(Module& module, Fn&& fn) {
+    forEachOutputNode(module, fn);
+    forEachSignalNode(module, fn);
+}
+
+template<typename Fn>
+void forEachNamedValueNode(const Module& module, Fn&& fn) {
+    for (const auto& [_, node] : module.nodes) fn(node);
+}
+
+template<typename Fn>
+void forEachNamedValueNode(Module& module, Fn&& fn) {
+    for (auto& [_, node] : module.nodes) fn(node);
+}
+
+void validateModuleNodeNamespace(const Module& module);
+ModuleNode& addModuleNode(Module& module, const ModuleNode& node);
+ModuleNode& addInputNode(Module& module, const ModuleNode& node);
+ModuleNode& addOutputNode(Module& module, const ModuleNode& node);
+ModuleNode& addSignalNode(Module& module, const ModuleNode& node);
+void rebuildModuleNodeIndex(Module& module);
+void rebuildModuleNodeIndexRecursively(Module& module);
 
 // ============================================================================
 // Parameter context for resolution

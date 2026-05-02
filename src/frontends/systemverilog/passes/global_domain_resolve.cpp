@@ -86,12 +86,13 @@ std::optional<std::string> transparentAliasTarget(
         return std::nullopt;
     }
     if (source->instance_path != dfgInstancePath(path)) {
-        for (const auto& [inputName, input] : module.inputs) {
+        std::optional<std::string> inputName;
+        forEachInputNode(module, [&](const Signal& input) {
             const auto& leaves = signalLeaves(input);
             if (leaves.size() == 1 && leaves.front() == source)
-                return inputName;
-        }
-        return std::nullopt;
+                inputName = input.name;
+        });
+        return inputName;
     }
     return source->name;
 }
@@ -103,7 +104,7 @@ std::optional<std::string> resolveAliasToLocalInput(
     std::set<std::string> visited;
     std::string current = signalName;
     while (visited.insert(current).second) {
-        if (module.inputs.contains(current)) return current;
+        if (findInputNode(module, current)) return current;
         auto next = transparentAliasTarget(module, path, current);
         if (!next) return std::nullopt;
         current = *next;
@@ -302,7 +303,7 @@ std::map<LocalPortDemandKey, LocalPortDemand> inferClockResetPortFacts(
             continue;
         }
 
-        if (!module.inputs.contains(signalName)) {
+        if (!findInputNode(module, signalName)) {
             throw CompilerError(std::format(
                 "global_domain_resolve: inferred {} signal '{}' in module '{}' at {} "
                 "is not an input port",

@@ -136,6 +136,7 @@ void inlineDFGs(Module& top) {
         inlineModuleNode(top, binding);
     }
     top.instance_bindings.clear();
+    rebuildModuleNodeIndexRecursively(top);
 }
 
 } // namespace mate

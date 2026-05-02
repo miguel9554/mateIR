@@ -366,16 +366,11 @@ static DFGNode* lookupNamedNodeInModule(const ResolutionContext& ctx,
 
 template<typename Fn>
 static void forEachVisibleDriverTarget(const ResolutionContext& ctx, Fn&& fn) {
-    for (const auto& [_, output] : ctx.thisModule->outputs) {
-        for (const auto& leaf : signalLeafRefs(output)) {
-            if (leaf.node) fn(leaf.leaf_name, leaf.node);
-        }
-    }
-    for (const auto& [_, signal] : ctx.thisModule->signals) {
+    forEachDrivenNode(*ctx.thisModule, [&](const Signal& signal) {
         for (const auto& leaf : signalLeafRefs(signal)) {
             if (leaf.node) fn(leaf.leaf_name, leaf.node);
         }
-    }
+    });
     for (const auto& flop : ctx.thisModule->flops) {
         for (const auto& leaf : flopDLeafRefs(flop)) {
             if (leaf.node) {
@@ -1566,15 +1561,7 @@ const Type* lookupDeclaredType(const std::string& baseName,
         return &(*localIt->second->type);
     }
 
-    if (auto it = ctx.thisModule->inputs.find(baseName); it != ctx.thisModule->inputs.end()) {
-        return &it->second.type;
-    }
-    if (auto it = ctx.thisModule->outputs.find(baseName); it != ctx.thisModule->outputs.end()) {
-        return &it->second.type;
-    }
-    if (auto it = ctx.thisModule->signals.find(baseName); it != ctx.thisModule->signals.end()) {
-        return &it->second.type;
-    }
+    if (auto* node = findNode(*ctx.thisModule, baseName)) return &node->type;
     for (const auto& flop : ctx.thisModule->flops) {
         if (flop.name == baseName) {
             return &flop.type;
@@ -4726,10 +4713,11 @@ static void resolveGenerateScopeDecls(
                 if (!ctx.instance_path.empty()) {
                     std::string qualName = ctx.instance_path + "." + name;
                     Signal genSig;
-                genSig.name     = qualName;
-                genSig.type     = type;
-                genSig.binding.leaves = {node};
-                ctx.thisModule->signals[qualName] = genSig;
+                    genSig.name = qualName;
+                    genSig.type = type;
+                    genSig.binding.leaves = {node};
+                    addSignalNode(*ctx.thisModule, genSig);
+                    rebuildModuleNodeIndex(*ctx.thisModule);
                 }
             } else {
                 ctx.local_array_types[name] = type;
@@ -4748,7 +4736,8 @@ static void resolveGenerateScopeDecls(
                     genSig.binding.leaves.push_back(leaf);
                 }
                 if (!ctx.instance_path.empty()) {
-                    ctx.thisModule->signals[genSig.name] = genSig;
+                    addSignalNode(*ctx.thisModule, genSig);
+                    rebuildModuleNodeIndex(*ctx.thisModule);
                 }
             }
         }
@@ -5224,20 +5213,22 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
         auto sig = resolveSignal(input, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
-        resolved.inputs[sig.name] = sig;
+        addInputNode(resolved, sig);
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
         auto sig = resolveSignal(output, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
-        resolved.outputs[sig.name] = sig;
+        addOutputNode(resolved, sig);
     }
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
         auto sig = resolveSignal(signal, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
-        resolved.signals[sig.name] = sig;
+        addSignalNode(resolved, sig);
     }
+
+    rebuildModuleNodeIndex(resolved);
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;
@@ -5369,6 +5360,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
     }
 
+    rebuildModuleNodeIndexRecursively(resolved);
     return resolved;
 }
 

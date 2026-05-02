@@ -106,8 +106,7 @@ bool debugPathMatches(const std::string& currentPath,
 
 const DFGNode* findDebugLeaf(const Module& module,
                              const std::string& nodeName) {
-    auto leaf = findModuleOutputOrSignalLeaf(module, nodeName);
-    return leaf ? leaf->node : nullptr;
+    return findModuleDebugLeafNode(module, nodeName);
 }
 
 void validateDebugSpecsBeforePipeline(const Module& topModule,
@@ -129,7 +128,7 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
 
             if (!found && !spec.module_path.empty())
                 throw CompilerError(std::format(
-                    "debug_dfg_nodes: node '{}' not found in module '{}' signals or outputs",
+                    "debug_dfg_nodes: node '{}' not found in module '{}' outputs, signals, or flop .d/.q leaves",
                     spec.node_name, module.name));
 
             if (found) foundSpecs.insert(i);
@@ -141,7 +140,7 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
     for (size_t i = 0; i < specs.size(); i++) {
         if (!foundSpecs.contains(i))
             throw CompilerError(std::format(
-                "debug_dfg_nodes: node '{}' not found in any module signals or outputs",
+                "debug_dfg_nodes: node '{}' not found in any module outputs, signals, or flop .d/.q leaves",
                 specs[i].node_name));
     }
 }
@@ -220,7 +219,7 @@ void runMateIRPipeline(MateIR& ir,
                         if (!node) {
                             if (!spec.module_path.empty())
                                 throw CompilerError(std::format(
-                                    "debug_dfg_nodes: node '{}' not found in module '{}' signals or outputs",
+                                    "debug_dfg_nodes: node '{}' not found in module '{}' outputs, signals, or flop .d/.q leaves",
                                     spec.node_name, module.name));
                             continue;
                         }

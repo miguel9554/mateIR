@@ -43,6 +43,14 @@ struct SignalLeafRef {
     size_t leaf_index = 0;
 };
 
+struct FlopLeafRef {
+    const FlopInfo* flop = nullptr;
+    DFGNode* node = nullptr;
+    std::string leaf_name;
+    size_t leaf_index = 0;
+    bool is_q_leaf = false;
+};
+
 struct ModuleRootSelection {
     bool parameters = false;
     bool localparams = false;
@@ -94,6 +102,8 @@ const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop);
 DFGNode* scalarFlopDNode(const FlopInfo& flop);
 DFGNode* scalarFlopQNode(const FlopInfo& flop);
 std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal);
+std::vector<FlopLeafRef> flopDLeafRefs(const FlopInfo& flop);
+std::vector<FlopLeafRef> flopQLeafRefs(const FlopInfo& flop);
 std::optional<SignalLeafRef> findSignalLeafRef(
     const std::map<std::string, Signal>& signals,
     const std::string& leaf_name);
@@ -103,6 +113,8 @@ std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
 std::optional<SignalLeafRef> findModuleNamedLeaf(
     const Module& module,
     const std::string& leaf_name);
+DFGNode* findModuleDebugLeafNode(Module& module, const std::string& leaf_name);
+const DFGNode* findModuleDebugLeafNode(const Module& module, const std::string& leaf_name);
 void collectModuleRoots(const Module& module,
                         std::unordered_set<DFGNode*>& roots,
                         const ModuleRootSelection& selection);

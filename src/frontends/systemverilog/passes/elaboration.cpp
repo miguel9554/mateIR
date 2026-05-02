@@ -353,29 +353,8 @@ static std::optional<DFGOutput> maybeDriver(const DFGNode* node) {
 
 static DFGNode* lookupNamedNodeInModule(const ResolutionContext& ctx,
                                         const std::string& name) {
-    if (auto leaf = findModuleNamedLeaf(*ctx.thisModule, name)) {
-        return leaf->node;
-    }
-    for (const auto& flop : ctx.thisModule->flops) {
-        if (flop.type.unpacked_dims.empty()) {
-            if (name == flop.name + ".q" && !flop.binding.q_leaves.empty()) {
-                return flop.binding.q_leaves.front();
-            }
-            if (name == flop.name + ".d" && !flop.binding.d_leaves.empty()) {
-                return flop.binding.d_leaves.front();
-            }
-            continue;
-        }
-        const auto suffixes = unpackedIndexSuffixes(flop.type);
-        for (size_t i = 0; i < suffixes.size(); ++i) {
-            if (i < flop.binding.q_leaves.size() && name == flop.name + suffixes[i] + ".q") {
-                return flop.binding.q_leaves[i];
-            }
-            if (i < flop.binding.d_leaves.size() && name == flop.name + suffixes[i] + ".d") {
-                return flop.binding.d_leaves[i];
-            }
-        }
-    }
+    if (auto leaf = findModuleNamedLeaf(*ctx.thisModule, name)) return leaf->node;
+    if (auto* debugLeaf = findModuleDebugLeafNode(*ctx.thisModule, name)) return debugLeaf;
     for (const auto& parameter : ctx.thisModule->parameters) {
         if (parameter.name == name) return parameter.dfg_node;
     }
@@ -398,16 +377,9 @@ static void forEachVisibleDriverTarget(const ResolutionContext& ctx, Fn&& fn) {
         }
     }
     for (const auto& flop : ctx.thisModule->flops) {
-        if (flop.type.unpacked_dims.empty()) {
-            if (!flop.binding.d_leaves.empty() && flop.binding.d_leaves.front()) {
-                fn(flop.name + ".d", flop.binding.d_leaves.front());
-            }
-            continue;
-        }
-        const auto suffixes = unpackedIndexSuffixes(flop.type);
-        for (size_t i = 0; i < suffixes.size() && i < flop.binding.d_leaves.size(); ++i) {
-            if (flop.binding.d_leaves[i]) {
-                fn(flop.name + suffixes[i] + ".d", flop.binding.d_leaves[i]);
+        for (const auto& leaf : flopDLeafRefs(flop)) {
+            if (leaf.node) {
+                fn(leaf.leaf_name, leaf.node);
             }
         }
     }

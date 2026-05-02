@@ -105,7 +105,32 @@ DFGNode* leafAt(const SignalBinding& binding,
     return binding.leaves[idx];
 }
 
+static size_t expectedSignalLeafCount(const Type& type) {
+    return type.unpacked_dims.empty() ? 1 : unpackedIndexSuffixes(type).size();
+}
+
+static void validateSignalBindingShape(const Signal& signal) {
+    const size_t expected = expectedSignalLeafCount(signal.type);
+    if (signal.binding.leaves.size() != expected) {
+        throw CompilerError(std::format(
+            "signal '{}' binding mismatch: expected {} leaf/leaves, got {}",
+            signal.name, expected, signal.binding.leaves.size()));
+    }
+}
+
+static void validateFlopBindingShape(const FlopInfo& flop,
+                                     const std::vector<DFGNode*>& leaves,
+                                     const char* kind) {
+    const size_t expected = expectedSignalLeafCount(flop.type);
+    if (leaves.size() != expected) {
+        throw CompilerError(std::format(
+            "flop '{}' {} binding mismatch: expected {} leaf/leaves, got {}",
+            flop.name, kind, expected, leaves.size()));
+    }
+}
+
 const std::vector<DFGNode*>& signalLeaves(const Signal& signal) {
+    validateSignalBindingShape(signal);
     return signal.binding.leaves;
 }
 
@@ -120,10 +145,12 @@ DFGNode* scalarSignalNode(const Signal& signal) {
 }
 
 const std::vector<DFGNode*>& flopDLeaves(const FlopInfo& flop) {
+    validateFlopBindingShape(flop, flop.binding.d_leaves, ".d");
     return flop.binding.d_leaves;
 }
 
 const std::vector<DFGNode*>& flopQLeaves(const FlopInfo& flop) {
+    validateFlopBindingShape(flop, flop.binding.q_leaves, ".q");
     return flop.binding.q_leaves;
 }
 
@@ -146,12 +173,13 @@ DFGNode* scalarFlopQNode(const FlopInfo& flop) {
 }
 
 std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal) {
+    validateSignalBindingShape(signal);
     std::vector<SignalLeafRef> refs;
     refs.reserve(signal.binding.leaves.size());
     if (signal.type.unpacked_dims.empty()) {
         refs.push_back(SignalLeafRef{
             .signal = &signal,
-            .node = signal.binding.leaves.empty() ? nullptr : signal.binding.leaves.front(),
+            .node = signal.binding.leaves.front(),
             .leaf_name = signal.name,
             .leaf_index = 0,
         });
@@ -159,8 +187,7 @@ std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal) {
     }
 
     const auto suffixes = unpackedIndexSuffixes(signal.type);
-    const size_t count = std::min(suffixes.size(), signal.binding.leaves.size());
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < suffixes.size(); ++i) {
         refs.push_back(SignalLeafRef{
             .signal = &signal,
             .node = signal.binding.leaves[i],
@@ -169,6 +196,46 @@ std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal) {
         });
     }
     return refs;
+}
+
+static std::vector<FlopLeafRef> flopLeafRefsImpl(const FlopInfo& flop,
+                                                 const std::vector<DFGNode*>& leaves,
+                                                 bool isQLeaf) {
+    validateFlopBindingShape(flop, leaves, isQLeaf ? ".q" : ".d");
+    std::vector<FlopLeafRef> refs;
+    refs.reserve(leaves.size());
+    const std::string suffix = isQLeaf ? ".q" : ".d";
+
+    if (flop.type.unpacked_dims.empty()) {
+        refs.push_back(FlopLeafRef{
+            .flop = &flop,
+            .node = leaves.front(),
+            .leaf_name = flop.name + suffix,
+            .leaf_index = 0,
+            .is_q_leaf = isQLeaf,
+        });
+        return refs;
+    }
+
+    const auto idxSuffixes = unpackedIndexSuffixes(flop.type);
+    for (size_t i = 0; i < idxSuffixes.size(); ++i) {
+        refs.push_back(FlopLeafRef{
+            .flop = &flop,
+            .node = leaves[i],
+            .leaf_name = flop.name + idxSuffixes[i] + suffix,
+            .leaf_index = i,
+            .is_q_leaf = isQLeaf,
+        });
+    }
+    return refs;
+}
+
+std::vector<FlopLeafRef> flopDLeafRefs(const FlopInfo& flop) {
+    return flopLeafRefsImpl(flop, flop.binding.d_leaves, false);
+}
+
+std::vector<FlopLeafRef> flopQLeafRefs(const FlopInfo& flop) {
+    return flopLeafRefsImpl(flop, flop.binding.q_leaves, true);
 }
 
 std::optional<SignalLeafRef> findSignalLeafRef(
@@ -200,6 +267,27 @@ std::optional<SignalLeafRef> findModuleNamedLeaf(
     if (auto input = findSignalLeafRef(module.inputs, leaf_name)) return input;
     if (auto output = findSignalLeafRef(module.outputs, leaf_name)) return output;
     return findSignalLeafRef(module.signals, leaf_name);
+}
+
+DFGNode* findModuleDebugLeafNode(Module& module, const std::string& leaf_name) {
+    if (auto output = findSignalLeafRef(module.outputs, leaf_name)) return output->node;
+    if (auto signal = findSignalLeafRef(module.signals, leaf_name)) return signal->node;
+
+    for (const auto& flop : module.flops) {
+        for (const auto& leaf : flopDLeafRefs(flop)) {
+            if (leaf.leaf_name == leaf_name) return leaf.node;
+        }
+    }
+    for (const auto& flop : module.flops) {
+        for (const auto& leaf : flopQLeafRefs(flop)) {
+            if (leaf.leaf_name == leaf_name) return leaf.node;
+        }
+    }
+    return nullptr;
+}
+
+const DFGNode* findModuleDebugLeafNode(const Module& module, const std::string& leaf_name) {
+    return findModuleDebugLeafNode(const_cast<Module&>(module), leaf_name);
 }
 
 void collectModuleRoots(const Module& module,

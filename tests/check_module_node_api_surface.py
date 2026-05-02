@@ -9,6 +9,8 @@ TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
 
 GUARDED_FILES = [
+    REPO_ROOT / "src/mateir/module.h",
+    REPO_ROOT / "src/mateir/module.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/elaboration.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/dfg_inline.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/flop_resolve.cpp",
@@ -24,13 +26,21 @@ BANNED = [
     r"\.inputs\b",
     r"\.outputs\b",
     r"\.signals\b",
+    r"->inputs\b",
+    r"->outputs\b",
+    r"->signals\b",
 ]
 
 EXEMPT_LINE_PATTERNS = [
     r"\bbinding\.inputs\b",        # ModuleInstanceBinding::inputs
+    r"\bbinding->inputs\b",        # ModuleInstanceBinding::inputs
     r"\bunresolved\.(inputs|outputs|signals)\b",
+    r"\bunresolved->(inputs|outputs|signals)\b",
     r"resolved\.signals with qualified name",  # existing comment
     r"\bsummary\.(inputs|outputs|signals)\b",
+    r"\bsummary->(inputs|outputs|signals)\b",
+    r"\bselection\.(inputs|outputs|signals)\b",
+    r"\bselection->(inputs|outputs|signals)\b",
     r"\.inputs\s*=\s*\{\s*\}",     # designated init for ModuleInstanceBinding
 ]
 

@@ -619,7 +619,6 @@ SyncDomainAnalysis propagateSyncDomains(
     analysis.node_sync = propagateNodeSyncTypes(*module.dfg, std::move(analysis.node_sync));
 
     assignSignalSyncTypes(module, {}, ir, domainFacts, analysis.node_sync);
-    rebuildModuleNodeIndexRecursively(module);
     collectFlopDSyncTypes(module, analysis.node_sync, analysis.flop_d_domains);
     return analysis;
 }

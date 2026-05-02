@@ -105,9 +105,6 @@ DFGNode* scalarFlopQNode(const FlopInfo& flop);
 std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal);
 std::vector<FlopLeafRef> flopDLeafRefs(const FlopInfo& flop);
 std::vector<FlopLeafRef> flopQLeafRefs(const FlopInfo& flop);
-std::optional<SignalLeafRef> findSignalLeafRef(
-    const std::map<std::string, Signal>& signals,
-    const std::string& leaf_name);
 std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
     const Module& module,
     const std::string& leaf_name);
@@ -193,9 +190,6 @@ struct Module {
     std::vector<Param> parameters;
     std::vector<Param> localparams;
     std::map<std::string, ModuleNode> nodes;
-    std::map<std::string, Signal> inputs;
-    std::map<std::string, Signal> outputs;
-    std::map<std::string, Signal> signals;
     std::vector<FlopInfo> flops;
 
     // TODO a list of instantiated modules.
@@ -252,7 +246,6 @@ void forEachInputNode(Module& module, Fn&& fn) {
     forEachNodeIf(module, [&](ModuleNode& node) {
         if (!isInputNode(node)) return false;
         fn(node);
-        module.inputs[node.name] = node;
         return false;
     });
 }
@@ -270,7 +263,6 @@ void forEachOutputNode(Module& module, Fn&& fn) {
     forEachNodeIf(module, [&](ModuleNode& node) {
         if (!isOutputNode(node)) return false;
         fn(node);
-        module.outputs[node.name] = node;
         return false;
     });
 }
@@ -288,7 +280,6 @@ void forEachSignalNode(Module& module, Fn&& fn) {
     forEachNodeIf(module, [&](ModuleNode& node) {
         if (!isSignalNode(node)) return false;
         fn(node);
-        module.signals[node.name] = node;
         return false;
     });
 }

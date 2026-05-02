@@ -202,45 +202,23 @@ ModuleNode* findSignalNode(Module& module, const std::string& name) {
 }
 
 void validateModuleNodeNamespace(const Module& module) {
-    std::map<std::string, ModuleNodeRole> seen;
-    auto track = [&](const std::map<std::string, Signal>& nodes, ModuleNodeRole role) {
-        for (const auto& [name, node] : nodes) {
-            auto [it, inserted] = seen.emplace(name, role);
-            if (!inserted && it->second != role) {
-                throw CompilerError(std::format(
-                    "module '{}' has duplicate named-value node '{}' across roles '{}' and '{}'",
-                    module.name, name, moduleNodeRoleName(it->second), moduleNodeRoleName(role)));
-            }
-            if (node.name != name) {
-                throw CompilerError(std::format(
-                    "module '{}' has mismatched node key/name for '{}'", module.name, name));
-            }
+    for (const auto& [name, node] : module.nodes) {
+        if (node.name != name) {
+            throw CompilerError(std::format(
+                "module '{}' has mismatched node key/name for '{}'", module.name, name));
         }
-    };
-    track(module.inputs, ModuleNodeRole::Input);
-    track(module.outputs, ModuleNodeRole::Output);
-    track(module.signals, ModuleNodeRole::Signal);
+    }
 }
 
 ModuleNode& addModuleNode(Module& module, const ModuleNode& node) {
     ModuleNode copy = node;
-    if (auto it = module.nodes.find(copy.name); it != module.nodes.end() && it->second.role != copy.role) {
+    if (auto it = module.nodes.find(copy.name); it != module.nodes.end()) {
         throw CompilerError(std::format(
             "module '{}' has duplicate named-value node '{}' across roles '{}' and '{}'",
             module.name, copy.name, moduleNodeRoleName(it->second.role), moduleNodeRoleName(copy.role)));
     }
-    auto& roleMap = isInputNode(copy)   ? module.inputs :
-                    isOutputNode(copy)  ? module.outputs :
-                                          module.signals;
-
-    auto roleIt = roleMap.find(copy.name);
-    if (roleIt != roleMap.end()) {
-        roleIt->second = copy;
-    } else {
-        roleMap.emplace(copy.name, copy);
-    }
-    auto [it, inserted] = module.nodes.insert_or_assign(copy.name, copy);
-    (void) inserted;
+    auto [it, inserted] = module.nodes.insert({copy.name, copy});
+    (void)inserted;
     return it->second;
 }
 
@@ -263,11 +241,9 @@ ModuleNode& addSignalNode(Module& module, const ModuleNode& node) {
 }
 
 void rebuildModuleNodeIndex(Module& module) {
+    // Compatibility hook: phase-3 storage is nodes-only, so rebuild is now validate-only.
+    (void)module;
     validateModuleNodeNamespace(module);
-    module.nodes.clear();
-    for (const auto& [_, node] : module.inputs) module.nodes[node.name] = node;
-    for (const auto& [_, node] : module.outputs) module.nodes[node.name] = node;
-    for (const auto& [_, node] : module.signals) module.nodes[node.name] = node;
 }
 
 void rebuildModuleNodeIndexRecursively(Module& module) {
@@ -393,22 +369,6 @@ std::vector<FlopLeafRef> flopDLeafRefs(const FlopInfo& flop) {
 
 std::vector<FlopLeafRef> flopQLeafRefs(const FlopInfo& flop) {
     return flopLeafRefsImpl(flop, flop.binding.q_leaves, true);
-}
-
-std::optional<SignalLeafRef> findSignalLeafRef(
-    const std::map<std::string, Signal>& signals,
-    const std::string& leaf_name) {
-    if (auto it = signals.find(leaf_name); it != signals.end()) {
-        auto refs = signalLeafRefs(it->second);
-        if (refs.size() == 1) return refs.front();
-    }
-
-    for (const auto& [_, signal] : signals) {
-        for (const auto& ref : signalLeafRefs(signal)) {
-            if (ref.leaf_name == leaf_name) return ref;
-        }
-    }
-    return std::nullopt;
 }
 
 std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(

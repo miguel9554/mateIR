@@ -4710,7 +4710,7 @@ static void resolveGenerateScopeDecls(
                 auto* node = ctx.graph.signal(ctx.instance_path, name);
                 node->type = type;
                 ctx.local_signals[name] = node;
-                // Add to resolved.signals with qualified name so the VCD writer can
+                // Add to resolved named-value nodes with qualified name so the VCD writer can
                 // place this signal under the correct generate-scope hierarchy.
                 if (!ctx.instance_path.empty()) {
                     std::string qualName = ctx.instance_path + "." + name;
@@ -4719,7 +4719,6 @@ static void resolveGenerateScopeDecls(
                     genSig.type = type;
                     genSig.binding.leaves = {node};
                     addSignalNode(*ctx.thisModule, genSig);
-                    rebuildModuleNodeIndex(*ctx.thisModule);
                 }
             } else {
                 ctx.local_array_types[name] = type;
@@ -4739,7 +4738,6 @@ static void resolveGenerateScopeDecls(
                 }
                 if (!ctx.instance_path.empty()) {
                     addSignalNode(*ctx.thisModule, genSig);
-                    rebuildModuleNodeIndex(*ctx.thisModule);
                 }
             }
         }
@@ -5229,8 +5227,6 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         auto sig = resolveSignal(signal, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
         addSignalNode(resolved, sig);
     }
-
-    rebuildModuleNodeIndex(resolved);
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;

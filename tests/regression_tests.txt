@@ -42,6 +42,8 @@ multiple_continuous_assign FAIL Multiple drivers for target 'n'
 multiple_seq_writers_same_flop FAIL Multiple drivers for target 'q.d'
 multiple_submodule_output_drivers FAIL Multiple drivers for target 'n'
 module_node_role_collision_fail FAIL duplicate named-value node 'dup' across roles
+module_node_role_collision_input_signal_fail FAIL duplicate named-value node 'dup' across roles 'input' and 'signal'
+module_node_role_collision_output_signal_fail FAIL duplicate named-value node 'dup' across roles 'output' and 'signal'
 overlapping_partial_writes FAIL Overlapping partial writes for target 'bus'
 partial_then_full_write_conflict FAIL Multiple drivers for target 'bus'
 partial_branch_merge PASS

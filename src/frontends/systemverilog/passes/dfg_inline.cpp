@@ -44,8 +44,8 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
 
         // Update input binding metadata: subInputNode will be dead after
         // rewiring and removed by DCE.
-        if (auto it = sub->inputs.find(portName); it != sub->inputs.end()) {
-            for (auto*& leaf : it->second.binding.leaves) {
+        if (auto* input = findInputNode(*sub, portName); input) {
+            for (auto*& leaf : input->binding.leaves) {
                 if (leaf == subInputNode) leaf = driver.node;
             }
         }

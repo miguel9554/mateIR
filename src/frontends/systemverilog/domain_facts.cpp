@@ -22,7 +22,7 @@ InstancePath childPath(InstancePath path, const std::string& instanceName) {
     return path;
 }
 
-const Signal* findModulePort(const Module& module, const std::string& name) {
+const ModuleNode* findModulePort(const Module& module, const std::string& name) {
     return mate::findPort(module, name);
 }
 
@@ -47,7 +47,7 @@ void validateModuleFacts(const Module& module,
     }
 
     for (const auto& [portName, portFact] : moduleFacts->ports) {
-        const Signal* sig = findModulePort(module, portName);
+        const ModuleNode* sig = findModulePort(module, portName);
         if (!sig) {
             throw CompilerError(std::format(
                 "frontend_domain_facts: private port fact '{}' missing public port in module '{}'",

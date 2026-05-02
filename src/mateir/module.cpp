@@ -18,9 +18,9 @@ const char* moduleNodeRoleName(ModuleNodeRole role) {
     switch (role) {
         case ModuleNodeRole::Input: return "input";
         case ModuleNodeRole::Output: return "output";
-        case ModuleNodeRole::Signal: return "signal";
+        case ModuleNodeRole::Internal: return "internal";
     }
-    return "signal";
+    return "internal";
 }
 
 } // namespace
@@ -99,7 +99,7 @@ Type unpackedElementType(const Type& type) {
     return dropFirstUnpackedDim(type);
 }
 
-DFGNode* scalarLeaf(const SignalBinding& binding) {
+DFGNode* scalarLeaf(const ModuleNodeBinding& binding) {
     if (binding.leaves.size() != 1) {
         throw CompilerError(std::format(
             "scalarLeaf: expected 1 leaf, got {}", binding.leaves.size()));
@@ -107,7 +107,7 @@ DFGNode* scalarLeaf(const SignalBinding& binding) {
     return binding.leaves[0];
 }
 
-DFGNode* leafAt(const SignalBinding& binding,
+DFGNode* leafAt(const ModuleNodeBinding& binding,
                 const Type& type,
                 const std::vector<int64_t>& indices) {
     size_t idx = linearUnpackedIndex(type.unpacked_dims, indices);
@@ -118,12 +118,12 @@ DFGNode* leafAt(const SignalBinding& binding,
     return binding.leaves[idx];
 }
 
-static size_t expectedSignalLeafCount(const Type& type) {
+static size_t expectedModuleNodeLeafCount(const Type& type) {
     return type.unpacked_dims.empty() ? 1 : unpackedIndexSuffixes(type).size();
 }
 
-static void validateSignalBindingShape(const Signal& signal) {
-    const size_t expected = expectedSignalLeafCount(signal.type);
+static void validateModuleNodeBindingShape(const ModuleNode& signal) {
+    const size_t expected = expectedModuleNodeLeafCount(signal.type);
     if (signal.binding.leaves.size() != expected) {
         throw CompilerError(std::format(
             "signal '{}' binding mismatch: expected {} leaf/leaves, got {}",
@@ -139,8 +139,8 @@ bool isOutputNode(const ModuleNode& node) {
     return node.role == ModuleNodeRole::Output;
 }
 
-bool isSignalNode(const ModuleNode& node) {
-    return node.role == ModuleNodeRole::Signal;
+bool isInternalNode(const ModuleNode& node) {
+    return node.role == ModuleNodeRole::Internal;
 }
 
 bool isPortNode(const ModuleNode& node) {
@@ -148,7 +148,7 @@ bool isPortNode(const ModuleNode& node) {
 }
 
 bool isDrivenNode(const ModuleNode& node) {
-    return isOutputNode(node) || isSignalNode(node);
+    return isOutputNode(node) || isInternalNode(node);
 }
 
 const ModuleNode* findNode(const Module& module, const std::string& name) {
@@ -191,13 +191,13 @@ ModuleNode* findOutputNode(Module& module, const std::string& name) {
     return nullptr;
 }
 
-const ModuleNode* findSignalNode(const Module& module, const std::string& name) {
-    if (auto* node = findNode(module, name); node && isSignalNode(*node)) return node;
+const ModuleNode* findInternalNode(const Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isInternalNode(*node)) return node;
     return nullptr;
 }
 
-ModuleNode* findSignalNode(Module& module, const std::string& name) {
-    if (auto* node = findNode(module, name); node && isSignalNode(*node)) return node;
+ModuleNode* findInternalNode(Module& module, const std::string& name) {
+    if (auto* node = findNode(module, name); node && isInternalNode(*node)) return node;
     return nullptr;
 }
 
@@ -234,9 +234,9 @@ ModuleNode& addOutputNode(Module& module, const ModuleNode& node) {
     return addModuleNode(module, copy);
 }
 
-ModuleNode& addSignalNode(Module& module, const ModuleNode& node) {
+ModuleNode& addInternalNode(Module& module, const ModuleNode& node) {
     ModuleNode copy = node;
-    copy.role = ModuleNodeRole::Signal;
+    copy.role = ModuleNodeRole::Internal;
     return addModuleNode(module, copy);
 }
 
@@ -254,7 +254,7 @@ void rebuildModuleNodeIndexRecursively(Module& module) {
 static void validateFlopBindingShape(const FlopInfo& flop,
                                      const std::vector<DFGNode*>& leaves,
                                      const char* kind) {
-    const size_t expected = expectedSignalLeafCount(flop.type);
+    const size_t expected = expectedModuleNodeLeafCount(flop.type);
     if (leaves.size() != expected) {
         throw CompilerError(std::format(
             "flop '{}' {} binding mismatch: expected {} leaf/leaves, got {}",
@@ -262,17 +262,17 @@ static void validateFlopBindingShape(const FlopInfo& flop,
     }
 }
 
-const std::vector<DFGNode*>& signalLeaves(const Signal& signal) {
-    validateSignalBindingShape(signal);
+const std::vector<DFGNode*>& moduleNodeLeaves(const ModuleNode& signal) {
+    validateModuleNodeBindingShape(signal);
     return signal.binding.leaves;
 }
 
-DFGNode* scalarSignalNode(const Signal& signal) {
+DFGNode* scalarModuleNode(const ModuleNode& signal) {
     try {
         return scalarLeaf(signal.binding);
     } catch (const CompilerError&) {
         throw CompilerError(std::format(
-            "scalarSignalNode: signal '{}' is not scalar-bound ({} leaves)",
+            "scalarModuleNode: signal '{}' is not scalar-bound ({} leaves)",
             signal.name, signal.binding.leaves.size()));
     }
 }
@@ -305,13 +305,13 @@ DFGNode* scalarFlopQNode(const FlopInfo& flop) {
     return flop.binding.q_leaves[0];
 }
 
-std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal) {
-    validateSignalBindingShape(signal);
-    std::vector<SignalLeafRef> refs;
+std::vector<ModuleNodeLeafRef> moduleNodeLeafRefs(const ModuleNode& signal) {
+    validateModuleNodeBindingShape(signal);
+    std::vector<ModuleNodeLeafRef> refs;
     refs.reserve(signal.binding.leaves.size());
     if (signal.type.unpacked_dims.empty()) {
-        refs.push_back(SignalLeafRef{
-            .signal = &signal,
+        refs.push_back(ModuleNodeLeafRef{
+            .module_node = &signal,
             .node = signal.binding.leaves.front(),
             .leaf_name = signal.name,
             .leaf_index = 0,
@@ -321,8 +321,8 @@ std::vector<SignalLeafRef> signalLeafRefs(const Signal& signal) {
 
     const auto suffixes = unpackedIndexSuffixes(signal.type);
     for (size_t i = 0; i < suffixes.size(); ++i) {
-        refs.push_back(SignalLeafRef{
-            .signal = &signal,
+        refs.push_back(ModuleNodeLeafRef{
+            .module_node = &signal,
             .node = signal.binding.leaves[i],
             .leaf_name = signal.name + suffixes[i],
             .leaf_index = i,
@@ -371,13 +371,13 @@ std::vector<FlopLeafRef> flopQLeafRefs(const FlopInfo& flop) {
     return flopLeafRefsImpl(flop, flop.binding.q_leaves, true);
 }
 
-std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
+std::optional<ModuleNodeLeafRef> findModuleDrivenLeaf(
     const Module& module,
     const std::string& leaf_name) {
-    std::optional<SignalLeafRef> found;
+    std::optional<ModuleNodeLeafRef> found;
     forEachOutputNode(module, [&](const ModuleNode& node) {
         if (found) return;
-        for (const auto& ref : signalLeafRefs(node)) {
+        for (const auto& ref : moduleNodeLeafRefs(node)) {
             if (ref.leaf_name == leaf_name) {
                 found = ref;
                 return;
@@ -385,9 +385,9 @@ std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
         }
     });
     if (found) return found;
-    forEachSignalNode(module, [&](const ModuleNode& node) {
+    forEachInternalNode(module, [&](const ModuleNode& node) {
         if (found) return;
-        for (const auto& ref : signalLeafRefs(node)) {
+        for (const auto& ref : moduleNodeLeafRefs(node)) {
             if (ref.leaf_name == leaf_name) {
                 found = ref;
                 return;
@@ -397,13 +397,13 @@ std::optional<SignalLeafRef> findModuleOutputOrSignalLeaf(
     return found;
 }
 
-std::optional<SignalLeafRef> findModuleNamedLeaf(
+std::optional<ModuleNodeLeafRef> findModuleNamedLeaf(
     const Module& module,
     const std::string& leaf_name) {
-    std::optional<SignalLeafRef> found;
+    std::optional<ModuleNodeLeafRef> found;
     forEachNamedValueNode(module, [&](const ModuleNode& node) {
         if (found) return;
-        for (const auto& ref : signalLeafRefs(node)) {
+        for (const auto& ref : moduleNodeLeafRefs(node)) {
             if (ref.leaf_name == leaf_name) {
                 found = ref;
                 return;
@@ -414,7 +414,7 @@ std::optional<SignalLeafRef> findModuleNamedLeaf(
 }
 
 DFGNode* findModuleDebugLeafNode(Module& module, const std::string& leaf_name) {
-    if (auto output = findModuleOutputOrSignalLeaf(module, leaf_name)) return output->node;
+    if (auto output = findModuleDrivenLeaf(module, leaf_name)) return output->node;
 
     for (const auto& flop : module.flops) {
         for (const auto& leaf : flopDLeafRefs(flop)) {
@@ -436,8 +436,8 @@ const DFGNode* findModuleDebugLeafNode(const Module& module, const std::string& 
 void collectModuleRoots(const Module& module,
                         std::unordered_set<DFGNode*>& roots,
                         const ModuleRootSelection& selection) {
-    auto insertSignalLeaves = [&roots](const ModuleNode& signal) {
-        for (auto* leaf : signalLeaves(signal)) {
+    auto insertModuleNodeLeaves = [&roots](const ModuleNode& signal) {
+        for (auto* leaf : moduleNodeLeaves(signal)) {
             if (leaf) roots.insert(leaf);
         }
     };
@@ -452,9 +452,9 @@ void collectModuleRoots(const Module& module,
             if (parameter.dfg_node) roots.insert(parameter.dfg_node);
         }
     }
-    if (selection.inputs) forEachInputNode(module, insertSignalLeaves);
-    if (selection.outputs) forEachOutputNode(module, insertSignalLeaves);
-    if (selection.signals) forEachSignalNode(module, insertSignalLeaves);
+    if (selection.inputs) forEachInputNode(module, insertModuleNodeLeaves);
+    if (selection.outputs) forEachOutputNode(module, insertModuleNodeLeaves);
+    if (selection.signals) forEachInternalNode(module, insertModuleNodeLeaves);
     if (selection.flop_d) {
         for (const auto& flop : module.flops) {
             for (auto* leaf : flopDLeaves(flop)) {
@@ -502,7 +502,7 @@ void FlopInfo::print(std::ostream& os, int indent) const {
     }
 }
 
-void SignalBase::print(std::ostream& os) const {
+void NamedValueBase::print(std::ostream& os) const {
     os << name << ": ";
     type.print(os);
     for (const auto& dim : type.unpacked_dims) {
@@ -511,7 +511,7 @@ void SignalBase::print(std::ostream& os) const {
 }
 
 void ModuleNode::print(std::ostream& os) const {
-    SignalBase::print(os);
+    NamedValueBase::print(os);
     SyncKind kind = syncKind(*this);
     const char* kindName = kind == SyncKind::Sync  ? "sync"  :
                            kind == SyncKind::Clock ? "clock" :
@@ -561,7 +561,7 @@ void Module::print(int indent) const {
     });
 
     std::cout << indent_str(indent + 1) << "Signals:" << std::endl;
-    forEachSignalNode(*this, [&](const ModuleNode& signal) {
+    forEachInternalNode(*this, [&](const ModuleNode& signal) {
         std::cout << indent_str(indent + 2);
         signal.print(std::cout);
         std::cout << std::endl;
@@ -735,11 +735,11 @@ SyncKind syncKind(const SyncType& sync_type) {
     return SyncKind::Async;
 }
 
-SyncKind syncKind(const Signal& signal) {
+SyncKind syncKind(const ModuleNode& signal) {
     return syncKind(signal.sync_type);
 }
 
-static std::string signalToJson(const Signal& s) {
+static std::string moduleNodeToJson(const ModuleNode& s) {
     std::ostringstream ss;
     ss << "{";
     ss << "\"name\": \"" << s.name << "\", ";
@@ -804,7 +804,7 @@ static std::string moduleToJson(const Module& m, int indent) {
     first = true;
     forEachInputNode(m, [&](const ModuleNode& sig) {
         if (!first) ss << ",\n";
-        ss << ind(indent+2) << signalToJson(sig);
+        ss << ind(indent+2) << moduleNodeToJson(sig);
         first = false;
     });
     ss << "\n" << ind(indent+1) << "],\n";
@@ -814,7 +814,7 @@ static std::string moduleToJson(const Module& m, int indent) {
     first = true;
     forEachOutputNode(m, [&](const ModuleNode& sig) {
         if (!first) ss << ",\n";
-        ss << ind(indent+2) << signalToJson(sig);
+        ss << ind(indent+2) << moduleNodeToJson(sig);
         first = false;
     });
     ss << "\n" << ind(indent+1) << "],\n";
@@ -822,9 +822,9 @@ static std::string moduleToJson(const Module& m, int indent) {
     // Signals
     ss << ind(indent+1) << "\"signals\": [\n";
     first = true;
-    forEachSignalNode(m, [&](const ModuleNode& sig) {
+    forEachInternalNode(m, [&](const ModuleNode& sig) {
         if (!first) ss << ",\n";
-        ss << ind(indent+2) << signalToJson(sig);
+        ss << ind(indent+2) << moduleNodeToJson(sig);
         first = false;
     });
     ss << "\n" << ind(indent+1) << "],\n";

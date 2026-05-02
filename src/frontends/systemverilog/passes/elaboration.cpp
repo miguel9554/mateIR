@@ -364,10 +364,21 @@ static DFGNode* lookupNamedNodeInModule(const ResolutionContext& ctx,
     return nullptr;
 }
 
+static DFGNode* lookupDrivenNodeInModule(const ResolutionContext& ctx,
+                                         const std::string& name) {
+    if (auto leaf = findModuleDrivenLeaf(*ctx.thisModule, name)) return leaf->node;
+    for (const auto& flop : ctx.thisModule->flops) {
+        for (const auto& leaf : flopDLeafRefs(flop)) {
+            if (leaf.leaf_name == name) return leaf.node;
+        }
+    }
+    return nullptr;
+}
+
 template<typename Fn>
 static void forEachVisibleDriverTarget(const ResolutionContext& ctx, Fn&& fn) {
-    forEachDrivenNode(*ctx.thisModule, [&](const Signal& signal) {
-        for (const auto& leaf : signalLeafRefs(signal)) {
+    forEachDrivenNode(*ctx.thisModule, [&](const ModuleNode& signal) {
+        for (const auto& leaf : moduleNodeLeafRefs(signal)) {
             if (leaf.node) fn(leaf.leaf_name, leaf.node);
         }
     });
@@ -406,7 +417,7 @@ static DFGNode* lookupTargetNode(ResolutionContext& ctx, const std::string& name
     if (auto localIt = ctx.local_signals.find(name); localIt != ctx.local_signals.end()) {
         return localIt->second;
     }
-    return lookupNamedNodeInModule(ctx, name);
+    return lookupDrivenNodeInModule(ctx, name);
 }
 
 static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNode* driver) {
@@ -418,7 +429,7 @@ static void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNo
         ctx.graph.connectDriver(localIt->second, driver);
         return;
     }
-    if (auto* target = lookupNamedNodeInModule(ctx, name)) {
+    if (auto* target = lookupDrivenNodeInModule(ctx, name)) {
         ctx.graph.connectDriver(target, driver);
     }
 }
@@ -764,7 +775,7 @@ static std::optional<PartialTargetState> buildMergedPartialDriver(
             if (!selected && !result) continue;
             if (!selected || !result) {
                 throw CompilerError(
-                    "Signal '" + targetName + "' not assigned in all branches and has no default/fallback",
+                    "Target '" + targetName + "' not assigned in all branches and has no default/fallback",
                     loc);
             }
             if (selected == result) continue;
@@ -800,7 +811,7 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
     DFGNode* result = fallbackBranch ? branchValue(*fallbackBranch) : retained;
     if (!result) {
         throw CompilerError(
-            "Signal '" + targetName + "' not assigned in all branches and has no default/fallback",
+            "Target '" + targetName + "' not assigned in all branches and has no default/fallback",
             loc);
     }
 
@@ -808,7 +819,7 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
         DFGNode* selected = branchValue(it->modifiedDrivers);
         if (!selected) {
             throw CompilerError(
-                "Signal '" + targetName + "' not assigned in all branches and has no default/fallback",
+                "Target '" + targetName + "' not assigned in all branches and has no default/fallback",
                 loc);
         }
         if (selected == result) continue;
@@ -1052,7 +1063,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                     DFGNode* value = state ? exprForSliceInterval(ctx, *state, low, high, loc) : nullptr;
                     if (!value) {
                         throw CompilerError(
-                            "Signal '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
+                            "Target '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
                             loc);
                     }
                     selectorValues.push_back(selectorValue);
@@ -1100,7 +1111,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             }
             if (!value) {
                 throw CompilerError(
-                    "Signal '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
+                    "Target '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
                     loc);
             }
             selectorValues.push_back(selectorValue);
@@ -4155,11 +4166,11 @@ void resolveProceduralTimingInPlace(
     resolveStatementInPlace(statement, ctx);
 }
 
-Signal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx,
+ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterContext& ctx,
                              const EnumRegistry& enumRegistry,
                              const PackageRegistry* pkgRegistry = nullptr,
                              const slang::SourceManager* sm = nullptr) {
-    Signal resolved;
+    ModuleNode resolved;
     resolved.name = signal.name;
 
     resolved.type = resolveType(
@@ -4185,7 +4196,7 @@ Signal resolveSignal(const UnresolvedSignal& signal, const ParameterContext& ctx
 
 // Pre-populate module input (port) with all bit indices
 // For vector inputs, creates base node + individual element nodes
-void prePopulateInput(DFG& graph, Signal& sig) {
+void prePopulateInput(DFG& graph, ModuleNode& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
         auto* node = graph.createGraphInput("", sig.name);
@@ -4205,7 +4216,7 @@ void prePopulateInput(DFG& graph, Signal& sig) {
 // Pre-populate module output (port) with all bit indices
 // Creates OUTPUT nodes with no driver
 // For vector outputs, creates base node + individual element nodes
-void prePopulateOutput(DFG& graph, Signal& sig) {
+void prePopulateOutput(DFG& graph, ModuleNode& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
         auto* node = graph.createGraphOutput("", sig.name);
@@ -4225,7 +4236,7 @@ void prePopulateOutput(DFG& graph, Signal& sig) {
 // Pre-populate internal signal with all bit indices.
 // Only called for plain (non-flop) signals; .d/.q nodes are handled by
 // prePopulateFlopNodes below.
-void prePopulateSignal(DFG& graph, Signal& sig) {
+void prePopulateModuleNode(DFG& graph, ModuleNode& sig) {
     sig.binding.leaves.clear();
     if (sig.type.unpacked_dims.empty()) {
         auto* node = graph.signal("", sig.name);
@@ -4714,11 +4725,11 @@ static void resolveGenerateScopeDecls(
                 // place this signal under the correct generate-scope hierarchy.
                 if (!ctx.instance_path.empty()) {
                     std::string qualName = ctx.instance_path + "." + name;
-                    Signal genSig;
+                    ModuleNode genSig;
                     genSig.name = qualName;
                     genSig.type = type;
                     genSig.binding.leaves = {node};
-                    addSignalNode(*ctx.thisModule, genSig);
+                    addInternalNode(*ctx.thisModule, genSig);
                 }
             } else {
                 ctx.local_array_types[name] = type;
@@ -4726,7 +4737,7 @@ static void resolveGenerateScopeDecls(
                 Type leafType = type;
                 leafType.unpacked_dims.clear();
 
-                Signal genSig;
+                ModuleNode genSig;
                 genSig.name = ctx.instance_path.empty() ? name : ctx.instance_path + "." + name;
                 genSig.type = type;
 
@@ -4737,7 +4748,7 @@ static void resolveGenerateScopeDecls(
                     genSig.binding.leaves.push_back(leaf);
                 }
                 if (!ctx.instance_path.empty()) {
-                    addSignalNode(*ctx.thisModule, genSig);
+                    addInternalNode(*ctx.thisModule, genSig);
                 }
             }
         }
@@ -5212,29 +5223,29 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
-        auto sig = resolveSignal(input, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
+        auto sig = resolveModuleNode(input, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
         addInputNode(resolved, sig);
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
-        auto sig = resolveSignal(output, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
+        auto sig = resolveModuleNode(output, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
         addOutputNode(resolved, sig);
     }
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
-        auto sig = resolveSignal(signal, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
-        addSignalNode(resolved, sig);
+        auto sig = resolveModuleNode(signal, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
+        addInternalNode(resolved, sig);
     }
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;
     for (const auto& flop : unresolved.flops) {
-        const auto& resolvedSignal = (resolveSignal(flop, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager));
+        const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager));
         resolved.flops.push_back(FlopInfo{
-                .name = resolvedSignal.name,
-                .type = resolvedSignal.type,
+                .name = resolvedModuleNode.name,
+                .type = resolvedModuleNode.type,
                 .flop_type = FLOP_D,
                 .reset_value = std::nullopt,
                 .clock_domain = InvalidClockId,
@@ -5299,8 +5310,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     }
 
     // Pre-populate internal SIGNALS (not ports, not flops)
-    forEachSignalNode(resolved, [&](ModuleNode& signal) {
-        prePopulateSignal(graph, signal);
+    forEachInternalNode(resolved, [&](ModuleNode& signal) {
+        prePopulateModuleNode(graph, signal);
     });
 
     // === Resolve all blocks into the shared graph ===

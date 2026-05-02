@@ -128,12 +128,12 @@ static unsigned int getWidth(const DFGNode* node) {
     return 64;
 }
 
-bool VcdWriter::isDomainInput(const Signal& sig) const {
+bool VcdWriter::isDomainInput(const ModuleNode& sig) const {
     return std::holds_alternative<ClockSignal>(sig.sync_type) ||
            std::holds_alternative<ResetSignal>(sig.sync_type);
 }
 
-std::string VcdWriter::requireTopInputSourceName(const Signal& sig,
+std::string VcdWriter::requireTopInputSourceName(const ModuleNode& sig,
                                                  const std::string& context) const {
     const HierSignalRef* source = nullptr;
 
@@ -167,7 +167,7 @@ std::string VcdWriter::requireTopInputSourceName(const Signal& sig,
 }
 
 void VcdWriter::addDomainInputEntry(vcd_tracer::module& scope, const std::string& name,
-                                    const Signal& sig) {
+                                    const ModuleNode& sig) {
     unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
     auto v = std::make_unique<SimVcdValue>(w);
     v->elaborate(scope.get_add_fn(), name);
@@ -195,15 +195,15 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
 }
 
 void VcdWriter::addSignalEntries(vcd_tracer::module& scope, const std::string& name,
-                                 const Signal& sig,
+                                 const ModuleNode& sig,
                                  const std::unordered_set<const DFGNode*>& alive) {
     if (sig.type.unpacked_dims.empty()) {
-        addEntry(scope, name, scalarSignalNode(sig), alive);
+        addEntry(scope, name, scalarModuleNode(sig), alive);
         return;
     }
 
     auto suffixes = unpackedIndexSuffixes(sig.type);
-    const auto& leaves = signalLeaves(sig);
+    const auto& leaves = moduleNodeLeaves(sig);
     for (size_t i = 0; i < suffixes.size() && i < leaves.size(); ++i) {
         addEntry(scope, name + suffixes[i], leaves[i], alive);
     }
@@ -290,7 +290,7 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
         }
     });
 
-    forEachSignalNode(mod, [&](const ModuleNode& sig) {
+    forEachInternalNode(mod, [&](const ModuleNode& sig) {
         const std::string& name = sig.name;
         if (name.ends_with(".q") || name.ends_with(".d")) return;
         auto dot = name.rfind('.');
@@ -365,7 +365,7 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
         }
     });
 
-    forEachSignalNode(mod, [&](const ModuleNode& sig) {
+    forEachInternalNode(mod, [&](const ModuleNode& sig) {
         const std::string& name = sig.name;
         if (name.ends_with(".q") || name.ends_with(".d")) return;
         auto dot = name.rfind('.');

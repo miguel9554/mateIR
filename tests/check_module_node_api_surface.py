@@ -14,6 +14,7 @@ GUARDED_FILES = [
     REPO_ROOT / "src/frontends/systemverilog/passes/elaboration.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/dfg_inline.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/flop_resolve.cpp",
+    REPO_ROOT / "src/frontends/systemverilog/passes/global_domain_resolve.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/io_domains_set.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/sync_domain_propagate.cpp",
     REPO_ROOT / "src/frontends/systemverilog/domain_facts.cpp",
@@ -29,6 +30,17 @@ BANNED = [
     r"->inputs\b",
     r"->outputs\b",
     r"->signals\b",
+    r"\busing\s+Signal\s*=\s*ModuleNode\b",
+    r"\bModuleNodeRole::Signal\b",
+    r"\bisSignalNode\b",
+    r"\bfindSignalNode\b",
+    r"\bforEachSignalNode\b",
+    r"\baddSignalNode\b",
+    r"\bsignalLeaves\b",
+    r"\bscalarSignalNode\b",
+    r"\bsignalLeafRefs\b",
+    r"\bSignalLeafRef\b",
+    r"\bfindModuleOutputOrSignalLeaf\b",
 ]
 
 EXEMPT_LINE_PATTERNS = [

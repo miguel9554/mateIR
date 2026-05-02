@@ -38,7 +38,7 @@ InstancePath childPath(InstancePath path, const std::string& instanceName) {
 
 DFGNode* nodeForTrigger(const Module& resolved, const EventTriggerFact& trigger) {
     const auto* input = findInputNode(resolved, trigger.local_signal_name);
-    return input ? scalarSignalNode(*input) : nullptr;
+    return input ? scalarModuleNode(*input) : nullptr;
 }
 
 bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
@@ -428,11 +428,11 @@ static void resolveFlopsForModule(Module& resolved,
         if (output.type.unpacked_dims.empty()) {
             DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + ".q");
             if (qNode) {
-                graph.connectDriver(scalarSignalNode(output), {qNode, 0});
+                graph.connectDriver(scalarModuleNode(output), {qNode, 0});
             }
         } else {
             auto suffixes = unpackedIndexSuffixes(output.type);
-            const auto& leaves = signalLeaves(output);
+            const auto& leaves = moduleNodeLeaves(output);
             for (size_t i = 0; i < suffixes.size(); ++i) {
                 const auto& suffix = suffixes[i];
                 DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + suffix + ".q");
@@ -470,7 +470,7 @@ static void resolveFlopsForModule(Module& resolved,
             const std::optional<EventTriggerFact>& reset = flopDomain.reset;
 
             // Helper to find exactly one signal
-            auto find_unique_input = [&](const std::string& sig_name, const char* role) -> Signal& {
+            auto find_unique_input = [&](const std::string& sig_name, const char* role) -> ModuleNode& {
                 auto* input = findInputNode(resolved, sig_name);
                 if (!input)
                     throw CompilerError(std::format(
@@ -510,7 +510,7 @@ static void resolveFlopsForModule(Module& resolved,
     // Check that module-visible logic and resolved flop functional .d logic do
     // not depend on clock/reset signals.
     forEachDrivenNode(resolved, [&](const ModuleNode& signal) {
-        for (const auto& leaf : signalLeafRefs(signal)) {
+        for (const auto& leaf : moduleNodeLeafRefs(signal)) {
             if (!leaf.node) continue;
             check_logic_no_clock_reset(leaf.node, leaf.leaf_name, resolved.name, clocks, resets);
         }

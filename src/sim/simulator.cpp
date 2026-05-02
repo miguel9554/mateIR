@@ -716,7 +716,7 @@ std::set<ResetId> Simulator::activeResetDomains() const {
 
 void Simulator::recordOutputs() {
     forEachOutputNode(module_, [&](const ModuleNode& output) {
-        for (const auto& leaf : signalLeafRefs(output)) {
+        for (const auto& leaf : moduleNodeLeafRefs(output)) {
             if (!leaf.node) continue;
             recorded_values_[leaf.leaf_name].push_back(root_->checkedGet(leaf.node));
         }

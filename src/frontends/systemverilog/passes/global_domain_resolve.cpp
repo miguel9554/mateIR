@@ -87,8 +87,8 @@ std::optional<std::string> transparentAliasTarget(
     }
     if (source->instance_path != dfgInstancePath(path)) {
         std::optional<std::string> inputName;
-        forEachInputNode(module, [&](const Signal& input) {
-            const auto& leaves = signalLeaves(input);
+        forEachInputNode(module, [&](const ModuleNode& input) {
+            const auto& leaves = moduleNodeLeaves(input);
             if (leaves.size() == 1 && leaves.front() == source)
                 inputName = input.name;
         });

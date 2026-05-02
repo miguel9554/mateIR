@@ -219,7 +219,7 @@ ResetId requireResolvedTopReset(
 std::optional<SyncType> topPortSyncType(
         const MateIR& ir,
         const FrontendDomainFacts& facts,
-        const Signal& signal) {
+        const ModuleNode& signal) {
     if (!facts.top_inputs) return std::nullopt;
 
     for (const auto& [domainName, clock] : facts.top_inputs->clocks) {
@@ -256,7 +256,7 @@ SyncType expectedPortSyncType(
         const MateIR& ir,
         const FrontendDomainFacts& facts,
         const ModuleDomainFacts& moduleFacts,
-        const Signal& signal) {
+        const ModuleNode& signal) {
     if (path.elems.empty()) {
         auto topType = topPortSyncType(ir, facts, signal);
         if (!topType) {
@@ -379,7 +379,7 @@ void seedDeclaredInputSyncTypes(
 
         input.sync_type = expectedPortSyncType(module, path, ir, facts, moduleFacts, input);
         validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
-        for (auto* leaf : signalLeaves(input))
+        for (auto* leaf : moduleNodeLeaves(input))
             setNodeSync(nodeSync, leaf, input.sync_type);
     });
 
@@ -541,13 +541,13 @@ FlopDInputDomain flopDInputDomainForLeaves(
     };
 }
 
-SyncType syncTypeForSignalLeaves(
-        const Signal& signal,
+SyncType syncTypeForModuleNodeLeaves(
+        const ModuleNode& signal,
         const std::map<const DFGNode*, SyncType>& nodeSync) {
-    return syncTypeForLeaves(signalLeaves(signal), nodeSync);
+    return syncTypeForLeaves(moduleNodeLeaves(signal), nodeSync);
 }
 
-void assignSignalSyncTypes(
+void assignModuleNodeSyncTypes(
         Module& module,
         const InstancePath& path,
         const MateIR& ir,
@@ -555,7 +555,7 @@ void assignSignalSyncTypes(
         const std::map<const DFGNode*, SyncType>& nodeSync) {
     const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
 
-    auto assignInput = [&](Signal& input) {
+    auto assignInput = [&](ModuleNode& input) {
         bool useDeclared = path.elems.empty();
         if (!useDeclared) {
             auto portIt = moduleFacts.ports.find(input.name);
@@ -566,13 +566,13 @@ void assignSignalSyncTypes(
         if (useDeclared) {
             input.sync_type = expectedPortSyncType(module, path, ir, facts, moduleFacts, input);
         } else {
-            input.sync_type = syncTypeForSignalLeaves(input, nodeSync);
+            input.sync_type = syncTypeForModuleNodeLeaves(input, nodeSync);
         }
         validateSyncTypeIds(ir, input.sync_type, module, path, input.name);
     };
 
-    auto assignDrivenSignal = [&](Signal& signal) {
-        SyncType propagated = syncTypeForSignalLeaves(signal, nodeSync);
+    auto assignDrivenModuleNode = [&](ModuleNode& signal) {
+        SyncType propagated = syncTypeForModuleNodeLeaves(signal, nodeSync);
         if (moduleFacts.ports.contains(signal.name)) {
             SyncType expected = expectedPortSyncType(module, path, ir, facts, moduleFacts, signal);
             if (std::holds_alternative<AsyncSignal>(propagated) &&
@@ -588,10 +588,10 @@ void assignSignalSyncTypes(
     };
 
     forEachInputNode(module, assignInput);
-    forEachDrivenNode(module, assignDrivenSignal);
+    forEachDrivenNode(module, assignDrivenModuleNode);
 
     for (auto& sub : module.hierarchyInstantiation)
-        assignSignalSyncTypes(sub, childPath(path, sub.instance_name), ir, facts, nodeSync);
+        assignModuleNodeSyncTypes(sub, childPath(path, sub.instance_name), ir, facts, nodeSync);
 }
 
 void collectFlopDSyncTypes(
@@ -618,7 +618,7 @@ SyncDomainAnalysis propagateSyncDomains(
     seedFlopSyncTypes(module, analysis.node_sync);
     analysis.node_sync = propagateNodeSyncTypes(*module.dfg, std::move(analysis.node_sync));
 
-    assignSignalSyncTypes(module, {}, ir, domainFacts, analysis.node_sync);
+    assignModuleNodeSyncTypes(module, {}, ir, domainFacts, analysis.node_sync);
     collectFlopDSyncTypes(module, analysis.node_sync, analysis.flop_d_domains);
     return analysis;
 }

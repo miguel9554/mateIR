@@ -46,3 +46,7 @@ tests/**/obj_dir
 external/slang-install/
 
 docs/1800-2023.pdf
+
+docs/*
+get_prompt.py
+.codex

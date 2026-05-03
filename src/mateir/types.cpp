@@ -30,6 +30,20 @@ Type Type::makeEnum(std::string type_name, int width,
     };
 }
 
+Type Type::makeStruct(std::string type_name,
+                      std::vector<StructField> fields) {
+    return Type{
+        .kind = TypeKind::Struct,
+        .width = 0,
+        .metadata = StructInfo{
+            .type_name = std::move(type_name),
+            .fields = std::move(fields)
+        },
+        .packed_dims = {},
+        .unpacked_dims = {}
+    };
+}
+
 void Type::print(std::ostream& os) const {
     switch (kind) {
         case TypeKind::Integer:
@@ -37,6 +51,9 @@ void Type::print(std::ostream& os) const {
             break;
         case TypeKind::Enum:
             os << "Enum(" << enumInfo().type_name << ")";
+            break;
+        case TypeKind::Struct:
+            os << "Struct(" << structInfo().type_name << ")";
             break;
     }
     if (!packed_dims.empty()) {

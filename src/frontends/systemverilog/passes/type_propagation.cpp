@@ -52,6 +52,14 @@ static void rejectUnpacked(const DFGNode* node, const char* opName) {
     }
 }
 
+static void rejectStructType(const DFGNode* node, const char* opName) {
+    if (node->hasType() && node->type->isStruct()) {
+        throw CompilerError(std::format(
+            "Invariant violation: struct type '{}' cannot reach DFG operator {}",
+            node->type->structInfo().type_name, opName), node->loc);
+    }
+}
+
 static DFGNode* unaryNode(const DFGNode* node) {
     return node->unaryInputs().operand.node;
 }
@@ -99,6 +107,11 @@ static Type mergeDataTypes(const Type& a, const Type& b,
 // ---------------------------------------------------------------------------
 
 bool inferNodeType(DFGNode* node) {
+    if (node->hasType() && node->type->isStruct()) {
+        throw CompilerError(std::format(
+            "Invariant violation: struct type '{}' cannot reach type propagation",
+            node->type->structInfo().type_name), node->loc);
+    }
     if (node->hasType()) return false;
 
     switch (node->kind()) {
@@ -115,6 +128,7 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::SUB: {
             auto [lhs, rhs] = binaryNodes(node);
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectStructType(lhs, "SUB"); rejectStructType(rhs, "SUB");
             rejectUnpacked(lhs, "SUB"); rejectUnpacked(rhs, "SUB");
             rejectEnum(lhs, "SUB"); rejectEnum(rhs, "SUB");
             int width = std::max(lhs->type->width, rhs->type->width);
@@ -128,6 +142,7 @@ bool inferNodeType(DFGNode* node) {
         {
             auto [lhs, rhs] = binaryNodes(node);
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectStructType(lhs, to_string(node->kind())); rejectStructType(rhs, to_string(node->kind()));
             rejectUnpacked(lhs, to_string(node->kind())); rejectUnpacked(rhs, to_string(node->kind()));
             rejectEnum(lhs, to_string(node->kind())); rejectEnum(rhs, to_string(node->kind()));
             node->type = widenTypes(*lhs->type, *rhs->type);
@@ -138,6 +153,7 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::EQ: {
             auto [lhs, rhs] = binaryNodes(node);
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectStructType(lhs, "EQ"); rejectStructType(rhs, "EQ");
             rejectUnpacked(lhs, "EQ"); rejectUnpacked(rhs, "EQ");
             bool lhsEnum = lhs->type->isEnum(), rhsEnum = rhs->type->isEnum();
             if (lhsEnum || rhsEnum) {
@@ -159,6 +175,7 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::GE: {
             auto [lhs, rhs] = binaryNodes(node);
             if (!lhs->hasType() || !rhs->hasType()) return false;
+            rejectStructType(lhs, to_string(node->kind())); rejectStructType(rhs, to_string(node->kind()));
             rejectUnpacked(lhs, to_string(node->kind())); rejectUnpacked(rhs, to_string(node->kind()));
             rejectEnum(lhs, to_string(node->kind())); rejectEnum(rhs, to_string(node->kind()));
             node->type = makeOneBitUnsigned();
@@ -170,6 +187,7 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::ASR: {
             auto* lhs = node->binaryInputs().lhs.node;
             if (!lhs->hasType()) return false;
+            rejectStructType(lhs, to_string(node->kind()));
             rejectUnpacked(lhs, to_string(node->kind()));
             rejectEnum(lhs, to_string(node->kind()));
             node->type = *lhs->type;
@@ -185,6 +203,7 @@ bool inferNodeType(DFGNode* node) {
             }
             for (size_t i = 0; i < node->muxArmCount(); ++i) {
                 if (!node->muxArmData(i).node->hasType()) return false;
+                rejectStructType(node->muxArmData(i).node, "MUX");
             }
             Type result = *node->muxArmData(0).node->type;
             for (size_t i = 1; i < node->muxArmCount(); ++i) {
@@ -199,6 +218,7 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::BITWISE_NOT: {
             auto* operand = unaryNode(node);
             if (!operand->hasType()) return false;
+            rejectStructType(operand, to_string(node->kind()));
             rejectUnpacked(operand, to_string(node->kind()));
             rejectEnum(operand, to_string(node->kind()));
             node->type = *operand->type;
@@ -212,6 +232,7 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::BITWISE_XNOR: {
             auto [a, b] = binaryNodes(node);
             if (!a->hasType() || !b->hasType()) return false;
+            rejectStructType(a, to_string(node->kind())); rejectStructType(b, to_string(node->kind()));
             rejectUnpacked(a, to_string(node->kind())); rejectUnpacked(b, to_string(node->kind()));
             rejectEnum(a, to_string(node->kind())); rejectEnum(b, to_string(node->kind()));
             int w = std::max(a->type->width, b->type->width);
@@ -229,6 +250,7 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::REDUCTION_XNOR: {
             auto* operand = unaryNode(node);
             if (!operand->hasType()) return false;
+            rejectStructType(operand, to_string(node->kind()));
             rejectUnpacked(operand, to_string(node->kind()));
             node->type = makeOneBitUnsigned();
             return true;
@@ -241,6 +263,7 @@ bool inferNodeType(DFGNode* node) {
             if (!driverOutput) return false;
             auto* driver = driverOutput->node;
             if (!driver->hasType()) return false;
+            rejectStructType(driver, to_string(node->kind()));
             node->type = *driver->type;
             return true;
         }
@@ -253,6 +276,7 @@ bool inferNodeType(DFGNode* node) {
             }
             for (const auto& input : node->concatParts()) {
                 if (!input.node->hasType()) return false;
+                rejectStructType(input.node, "CONCAT");
             }
             int totalWidth = 0;
             for (const auto& input : node->concatParts()) {

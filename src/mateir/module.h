@@ -188,6 +188,7 @@ struct Module {
     std::string instance_name;  // instance name (empty for the top module)
     std::vector<Param> parameters;
     std::vector<Param> localparams;
+    std::map<std::string, Type> named_types;
     std::map<std::string, ModuleNode> nodes;
     std::vector<FlopInfo> flops;
 

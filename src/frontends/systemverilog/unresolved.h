@@ -20,13 +20,19 @@ struct ImportSpec {
     std::optional<std::string> item;  // nullopt = wildcard (:*)
 };
 
+struct UnresolvedTypedef {
+    std::string name;
+    const slang::syntax::DataTypeSyntax* syntax = nullptr;
+};
+
 // ============================================================================
 // Unresolved package - typedef enum declarations inside a package body
 // ============================================================================
 
 struct UnresolvedPackage {
     std::string name;
-    std::vector<std::pair<std::string, const slang::syntax::EnumTypeSyntax*>> enumTypedefs;
+    std::vector<UnresolvedTypedef> enumTypedefs;
+    std::vector<UnresolvedTypedef> structTypedefs;
     std::vector<const slang::syntax::FunctionDeclarationSyntax*> functions;
 };
 
@@ -115,7 +121,8 @@ struct UnresolvedModule {
     std::vector<UnresolvedTypes::Generate> generateBlocks;
 
     // Enum typedef declarations (typedef_name → EnumType syntax pointer)
-    std::vector<std::pair<std::string, const slang::syntax::EnumTypeSyntax*>> enumTypedefs;
+    std::vector<UnresolvedTypedef> enumTypedefs;
+    std::vector<UnresolvedTypedef> structTypedefs;
 
     // Package imports (from module header)
     std::vector<ImportSpec> imports;

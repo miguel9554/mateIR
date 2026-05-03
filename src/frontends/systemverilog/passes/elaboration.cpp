@@ -27,8 +27,8 @@ using namespace slang::syntax;
 
 namespace mate {
 
-// Enum type registry: typedef name → Type (Enum kind)
-using EnumRegistry  = std::map<std::string, Type>;
+// Named type registry: typedef name → Type (enum/struct)
+using NamedTypeRegistry  = std::map<std::string, Type>;
 // Map from enum member/enum-typed-localparam name → (integer value, enum Type)
 using EnumMemberMap = std::map<std::string, std::pair<int64_t, Type>>;
 
@@ -49,7 +49,7 @@ using PartialDriverMap = std::unordered_map<std::string, PartialTargetState>;
 
 // Package registry: package name → its resolved enum types and members
 struct PackageEntry {
-    EnumRegistry  enumTypes;
+    NamedTypeRegistry  namedTypes;
     EnumMemberMap enumMembers;
     std::map<std::string, const FunctionDeclarationSyntax*> functions;
 };
@@ -91,7 +91,7 @@ struct ResolutionContext {
     std::set<std::string> local_flop_names;
 
     // Enum type registry and member map (populated in resolveModule before elaboration)
-    const EnumRegistry&   enumRegistry;
+    const NamedTypeRegistry&   namedTypeRegistry;
     const EnumMemberMap&  enumMemberValues;
     // Package registry (for pkg::type and pkg::MEMBER references)
     const PackageRegistry& pkgRegistry;
@@ -1314,18 +1314,18 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 // TODO: Actually evaluate the type syntax and dimension expressions
 Param resolveParameter(const UnresolvedParam& param, const ParameterContext& topCtx,
                                ParameterContext& localCtx, bool isLocal = false,
-                               const EnumRegistry* enumRegistry = nullptr) {
+                               const NamedTypeRegistry* namedTypeRegistry = nullptr) {
     Param resolved;
     resolved.name = param.name;
 
     if (param.type.syntax->kind == SyntaxKind::ImplicitType) {
         resolved.type = Type::makeInteger(32, false);
-    } else if (param.type.syntax->kind == SyntaxKind::NamedType && enumRegistry) {
+    } else if (param.type.syntax->kind == SyntaxKind::NamedType && namedTypeRegistry) {
         auto& named = param.type.syntax->as<NamedTypeSyntax>();
         std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
-        auto it = enumRegistry->find(typeName);
-        if (it == enumRegistry->end())
-            throw CompilerError("Unknown enum type for localparam: " + typeName);
+        auto it = namedTypeRegistry->find(typeName);
+        if (it == namedTypeRegistry->end())
+            throw CompilerError("Unknown type for localparam: " + typeName);
         resolved.type = it->second;
     } else {
         throw CompilerError("Only implicit param type supported");
@@ -1455,7 +1455,7 @@ std::vector<Dimension> ResolveDimensions(
 Type resolveType(
     const DataTypeSyntax& syntax,
     const ParameterContext& ctx,
-    const EnumRegistry& enumRegistry,
+    const NamedTypeRegistry& namedTypeRegistry,
     const PackageRegistry* pkgRegistry = nullptr)
 {
     // Enum named type: look up in registry
@@ -1470,14 +1470,14 @@ Type resolveType(
             if (!pkgRegistry) throw CompilerError("No package registry available for qualified type: " + pkgName + "::" + typeName);
             auto pkgIt = pkgRegistry->find(pkgName);
             if (pkgIt == pkgRegistry->end()) throw CompilerError("Unknown package: " + pkgName);
-            auto it = pkgIt->second.enumTypes.find(typeName);
-            if (it == pkgIt->second.enumTypes.end()) throw CompilerError("Unknown type: " + pkgName + "::" + typeName);
+            auto it = pkgIt->second.namedTypes.find(typeName);
+            if (it == pkgIt->second.namedTypes.end()) throw CompilerError("Unknown type: " + pkgName + "::" + typeName);
             return it->second;
         }
 
         std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
-        auto it = enumRegistry.find(typeName);
-        if (it == enumRegistry.end())
+        auto it = namedTypeRegistry.find(typeName);
+        if (it == namedTypeRegistry.end())
             throw CompilerError("Unknown type: " + typeName);
         return it->second;
     }
@@ -1490,7 +1490,7 @@ Type resolveType(
             std::to_string(reinterpret_cast<uintptr_t>(&enumSyntax));
         int width = 32;
         if (enumSyntax.baseType) {
-            EnumRegistry emptyReg;
+            NamedTypeRegistry emptyReg;
             width = resolveType(*enumSyntax.baseType, ctx, emptyReg).width;
         }
         std::vector<EnumMember> members;
@@ -1503,6 +1503,14 @@ Type resolveType(
             nextValue = val + 1;
         }
         return Type::makeEnum(typeName, width, members);
+    }
+
+    if (syntax.kind == SyntaxKind::StructType) {
+        throw CompilerError("anonymous struct declarations are not supported");
+    }
+
+    if (syntax.kind == SyntaxKind::UnionType) {
+        throw CompilerError("union types are not supported");
     }
 
     SyntaxList<VariableDimensionSyntax> packedDimensionsSyntax = nullptr;
@@ -1897,12 +1905,19 @@ static void writeWholeTargetAsPartial(ResolutionContext& ctx,
 }
 
 static std::string frontendTypeName(const Type& type) {
-    return type.isEnum() ? type.enumInfo().type_name : "integer";
+    if (type.isEnum()) return type.enumInfo().type_name;
+    if (type.isStruct()) return type.structInfo().type_name;
+    return "integer";
 }
 
 static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
                                 ResolutionContext& ctx,
                                 const std::optional<SourceLoc>& loc) {
+    auto rejectStruct = [&](const Type& type) {
+        if (type.isStruct()) {
+            throw CompilerError("Struct casts are not supported in phase 1", loc);
+        }
+    };
     if (castExpr.left->kind == SyntaxKind::NamedType) {
         auto& namedType = castExpr.left->as<NamedTypeSyntax>();
         if (namedType.name->kind == SyntaxKind::ScopedName) {
@@ -1915,29 +1930,32 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
             if (pkgIt == ctx.pkgRegistry.end()) {
                 throw CompilerError("Unknown package in cast: " + pkgName, loc);
             }
-            auto it = pkgIt->second.enumTypes.find(typeName);
-            if (it == pkgIt->second.enumTypes.end()) {
+            auto it = pkgIt->second.namedTypes.find(typeName);
+            if (it == pkgIt->second.namedTypes.end()) {
                 throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
             }
+            rejectStruct(it->second);
             return it->second;
         }
 
         std::string typeName = std::string(
             namedType.name->as<IdentifierNameSyntax>().identifier.valueText());
-        auto it = ctx.enumRegistry.find(typeName);
-        if (it == ctx.enumRegistry.end()) {
-            throw CompilerError("Unknown enum type in cast: " + typeName, loc);
+        auto it = ctx.namedTypeRegistry.find(typeName);
+        if (it == ctx.namedTypeRegistry.end()) {
+            throw CompilerError("Unknown type in cast: " + typeName, loc);
         }
+        rejectStruct(it->second);
         return it->second;
     }
 
     if (castExpr.left->kind == SyntaxKind::IdentifierName) {
         std::string typeName = std::string(
             castExpr.left->as<IdentifierNameSyntax>().identifier.valueText());
-        auto it = ctx.enumRegistry.find(typeName);
-        if (it == ctx.enumRegistry.end()) {
-            throw CompilerError("Unknown enum type in cast: " + typeName, loc);
+        auto it = ctx.namedTypeRegistry.find(typeName);
+        if (it == ctx.namedTypeRegistry.end()) {
+            throw CompilerError("Unknown type in cast: " + typeName, loc);
         }
+        rejectStruct(it->second);
         return it->second;
     }
 
@@ -1951,10 +1969,11 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
         if (pkgIt == ctx.pkgRegistry.end()) {
             throw CompilerError("Unknown package in cast: " + pkgName, loc);
         }
-        auto it = pkgIt->second.enumTypes.find(typeName);
-        if (it == pkgIt->second.enumTypes.end()) {
+        auto it = pkgIt->second.namedTypes.find(typeName);
+        if (it == pkgIt->second.namedTypes.end()) {
             throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
         }
+        rejectStruct(it->second);
         return it->second;
     }
 
@@ -3739,7 +3758,13 @@ static DFGNode* inlineSubroutineCall(
     try {
         for (const auto* item : decl->items) {
             if (item->kind == SyntaxKind::DataDeclaration) {
-                for (auto* d : item->as<DataDeclarationSyntax>().declarators)
+                auto& dataDecl = item->as<DataDeclarationSyntax>();
+                Type localType = resolveType(*dataDecl.type, sub.params, sub.namedTypeRegistry, &sub.pkgRegistry);
+                if (localType.isStruct()) {
+                    throw CompilerError("struct-typed declarations are not supported before aggregate leaf binding",
+                                        resolveSourceLoc(*item, ctx.sm));
+                }
+                for (auto* d : dataDecl.declarators)
                     sub.subroutine_locals.insert(std::string(d->name.valueText()));
             } else {
                 resolveStatementInPlace(&item->as<StatementSyntax>(), sub);
@@ -3950,6 +3975,12 @@ void resolveSequentialBlockStatementInPlace(
                     resolveSourceLoc(*item, ctx.sm));
             }
             auto& dataDecl = item->as<DataDeclarationSyntax>();
+            Type localType = resolveType(*dataDecl.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
+            if (localType.isStruct()) {
+                throw CompilerError(
+                    "struct-typed declarations are not supported before aggregate leaf binding",
+                    resolveSourceLoc(*item, ctx.sm));
+            }
             for (auto* decl : dataDecl.declarators)
                 ctx.subroutine_locals.insert(std::string(decl->name.valueText()));
             continue;
@@ -4001,7 +4032,7 @@ void resolveForLoopStatementInPlace(
             ctx.domain_facts, ctx.occurrence,
             ctx.combDrivers,
             ctx.instance_path, ctx.local_nodes, ctx.local_array_types, ctx.local_flop_names,
-            ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
+            ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
             ctx.moduleLookup, ctx.globalImports,
             ctx.current_write_origin, ctx.partial_drivers, ctx.write_states,
             ctx.subroutineRegistry, ctx.subroutine_locals,
@@ -4167,7 +4198,7 @@ void resolveProceduralTimingInPlace(
 }
 
 ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterContext& ctx,
-                             const EnumRegistry& enumRegistry,
+                             const NamedTypeRegistry& namedTypeRegistry,
                              const PackageRegistry* pkgRegistry = nullptr,
                              const slang::SourceManager* sm = nullptr) {
     ModuleNode resolved;
@@ -4176,8 +4207,14 @@ ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterCont
     resolved.type = resolveType(
         *signal.type.syntax,
         ctx,
-        enumRegistry,
+        namedTypeRegistry,
         pkgRegistry);
+
+    if (resolved.type.isStruct()) {
+        throw CompilerError(
+            "struct-typed declarations are not supported before aggregate leaf binding",
+            sm ? std::optional<SourceLoc>(resolveSourceLoc(*signal.type.syntax, *sm)) : std::nullopt);
+    }
 
 
     if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, sm);
@@ -4679,7 +4716,11 @@ static void resolveGenerateScopeDecls(
                                   const DeclaratorSyntax& decl,
                                   bool isFlop) {
         std::string name(decl.name.valueText());
-        Type type = resolveType(typeSyntax, ctx.params, ctx.enumRegistry, &ctx.pkgRegistry);
+        Type type = resolveType(typeSyntax, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
+        if (type.isStruct()) {
+            throw CompilerError("struct-typed declarations are not supported before aggregate leaf binding",
+                                resolveSourceLoc(decl, ctx.sm));
+        }
 
         // Resolve unpacked dimensions from the declarator
         auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.sm);
@@ -4897,7 +4938,7 @@ void resolveGenerateMemberInPlace(
                     ctx.sm, false, {}, ctx.domain_facts, ctx.occurrence, {},
                     childPath, ctx.local_nodes,
                     ctx.local_array_types, {},
-                    ctx.enumRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
+                    ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
                     ctx.moduleLookup, ctx.globalImports,
                     ctx.current_write_origin, ctx.partial_drivers, ctx.write_states};
 
@@ -5045,6 +5086,48 @@ void resolveGenerateMemberInPlace(
 
 } // anonymous namespace
 
+static std::vector<StructField> resolveStructFields(
+    const StructUnionTypeSyntax& structSyntax,
+    const std::string& typeName,
+    const ParameterContext& ctx,
+    const NamedTypeRegistry& namedTypeRegistry,
+    const PackageRegistry* pkgRegistry) {
+    std::vector<StructField> fields;
+    std::set<std::string> seenNames;
+    for (const auto* member : structSyntax.members) {
+        if (member->type->kind == SyntaxKind::StructType || member->type->kind == SyntaxKind::UnionType) {
+            throw CompilerError("anonymous struct declarations are not supported");
+        }
+        Type memberType = resolveType(*member->type, ctx, namedTypeRegistry, pkgRegistry);
+        for (const auto* declarator : member->declarators) {
+            if (declarator->initializer) {
+                throw CompilerError("struct member initializers/defaults are not supported");
+            }
+            if (!declarator->dimensions.empty()) {
+                throw CompilerError("struct fields cannot be unpacked arrays");
+            }
+            std::string fieldName(declarator->name.valueText());
+            if (!seenNames.insert(fieldName).second) {
+                throw CompilerError("duplicate field name in struct typedef '" + typeName + "': " + fieldName);
+            }
+            fields.push_back({.name = fieldName, .type = std::make_shared<Type>(memberType)});
+        }
+    }
+    return fields;
+}
+
+static Type resolveStructTypedef(const UnresolvedTypedef& typedefDecl,
+                                 const ParameterContext& ctx,
+                                 const NamedTypeRegistry& namedTypeRegistry,
+                                 const PackageRegistry* pkgRegistry = nullptr) {
+    if (typedefDecl.syntax->kind != SyntaxKind::StructType) {
+        throw CompilerError("Expected struct typedef syntax");
+    }
+    const auto& structSyntax = typedefDecl.syntax->as<StructUnionTypeSyntax>();
+    auto fields = resolveStructFields(structSyntax, typedefDecl.name, ctx, namedTypeRegistry, pkgRegistry);
+    return Type::makeStruct(typedefDecl.name, std::move(fields));
+}
+
 // Resolve all packages into a PackageRegistry
 static PackageRegistry resolvePackages(
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages)
@@ -5053,7 +5136,9 @@ static PackageRegistry resolvePackages(
     for (const auto& pkg : packages) {
         PackageEntry entry;
         ParameterContext emptyCtx;
-        for (const auto& [typeName, enumSyntax] : pkg->enumTypedefs) {
+        for (const auto& td : pkg->enumTypedefs) {
+            auto& typeName = td.name;
+            auto* enumSyntax = &td.syntax->as<EnumTypeSyntax>();
             int width = 32;
             if (enumSyntax->baseType)
                 width = resolveType(*enumSyntax->baseType, emptyCtx, {}).width;
@@ -5067,9 +5152,15 @@ static PackageRegistry resolvePackages(
                 nextValue = val + 1;
             }
             Type enumType = Type::makeEnum(typeName, width, members);
-            entry.enumTypes[typeName] = enumType;
+            entry.namedTypes[typeName] = enumType;
             for (const auto& m : members)
                 entry.enumMembers[m.name] = {m.value, enumType};
+        }
+        for (const auto& td : pkg->structTypedefs) {
+            if (entry.namedTypes.contains(td.name)) {
+                throw CompilerError("Duplicate typedef in package '" + pkg->name + "': " + td.name);
+            }
+            entry.namedTypes[td.name] = resolveStructTypedef(td, emptyCtx, entry.namedTypes);
         }
         for (const auto* fn : pkg->functions)
             entry.functions[getFuncName(*fn)] = fn;
@@ -5082,7 +5173,7 @@ static PackageRegistry resolvePackages(
 static void applyImports(
     const std::vector<ImportSpec>& imports,
     const PackageRegistry& pkgRegistry,
-    EnumRegistry& enumRegistry,
+    NamedTypeRegistry& namedTypeRegistry,
     EnumMemberMap& enumMemberValues,
     ParameterContext& localCtx)
 {
@@ -5093,17 +5184,17 @@ static void applyImports(
         const auto& entry = pkgIt->second;
         if (!spec.item) {
             // wildcard: import all
-            for (const auto& [k, v] : entry.enumTypes)
-                enumRegistry[k] = v;
+            for (const auto& [k, v] : entry.namedTypes)
+                namedTypeRegistry[k] = v;
             for (const auto& [k, v] : entry.enumMembers) {
                 enumMemberValues[k] = v;
                 localCtx.values[k]  = v.first;
             }
         } else {
             // explicit import of a single name
-            auto it = entry.enumTypes.find(*spec.item);
-            if (it != entry.enumTypes.end())
-                enumRegistry[it->first] = it->second;
+            auto it = entry.namedTypes.find(*spec.item);
+            if (it != entry.namedTypes.end())
+                namedTypeRegistry[it->first] = it->second;
             auto mit = entry.enumMembers.find(*spec.item);
             if (mit != entry.enumMembers.end()) {
                 enumMemberValues[mit->first] = mit->second;
@@ -5129,14 +5220,19 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // === Build enum registry from typedef enum declarations ===
     // Must happen before any type resolution or parameter evaluation so that
     // enum member names are available as constants.
-    EnumRegistry  enumRegistry;
+    NamedTypeRegistry  namedTypeRegistry;
     EnumMemberMap enumMemberValues;
 
     // Seed registry from package imports (global first, then module-header imports)
-    applyImports(globalImports,      pkgRegistry, enumRegistry, enumMemberValues, *localCtx);
-    applyImports(unresolved.imports, pkgRegistry, enumRegistry, enumMemberValues, *localCtx);
+    applyImports(globalImports,      pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
+    applyImports(unresolved.imports, pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
 
-    for (auto& [typeName, enumSyntax] : unresolved.enumTypedefs) {
+    for (const auto& td : unresolved.enumTypedefs) {
+        const auto& typeName = td.name;
+        auto* enumSyntax = &td.syntax->as<EnumTypeSyntax>();
+        if (namedTypeRegistry.contains(typeName)) {
+            throw CompilerError("Duplicate typedef in module '" + unresolved.name + "': " + typeName);
+        }
         // Resolve the underlying base type width (e.g. logic [1:0] → width 2)
         int width = 32;  // default if no explicit base type
         if (enumSyntax->baseType) {
@@ -5158,7 +5254,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
 
         Type enumType = Type::makeEnum(typeName, width, members);
-        enumRegistry[typeName] = enumType;
+        namedTypeRegistry[typeName] = enumType;
 
         // Inject member names as integer constants (for evaluateConstantExpr in localparams)
         // and as typed entries (for buildExprDFG)
@@ -5168,6 +5264,14 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
     }
 
+    for (const auto& td : unresolved.structTypedefs) {
+        if (namedTypeRegistry.contains(td.name)) {
+            throw CompilerError("Duplicate typedef in module '" + unresolved.name + "': " + td.name);
+        }
+        namedTypeRegistry[td.name] = resolveStructTypedef(td, *localCtx, namedTypeRegistry, &pkgRegistry);
+    }
+    resolved.named_types = namedTypeRegistry;
+
     // Resolve parameters
     for (const auto& param : unresolved.parameters) {
         resolved.parameters.push_back(resolveParameter(param, topCtx, *localCtx));
@@ -5176,7 +5280,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Resolve localparams (cannot be overridden by instantiation context)
     // Pass enum registry so enum-typed localparams (e.g. localparam op_t X = OP_NOP) are handled
     for (const auto& param : unresolved.localparams) {
-        resolved.localparams.push_back(resolveParameter(param, topCtx, *localCtx, true, &enumRegistry));
+        resolved.localparams.push_back(resolveParameter(param, topCtx, *localCtx, true, &namedTypeRegistry));
     }
 
     auto mergedCtx = std::make_unique<ParameterContext>(topCtx);
@@ -5196,7 +5300,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                 std::to_string(reinterpret_cast<uintptr_t>(enumSyntax));
             int width = 32;
             if (enumSyntax->baseType) {
-                EnumRegistry emptyReg;
+                NamedTypeRegistry emptyReg;
                 width = resolveType(*enumSyntax->baseType, *mergedCtx, emptyReg).width;
             }
             std::vector<EnumMember> members;
@@ -5209,7 +5313,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                 nextValue = val + 1;
             }
             Type enumType = Type::makeEnum(typeName, width, members);
-            enumRegistry[typeName] = enumType;
+            namedTypeRegistry[typeName] = enumType;
             for (const auto& m : members) {
                 mergedCtx->values[m.name] = m.value;
                 enumMemberValues[m.name] = {m.value, enumType};
@@ -5223,26 +5327,26 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
-        auto sig = resolveModuleNode(input, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
+        auto sig = resolveModuleNode(input, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
         addInputNode(resolved, sig);
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
-        auto sig = resolveModuleNode(output, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
+        auto sig = resolveModuleNode(output, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
         addOutputNode(resolved, sig);
     }
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
-        auto sig = resolveModuleNode(signal, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager);
+        auto sig = resolveModuleNode(signal, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
         addInternalNode(resolved, sig);
     }
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;
     for (const auto& flop : unresolved.flops) {
-        const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, enumRegistry, &pkgRegistry, &sourceManager));
+        const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedModuleNode.name,
                 .type = resolvedModuleNode.type,
@@ -5319,7 +5423,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     ResolutionContext resCtx{
         graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {},
         domainFacts, occurrence, {},
-        "", {}, {}, {}, enumRegistry, enumMemberValues, pkgRegistry,
+        "", {}, {}, {}, namedTypeRegistry, enumMemberValues, pkgRegistry,
         moduleLookup, globalImports, "", {}, {}, subroutineRegistry
     };
 

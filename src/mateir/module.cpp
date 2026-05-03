@@ -546,6 +546,13 @@ void Module::print(int indent) const {
         std::cout << std::endl;
     }
 
+    std::cout << indent_str(indent + 1) << "Named types:" << std::endl;
+    for (const auto& [type_name, type] : this->named_types) {
+        std::cout << indent_str(indent + 2) << type_name << ": ";
+        type.print(std::cout);
+        std::cout << std::endl;
+    }
+
     std::cout << indent_str(indent + 1) << "Inputs:" << std::endl;
     forEachInputNode(*this, [&](const ModuleNode& in) {
         std::cout << indent_str(indent + 2);
@@ -611,7 +618,10 @@ void Module::print(int indent) const {
 static std::string typeToJson(const Type& t) {
     std::ostringstream ss;
     ss << "{";
-    ss << "\"kind\": \"" << (t.kind == TypeKind::Enum ? "enum" : "integer") << "\", ";
+    const char* kind = "integer";
+    if (t.kind == TypeKind::Enum) kind = "enum";
+    else if (t.kind == TypeKind::Struct) kind = "struct";
+    ss << "\"kind\": \"" << kind << "\", ";
     ss << "\"width\": " << t.width << ", ";
     ss << "\"signed\": " << (t.isSigned() ? "true" : "false");
     if (!t.packed_dims.empty()) {
@@ -640,6 +650,22 @@ static std::string typeToJson(const Type& t) {
             if (i) ss << ", ";
             ss << "{\"name\": \"" << ei.members[i].name
                << "\", \"value\": " << ei.members[i].value << "}";
+        }
+        ss << "]";
+    } else if (t.kind == TypeKind::Struct) {
+        const auto& si = t.structInfo();
+        ss << ", \"struct_type\": \"" << si.type_name << "\"";
+        ss << ", \"struct_fields\": [";
+        for (size_t i = 0; i < si.fields.size(); ++i) {
+            if (i) ss << ", ";
+            ss << "{";
+            ss << "\"name\": \"" << si.fields[i].name << "\", ";
+            if (!si.fields[i].type) {
+                ss << "\"type\": null";
+            } else {
+                ss << "\"type\": " << typeToJson(*si.fields[i].type);
+            }
+            ss << "}";
         }
         ss << "]";
     }
@@ -795,6 +821,15 @@ static std::string moduleToJson(const Module& m, int indent) {
     for (const auto& p : m.localparams) {
         if (!first) ss << ",\n";
         ss << ind(indent+2) << paramToJson(p);
+        first = false;
+    }
+    ss << "\n" << ind(indent+1) << "],\n";
+
+    ss << ind(indent+1) << "\"named_types\": [\n";
+    first = true;
+    for (const auto& [name, type] : m.named_types) {
+        if (!first) ss << ",\n";
+        ss << ind(indent+2) << "{\"name\": \"" << name << "\", \"type\": " << typeToJson(type) << "}";
         first = false;
     }
     ss << "\n" << ind(indent+1) << "],\n";

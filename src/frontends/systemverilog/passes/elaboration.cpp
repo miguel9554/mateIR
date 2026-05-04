@@ -303,6 +303,12 @@ static ExprValue buildExprValue(const slang::syntax::ExpressionSyntax* expr,
 static ExprValue buildScalarExprValue(const slang::syntax::ExpressionSyntax* expr,
                                       ResolutionContext& ctx);
 
+static ExprValue buildAssignmentPatternExprValueForTarget(
+    const slang::syntax::AssignmentPatternExpressionSyntax& patternExpr,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc);
+
 // Build a scalar-only expression. Throws if the expression resolves to an array.
 static DFGNode* buildExprDFG(const slang::syntax::ExpressionSyntax* expr,
                               ResolutionContext& ctx);
@@ -2506,6 +2512,19 @@ static ExprValue buildExprValue(
         return buildConditionalExprValue(expr->as<ConditionalExpressionSyntax>(), ctx);
     }
 
+    if (expr->kind == SyntaxKind::AssignmentPatternExpression) {
+        const auto& patternExpr = expr->as<AssignmentPatternExpressionSyntax>();
+        auto loc = resolveSourceLoc(*expr, ctx.sm);
+        if (!patternExpr.type) {
+            throw CompilerError("Struct literal requires assignment context or explicit typedef prefix", loc);
+        }
+        Type targetType = resolveType(*patternExpr.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
+        if (!targetType.isStruct() || !targetType.unpacked_dims.empty()) {
+            throw CompilerError("Only struct literals are supported for explicit typed assignment patterns", loc);
+        }
+        return buildAssignmentPatternExprValueForTarget(patternExpr, targetType, ctx, loc);
+    }
+
     if (expr->kind == SyntaxKind::IdentifierName) {
         auto& name = expr->as<IdentifierNameSyntax>();
         return exprValueFromIdentifier(
@@ -2605,6 +2624,191 @@ static ExprValue buildScalarExprValue(
                             resolveSourceLoc(*expr, ctx.sm));
     }
     return value;
+}
+
+static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
+                                         const Type& targetType,
+                                         ResolutionContext& ctx,
+                                         const std::optional<SourceLoc>& loc);
+
+static ExprValue buildStructLiteralExprValue(const AssignmentPatternExpressionSyntax& patternExpr,
+                                             const Type& structType,
+                                             ResolutionContext& ctx,
+                                             const std::optional<SourceLoc>& loc) {
+    if (!structType.isStruct() || !structType.unpacked_dims.empty()) {
+        throw CompilerError("Struct literal target type is invalid", loc);
+    }
+
+    const auto& fields = structType.structInfo().fields;
+    std::vector<DFGNode*> leaves;
+
+    auto appendFieldValue = [&](const ExprValue& value, const Type& fieldType) {
+        if (fieldType.isStruct() || !fieldType.unpacked_dims.empty()) {
+            if (value.leaves.empty()) {
+                throw CompilerError("Struct literal field expression did not produce aggregate leaves", loc);
+            }
+            leaves.insert(leaves.end(), value.leaves.begin(), value.leaves.end());
+            return;
+        }
+        if (!value.scalar) {
+            throw CompilerError("Struct literal field expression did not produce a scalar DFG node", loc);
+        }
+        leaves.push_back(value.scalar);
+    };
+
+    if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
+        const auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
+        if (pattern.items.size() != fields.size()) {
+            throw CompilerError(
+                std::format("Struct literal for '{}' requires {} fields but {} were provided",
+                            structType.structInfo().type_name, fields.size(), pattern.items.size()),
+                loc);
+        }
+        for (size_t i = 0; i < fields.size(); ++i) {
+            ExprValue fieldValue = buildValueForTargetType(pattern.items[i], *fields[i].type, ctx, loc);
+            appendFieldValue(fieldValue, *fields[i].type);
+        }
+    } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+        const auto& pattern = patternExpr.pattern->as<StructuredAssignmentPatternSyntax>();
+        std::map<std::string, const ExpressionSyntax*> namedValues;
+        const ExpressionSyntax* defaultExpr = nullptr;
+
+        for (const auto* item : pattern.items) {
+            if (item->key->kind == SyntaxKind::DefaultPatternKeyExpression ||
+                (item->key->kind == SyntaxKind::IdentifierName &&
+                 item->key->as<IdentifierNameSyntax>().identifier.valueText() == "default")) {
+                if (defaultExpr) {
+                    throw CompilerError("Assignment pattern has multiple default keys", loc);
+                }
+                defaultExpr = item->expr;
+                continue;
+            }
+
+            if (item->key->kind != SyntaxKind::IdentifierName) {
+                throw CompilerError("Type-keyed struct literals are not supported", loc);
+            }
+            std::string fieldName = std::string(item->key->as<IdentifierNameSyntax>().identifier.valueText());
+            if (namedValues.contains(fieldName)) {
+                throw CompilerError(
+                    std::format("Struct literal has duplicate field '{}'", fieldName),
+                    loc);
+            }
+            bool knownField = false;
+            for (const auto& field : fields) {
+                if (field.name == fieldName) {
+                    knownField = true;
+                    break;
+                }
+            }
+            if (!knownField) {
+                throw CompilerError(
+                    std::format("Unknown field '{}' on struct type '{}'", fieldName, structType.structInfo().type_name),
+                    loc);
+            }
+            namedValues[fieldName] = item->expr;
+        }
+
+        for (const auto& field : fields) {
+            const ExpressionSyntax* expr = nullptr;
+            if (auto it = namedValues.find(field.name); it != namedValues.end()) {
+                expr = it->second;
+            } else if (defaultExpr) {
+                expr = defaultExpr;
+            } else {
+                throw CompilerError(
+                    std::format("Struct literal for '{}' does not cover field '{}'",
+                                structType.structInfo().type_name, field.name),
+                    loc);
+            }
+            ExprValue fieldValue = buildValueForTargetType(expr, *field.type, ctx, loc);
+            appendFieldValue(fieldValue, *field.type);
+        }
+    } else if (patternExpr.pattern->kind == SyntaxKind::ReplicatedAssignmentPattern) {
+        throw CompilerError("Replicated struct literals are not supported", loc);
+    } else {
+        throw CompilerError("Unsupported assignment pattern kind for struct literal", loc);
+    }
+
+    std::vector<AggregateLeafBinding> plan;
+    collectAggregateLeafPlan(structType, "", {}, plan);
+    if (plan.size() != leaves.size()) {
+        throw CompilerError("Struct literal leaf shape mismatch", loc);
+    }
+    std::vector<AggregatePath> leafPaths;
+    leafPaths.reserve(plan.size());
+    for (const auto& leaf : plan) {
+        leafPaths.push_back(leaf.path);
+    }
+
+    return ExprValue{
+        .type = structType,
+        .scalar = nullptr,
+        .leaves = std::move(leaves),
+        .leaf_paths = std::move(leafPaths),
+    };
+}
+
+static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
+                                         const Type& targetType,
+                                         ResolutionContext& ctx,
+                                         const std::optional<SourceLoc>& loc) {
+    if (targetType.isStruct() || !targetType.unpacked_dims.empty()) {
+        if (expr->kind == SyntaxKind::AssignmentPatternExpression) {
+            return buildAssignmentPatternExprValueForTarget(
+                expr->as<AssignmentPatternExpressionSyntax>(), targetType, ctx, loc);
+        }
+        ExprValue value = buildExprValue(expr, ctx);
+        if (value.scalar && !value.type.isStruct() && value.type.unpacked_dims.empty()) {
+            std::vector<AggregateLeafBinding> plan;
+            collectAggregateLeafPlan(targetType, "", {}, plan);
+            std::vector<DFGNode*> leaves;
+            leaves.reserve(plan.size());
+            std::vector<AggregatePath> leafPaths;
+            leafPaths.reserve(plan.size());
+            for (const auto& leaf : plan) {
+                ExprValue scalar = buildScalarExprValue(expr, ctx);
+                ExprValue coerced = coerceAssignmentExprToWidth(ctx, std::move(scalar), leaf.leaf_type, loc);
+                leaves.push_back(coerced.scalar);
+                leafPaths.push_back(leaf.path);
+            }
+            return ExprValue{
+                .type = targetType,
+                .scalar = nullptr,
+                .leaves = std::move(leaves),
+                .leaf_paths = std::move(leafPaths),
+            };
+        }
+        if (!sameAggregateStructTypedefShape(value.type, targetType)) {
+            bool rhsStructAggregate = typeContainsStructValue(value.type);
+            if (rhsStructAggregate) {
+                throw CompilerError("whole-struct assignment requires matching typedef names", loc);
+            }
+            throw CompilerError("struct/vector assignment is not supported", loc);
+        }
+        return value;
+    }
+
+    ExprValue scalar = buildScalarExprValue(expr, ctx);
+    return coerceAssignmentExprToWidth(ctx, std::move(scalar), targetType, loc);
+}
+
+static ExprValue buildAssignmentPatternExprValueForTarget(
+    const AssignmentPatternExpressionSyntax& patternExpr,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc) {
+    if (patternExpr.type) {
+        Type explicitType = resolveType(*patternExpr.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
+        if (!sameAggregateStructTypedefShape(explicitType, targetType)) {
+            throw CompilerError("whole-struct assignment requires matching typedef names", loc);
+        }
+    }
+
+    if (targetType.isStruct() && targetType.unpacked_dims.empty()) {
+        return buildStructLiteralExprValue(patternExpr, targetType, ctx, loc);
+    }
+
+    throw CompilerError("Assignment patterns are only supported for whole unpacked arrays or struct literals", loc);
 }
 
 // Build DFG node directly from slang expression syntax
@@ -3472,85 +3676,86 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
         std::string baseName(left->as<IdentifierNameSyntax>().identifier.valueText());
         const auto* declaredType = lookupDeclaredType(baseName, ctx);
-        if (!declaredType || declaredType->unpacked_dims.empty()) {
-            throw CompilerError(
-                "Assignment patterns are only supported for whole unpacked arrays",
-                assignLoc);
-        }
-
-        const auto suffixes = unpackedIndexSuffixes(*declaredType);
-        const auto indices = enumerateIndices(declaredType->unpacked_dims.front());
-        std::vector<DFGNode*> elementDrivers(suffixes.size(), nullptr);
-        auto& patternExpr = right->as<AssignmentPatternExpressionSyntax>();
-
-        if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
-            auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
-            if (pattern.items.size() != suffixes.size()) {
-                throw CompilerError(
-                    std::format("Assignment pattern for '{}' requires {} elements but {} were provided",
-                                baseName, suffixes.size(), pattern.items.size()),
-                    assignLoc);
-            }
-            for (size_t i = 0; i < suffixes.size(); ++i) {
-                elementDrivers[i] = buildExprDFG(pattern.items[i], ctx);
-            }
-        } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
-            if (declaredType->unpacked_dims.size() != 1) {
-                throw CompilerError(
-                    "Keyed assignment patterns are currently supported only for 1-D unpacked arrays",
-                    assignLoc);
-            }
-            auto& pattern = patternExpr.pattern->as<StructuredAssignmentPatternSyntax>();
-            std::map<int64_t, DFGNode*> keyedDrivers;
-            DFGNode* defaultDriver = nullptr;
-
-            for (const auto* item : pattern.items) {
-                if (item->key->kind == SyntaxKind::DefaultPatternKeyExpression ||
-                    (item->key->kind == SyntaxKind::IdentifierName &&
-                     item->key->as<IdentifierNameSyntax>().identifier.valueText() == "default")) {
-                    if (defaultDriver) {
-                        throw CompilerError("Assignment pattern has multiple default keys",
-                                            assignLoc);
-                    }
-                    defaultDriver = buildExprDFG(item->expr, ctx);
-                    continue;
-                }
-
-                int64_t idx = evaluateConstantExpr(item->key, ctx.params, ctx.sm, *item->key,
-                                                   &ctx.pkgRegistry);
-                if (keyedDrivers.contains(idx)) {
-                    throw CompilerError(
-                        std::format("Assignment pattern has multiple keys for index {}", idx),
-                        assignLoc);
-                }
-                keyedDrivers[idx] = buildExprDFG(item->expr, ctx);
-            }
-
-            for (size_t i = 0; i < indices.size(); ++i) {
-                auto it = keyedDrivers.find(indices[i]);
-                if (it != keyedDrivers.end()) {
-                    elementDrivers[i] = it->second;
-                } else if (defaultDriver) {
-                    elementDrivers[i] = defaultDriver;
-                } else {
-                    throw CompilerError(
-                        std::format("Assignment pattern for '{}' does not cover index {}",
-                                    baseName, indices[i]),
-                        assignLoc);
-                }
-            }
+        if (!declaredType || declaredType->unpacked_dims.empty() || typeContainsStructValue(*declaredType)) {
+            // Struct-literal assignment patterns are handled below after full LHS normalization.
         } else {
-            throw CompilerError("Replicated assignment patterns are not yet supported",
-                                assignLoc);
-        }
 
-        connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
-        return;
+            const auto suffixes = unpackedIndexSuffixes(*declaredType);
+            const auto indices = enumerateIndices(declaredType->unpacked_dims.front());
+            std::vector<DFGNode*> elementDrivers(suffixes.size(), nullptr);
+            auto& patternExpr = right->as<AssignmentPatternExpressionSyntax>();
+
+            if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
+                auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
+                if (pattern.items.size() != suffixes.size()) {
+                    throw CompilerError(
+                        std::format("Assignment pattern for '{}' requires {} elements but {} were provided",
+                                    baseName, suffixes.size(), pattern.items.size()),
+                        assignLoc);
+                }
+                for (size_t i = 0; i < suffixes.size(); ++i) {
+                    elementDrivers[i] = buildExprDFG(pattern.items[i], ctx);
+                }
+            } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+                if (declaredType->unpacked_dims.size() != 1) {
+                    throw CompilerError(
+                        "Keyed assignment patterns are currently supported only for 1-D unpacked arrays",
+                        assignLoc);
+                }
+                auto& pattern = patternExpr.pattern->as<StructuredAssignmentPatternSyntax>();
+                std::map<int64_t, DFGNode*> keyedDrivers;
+                DFGNode* defaultDriver = nullptr;
+
+                for (const auto* item : pattern.items) {
+                    if (item->key->kind == SyntaxKind::DefaultPatternKeyExpression ||
+                        (item->key->kind == SyntaxKind::IdentifierName &&
+                         item->key->as<IdentifierNameSyntax>().identifier.valueText() == "default")) {
+                        if (defaultDriver) {
+                            throw CompilerError("Assignment pattern has multiple default keys",
+                                                assignLoc);
+                        }
+                        defaultDriver = buildExprDFG(item->expr, ctx);
+                        continue;
+                    }
+
+                    int64_t idx = evaluateConstantExpr(item->key, ctx.params, ctx.sm, *item->key,
+                                                       &ctx.pkgRegistry);
+                    if (keyedDrivers.contains(idx)) {
+                        throw CompilerError(
+                            std::format("Assignment pattern has multiple keys for index {}", idx),
+                            assignLoc);
+                    }
+                    keyedDrivers[idx] = buildExprDFG(item->expr, ctx);
+                }
+
+                for (size_t i = 0; i < indices.size(); ++i) {
+                    auto it = keyedDrivers.find(indices[i]);
+                    if (it != keyedDrivers.end()) {
+                        elementDrivers[i] = it->second;
+                    } else if (defaultDriver) {
+                        elementDrivers[i] = defaultDriver;
+                    } else {
+                        throw CompilerError(
+                            std::format("Assignment pattern for '{}' does not cover index {}",
+                                        baseName, indices[i]),
+                            assignLoc);
+                    }
+                }
+            } else {
+                throw CompilerError("Replicated assignment patterns are not yet supported",
+                                    assignLoc);
+            }
+
+            connectWholeUnpackedArray(baseName, *declaredType, elementDrivers);
+            return;
+        }
     }
 
     // Build the expression value of the RHS. Whole-array assignments consume the
     // array-valued form; scalar paths below use RHSexprNode.
-    ExprValue RHSvalue = buildExprValue(right, ctx);
+    ExprValue RHSvalue = (right->kind == SyntaxKind::AssignmentPatternExpression)
+        ? ExprValue{.type = Type{}, .scalar = nullptr, .leaves = {}, .leaf_paths = {}}
+        : buildExprValue(right, ctx);
     DFGNode* RHSexprNode = RHSvalue.scalar;
 
     // LHS concatenation: {elem_n, ..., elem_0} = RHS
@@ -3844,6 +4049,21 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
     } else if (currentSelectedType) {
         assignmentTargetType = *currentSelectedType;
+    }
+    if (right->kind == SyntaxKind::AssignmentPatternExpression) {
+        if (!hasRangeSelect && assignmentTargetType &&
+            typeContainsStructValue(*assignmentTargetType)) {
+            RHSvalue = buildAssignmentPatternExprValueForTarget(
+                right->as<AssignmentPatternExpressionSyntax>(),
+                *assignmentTargetType,
+                ctx,
+                assignLoc);
+            RHSexprNode = RHSvalue.scalar;
+        } else {
+            throw CompilerError(
+                "Assignment patterns are only supported for whole unpacked arrays or struct literals",
+                assignLoc);
+        }
     }
     if (!hasRangeSelect && assignmentTargetType &&
             typeContainsStructValue(*assignmentTargetType)) {

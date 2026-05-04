@@ -1,0 +1,10 @@
+module_name: struct_literal_context_required_fail
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs: []

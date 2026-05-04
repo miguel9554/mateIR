@@ -197,15 +197,13 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
 void VcdWriter::addSignalEntries(vcd_tracer::module& scope, const std::string& name,
                                  const ModuleNode& sig,
                                  const std::unordered_set<const DFGNode*>& alive) {
-    if (sig.type.unpacked_dims.empty()) {
-        addEntry(scope, name, scalarModuleNode(sig), alive);
-        return;
-    }
-
-    auto suffixes = unpackedIndexSuffixes(sig.type);
-    const auto& leaves = moduleNodeLeaves(sig);
-    for (size_t i = 0; i < suffixes.size() && i < leaves.size(); ++i) {
-        addEntry(scope, name + suffixes[i], leaves[i], alive);
+    for (const auto& leaf : moduleNodeLeafRefs(sig)) {
+        std::string resolvedName = leaf.leaf_name;
+        if (leaf.leaf_name.rfind(sig.name, 0) == 0) {
+            const std::string suffix = leaf.leaf_name.substr(sig.name.size());
+            resolvedName = name + suffix;
+        }
+        addEntry(scope, resolvedName, leaf.node, alive);
     }
 }
 

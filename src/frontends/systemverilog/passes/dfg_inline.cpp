@@ -48,6 +48,9 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
             for (auto*& leaf : input->binding.leaves) {
                 if (leaf == subInputNode) leaf = driver.node;
             }
+            for (auto& leaf : input->binding.aggregate_leaves) {
+                if (leaf.leaf == subInputNode) leaf.leaf = driver.node;
+            }
         }
 
         // Recursively fix input bindings in deeper descendants that were wired to
@@ -56,6 +59,9 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
             forEachInputNode(mod, [&](ModuleNode& inp) {
                 for (auto*& leaf : inp.binding.leaves) {
                     if (leaf == subInputNode) leaf = driver.node;
+                }
+                for (auto& leaf : inp.binding.aggregate_leaves) {
+                    if (leaf.leaf == subInputNode) leaf.leaf = driver.node;
                 }
             });
             for (auto& child : mod.hierarchyInstantiation)

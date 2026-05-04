@@ -1,12 +1,13 @@
-module struct_named_object_phase1_fail (
+module struct_array_of_struct_leaf_binding (
     input wire clk,
     input wire rst_n,
     output logic keep_alive
 );
     typedef struct packed {
-        logic [7:0] data;
-    } item_t;
+        logic field0;
+        logic [3:0] field1;
+    } fifo_elem_t;
 
-    item_t bad_decl;
+    fifo_elem_t fifo [0:1];
     always @(*) keep_alive = 1'b0;
 endmodule

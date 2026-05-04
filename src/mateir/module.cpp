@@ -23,6 +23,56 @@ const char* moduleNodeRoleName(ModuleNodeRole role) {
     return "internal";
 }
 
+Type scalarLeafType(Type type) {
+    type.unpacked_dims.clear();
+    return type;
+}
+
+void collectAggregateLeafPlan(const Type& type,
+                              const std::string& base_name,
+                              const AggregatePath& path,
+                              std::vector<AggregateLeafBinding>& out) {
+    if (!type.unpacked_dims.empty()) {
+        Type elem = type;
+        const auto dim = elem.unpacked_dims.front();
+        elem.unpacked_dims.erase(elem.unpacked_dims.begin());
+        int step = dim.left <= dim.right ? 1 : -1;
+        for (int i = dim.left; step > 0 ? i <= dim.right : i >= dim.right; i += step) {
+            AggregatePath child_path = path;
+            child_path.push_back(AggregatePathElem{
+                .kind = AggregatePathElemKind::Index,
+                .field_name = "",
+                .index = i,
+            });
+            collectAggregateLeafPlan(elem,
+                                     base_name + "[" + std::to_string(i) + "]",
+                                     child_path,
+                                     out);
+        }
+        return;
+    }
+
+    if (type.isStruct()) {
+        for (const auto& field : type.structInfo().fields) {
+            AggregatePath child_path = path;
+            child_path.push_back(AggregatePathElem{
+                .kind = AggregatePathElemKind::Field,
+                .field_name = field.name,
+                .index = 0,
+            });
+            collectAggregateLeafPlan(*field.type, base_name + "." + field.name, child_path, out);
+        }
+        return;
+    }
+
+    out.push_back(AggregateLeafBinding{
+        .leaf = nullptr,
+        .name = base_name,
+        .path = path,
+        .leaf_type = scalarLeafType(type),
+    });
+}
+
 } // namespace
 
 // ============================================================================
@@ -119,11 +169,18 @@ DFGNode* leafAt(const ModuleNodeBinding& binding,
 }
 
 static size_t expectedModuleNodeLeafCount(const Type& type) {
-    return type.unpacked_dims.empty() ? 1 : unpackedIndexSuffixes(type).size();
+    std::vector<AggregateLeafBinding> plan;
+    collectAggregateLeafPlan(type, "", {}, plan);
+    return plan.size();
 }
 
 static void validateModuleNodeBindingShape(const ModuleNode& module_node) {
     const size_t expected = expectedModuleNodeLeafCount(module_node.type);
+    if (module_node.binding.aggregate_leaves.size() != expected) {
+        throw CompilerError(std::format(
+            "module node '{}' aggregate binding mismatch: expected {} leaf/leaves, got {}",
+            module_node.name, expected, module_node.binding.aggregate_leaves.size()));
+    }
     if (module_node.binding.leaves.size() != expected) {
         throw CompilerError(std::format(
             "module node '{}' binding mismatch: expected {} leaf/leaves, got {}",
@@ -308,23 +365,25 @@ DFGNode* scalarFlopQNode(const FlopInfo& flop) {
 std::vector<ModuleNodeLeafRef> moduleNodeLeafRefs(const ModuleNode& module_node) {
     validateModuleNodeBindingShape(module_node);
     std::vector<ModuleNodeLeafRef> refs;
-    refs.reserve(module_node.binding.leaves.size());
-    if (module_node.type.unpacked_dims.empty()) {
+    refs.reserve(module_node.binding.aggregate_leaves.size());
+    if (module_node.binding.aggregate_leaves.empty()) {
+        return refs;
+    }
+    if (module_node.binding.aggregate_leaves.size() == 1) {
         refs.push_back(ModuleNodeLeafRef{
             .module_node = &module_node,
-            .node = module_node.binding.leaves.front(),
-            .leaf_name = module_node.name,
+            .node = module_node.binding.aggregate_leaves.front().leaf,
+            .leaf_name = module_node.binding.aggregate_leaves.front().name,
             .leaf_index = 0,
         });
         return refs;
     }
-
-    const auto suffixes = unpackedIndexSuffixes(module_node.type);
-    for (size_t i = 0; i < suffixes.size(); ++i) {
+    for (size_t i = 0; i < module_node.binding.aggregate_leaves.size(); ++i) {
+        const auto& leaf = module_node.binding.aggregate_leaves[i];
         refs.push_back(ModuleNodeLeafRef{
             .module_node = &module_node,
-            .node = module_node.binding.leaves[i],
-            .leaf_name = module_node.name + suffixes[i],
+            .node = leaf.leaf,
+            .leaf_name = leaf.name,
             .leaf_index = i,
         });
     }
@@ -753,6 +812,33 @@ static std::string syncTypeToJson(const SyncType& syncType) {
     return ss.str();
 }
 
+static std::string aggregatePathElemToJson(const AggregatePathElem& elem) {
+    std::ostringstream ss;
+    ss << "{";
+    if (elem.kind == AggregatePathElemKind::Field) {
+        ss << "\"kind\": \"Field\", \"name\": \"" << elem.field_name << "\"";
+    } else {
+        ss << "\"kind\": \"Index\", \"value\": " << elem.index;
+    }
+    ss << "}";
+    return ss.str();
+}
+
+static std::string aggregateLeafToJson(const AggregateLeafBinding& leaf) {
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"name\": \"" << leaf.name << "\", ";
+    ss << "\"path\": [";
+    for (size_t i = 0; i < leaf.path.size(); ++i) {
+        if (i) ss << ", ";
+        ss << aggregatePathElemToJson(leaf.path[i]);
+    }
+    ss << "], ";
+    ss << "\"type\": " << typeToJson(leaf.leaf_type);
+    ss << "}";
+    return ss.str();
+}
+
 SyncKind syncKind(const SyncType& sync_type) {
     if (std::holds_alternative<SyncSignal>(sync_type)) return SyncKind::Sync;
     if (std::holds_alternative<ClockSignal>(sync_type)) return SyncKind::Clock;
@@ -771,7 +857,13 @@ static std::string moduleNodeToJson(const ModuleNode& s) {
     ss << "\"name\": \"" << s.name << "\", ";
     ss << "\"type\": " << typeToJson(s.type) << ", ";
     ss << "\"sync_kind\": \"" << syncKindStr(syncKind(s)) << "\", ";
-    ss << "\"sync_type\": " << syncTypeToJson(s.sync_type);
+    ss << "\"sync_type\": " << syncTypeToJson(s.sync_type) << ", ";
+    ss << "\"binding_leaves\": [";
+    for (size_t i = 0; i < s.binding.aggregate_leaves.size(); ++i) {
+        if (i) ss << ", ";
+        ss << aggregateLeafToJson(s.binding.aggregate_leaves[i]);
+    }
+    ss << "]";
     ss << "}";
     return ss.str();
 }

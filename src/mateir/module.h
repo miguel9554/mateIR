@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <cstdint>
 #include <unordered_set>
 #include <vector>
 
@@ -17,11 +18,31 @@ namespace mate {
 // Leaf binding structures
 // ============================================================================
 
+enum class AggregatePathElemKind {
+    Field,
+    Index,
+};
+
+struct AggregatePathElem {
+    AggregatePathElemKind kind = AggregatePathElemKind::Field;
+    std::string field_name;
+    int64_t index = 0;
+};
+
+using AggregatePath = std::vector<AggregatePathElem>;
+
+struct AggregateLeafBinding {
+    DFGNode* leaf = nullptr;
+    std::string name;
+    AggregatePath path;
+    Type leaf_type;
+};
+
 // Declaration-order DFG leaves for a module node.
 // Scalars and packed vectors have exactly one leaf.
-// Unpacked arrays have one leaf per flattened element (declaration order,
-// outermost dimension first).
+// Unpacked/struct aggregates flatten in declaration order.
 struct ModuleNodeBinding {
+    std::vector<AggregateLeafBinding> aggregate_leaves;
     std::vector<DFGNode*> leaves;
 };
 

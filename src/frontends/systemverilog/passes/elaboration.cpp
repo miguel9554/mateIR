@@ -317,6 +317,11 @@ static DFGNode* inlineSubroutineCall(
         ResolutionContext& ctx
 );
 
+static void collectAggregateLeafPlan(const Type& type,
+                                     const std::string& baseName,
+                                     const AggregatePath& path,
+                                     std::vector<AggregateLeafBinding>& out);
+
 const Type* lookupDeclaredType(const std::string& baseName,
                                        const ResolutionContext& ctx);
 
@@ -1648,17 +1653,19 @@ static DFGNode* lookupLeafNode(ResolutionContext& ctx, const std::string& name) 
     return lookupNamedNodeInModule(ctx, name);
 }
 
-static std::vector<DFGNode*> lookupArrayLeaves(ResolutionContext& ctx,
-                                               const std::string& baseName,
-                                               const Type& type) {
+static std::vector<DFGNode*> lookupAggregateLeaves(ResolutionContext& ctx,
+                                                   const std::string& baseName,
+                                                   const Type& type) {
     std::vector<DFGNode*> leaves;
-    leaves.reserve(unpackedLeafCount(type));
+    std::vector<AggregateLeafBinding> plan;
+    collectAggregateLeafPlan(type, baseName, {}, plan);
+    leaves.reserve(plan.size());
     const bool readFlopQ = isFlopBaseName(ctx, baseName);
-    for (const auto& suffix : unpackedIndexSuffixes(type)) {
-        std::string leafName = baseName + suffix + (readFlopQ ? ".q" : "");
+    for (const auto& leafPlan : plan) {
+        std::string leafName = leafPlan.name + (readFlopQ ? ".q" : "");
         DFGNode* leaf = lookupLeafNode(ctx, leafName);
         if (!leaf) {
-            throw CompilerError("Could not find unpacked array leaf: " + leafName);
+            throw CompilerError("Could not find aggregate leaf: " + leafName);
         }
         leaves.push_back(leaf);
     }
@@ -1669,11 +1676,11 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
                                          const std::optional<SourceLoc>& loc,
                                          ResolutionContext& ctx) {
     const auto* declaredType = lookupDeclaredType(baseName, ctx);
-    if (declaredType && !declaredType->unpacked_dims.empty()) {
+    if (declaredType && (declaredType->isStruct() || !declaredType->unpacked_dims.empty())) {
         return ExprValue{
             .type = *declaredType,
             .scalar = nullptr,
-            .leaves = lookupArrayLeaves(ctx, baseName, *declaredType),
+            .leaves = lookupAggregateLeaves(ctx, baseName, *declaredType),
         };
     }
 
@@ -4210,13 +4217,6 @@ ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterCont
         namedTypeRegistry,
         pkgRegistry);
 
-    if (resolved.type.isStruct()) {
-        throw CompilerError(
-            "struct-typed declarations are not supported before aggregate leaf binding",
-            sm ? std::optional<SourceLoc>(resolveSourceLoc(*signal.type.syntax, *sm)) : std::nullopt);
-    }
-
-
     if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, sm);
 
     // For some reason getting 1 dimension of [0:0]
@@ -4231,63 +4231,129 @@ ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterCont
 // Pre-population helpers for DFG
 // ============================================================================
 
+static Type aggregateLeafType(Type type) {
+    type.unpacked_dims.clear();
+    return type;
+}
+
+static bool typeContainsStruct(const Type& type) {
+    if (type.isStruct()) return true;
+    if (!type.unpacked_dims.empty()) {
+        Type elem = type;
+        elem.unpacked_dims.erase(elem.unpacked_dims.begin());
+        return typeContainsStruct(elem);
+    }
+    return false;
+}
+
+static void collectAggregateLeafPlan(const Type& type,
+                                     const std::string& baseName,
+                                     const AggregatePath& path,
+                                     std::vector<AggregateLeafBinding>& out) {
+    if (!type.unpacked_dims.empty()) {
+        Type elem = type;
+        const auto dim = elem.unpacked_dims.front();
+        elem.unpacked_dims.erase(elem.unpacked_dims.begin());
+        int step = dim.left <= dim.right ? 1 : -1;
+        for (int i = dim.left; step > 0 ? i <= dim.right : i >= dim.right; i += step) {
+            AggregatePath childPath = path;
+            childPath.push_back(AggregatePathElem{
+                .kind = AggregatePathElemKind::Index,
+                .field_name = "",
+                .index = i,
+            });
+            collectAggregateLeafPlan(elem,
+                                     baseName + "[" + std::to_string(i) + "]",
+                                     childPath,
+                                     out);
+        }
+        return;
+    }
+
+    if (type.isStruct()) {
+        for (const auto& field : type.structInfo().fields) {
+            AggregatePath childPath = path;
+            childPath.push_back(AggregatePathElem{
+                .kind = AggregatePathElemKind::Field,
+                .field_name = field.name,
+                .index = 0,
+            });
+            collectAggregateLeafPlan(*field.type, baseName + "." + field.name, childPath, out);
+        }
+        return;
+    }
+
+    out.push_back(AggregateLeafBinding{
+        .leaf = nullptr,
+        .name = baseName,
+        .path = path,
+        .leaf_type = aggregateLeafType(type),
+    });
+}
+
+enum class AggregateLeafNodeKind {
+    Input,
+    Output,
+    Signal,
+};
+
+static DFGNode* createAggregateLeafNode(DFG& graph,
+                                        AggregateLeafNodeKind kind,
+                                        const std::string& name,
+                                        const Type& type) {
+    DFGNode* node = nullptr;
+    switch (kind) {
+        case AggregateLeafNodeKind::Input:
+            node = graph.createGraphInput("", name);
+            break;
+        case AggregateLeafNodeKind::Output:
+            node = graph.createGraphOutput("", name);
+            break;
+        case AggregateLeafNodeKind::Signal:
+            node = graph.signal("", name);
+            break;
+    }
+    node->type = type;
+    return node;
+}
+
+static void prePopulateAggregateModuleNode(DFG& graph,
+                                           ModuleNode& sig,
+                                           AggregateLeafNodeKind kind) {
+    sig.binding.leaves.clear();
+    sig.binding.aggregate_leaves.clear();
+    collectAggregateLeafPlan(sig.type, sig.name, {}, sig.binding.aggregate_leaves);
+    for (auto& leaf : sig.binding.aggregate_leaves) {
+        DFGNode* node = createAggregateLeafNode(graph, kind, leaf.name, leaf.leaf_type);
+        leaf.leaf = node;
+        sig.binding.leaves.push_back(node);
+    }
+}
+
 // Pre-populate module input (port) with all bit indices
 // For vector inputs, creates base node + individual element nodes
 void prePopulateInput(DFG& graph, ModuleNode& sig) {
-    sig.binding.leaves.clear();
-    if (sig.type.unpacked_dims.empty()) {
-        auto* node = graph.createGraphInput("", sig.name);
-        node->type = sig.type;
-        sig.binding.leaves.push_back(node);
-    } else {
-        Type leafType = sig.type;
-        leafType.unpacked_dims.clear();
-        for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
-            auto* node = graph.createGraphInput("", sig.name + suffix);
-            node->type = leafType;
-            sig.binding.leaves.push_back(node);
-        }
-    }
+    prePopulateAggregateModuleNode(graph, sig, AggregateLeafNodeKind::Input);
 }
 
 // Pre-populate module output (port) with all bit indices
 // Creates OUTPUT nodes with no driver
 // For vector outputs, creates base node + individual element nodes
 void prePopulateOutput(DFG& graph, ModuleNode& sig) {
-    sig.binding.leaves.clear();
-    if (sig.type.unpacked_dims.empty()) {
-        auto* node = graph.createGraphOutput("", sig.name);
-        node->type = sig.type;
-        sig.binding.leaves.push_back(node);
-    } else {
-        Type leafType = sig.type;
-        leafType.unpacked_dims.clear();
-        for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
-            auto* node = graph.createGraphOutput("", sig.name + suffix);
-            node->type = leafType;
-            sig.binding.leaves.push_back(node);
-        }
-    }
+    prePopulateAggregateModuleNode(graph, sig, AggregateLeafNodeKind::Output);
 }
 
 // Pre-populate internal signal with all bit indices.
 // Only called for plain (non-flop) signals; .d/.q nodes are handled by
 // prePopulateFlopNodes below.
 void prePopulateModuleNode(DFG& graph, ModuleNode& sig) {
-    sig.binding.leaves.clear();
-    if (sig.type.unpacked_dims.empty()) {
-        auto* node = graph.signal("", sig.name);
-        node->type = sig.type;
-        sig.binding.leaves.push_back(node);
-        return;
-    }
-
-    Type leafType = sig.type;
-    leafType.unpacked_dims.clear();
-    for (const auto& suffix : unpackedIndexSuffixes(sig.type)) {
-        auto* node = graph.signal("", sig.name + suffix);
-        node->type = leafType;
-        sig.binding.leaves.push_back(node);
+    prePopulateAggregateModuleNode(graph, sig, AggregateLeafNodeKind::Signal);
+    if (typeContainsStruct(sig.type)) {
+        for (auto& leaf : sig.binding.aggregate_leaves) {
+            auto* zero = graph.constant(0);
+            zero->type = leaf.leaf_type;
+            graph.connectDriver(leaf.leaf, zero);
+        }
     }
 }
 
@@ -4717,10 +4783,6 @@ static void resolveGenerateScopeDecls(
                                   bool isFlop) {
         std::string name(decl.name.valueText());
         Type type = resolveType(typeSyntax, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
-        if (type.isStruct()) {
-            throw CompilerError("struct-typed declarations are not supported before aggregate leaf binding",
-                                resolveSourceLoc(decl, ctx.sm));
-        }
 
         // Resolve unpacked dimensions from the declarator
         auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.sm);
@@ -4730,6 +4792,10 @@ static void resolveGenerateScopeDecls(
         type.unpacked_dims = unpacked;
 
         if (isFlop) {
+            if (type.isStruct()) {
+                throw CompilerError("struct-typed flops are not supported in phase 2",
+                                    resolveSourceLoc(decl, ctx.sm));
+            }
             if (!type.unpacked_dims.empty())
                 throw CompilerError(
                     "Generate-scope flop arrays not yet supported: " + name);
@@ -4758,39 +4824,31 @@ static void resolveGenerateScopeDecls(
             });
         } else {
             // Wire / internal signal
-            if (type.unpacked_dims.empty()) {
-                auto* node = ctx.graph.signal(ctx.instance_path, name);
-                node->type = type;
-                ctx.local_nodes[name] = node;
-                // Add to resolved named-value nodes with qualified name so the VCD writer can
-                // place this node under the correct generate-scope hierarchy.
-                if (!ctx.instance_path.empty()) {
-                    std::string qualName = ctx.instance_path + "." + name;
-                    ModuleNode genSig;
-                    genSig.name = qualName;
-                    genSig.type = type;
-                    genSig.binding.leaves = {node};
-                    addInternalNode(*ctx.thisModule, genSig);
-                }
-            } else {
+            std::vector<AggregateLeafBinding> localLeafPlan;
+            collectAggregateLeafPlan(type, name, {}, localLeafPlan);
+            for (auto& leaf : localLeafPlan) {
+                auto* node = ctx.graph.signal(ctx.instance_path, leaf.name);
+                node->type = leaf.leaf_type;
+                leaf.leaf = node;
+            }
+            if (!type.unpacked_dims.empty() || type.isStruct()) {
                 ctx.local_array_types[name] = type;
+            }
+            for (const auto& leaf : localLeafPlan) {
+                ctx.local_nodes[leaf.name] = leaf.leaf;
+            }
 
-                Type leafType = type;
-                leafType.unpacked_dims.clear();
-
+            if (!ctx.instance_path.empty()) {
+                std::string qualName = ctx.instance_path + "." + name;
                 ModuleNode genSig;
-                genSig.name = ctx.instance_path.empty() ? name : ctx.instance_path + "." + name;
+                genSig.name = qualName;
                 genSig.type = type;
-
-                for (const auto& suffix : unpackedIndexSuffixes(type)) {
-                    auto* leaf = ctx.graph.signal(ctx.instance_path, name + suffix);
-                    leaf->type = leafType;
-                    ctx.local_nodes[name + suffix] = leaf;
-                    genSig.binding.leaves.push_back(leaf);
+                collectAggregateLeafPlan(type, qualName, {}, genSig.binding.aggregate_leaves);
+                for (size_t i = 0; i < genSig.binding.aggregate_leaves.size(); ++i) {
+                    genSig.binding.aggregate_leaves[i].leaf = localLeafPlan[i].leaf;
+                    genSig.binding.leaves.push_back(localLeafPlan[i].leaf);
                 }
-                if (!ctx.instance_path.empty()) {
-                    addInternalNode(*ctx.thisModule, genSig);
-                }
+                addInternalNode(*ctx.thisModule, genSig);
             }
         }
     };
@@ -5328,12 +5386,20 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
         auto sig = resolveModuleNode(input, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
+        if (sig.type.isStruct()) {
+            throw CompilerError("struct-typed input ports are not supported in phase 2",
+                                resolveSourceLoc(*input.type.syntax, sourceManager));
+        }
         addInputNode(resolved, sig);
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
         auto sig = resolveModuleNode(output, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
+        if (sig.type.isStruct()) {
+            throw CompilerError("struct-typed output ports are not supported in phase 2",
+                                resolveSourceLoc(*output.type.syntax, sourceManager));
+        }
         addOutputNode(resolved, sig);
     }
 
@@ -5347,6 +5413,10 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     std::set<std::string> flopNames;
     for (const auto& flop : unresolved.flops) {
         const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+        if (resolvedModuleNode.type.isStruct()) {
+            throw CompilerError("struct-typed flops are not supported in phase 2",
+                                resolveSourceLoc(*flop.type.syntax, sourceManager));
+        }
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedModuleNode.name,
                 .type = resolvedModuleNode.type,

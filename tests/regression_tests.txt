@@ -61,7 +61,9 @@ static_flop_d PASS
 static_sync_mix PASS
 static_top_output PASS
 struct_typedef_collection PASS
-struct_named_object_phase1_fail FAIL struct-typed declarations are not supported before aggregate leaf binding
+struct_field_access_phase2_fail FAIL Unknown package
+struct_whole_assign_phase2_fail FAIL Array-valued expression used for scalar assignment
+struct_port_decl_phase2_fail FAIL anonymous struct declarations are not supported
 struct_anonymous_decl_fail FAIL anonymous struct declarations are not supported
 struct_unpacked_field_fail FAIL struct fields cannot be unpacked arrays
 struct_member_default_fail FAIL struct member initializers/defaults are not supported

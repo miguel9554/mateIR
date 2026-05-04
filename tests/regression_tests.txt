@@ -69,6 +69,12 @@ struct_whole_assign_phase2_fail PASS
 struct_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
 struct_to_vector_assign_fail FAIL struct/vector assignment is not supported
 vector_to_struct_assign_fail FAIL struct/vector assignment is not supported
+struct_conditional_expr PASS
+struct_if_branch_merge PASS
+struct_case_branch_merge PASS
+struct_conditional_typedef_mismatch_fail FAIL whole-struct conditional requires matching typedef names
+struct_if_struct_condition_fail FAIL whole struct cannot be used as a boolean condition
+struct_ternary_struct_condition_fail FAIL whole struct cannot be used as a boolean condition
 struct_port_decl_phase2_fail FAIL anonymous struct declarations are not supported
 struct_anonymous_decl_fail FAIL anonymous struct declarations are not supported
 struct_unpacked_field_fail FAIL struct fields cannot be unpacked arrays

@@ -2259,6 +2259,127 @@ static Type mergeFrontendDataTypes(const ExprValue& lhs,
                              lhs.type.isSigned() && rhs.type.isSigned());
 }
 
+static bool typeContainsStructValue(const Type& type) {
+    if (type.isStruct()) return true;
+    if (type.unpacked_dims.empty()) return false;
+    Type elem = type;
+    elem.unpacked_dims.erase(elem.unpacked_dims.begin());
+    return typeContainsStructValue(elem);
+}
+
+static bool sameAggregateStructTypedefShape(const Type& lhs, const Type& rhs) {
+    if (!lhs.unpacked_dims.empty() || !rhs.unpacked_dims.empty()) {
+        if (lhs.unpacked_dims.empty() || rhs.unpacked_dims.empty()) return false;
+        if (lhs.unpacked_dims.front() != rhs.unpacked_dims.front()) return false;
+        return sameAggregateStructTypedefShape(dropFirstUnpackedDim(lhs), dropFirstUnpackedDim(rhs));
+    }
+    if (lhs.isStruct() || rhs.isStruct()) {
+        if (!lhs.isStruct() || !rhs.isStruct()) return false;
+        if (lhs.structInfo().type_name != rhs.structInfo().type_name) return false;
+        if (lhs.structInfo().fields.size() != rhs.structInfo().fields.size()) return false;
+        for (size_t i = 0; i < lhs.structInfo().fields.size(); ++i) {
+            if (!sameAggregateStructTypedefShape(*lhs.structInfo().fields[i].type,
+                                                 *rhs.structInfo().fields[i].type)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool aggregatePathElemEqual(const AggregatePathElem& lhs, const AggregatePathElem& rhs) {
+    if (lhs.kind != rhs.kind) return false;
+    if (lhs.kind == AggregatePathElemKind::Field) return lhs.field_name == rhs.field_name;
+    return lhs.index == rhs.index;
+}
+
+static bool aggregatePathEqual(const AggregatePath& lhs, const AggregatePath& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (!aggregatePathElemEqual(lhs[i], rhs[i])) return false;
+    }
+    return true;
+}
+
+static DFGNode* buildBooleanConditionNode(const ExpressionSyntax* expr,
+                                          ResolutionContext& ctx,
+                                          const std::optional<SourceLoc>& loc) {
+    ExprValue value = buildExprValue(expr, ctx);
+    if (typeContainsStructValue(value.type)) {
+        throw CompilerError("whole struct cannot be used as a boolean condition", loc);
+    }
+    if (!value.type.unpacked_dims.empty() || !value.scalar) {
+        throw CompilerError("Array-valued expression used where scalar expression is required", loc);
+    }
+    return value.scalar;
+}
+
+static ExprValue buildConditionalExprValue(const ConditionalExpressionSyntax& cond,
+                                           ResolutionContext& ctx) {
+    auto loc = resolveSourceLoc(cond, ctx.sm);
+    if (cond.predicate->conditions.size() != 1) {
+        throw CompilerError("Only single condition supported in ternary expression", loc);
+    }
+    if (cond.predicate->conditions[0]->matchesClause) {
+        throw CompilerError("matches clause not supported in ternary expression", loc);
+    }
+
+    DFGNode* condNode = buildBooleanConditionNode(cond.predicate->conditions[0]->expr, ctx, loc);
+    ExprValue trueValue = buildExprValue(cond.left, ctx);
+    ExprValue falseValue = buildExprValue(cond.right, ctx);
+
+    bool trueHasStruct = typeContainsStructValue(trueValue.type);
+    bool falseHasStruct = typeContainsStructValue(falseValue.type);
+    if (trueHasStruct != falseHasStruct) {
+        throw CompilerError("struct/vector assignment is not supported", loc);
+    }
+    if (!trueHasStruct) {
+        if ((!trueValue.type.unpacked_dims.empty() || !falseValue.type.unpacked_dims.empty()) ||
+            !trueValue.scalar || !falseValue.scalar) {
+            throw CompilerError("Array-valued expression used where scalar expression is required", loc);
+        }
+        Type mergedType = mergeFrontendDataTypes(trueValue, falseValue, loc);
+        auto* node = ctx.graph.mux(condNode, trueValue.scalar, falseValue.scalar);
+        node->loc = loc;
+        if (trueValue.type.isEnum() || falseValue.type.isEnum()) {
+            node->type = mergedType;
+        }
+        return ExprValue{.type = mergedType, .scalar = node, .leaves = {}, .leaf_paths = {}};
+    }
+
+    if (!sameAggregateStructTypedefShape(trueValue.type, falseValue.type)) {
+        throw CompilerError("whole-struct conditional requires matching typedef names", loc);
+    }
+    if (trueValue.leaves.size() != falseValue.leaves.size() ||
+        trueValue.leaf_paths.size() != falseValue.leaf_paths.size()) {
+        throw CompilerError("whole-struct conditional leaf shape mismatch", loc);
+    }
+
+    std::vector<DFGNode*> leaves;
+    leaves.reserve(trueValue.leaves.size());
+    for (size_t i = 0; i < trueValue.leaves.size(); ++i) {
+        if (!aggregatePathEqual(trueValue.leaf_paths[i], falseValue.leaf_paths[i])) {
+            throw CompilerError("whole-struct conditional leaf path mismatch", loc);
+        }
+        auto* mux = ctx.graph.mux(condNode, trueValue.leaves[i], falseValue.leaves[i]);
+        mux->loc = loc;
+        if (trueValue.leaves[i] && falseValue.leaves[i] &&
+            trueValue.leaves[i]->hasType() && falseValue.leaves[i]->hasType()) {
+            ExprValue lhsLeaf{.type = *trueValue.leaves[i]->type, .scalar = trueValue.leaves[i]};
+            ExprValue rhsLeaf{.type = *falseValue.leaves[i]->type, .scalar = falseValue.leaves[i]};
+            Type mergedType = mergeFrontendDataTypes(lhsLeaf, rhsLeaf, loc);
+            if (mergedType.isEnum()) mux->type = mergedType;
+        }
+        leaves.push_back(mux);
+    }
+    return ExprValue{
+        .type = trueValue.type,
+        .scalar = nullptr,
+        .leaves = std::move(leaves),
+        .leaf_paths = trueValue.leaf_paths,
+    };
+}
+
 static ExprValue retagConstOrReturnValue(ExprValue value,
                                          const Type& targetType,
                                          const std::optional<SourceLoc>& loc) {
@@ -2379,6 +2500,10 @@ static ExprValue buildExprValue(
         ExprValue inner = buildScalarExprValue(castExpr.right->expression, ctx);
         validateEnumCastWidth(inner, castType, loc);
         return retagConstOrReturnValue(inner, castType, loc);
+    }
+
+    if (expr->kind == SyntaxKind::ConditionalExpression) {
+        return buildConditionalExprValue(expr->as<ConditionalExpressionSyntax>(), ctx);
     }
 
     if (expr->kind == SyntaxKind::IdentifierName) {
@@ -3235,26 +3360,7 @@ static DFGNode* buildExprScalarImpl(
         }
 
         case SyntaxKind::ConditionalExpression: {
-            auto& cond = expr->as<ConditionalExpressionSyntax>();
-            if (cond.predicate->conditions.size() != 1) {
-                throw CompilerError("Only single condition supported in ternary expression",
-                                    resolveSourceLoc(*expr, ctx.sm));
-            }
-            if (cond.predicate->conditions[0]->matchesClause) {
-                throw CompilerError("matches clause not supported in ternary expression",
-                                    resolveSourceLoc(*expr, ctx.sm));
-            }
-            auto* condNode = buildExprDFG(cond.predicate->conditions[0]->expr, ctx);
-            auto loc = resolveSourceLoc(*expr, ctx.sm);
-            auto trueValue = buildScalarExprValue(cond.left, ctx);
-            auto falseValue = buildScalarExprValue(cond.right, ctx);
-            Type mergedType = mergeFrontendDataTypes(trueValue, falseValue, loc);
-            auto* node = ctx.graph.mux(condNode, trueValue.scalar, falseValue.scalar);
-            node->loc = loc;
-            if (trueValue.type.isEnum() || falseValue.type.isEnum()) {
-                node->type = mergedType;
-            }
-            return node;
+            return buildScalarExprValue(expr, ctx).scalar;
         }
 
         case SyntaxKind::CastExpression: {
@@ -3355,27 +3461,6 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         if (ctx.is_sequential) {
             recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
         }
-    };
-
-    auto typeContainsStructValue = [&](const Type& type, const auto& self) -> bool {
-        if (type.isStruct()) return true;
-        if (type.unpacked_dims.empty()) return false;
-        Type elem = type;
-        elem.unpacked_dims.erase(elem.unpacked_dims.begin());
-        return self(elem, self);
-    };
-
-    auto sameStructTypedefShape = [&](const Type& lhs, const Type& rhs, const auto& self) -> bool {
-        if (!lhs.unpacked_dims.empty() || !rhs.unpacked_dims.empty()) {
-            if (lhs.unpacked_dims.empty() || rhs.unpacked_dims.empty()) return false;
-            if (lhs.unpacked_dims.front() != rhs.unpacked_dims.front()) return false;
-            return self(dropFirstUnpackedDim(lhs), dropFirstUnpackedDim(rhs), self);
-        }
-        if (lhs.isStruct() || rhs.isStruct()) {
-            if (!lhs.isStruct() || !rhs.isStruct()) return false;
-            return lhs.structInfo().type_name == rhs.structInfo().type_name;
-        }
-        return true;
     };
 
     if (right->kind == SyntaxKind::AssignmentPatternExpression) {
@@ -3614,7 +3699,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     if (selectors.empty()) {
         if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
             declaredType && !declaredType->unpacked_dims.empty() &&
-                !typeContainsStructValue(*declaredType, typeContainsStructValue)) {
+                !typeContainsStructValue(*declaredType)) {
             if (RHSvalue.type.unpacked_dims != declaredType->unpacked_dims ||
                     RHSvalue.leaves.size() != aggregateValueLeafCount(*declaredType)) {
                 throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
@@ -3761,14 +3846,14 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         assignmentTargetType = *currentSelectedType;
     }
     if (!hasRangeSelect && assignmentTargetType &&
-            typeContainsStructValue(*assignmentTargetType, typeContainsStructValue)) {
+            typeContainsStructValue(*assignmentTargetType)) {
         if (ctx.is_sequential && !isFlopName(baseName)) {
             throw CompilerError(
                 std::format("{} NOT a flop and assigned on seq. block", baseName),
                 resolveSourceLoc(assignExpr, ctx.sm));
         }
-        if (!sameStructTypedefShape(*assignmentTargetType, RHSvalue.type, sameStructTypedefShape)) {
-            bool rhsStructAggregate = typeContainsStructValue(RHSvalue.type, typeContainsStructValue);
+        if (!sameAggregateStructTypedefShape(*assignmentTargetType, RHSvalue.type)) {
+            bool rhsStructAggregate = typeContainsStructValue(RHSvalue.type);
             if (rhsStructAggregate) {
                 throw CompilerError(
                     "whole-struct assignment requires matching typedef names",
@@ -3813,9 +3898,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     }
 
     if (!RHSexprNode &&
-            typeContainsStructValue(RHSvalue.type, typeContainsStructValue) &&
+            typeContainsStructValue(RHSvalue.type) &&
             (!assignmentTargetType ||
-             !typeContainsStructValue(*assignmentTargetType, typeContainsStructValue))) {
+             !typeContainsStructValue(*assignmentTargetType))) {
         throw CompilerError("struct/vector assignment is not supported", assignLoc);
     }
 
@@ -4158,7 +4243,7 @@ void resolveConditionalStatementInPlace(
     }
 
     // Construct the predicate node used by branch merges.
-    auto conditionNode = buildExprDFG(predicateExpr, ctx);
+    auto conditionNode = buildBooleanConditionNode(predicateExpr, ctx, condLoc);
     const auto baselineDrivers = snapshotDrivers(ctx);
 
     std::optional<DriverMap> elseDrivers;

@@ -1,0 +1,7 @@
+module_name: struct_conditional_expr
+async_domain:
+- sel
+- ax
+- ay
+- bx
+- by

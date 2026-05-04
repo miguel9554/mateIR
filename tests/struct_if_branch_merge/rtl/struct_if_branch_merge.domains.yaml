@@ -1,0 +1,7 @@
+module_name: struct_if_branch_merge
+async_domain:
+- sel
+- ax
+- ay
+- bx
+- by

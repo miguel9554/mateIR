@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <functional>
 #include <iostream>
 #include <source_location>
 #include <map>
@@ -87,6 +88,8 @@ struct ResolutionContext {
     // generate-scope array signals. Used by lookupDeclaredType since there is no
     // aggregate node for arrays after the leaf-binding refactor.
     std::map<std::string, Type> local_array_types;
+    // Local aggregate bindings keyed by base declaration name.
+    std::map<std::string, ModuleNodeBinding> local_aggregate_bindings;
     // local_flop_names: base names of flops declared in this generate scope
     std::set<std::string> local_flop_names;
 
@@ -290,6 +293,7 @@ struct ExprValue {
     Type type;
     DFGNode* scalar = nullptr;      // valid when type.unpacked_dims is empty
     std::vector<DFGNode*> leaves;   // valid when type.unpacked_dims is non-empty
+    std::vector<AggregatePath> leaf_paths;
 };
 
 // Build an expression that may be scalar or array-valued.
@@ -321,6 +325,12 @@ static void collectAggregateLeafPlan(const Type& type,
                                      const std::string& baseName,
                                      const AggregatePath& path,
                                      std::vector<AggregateLeafBinding>& out);
+
+static size_t aggregateValueLeafCount(const Type& type) {
+    std::vector<AggregateLeafBinding> plan;
+    collectAggregateLeafPlan(type, "", {}, plan);
+    return plan.size();
+}
 
 const Type* lookupDeclaredType(const std::string& baseName,
                                        const ResolutionContext& ctx);
@@ -1653,9 +1663,39 @@ static DFGNode* lookupLeafNode(ResolutionContext& ctx, const std::string& name) 
     return lookupNamedNodeInModule(ctx, name);
 }
 
+static const ModuleNodeBinding* lookupAggregateBinding(const ResolutionContext& ctx,
+                                                       const std::string& baseName) {
+    if (auto it = ctx.local_aggregate_bindings.find(baseName);
+        it != ctx.local_aggregate_bindings.end()) {
+        return &it->second;
+    }
+    if (auto* node = findNode(*ctx.thisModule, baseName)) {
+        return &node->binding;
+    }
+    return nullptr;
+}
+
 static std::vector<DFGNode*> lookupAggregateLeaves(ResolutionContext& ctx,
                                                    const std::string& baseName,
                                                    const Type& type) {
+    if (const auto* binding = lookupAggregateBinding(ctx, baseName);
+        binding && !binding->aggregate_leaves.empty()) {
+        std::vector<DFGNode*> leaves;
+        leaves.reserve(binding->aggregate_leaves.size());
+        const bool readFlopQ = isFlopBaseName(ctx, baseName);
+        for (const auto& leaf : binding->aggregate_leaves) {
+            if (readFlopQ) {
+                DFGNode* qLeaf = lookupLeafNode(ctx, leaf.name + ".q");
+                if (!qLeaf) throw CompilerError("Could not find aggregate leaf: " + leaf.name + ".q");
+                leaves.push_back(qLeaf);
+            } else {
+                if (!leaf.leaf) throw CompilerError("Could not find aggregate leaf binding for: " + leaf.name);
+                leaves.push_back(leaf.leaf);
+            }
+        }
+        return leaves;
+    }
+
     std::vector<DFGNode*> leaves;
     std::vector<AggregateLeafBinding> plan;
     collectAggregateLeafPlan(type, baseName, {}, plan);
@@ -1672,6 +1712,24 @@ static std::vector<DFGNode*> lookupAggregateLeaves(ResolutionContext& ctx,
     return leaves;
 }
 
+static std::vector<AggregatePath> lookupAggregateLeafPaths(ResolutionContext& ctx,
+                                                           const std::string& baseName,
+                                                           const Type& type) {
+    if (const auto* binding = lookupAggregateBinding(ctx, baseName);
+        binding && !binding->aggregate_leaves.empty()) {
+        std::vector<AggregatePath> out;
+        out.reserve(binding->aggregate_leaves.size());
+        for (const auto& leaf : binding->aggregate_leaves) out.push_back(leaf.path);
+        return out;
+    }
+    std::vector<AggregateLeafBinding> plan;
+    collectAggregateLeafPlan(type, baseName, {}, plan);
+    std::vector<AggregatePath> out;
+    out.reserve(plan.size());
+    for (const auto& leaf : plan) out.push_back(leaf.path);
+    return out;
+}
+
 static ExprValue exprValueFromIdentifier(const std::string& baseName,
                                          const std::optional<SourceLoc>& loc,
                                          ResolutionContext& ctx) {
@@ -1681,6 +1739,7 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
             .type = *declaredType,
             .scalar = nullptr,
             .leaves = lookupAggregateLeaves(ctx, baseName, *declaredType),
+            .leaf_paths = lookupAggregateLeafPaths(ctx, baseName, *declaredType),
         };
     }
 
@@ -1688,14 +1747,14 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
         if (auto it = ctx.combDrivers.find(baseName); it != ctx.combDrivers.end()) {
             Type type = declaredType ? *declaredType :
                 it->second->type.value_or(Type::makeInteger(0, false));
-            return ExprValue{.type = type, .scalar = it->second, .leaves = {}};
+            return ExprValue{.type = type, .scalar = it->second, .leaves = {}, .leaf_paths = {}};
         }
     }
     if (auto it = ctx.local_nodes.find(baseName); it != ctx.local_nodes.end()) {
         if (!it->second || !it->second->hasType()) {
             throw CompilerError("Untyped local node: " + baseName, loc);
         }
-        return ExprValue{.type = *it->second->type, .scalar = it->second, .leaves = {}};
+        return ExprValue{.type = *it->second->type, .scalar = it->second, .leaves = {}, .leaf_paths = {}};
     }
 
     DFGNode* node = resolveIdentifier(baseName, ctx, false, ctx.flopNames);
@@ -1705,19 +1764,19 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
             auto* n = ctx.graph.constant(eit->second.first);
             n->type = eit->second.second;
             if (loc) n->loc = *loc;
-            return ExprValue{.type = *n->type, .scalar = n, .leaves = {}};
+            return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
         }
         auto paramIt = ctx.params.values.find(baseName);
         if (paramIt != ctx.params.values.end()) {
             auto* n = ctx.graph.constant(paramIt->second);
             if (loc) n->loc = *loc;
-            return ExprValue{.type = *n->type, .scalar = n, .leaves = {}};
+            return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
         }
     }
     if (!node || !node->hasType()) {
         throw CompilerError("Undeclared or untyped signal: '" + baseName + "'", loc);
     }
-    return ExprValue{.type = *node->type, .scalar = node, .leaves = {}};
+    return ExprValue{.type = *node->type, .scalar = node, .leaves = {}, .leaf_paths = {}};
 }
 
 static ExprValue selectStaticUnpacked(const ExprValue& value, int64_t idx) {
@@ -1727,19 +1786,27 @@ static ExprValue selectStaticUnpacked(const ExprValue& value, int64_t idx) {
     const auto& dim = value.type.unpacked_dims.front();
     size_t pos = linearUnpackedIndex({dim}, {idx});
     Type childType = dropFirstUnpackedDim(value.type);
-    size_t groupSize = unpackedLeafCount(childType);
+    size_t groupSize = aggregateValueLeafCount(childType);
     size_t start = pos * groupSize;
     if (start + groupSize > value.leaves.size()) {
         throw CompilerError("Static unpacked index leaf range out of bounds");
     }
-    if (childType.unpacked_dims.empty()) {
-        return ExprValue{.type = childType, .scalar = value.leaves[start], .leaves = {}};
+    if (childType.unpacked_dims.empty() && !childType.isStruct()) {
+        return ExprValue{.type = childType, .scalar = value.leaves[start], .leaves = {}, .leaf_paths = {}};
+    }
+    std::vector<AggregatePath> childPaths;
+    childPaths.reserve(groupSize);
+    for (size_t i = 0; i < groupSize; ++i) {
+        AggregatePath path = value.leaf_paths[start + i];
+        if (!path.empty()) path.erase(path.begin());
+        childPaths.push_back(std::move(path));
     }
     return ExprValue{
         .type = childType,
         .scalar = nullptr,
         .leaves = std::vector<DFGNode*>(value.leaves.begin() + start,
                                         value.leaves.begin() + start + groupSize),
+        .leaf_paths = std::move(childPaths),
     };
 }
 
@@ -1762,7 +1829,7 @@ static ExprValue selectDynamicUnpacked(const ExprValue& value,
     int64_t hi = std::max<int64_t>(dim.left, dim.right);
     int64_t N = hi - lo + 1;
     Type childType = dropFirstUnpackedDim(value.type);
-    size_t groupSize = unpackedLeafCount(childType);
+    size_t groupSize = aggregateValueLeafCount(childType);
 
     DFGNode* adjustedSel = selectorExprNode;
     if (lo != 0) {
@@ -1803,10 +1870,171 @@ static ExprValue selectDynamicUnpacked(const ExprValue& value,
         resultLeaves.push_back(mux);
     }
 
-    if (childType.unpacked_dims.empty()) {
-        return ExprValue{.type = childType, .scalar = resultLeaves.at(0), .leaves = {}};
+    if (childType.unpacked_dims.empty() && !childType.isStruct()) {
+        return ExprValue{.type = childType, .scalar = resultLeaves.at(0), .leaves = {}, .leaf_paths = {}};
     }
-    return ExprValue{.type = childType, .scalar = nullptr, .leaves = std::move(resultLeaves)};
+    std::vector<AggregatePath> childPaths;
+    childPaths.reserve(groupSize);
+    for (size_t i = 0; i < groupSize; ++i) {
+        AggregatePath path = value.leaf_paths[i];
+        if (!path.empty()) path.erase(path.begin());
+        childPaths.push_back(std::move(path));
+    }
+    return ExprValue{.type = childType, .scalar = nullptr, .leaves = std::move(resultLeaves), .leaf_paths = std::move(childPaths)};
+}
+
+static ExprValue selectStructField(const ExprValue& value,
+                                   const std::string& fieldName,
+                                   const std::optional<SourceLoc>& loc) {
+    if (!value.type.isStruct()) {
+        throw CompilerError("Member access on non-struct expression", loc);
+    }
+    const auto& fields = value.type.structInfo().fields;
+    const Type* fieldType = nullptr;
+    for (const auto& field : fields) {
+        if (field.name == fieldName) {
+            fieldType = field.type.get();
+            break;
+        }
+    }
+    if (!fieldType) {
+        throw CompilerError(
+            std::format("Unknown field '{}' on struct type '{}'", fieldName, value.type.structInfo().type_name),
+            loc);
+    }
+
+    AggregatePathElem elem{
+        .kind = AggregatePathElemKind::Field,
+        .field_name = fieldName,
+        .index = 0,
+    };
+    std::vector<DFGNode*> leaves;
+    std::vector<AggregatePath> paths;
+    for (size_t i = 0; i < value.leaves.size(); ++i) {
+        if (i >= value.leaf_paths.size() || value.leaf_paths[i].empty()) continue;
+        const auto& head = value.leaf_paths[i].front();
+        if (head.kind == elem.kind && head.field_name == elem.field_name) {
+            leaves.push_back(value.leaves[i]);
+            AggregatePath tail = value.leaf_paths[i];
+            tail.erase(tail.begin());
+            paths.push_back(std::move(tail));
+        }
+    }
+    if (leaves.empty()) {
+        throw CompilerError(
+            std::format("Unknown field '{}' on struct type '{}'", fieldName, value.type.structInfo().type_name),
+            loc);
+    }
+    Type outType = *fieldType;
+    if (!outType.unpacked_dims.empty() || outType.isStruct()) {
+        return ExprValue{.type = outType, .scalar = nullptr, .leaves = std::move(leaves), .leaf_paths = std::move(paths)};
+    }
+    return ExprValue{.type = outType, .scalar = leaves.front(), .leaves = {}, .leaf_paths = {}};
+}
+
+static ExprValue applySelector(const ExprValue& input,
+                               const SelectorSyntax& selector,
+                               ResolutionContext& ctx,
+                               const std::optional<SourceLoc>& loc) {
+    ExprValue value = input;
+    if (selector.kind == SyntaxKind::BitSelect) {
+        const auto& bitSelect = selector.as<BitSelectSyntax>();
+        if (!value.type.unpacked_dims.empty()) {
+            try {
+                int64_t idx = evaluateConstantExpr(bitSelect.expr, ctx.params);
+                return selectStaticUnpacked(value, idx);
+            } catch (const std::runtime_error&) {
+                auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
+                return selectDynamicUnpacked(value, selectorExprNode, ctx, loc);
+            }
+        }
+
+        if (!value.scalar) {
+            throw CompilerError("Packed bit-select on aggregate-valued expression", loc);
+        }
+        try {
+            int64_t idx = evaluateConstantExpr(bitSelect.expr, ctx.params);
+            if (!value.type.packed_dims.empty()) {
+                const auto& dim = value.type.packed_dims.front();
+                int64_t elemWidth = packedSuffixWidth(value.type, 1);
+                int64_t offset = packedIndexOffsetFromLsb(dim, idx) * elemWidth;
+                auto* lowNode = ctx.graph.constant(offset);
+                auto* highNode = ctx.graph.constant(offset + elemWidth - 1);
+                auto* sliceNode = ctx.graph.slice(value.scalar, highNode, lowNode);
+                sliceNode->loc = loc;
+                Type narrowed = value.type;
+                narrowed.width = static_cast<int>(elemWidth);
+                narrowed.packed_dims.erase(narrowed.packed_dims.begin());
+                sliceNode->type = narrowed;
+                return ExprValue{.type = narrowed, .scalar = sliceNode, .leaves = {}, .leaf_paths = {}};
+            }
+        } catch (const std::runtime_error&) {
+            throw CompilerError("Dynamic bit-select on packed vector is not yet supported", loc);
+        }
+    } else if (selector.kind == SyntaxKind::SimpleRangeSelect) {
+        if (!value.scalar || !value.type.unpacked_dims.empty() || value.type.isStruct()) {
+            throw CompilerError("Range-select on unpacked array is not supported", loc);
+        }
+        const auto& rangeSelect = selector.as<RangeSelectSyntax>();
+        auto* leftNode = buildExprDFG(rangeSelect.left, ctx);
+        auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
+        auto* sliceNode = ctx.graph.slice(value.scalar, leftNode, rightNode);
+        sliceNode->loc = loc;
+        return ExprValue{.type = sliceNode->type.value_or(Type{}), .scalar = sliceNode, .leaves = {}, .leaf_paths = {}};
+    } else if (selector.kind == SyntaxKind::AscendingRangeSelect ||
+               selector.kind == SyntaxKind::DescendingRangeSelect) {
+        if (!value.scalar || !value.type.unpacked_dims.empty() || value.type.isStruct()) {
+            throw CompilerError("Range-select on unpacked array is not supported", loc);
+        }
+        const auto& rangeSelect = selector.as<RangeSelectSyntax>();
+        auto* baseNode = buildExprDFG(rangeSelect.left, ctx);
+        int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right);
+        DFGNode* sliceNode = nullptr;
+        bool isAscending = selector.kind == SyntaxKind::AscendingRangeSelect;
+        try {
+            int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left);
+            int64_t high = isAscending ? base + width - 1 : base;
+            int64_t low = isAscending ? base : base - width + 1;
+            sliceNode = ctx.graph.slice(value.scalar, ctx.graph.constant(high), ctx.graph.constant(low));
+            sliceNode->loc = loc;
+        } catch (const std::runtime_error&) {
+            int64_t sourceWidth = value.type.width;
+            int selBits = 0;
+            while ((1LL << selBits) < sourceWidth) ++selBits;
+            if (selBits == 0) selBits = 1;
+
+            auto* truncSel = ctx.graph.slice(baseNode, ctx.graph.constant(selBits - 1), ctx.graph.constant(0));
+            truncSel->loc = loc;
+
+            std::vector<int64_t> armValues;
+            std::vector<DFGNode*> armData;
+            DFGNode* zeroNode = ctx.graph.constant(0);
+            zeroNode->type = Type::makeInteger(static_cast<int>(width), value.type.isSigned());
+
+            for (int64_t v = 0; v < (1LL << selBits); ++v) {
+                armValues.push_back(v);
+                bool inRange = isAscending ? (v <= sourceWidth - width)
+                                           : (v >= width - 1 && v < sourceWidth);
+                if (inRange) {
+                    int64_t high = isAscending ? v + width - 1 : v;
+                    int64_t low = isAscending ? v : v - width + 1;
+                    auto* slice = ctx.graph.slice(value.scalar, ctx.graph.constant(high), ctx.graph.constant(low));
+                    slice->loc = loc;
+                    armData.push_back(slice);
+                } else {
+                    armData.push_back(zeroNode);
+                }
+            }
+
+            sliceNode = ctx.graph.mux(truncSel, armValues, armData);
+            sliceNode->loc = loc;
+        }
+        Type sliceType = Type::makeInteger(static_cast<int>(width), value.type.isSigned());
+        sliceNode->type = sliceType;
+        return ExprValue{.type = sliceType, .scalar = sliceNode, .leaves = {}, .leaf_paths = {}};
+    }
+
+    throw CompilerError("Unsupported selector kind: " + std::string(toString(selector.kind)), loc);
 }
 
 static DFGNode* currentWholeDriverForTarget(ResolutionContext& ctx,
@@ -2116,7 +2344,7 @@ static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
                                             const std::optional<SourceLoc>& loc) {
     Type exprType = expr && expr->hasType() ? *expr->type : Type{};
     ExprValue coerced = coerceAssignmentExprToWidth(
-        ctx, ExprValue{.type = exprType, .scalar = expr, .leaves = {}}, targetType, loc);
+        ctx, ExprValue{.type = exprType, .scalar = expr, .leaves = {}, .leaf_paths = {}}, targetType, loc);
     return coerced.scalar;
 }
 
@@ -2164,147 +2392,11 @@ static ExprValue buildExprValue(
         auto& name = expr->as<IdentifierSelectNameSyntax>();
         std::string baseName(name.identifier.valueText());
         ExprValue value = exprValueFromIdentifier(baseName, resolveSourceLoc(*expr, ctx.sm), ctx);
-        std::optional<Type> currentType = value.type;
-
         for (const auto& elemSelect : name.selectors) {
             if (!elemSelect->selector) {
                 throw CompilerError("Empty selector not allowed.", resolveSourceLoc(*expr, ctx.sm));
             }
-            if (elemSelect->selector->kind == SyntaxKind::BitSelect) {
-                const auto& bitSelect = elemSelect->selector->as<BitSelectSyntax>();
-                if (currentType && !currentType->unpacked_dims.empty()) {
-                    try {
-                        int64_t idx = evaluateConstantExpr(bitSelect.expr, ctx.params);
-                        value = selectStaticUnpacked(value, idx);
-                    } catch (const std::runtime_error&) {
-                        auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
-                        value = selectDynamicUnpacked(
-                            value, selectorExprNode, ctx, resolveSourceLoc(*expr, ctx.sm));
-                    }
-                    currentType = value.type;
-                    continue;
-                }
-
-                if (!value.scalar) {
-                    throw CompilerError("Packed bit-select on array-valued expression",
-                                        resolveSourceLoc(*expr, ctx.sm));
-                }
-                try {
-                    int64_t idx = evaluateConstantExpr(bitSelect.expr, ctx.params);
-                    if (currentType && !currentType->packed_dims.empty()) {
-                        const auto& dim = currentType->packed_dims.front();
-                        int64_t elemWidth = packedSuffixWidth(*currentType, 1);
-                        int64_t offset = packedIndexOffsetFromLsb(dim, idx) * elemWidth;
-                        auto* lowNode = ctx.graph.constant(offset);
-                        auto* highNode = ctx.graph.constant(offset + elemWidth - 1);
-                        auto* sliceNode = ctx.graph.slice(value.scalar, highNode, lowNode);
-                        sliceNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        Type narrowed = *currentType;
-                        narrowed.width = static_cast<int>(elemWidth);
-                        narrowed.packed_dims.erase(narrowed.packed_dims.begin());
-                        sliceNode->type = narrowed;
-                        value = ExprValue{.type = narrowed, .scalar = sliceNode, .leaves = {}};
-                        currentType = narrowed;
-                        continue;
-                    }
-                } catch (const std::runtime_error&) {
-                    throw CompilerError(
-                        "Dynamic bit-select on packed vector is not yet supported",
-                        resolveSourceLoc(*expr, ctx.sm));
-                }
-            } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect) {
-                if (!value.scalar || (currentType && !currentType->unpacked_dims.empty())) {
-                    throw CompilerError("Range-select on unpacked array is not supported",
-                                        resolveSourceLoc(*expr, ctx.sm));
-                }
-                const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
-                auto* leftNode = buildExprDFG(rangeSelect.left, ctx);
-                auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
-                auto* sliceNode = ctx.graph.slice(value.scalar, leftNode, rightNode);
-                sliceNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                value = ExprValue{.type = sliceNode->type.value_or(Type{}),
-                                  .scalar = sliceNode,
-                                  .leaves = {}};
-                currentType.reset();
-                continue;
-            } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect ||
-                       elemSelect->selector->kind == SyntaxKind::DescendingRangeSelect) {
-                if (!value.scalar || (currentType && !currentType->unpacked_dims.empty())) {
-                    throw CompilerError("Range-select on unpacked array is not supported",
-                                        resolveSourceLoc(*expr, ctx.sm));
-                }
-                const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
-                auto* baseNode = buildExprDFG(rangeSelect.left, ctx);
-                int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right);
-                DFGNode* sliceNode = nullptr;
-                bool isAscending = elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect;
-                try {
-                    int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left);
-                    int64_t high = isAscending ? base + width - 1 : base;
-                    int64_t low = isAscending ? base : base - width + 1;
-                    sliceNode = ctx.graph.slice(value.scalar, ctx.graph.constant(high), ctx.graph.constant(low));
-                    sliceNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                } catch (const std::runtime_error&) {
-                    if (!currentType || !currentType->unpacked_dims.empty()) {
-                        throw CompilerError(
-                            isAscending
-                                ? "Indexed part-select [base +: width] requires a packed source"
-                                : "Indexed part-select [base -: width] requires a packed source",
-                            resolveSourceLoc(*expr, ctx.sm));
-                    }
-
-                    int64_t sourceWidth = currentType->width;
-                    int selBits = 0;
-                    while ((1LL << selBits) < sourceWidth) ++selBits;
-                    if (selBits == 0) selBits = 1;
-
-                    auto* truncSel = ctx.graph.slice(
-                        baseNode,
-                        ctx.graph.constant(selBits - 1),
-                        ctx.graph.constant(0));
-                    truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
-
-                    std::vector<int64_t> armValues;
-                    std::vector<DFGNode*> armData;
-                    DFGNode* zeroNode = ctx.graph.constant(0);
-                    zeroNode->type = Type::makeInteger(
-                        static_cast<int>(width), currentType->isSigned());
-
-                    for (int64_t v = 0; v < (1LL << selBits); ++v) {
-                        armValues.push_back(v);
-                        bool inRange = isAscending
-                            ? (v <= sourceWidth - width)
-                            : (v >= width - 1 && v < sourceWidth);
-                        if (inRange) {
-                            int64_t high = isAscending ? v + width - 1 : v;
-                            int64_t low = isAscending ? v : v - width + 1;
-                            auto* slice = ctx.graph.slice(
-                                value.scalar,
-                                ctx.graph.constant(high),
-                                ctx.graph.constant(low));
-                            slice->loc = resolveSourceLoc(*expr, ctx.sm);
-                            armData.push_back(slice);
-                        } else {
-                            armData.push_back(zeroNode);
-                        }
-                    }
-
-                    sliceNode = ctx.graph.mux(truncSel, armValues, armData);
-                    sliceNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                }
-                Type sliceType = Type::makeInteger(
-                    static_cast<int>(width), currentType ? currentType->isSigned() : false);
-                sliceNode->type = sliceType;
-                value = ExprValue{.type = sliceNode->type.value_or(Type{}),
-                                  .scalar = sliceNode,
-                                  .leaves = {}};
-                currentType = sliceType;
-                continue;
-            } else {
-                throw CompilerError(
-                    "Unsupported selector kind: " + std::string(toString(elemSelect->selector->kind)),
-                    resolveSourceLoc(*expr, ctx.sm));
-            }
+            value = applySelector(value, *elemSelect->selector, ctx, resolveSourceLoc(*expr, ctx.sm));
         }
         if (!value.type.unpacked_dims.empty() && value.leaves.empty()) {
             throw CompilerError("Array expression has no leaf binding", resolveSourceLoc(*expr, ctx.sm));
@@ -2312,11 +2404,58 @@ static ExprValue buildExprValue(
         return value;
     }
 
+    if (expr->kind == SyntaxKind::ElementSelectExpression) {
+        const auto& selectExpr = expr->as<ElementSelectExpressionSyntax>();
+        ExprValue value = buildExprValue(selectExpr.left, ctx);
+        if (!selectExpr.select->selector) {
+            throw CompilerError("Empty selector not allowed.", resolveSourceLoc(*expr, ctx.sm));
+        }
+        return applySelector(value, *selectExpr.select->selector, ctx, resolveSourceLoc(*expr, ctx.sm));
+    }
+
+    if (expr->kind == SyntaxKind::MemberAccessExpression) {
+        const auto& member = expr->as<MemberAccessExpressionSyntax>();
+        ExprValue base = buildExprValue(member.left, ctx);
+        return selectStructField(base, std::string(member.name.valueText()), resolveSourceLoc(*expr, ctx.sm));
+    }
+
+    if (expr->kind == SyntaxKind::ScopedName) {
+        const auto& scoped = expr->as<ScopedNameSyntax>();
+        bool treatAsFieldAccess = scoped.left->kind != SyntaxKind::IdentifierName;
+        if (!treatAsFieldAccess && scoped.left->kind == SyntaxKind::IdentifierName) {
+            std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            treatAsFieldAccess = lookupDeclaredType(baseName, ctx) != nullptr;
+        }
+        if (treatAsFieldAccess) {
+            ExprValue base = buildExprValue(&scoped.left->as<ExpressionSyntax>(), ctx);
+            if (scoped.right->kind == SyntaxKind::IdentifierName) {
+                return selectStructField(
+                    base,
+                    std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText()),
+                    resolveSourceLoc(*expr, ctx.sm));
+            }
+            if (scoped.right->kind == SyntaxKind::IdentifierSelectName) {
+                const auto& name = scoped.right->as<IdentifierSelectNameSyntax>();
+                ExprValue value = selectStructField(
+                    base,
+                    std::string(name.identifier.valueText()),
+                    resolveSourceLoc(*expr, ctx.sm));
+                for (const auto& elemSelect : name.selectors) {
+                    if (!elemSelect->selector) {
+                        throw CompilerError("Empty selector not allowed.", resolveSourceLoc(*expr, ctx.sm));
+                    }
+                    value = applySelector(value, *elemSelect->selector, ctx, resolveSourceLoc(*expr, ctx.sm));
+                }
+                return value;
+            }
+        }
+    }
+
     auto* scalar = buildExprScalarImpl(expr, ctx);
     if (!scalar || !scalar->hasType()) {
-        return ExprValue{.type = Type{}, .scalar = scalar, .leaves = {}};
+        return ExprValue{.type = Type{}, .scalar = scalar, .leaves = {}, .leaf_paths = {}};
     }
-    return ExprValue{.type = *scalar->type, .scalar = scalar, .leaves = {}};
+    return ExprValue{.type = *scalar->type, .scalar = scalar, .leaves = {}, .leaf_paths = {}};
 }
 
 static DFGNode* buildExprDFG(
@@ -2332,7 +2471,7 @@ static ExprValue buildScalarExprValue(
         ResolutionContext& ctx
 ) {
     ExprValue value = buildExprValue(expr, ctx);
-    if (!value.type.unpacked_dims.empty()) {
+    if (!value.type.unpacked_dims.empty() || value.type.isStruct()) {
         throw CompilerError("Array-valued expression used where scalar expression is required",
                             resolveSourceLoc(*expr, ctx.sm));
     }
@@ -2427,8 +2566,18 @@ static DFGNode* buildExprScalarImpl(
         }
 
         case SyntaxKind::ScopedName: {
-            // Package-qualified reference: pkg::MEMBER or pkg::type'(...) used as expression
+            // Struct-like scoped access on declared objects (e.g. s.a)
             auto& scoped = expr->as<ScopedNameSyntax>();
+            bool treatAsFieldAccess = scoped.left->kind != SyntaxKind::IdentifierName;
+            if (!treatAsFieldAccess && scoped.left->kind == SyntaxKind::IdentifierName) {
+                std::string baseName = std::string(
+                    scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                treatAsFieldAccess = lookupDeclaredType(baseName, ctx) != nullptr;
+            }
+            if (treatAsFieldAccess) {
+                return buildScalarExprValue(expr, ctx).scalar;
+            }
+            // Package-qualified reference: pkg::MEMBER
             std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
             std::string itemName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
             auto pkgIt = ctx.pkgRegistry.find(pkgName);
@@ -3382,27 +3531,70 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         return;
     }
 
-    // Get the base name and selectors for LHS
+    // Normalize the LHS into base name + unpacked/packed selectors + member suffix.
     std::string baseName;
-    const SyntaxList<ElementSelectSyntax>* selectors = nullptr;
-    if (left->kind == SyntaxKind::IdentifierName) {
-        const auto& identifier = left->as<slang::syntax::IdentifierNameSyntax>();
-        baseName = identifier.identifier.valueText();
-    } else if (left->kind == SyntaxKind::IdentifierSelectName) {
-        const auto& identifier = left->as<IdentifierSelectNameSyntax>();
-        baseName = identifier.identifier.valueText();
-        selectors = &identifier.selectors;
-    } else {
-        throw CompilerError(
-        "Left can only be variable name: " + std::string(toString(left->kind)),
-        resolveSourceLoc(assignExpr, ctx.sm));
-    }
+    std::vector<const ElementSelectSyntax*> selectors;
+    std::vector<std::string> memberSuffix;
+    std::function<void(const ExpressionSyntax*)> parseLhs = [&](const ExpressionSyntax* expr) {
+        if (!expr) {
+            throw CompilerError("Null LHS expression", assignLoc);
+        }
+        switch (expr->kind) {
+            case SyntaxKind::IdentifierName: {
+                baseName = expr->as<IdentifierNameSyntax>().identifier.valueText();
+                return;
+            }
+            case SyntaxKind::IdentifierSelectName: {
+                const auto& identifier = expr->as<IdentifierSelectNameSyntax>();
+                baseName = identifier.identifier.valueText();
+                for (const auto& elemSelect : identifier.selectors) {
+                    selectors.push_back(elemSelect);
+                }
+                return;
+            }
+            case SyntaxKind::ElementSelectExpression: {
+                const auto& selectExpr = expr->as<ElementSelectExpressionSyntax>();
+                parseLhs(selectExpr.left);
+                selectors.push_back(selectExpr.select);
+                return;
+            }
+            case SyntaxKind::MemberAccessExpression: {
+                const auto& member = expr->as<MemberAccessExpressionSyntax>();
+                parseLhs(member.left);
+                memberSuffix.push_back(std::string(member.name.valueText()));
+                return;
+            }
+            case SyntaxKind::ScopedName: {
+                const auto& scoped = expr->as<ScopedNameSyntax>();
+                parseLhs(&scoped.left->as<ExpressionSyntax>());
+                if (scoped.right->kind == SyntaxKind::IdentifierName) {
+                    memberSuffix.push_back(
+                        std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText()));
+                    return;
+                }
+                if (scoped.right->kind == SyntaxKind::IdentifierSelectName) {
+                    const auto& name = scoped.right->as<IdentifierSelectNameSyntax>();
+                    memberSuffix.push_back(std::string(name.identifier.valueText()));
+                    for (const auto& elemSelect : name.selectors) {
+                        selectors.push_back(elemSelect);
+                    }
+                    return;
+                }
+                throw CompilerError("Unsupported scoped LHS selector", assignLoc);
+            }
+            default:
+                throw CompilerError(
+                    "Left can only be variable name: " + std::string(toString(expr->kind)),
+                    assignLoc);
+        }
+    };
+    parseLhs(left);
 
-    if (!selectors) {
+    if (selectors.empty()) {
         if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
             declaredType && !declaredType->unpacked_dims.empty()) {
             if (RHSvalue.type.unpacked_dims != declaredType->unpacked_dims ||
-                    RHSvalue.leaves.size() != unpackedLeafCount(*declaredType)) {
+                    RHSvalue.leaves.size() != aggregateValueLeafCount(*declaredType)) {
                 throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
             }
             connectWholeUnpackedArray(baseName, *declaredType, RHSvalue.leaves);
@@ -3425,8 +3617,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         currentSelectedType = *targetDeclaredType;
     }
 
-    if (selectors) {
-        for (const auto& elemSelect : *selectors) {
+    if (!selectors.empty()) {
+        for (const auto* elemSelect : selectors) {
             if (!elemSelect->selector) {
                 throw CompilerError("Empty selector not allowed.",
                                     resolveSourceLoc(assignExpr, ctx.sm));
@@ -3441,11 +3633,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
                     if (currentSelectedType && !currentSelectedType->unpacked_dims.empty()) {
                         indexSuffix += "[" + std::to_string(idx) + "]";
-                        if (const auto* indexedType = lookupDeclaredTypeWithSuffix(baseName, indexSuffix, ctx)) {
-                            currentSelectedType = *indexedType;
-                        } else {
-                            currentSelectedType.reset();
-                        }
+                        currentSelectedType = dropFirstUnpackedDim(*currentSelectedType);
                     } else if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
                         const auto& dim = currentSelectedType->packed_dims.front();
                         int64_t elemWidth = packedSuffixWidth(*currentSelectedType, 1);
@@ -3517,6 +3705,31 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                     resolveSourceLoc(assignExpr, ctx.sm));
             }
         }
+    }
+
+    for (const auto& field : memberSuffix) {
+        if (!currentSelectedType || !currentSelectedType->isStruct()) {
+            throw CompilerError("Member access on non-struct LHS", assignLoc);
+        }
+        AggregatePathElem wanted{
+            .kind = AggregatePathElemKind::Field,
+            .field_name = field,
+            .index = 0,
+        };
+        const Type* fieldType = nullptr;
+        for (const auto& member : currentSelectedType->structInfo().fields) {
+            if (member.name == field) {
+                fieldType = member.type.get();
+                break;
+            }
+        }
+        if (!fieldType) {
+            throw CompilerError(
+                std::format("Unknown field '{}' on struct type '{}'", field, currentSelectedType->structInfo().type_name),
+                assignLoc);
+        }
+        indexSuffix += "." + field;
+        currentSelectedType = *fieldType;
     }
 
     std::optional<Type> assignmentTargetType;
@@ -4038,7 +4251,7 @@ void resolveForLoopStatementInPlace(
             ctx.sm, ctx.is_sequential, ctx.triggers,
             ctx.domain_facts, ctx.occurrence,
             ctx.combDrivers,
-            ctx.instance_path, ctx.local_nodes, ctx.local_array_types, ctx.local_flop_names,
+            ctx.instance_path, ctx.local_nodes, ctx.local_array_types, ctx.local_aggregate_bindings, ctx.local_flop_names,
             ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
             ctx.moduleLookup, ctx.globalImports,
             ctx.current_write_origin, ctx.partial_drivers, ctx.write_states,
@@ -4834,6 +5047,10 @@ static void resolveGenerateScopeDecls(
             if (!type.unpacked_dims.empty() || type.isStruct()) {
                 ctx.local_array_types[name] = type;
             }
+            ModuleNodeBinding binding;
+            binding.aggregate_leaves = localLeafPlan;
+            for (const auto& leaf : localLeafPlan) binding.leaves.push_back(leaf.leaf);
+            ctx.local_aggregate_bindings[name] = std::move(binding);
             for (const auto& leaf : localLeafPlan) {
                 ctx.local_nodes[leaf.name] = leaf.leaf;
             }
@@ -4995,7 +5212,7 @@ void resolveGenerateMemberInPlace(
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
                     ctx.sm, false, {}, ctx.domain_facts, ctx.occurrence, {},
                     childPath, ctx.local_nodes,
-                    ctx.local_array_types, {},
+                    ctx.local_array_types, ctx.local_aggregate_bindings, {},
                     ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
                     ctx.moduleLookup, ctx.globalImports,
                     ctx.current_write_origin, ctx.partial_drivers, ctx.write_states};
@@ -5493,7 +5710,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     ResolutionContext resCtx{
         graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {},
         domainFacts, occurrence, {},
-        "", {}, {}, {}, namedTypeRegistry, enumMemberValues, pkgRegistry,
+        "", {}, {}, {}, {}, namedTypeRegistry, enumMemberValues, pkgRegistry,
         moduleLookup, globalImports, "", {}, {}, subroutineRegistry
     };
 

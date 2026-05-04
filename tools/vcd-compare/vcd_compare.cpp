@@ -401,19 +401,47 @@ struct HierarchyParser {
             skip_ws();
             std::string found;
             std::vector<std::pair<int,int>> unpacked_dims;
+            std::set<std::string> binding_leaves;
             if (peek() != '}') {
                 do {
                     std::string key = parse_string();
                     expect(':');
                     if      (key == "name") found = parse_string();
                     else if (key == "type") unpacked_dims = parse_type_unpacked_dims();
+                    else if (key == "binding_leaves") {
+                        expect('[');
+                        skip_ws();
+                        if (peek() != ']') {
+                            do {
+                                expect('{');
+                                skip_ws();
+                                std::string leaf_name;
+                                if (peek() != '}') {
+                                    do {
+                                        std::string leaf_key = parse_string();
+                                        expect(':');
+                                        if (leaf_key == "name") leaf_name = parse_string();
+                                        else skip_value();
+                                        skip_ws();
+                                    } while (peek() == ',' && (++p, true));
+                                }
+                                expect('}');
+                                if (!leaf_name.empty()) binding_leaves.insert(leaf_name);
+                                skip_ws();
+                            } while (peek() == ',' && (++p, true));
+                        }
+                        expect(']');
+                    }
                     else                    skip_value();
                     skip_ws();
                 } while (peek() == ',' && (++p, true));
             }
             expect('}');
             if (!found.empty()) {
-                if (!unpacked_dims.empty())
+                if (!binding_leaves.empty()) {
+                    out.insert(binding_leaves.begin(), binding_leaves.end());
+                }
+                else if (!unpacked_dims.empty())
                     expand_unpacked(found, unpacked_dims, 0, out);
                 else
                     out.insert(found);

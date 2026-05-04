@@ -61,7 +61,9 @@ static_flop_d PASS
 static_sync_mix PASS
 static_top_output PASS
 struct_typedef_collection PASS
-struct_field_access_phase2_fail FAIL Unknown package
+struct_field_read_write PASS
+struct_array_field_access PASS
+struct_unknown_field_fail FAIL Unknown field 'bad' on struct type
 struct_whole_assign_phase2_fail FAIL Array-valued expression used for scalar assignment
 struct_port_decl_phase2_fail FAIL anonymous struct declarations are not supported
 struct_anonymous_decl_fail FAIL anonymous struct declarations are not supported

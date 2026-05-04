@@ -1,0 +1,13 @@
+module_name: struct_field_read_write
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - in_a
+      - in_b
+      - addend

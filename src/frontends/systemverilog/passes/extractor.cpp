@@ -64,6 +64,16 @@ private:
                 flopNames.insert(std::string(select.identifier.valueText()));
                 break;
             }
+            case SyntaxKind::MemberAccessExpression: {
+                auto& access = expr->as<MemberAccessExpressionSyntax>();
+                extractLhsName(access.left);
+                break;
+            }
+            case SyntaxKind::ScopedName: {
+                auto& scoped = expr->as<ScopedNameSyntax>();
+                extractLhsName(scoped.left);
+                break;
+            }
             case SyntaxKind::ConcatenationExpression: {
               auto& concat = expr->as<ConcatenationExpressionSyntax>();
               for (auto* part : concat.expressions) {

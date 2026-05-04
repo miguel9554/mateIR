@@ -28,6 +28,16 @@ Type scalarLeafType(Type type) {
     return type;
 }
 
+bool typeContainsStruct(const Type& type) {
+    if (type.isStruct()) return true;
+    if (!type.unpacked_dims.empty()) {
+        Type elem = type;
+        elem.unpacked_dims.erase(elem.unpacked_dims.begin());
+        return typeContainsStruct(elem);
+    }
+    return false;
+}
+
 void collectAggregateLeafPlan(const Type& type,
                               const std::string& base_name,
                               const AggregatePath& path,
@@ -950,9 +960,11 @@ static std::string moduleToJson(const Module& m, int indent) {
     ss << ind(indent+1) << "\"signals\": [\n";
     first = true;
     forEachInternalNode(m, [&](const ModuleNode& sig) {
+        if (typeContainsStruct(sig.type)) return false;
         if (!first) ss << ",\n";
         ss << ind(indent+2) << moduleNodeToJson(sig);
         first = false;
+        return false;
     });
     ss << "\n" << ind(indent+1) << "],\n";
 

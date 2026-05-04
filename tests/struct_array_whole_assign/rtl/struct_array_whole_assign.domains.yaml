@@ -1,4 +1,4 @@
-module_name: struct_whole_assign_phase2_fail
+module_name: struct_array_whole_assign
 
 resets:
   rst_n:
@@ -8,5 +8,7 @@ clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - in_x
-      - in_y
+      - in0_d
+      - in0_v
+      - in1_d
+      - in1_v

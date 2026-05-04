@@ -19,11 +19,15 @@ module uut_tb(
 
     always @(posedge _if.clk) begin
         if (!_if.rst_n) begin
-            _if.in_x <= 8'h00;
-            _if.in_y <= 1'b0;
+            _if.in0_d <= 4'h0;
+            _if.in0_v <= 1'b0;
+            _if.in1_d <= 4'h0;
+            _if.in1_v <= 1'b0;
         end else begin
-            _if.in_x <= _if.in_x + 8'h13;
-            _if.in_y <= ~_if.in_y;
+            _if.in0_d <= _if.in0_d + 4'h1;
+            _if.in0_v <= ~_if.in0_v;
+            _if.in1_d <= _if.in1_d + 4'h3;
+            _if.in1_v <= _if.in0_v ^ _if.in1_v;
         end
     end
 endmodule

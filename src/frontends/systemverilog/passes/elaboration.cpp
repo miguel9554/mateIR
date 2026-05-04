@@ -3357,6 +3357,27 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
     };
 
+    auto typeContainsStructValue = [&](const Type& type, const auto& self) -> bool {
+        if (type.isStruct()) return true;
+        if (type.unpacked_dims.empty()) return false;
+        Type elem = type;
+        elem.unpacked_dims.erase(elem.unpacked_dims.begin());
+        return self(elem, self);
+    };
+
+    auto sameStructTypedefShape = [&](const Type& lhs, const Type& rhs, const auto& self) -> bool {
+        if (!lhs.unpacked_dims.empty() || !rhs.unpacked_dims.empty()) {
+            if (lhs.unpacked_dims.empty() || rhs.unpacked_dims.empty()) return false;
+            if (lhs.unpacked_dims.front() != rhs.unpacked_dims.front()) return false;
+            return self(dropFirstUnpackedDim(lhs), dropFirstUnpackedDim(rhs), self);
+        }
+        if (lhs.isStruct() || rhs.isStruct()) {
+            if (!lhs.isStruct() || !rhs.isStruct()) return false;
+            return lhs.structInfo().type_name == rhs.structInfo().type_name;
+        }
+        return true;
+    };
+
     if (right->kind == SyntaxKind::AssignmentPatternExpression) {
         if (left->kind != SyntaxKind::IdentifierName) {
             throw CompilerError(
@@ -3592,7 +3613,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
     if (selectors.empty()) {
         if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
-            declaredType && !declaredType->unpacked_dims.empty()) {
+            declaredType && !declaredType->unpacked_dims.empty() &&
+                !typeContainsStructValue(*declaredType, typeContainsStructValue)) {
             if (RHSvalue.type.unpacked_dims != declaredType->unpacked_dims ||
                     RHSvalue.leaves.size() != aggregateValueLeafCount(*declaredType)) {
                 throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
@@ -3600,10 +3622,6 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             connectWholeUnpackedArray(baseName, *declaredType, RHSvalue.leaves);
             return;
         }
-    }
-
-    if (!RHSexprNode) {
-        throw CompilerError("Array-valued expression used for scalar assignment", assignLoc);
     }
 
     // Build the full element name for LHS by evaluating selectors statically.
@@ -3733,7 +3751,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     }
 
     std::optional<Type> assignmentTargetType;
-        if (hasRangeSelect) {
+    if (hasRangeSelect) {
         if (currentSelectedType) {
             assignmentTargetType = *currentSelectedType;
             assignmentTargetType->width =
@@ -3742,6 +3760,69 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     } else if (currentSelectedType) {
         assignmentTargetType = *currentSelectedType;
     }
+    if (!hasRangeSelect && assignmentTargetType &&
+            typeContainsStructValue(*assignmentTargetType, typeContainsStructValue)) {
+        if (ctx.is_sequential && !isFlopName(baseName)) {
+            throw CompilerError(
+                std::format("{} NOT a flop and assigned on seq. block", baseName),
+                resolveSourceLoc(assignExpr, ctx.sm));
+        }
+        if (!sameStructTypedefShape(*assignmentTargetType, RHSvalue.type, sameStructTypedefShape)) {
+            bool rhsStructAggregate = typeContainsStructValue(RHSvalue.type, typeContainsStructValue);
+            if (rhsStructAggregate) {
+                throw CompilerError(
+                    "whole-struct assignment requires matching typedef names",
+                    assignLoc);
+            }
+            throw CompilerError("struct/vector assignment is not supported", assignLoc);
+        }
+
+        std::vector<AggregateLeafBinding> lhsPlan;
+        std::string lhsBase = baseName + indexSuffix;
+        collectAggregateLeafPlan(*assignmentTargetType, lhsBase, {}, lhsPlan);
+        if (RHSvalue.leaves.size() != lhsPlan.size()) {
+            throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+        }
+
+        for (size_t i = 0; i < lhsPlan.size(); ++i) {
+            ExprValue rhsLeafValue{
+                .type = lhsPlan[i].leaf_type,
+                .scalar = RHSvalue.leaves[i],
+                .leaves = {},
+                .leaf_paths = {},
+            };
+            DFGNode* rhsLeaf = coerceAssignmentExprToWidth(
+                ctx, rhsLeafValue, lhsPlan[i].leaf_type, assignLoc).scalar;
+
+            std::string outputName = lhsPlan[i].name;
+            if (ctx.is_sequential) outputName += ".d";
+
+            if (!ctx.subroutine_locals.count(outputName)) {
+                recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+            }
+            connectNode(outputName, rhsLeaf);
+            if (!ctx.is_sequential) {
+                ctx.combDrivers[outputName] = rhsLeaf;
+            }
+        }
+
+        if (ctx.is_sequential) {
+            recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
+        }
+        return;
+    }
+
+    if (!RHSexprNode &&
+            typeContainsStructValue(RHSvalue.type, typeContainsStructValue) &&
+            (!assignmentTargetType ||
+             !typeContainsStructValue(*assignmentTargetType, typeContainsStructValue))) {
+        throw CompilerError("struct/vector assignment is not supported", assignLoc);
+    }
+
+    if (!RHSexprNode) {
+        throw CompilerError("Array-valued expression used for scalar assignment", assignLoc);
+    }
+
     if (assignmentTargetType && assignmentTargetType->width > 0) {
         RHSvalue.scalar = RHSexprNode;
         RHSvalue = coerceAssignmentExprToWidth(ctx, RHSvalue, assignmentTargetType, assignLoc);

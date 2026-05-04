@@ -63,8 +63,12 @@ static_top_output PASS
 struct_typedef_collection PASS
 struct_field_read_write PASS
 struct_array_field_access PASS
+struct_array_whole_assign PASS
 struct_unknown_field_fail FAIL Unknown field 'bad' on struct type
-struct_whole_assign_phase2_fail FAIL Array-valued expression used for scalar assignment
+struct_whole_assign_phase2_fail PASS
+struct_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
+struct_to_vector_assign_fail FAIL struct/vector assignment is not supported
+vector_to_struct_assign_fail FAIL struct/vector assignment is not supported
 struct_port_decl_phase2_fail FAIL anonymous struct declarations are not supported
 struct_anonymous_decl_fail FAIL anonymous struct declarations are not supported
 struct_unpacked_field_fail FAIL struct fields cannot be unpacked arrays

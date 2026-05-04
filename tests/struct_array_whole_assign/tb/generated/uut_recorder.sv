@@ -21,18 +21,32 @@ module uut_recorder(
 
     // Sync recorders
     sync_recorder#(
-        .filepath(path("in_x.txt")),
-        .TYPE(logic [7:0])
-    ) u_in_x_recorder(
+        .filepath(path("in0_d.txt")),
+        .TYPE(logic [3:0])
+    ) u_in0_d_recorder(
         .clk(_if.clk),
-        .data(_if.in_x)
+        .data(_if.in0_d)
     );
     sync_recorder#(
-        .filepath(path("in_y.txt")),
+        .filepath(path("in0_v.txt")),
         .TYPE(logic)
-    ) u_in_y_recorder(
+    ) u_in0_v_recorder(
         .clk(_if.clk),
-        .data(_if.in_y)
+        .data(_if.in0_v)
+    );
+    sync_recorder#(
+        .filepath(path("in1_d.txt")),
+        .TYPE(logic [3:0])
+    ) u_in1_d_recorder(
+        .clk(_if.clk),
+        .data(_if.in1_d)
+    );
+    sync_recorder#(
+        .filepath(path("in1_v.txt")),
+        .TYPE(logic)
+    ) u_in1_v_recorder(
+        .clk(_if.clk),
+        .data(_if.in1_v)
     );
 
 endmodule

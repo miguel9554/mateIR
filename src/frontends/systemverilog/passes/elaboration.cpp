@@ -84,10 +84,9 @@ struct ResolutionContext {
     // Wires: "name[i]" → leaf_node (for arrays; no aggregate base-name entry)
     //        "name" → node (for scalars)
     std::map<std::string, DFGNode*> local_nodes;
-    // local_array_types: base name → full Type (including unpacked_dims) for
-    // generate-scope array signals. Used by lookupDeclaredType since there is no
-    // aggregate node for arrays after the leaf-binding refactor.
-    std::map<std::string, Type> local_array_types;
+    // local_declared_types: base name -> full declared type for local aggregate
+    // values that are not represented as a module-level ModuleNode.
+    std::map<std::string, Type> local_declared_types;
     // Local aggregate bindings keyed by base declaration name.
     std::map<std::string, ModuleNodeBinding> local_aggregate_bindings;
     // local_flop_names: base names of flops declared in this generate scope
@@ -308,6 +307,10 @@ static ExprValue buildAssignmentPatternExprValueForTarget(
     const Type& targetType,
     ResolutionContext& ctx,
     const std::optional<SourceLoc>& loc);
+static ExprValue buildValueForTargetType(const slang::syntax::ExpressionSyntax* expr,
+                                         const Type& targetType,
+                                         ResolutionContext& ctx,
+                                         const std::optional<SourceLoc>& loc);
 
 // Build a scalar-only expression. Throws if the expression resolves to an array.
 static DFGNode* buildExprDFG(const slang::syntax::ExpressionSyntax* expr,
@@ -326,17 +329,9 @@ static DFGNode* inlineSubroutineCall(
         const InvocationExpressionSyntax& invoc,
         ResolutionContext& ctx
 );
-
-static void collectAggregateLeafPlan(const Type& type,
-                                     const std::string& baseName,
-                                     const AggregatePath& path,
-                                     std::vector<AggregateLeafBinding>& out);
-
-static size_t aggregateValueLeafCount(const Type& type) {
-    std::vector<AggregateLeafBinding> plan;
-    collectAggregateLeafPlan(type, "", {}, plan);
-    return plan.size();
-}
+static void declareLocalAggregateValue(ResolutionContext& ctx,
+                                       const std::string& name,
+                                       const Type& type);
 
 const Type* lookupDeclaredType(const std::string& baseName,
                                        const ResolutionContext& ctx);
@@ -1592,8 +1587,7 @@ DFGNode* resolveIdentifier(
 
 const Type* lookupDeclaredType(const std::string& baseName,
                                        const ResolutionContext& ctx) {
-    // Check local array type map first (generate-scope arrays have no aggregate node).
-    if (auto it = ctx.local_array_types.find(baseName); it != ctx.local_array_types.end()) {
+    if (auto it = ctx.local_declared_types.find(baseName); it != ctx.local_declared_types.end()) {
         return &it->second;
     }
     auto localIt = ctx.local_nodes.find(baseName);
@@ -1690,6 +1684,13 @@ static std::vector<DFGNode*> lookupAggregateLeaves(ResolutionContext& ctx,
         leaves.reserve(binding->aggregate_leaves.size());
         const bool readFlopQ = isFlopBaseName(ctx, baseName);
         for (const auto& leaf : binding->aggregate_leaves) {
+            if (!ctx.is_sequential) {
+                if (auto driverIt = ctx.combDrivers.find(leaf.name);
+                    driverIt != ctx.combDrivers.end()) {
+                    leaves.push_back(driverIt->second);
+                    continue;
+                }
+            }
             if (readFlopQ) {
                 DFGNode* qLeaf = lookupLeafNode(ctx, leaf.name + ".q");
                 if (!qLeaf) throw CompilerError("Could not find aggregate leaf: " + leaf.name + ".q");
@@ -4366,12 +4367,18 @@ static DFGNode* inlineSubroutineCall(
             if (item->kind == SyntaxKind::DataDeclaration) {
                 auto& dataDecl = item->as<DataDeclarationSyntax>();
                 Type localType = resolveType(*dataDecl.type, sub.params, sub.namedTypeRegistry, &sub.pkgRegistry);
-                if (localType.isStruct()) {
-                    throw CompilerError("struct-typed declarations are not supported before aggregate leaf binding",
-                                        resolveSourceLoc(*item, ctx.sm));
+                for (auto* d : dataDecl.declarators) {
+                    Type declaredType = localType;
+                    auto unpacked = ResolveDimensions(d->dimensions, sub.params, &sub.sm);
+                    if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
+                        unpacked.clear();
+                    declaredType.unpacked_dims = unpacked;
+                    std::string localName(d->name.valueText());
+                    sub.subroutine_locals.insert(localName);
+                    if (declaredType.isStruct() || !declaredType.unpacked_dims.empty()) {
+                        declareLocalAggregateValue(sub, localName, declaredType);
+                    }
                 }
-                for (auto* d : dataDecl.declarators)
-                    sub.subroutine_locals.insert(std::string(d->name.valueText()));
             } else {
                 resolveStatementInPlace(&item->as<StatementSyntax>(), sub);
             }
@@ -4582,13 +4589,18 @@ void resolveSequentialBlockStatementInPlace(
             }
             auto& dataDecl = item->as<DataDeclarationSyntax>();
             Type localType = resolveType(*dataDecl.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
-            if (localType.isStruct()) {
-                throw CompilerError(
-                    "struct-typed declarations are not supported before aggregate leaf binding",
-                    resolveSourceLoc(*item, ctx.sm));
+            for (auto* decl : dataDecl.declarators) {
+                Type declaredType = localType;
+                auto unpacked = ResolveDimensions(decl->dimensions, ctx.params, &ctx.sm);
+                if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
+                    unpacked.clear();
+                declaredType.unpacked_dims = unpacked;
+                std::string localName(decl->name.valueText());
+                ctx.subroutine_locals.insert(localName);
+                if (declaredType.isStruct() || !declaredType.unpacked_dims.empty()) {
+                    declareLocalAggregateValue(ctx, localName, declaredType);
+                }
             }
-            for (auto* decl : dataDecl.declarators)
-                ctx.subroutine_locals.insert(std::string(decl->name.valueText()));
             continue;
         }
         const auto& statement = item->as<StatementSyntax>();
@@ -4637,7 +4649,7 @@ void resolveForLoopStatementInPlace(
             ctx.sm, ctx.is_sequential, ctx.triggers,
             ctx.domain_facts, ctx.occurrence,
             ctx.combDrivers,
-            ctx.instance_path, ctx.local_nodes, ctx.local_array_types, ctx.local_aggregate_bindings, ctx.local_flop_names,
+            ctx.instance_path, ctx.local_nodes, ctx.local_declared_types, ctx.local_aggregate_bindings, ctx.local_flop_names,
             ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
             ctx.moduleLookup, ctx.globalImports,
             ctx.current_write_origin, ctx.partial_drivers, ctx.write_states,
@@ -4830,11 +4842,6 @@ ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterCont
 // Pre-population helpers for DFG
 // ============================================================================
 
-static Type aggregateLeafType(Type type) {
-    type.unpacked_dims.clear();
-    return type;
-}
-
 static bool typeContainsStruct(const Type& type) {
     if (type.isStruct()) return true;
     if (!type.unpacked_dims.empty()) {
@@ -4843,51 +4850,6 @@ static bool typeContainsStruct(const Type& type) {
         return typeContainsStruct(elem);
     }
     return false;
-}
-
-static void collectAggregateLeafPlan(const Type& type,
-                                     const std::string& baseName,
-                                     const AggregatePath& path,
-                                     std::vector<AggregateLeafBinding>& out) {
-    if (!type.unpacked_dims.empty()) {
-        Type elem = type;
-        const auto dim = elem.unpacked_dims.front();
-        elem.unpacked_dims.erase(elem.unpacked_dims.begin());
-        int step = dim.left <= dim.right ? 1 : -1;
-        for (int i = dim.left; step > 0 ? i <= dim.right : i >= dim.right; i += step) {
-            AggregatePath childPath = path;
-            childPath.push_back(AggregatePathElem{
-                .kind = AggregatePathElemKind::Index,
-                .field_name = "",
-                .index = i,
-            });
-            collectAggregateLeafPlan(elem,
-                                     baseName + "[" + std::to_string(i) + "]",
-                                     childPath,
-                                     out);
-        }
-        return;
-    }
-
-    if (type.isStruct()) {
-        for (const auto& field : type.structInfo().fields) {
-            AggregatePath childPath = path;
-            childPath.push_back(AggregatePathElem{
-                .kind = AggregatePathElemKind::Field,
-                .field_name = field.name,
-                .index = 0,
-            });
-            collectAggregateLeafPlan(*field.type, baseName + "." + field.name, childPath, out);
-        }
-        return;
-    }
-
-    out.push_back(AggregateLeafBinding{
-        .leaf = nullptr,
-        .name = baseName,
-        .path = path,
-        .leaf_type = aggregateLeafType(type),
-    });
 }
 
 enum class AggregateLeafNodeKind {
@@ -4961,30 +4923,18 @@ void prePopulateModuleNode(DFG& graph, ModuleNode& sig) {
 void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
     const std::string& name = flop.name;
     const Type& type = flop.type;
+    flop.binding.aggregate_leaves.clear();
     flop.binding.d_leaves.clear();
     flop.binding.q_leaves.clear();
 
-    if (type.unpacked_dims.empty()) {
-        // Scalar flop: one sink (.d) and one source (.q).
-        auto* dNode = graph.createGraphOutput("", name + ".d");
-        dNode->type = type;
-        auto* qNode = graph.createGraphInput("", name + ".q");
-        qNode->type = type;
-        flop.binding.d_leaves.push_back(dNode);
-        flop.binding.q_leaves.push_back(qNode);
-        return;
-    }
-
-    for (const auto& idxSuffix : unpackedIndexSuffixes(type)) {
-        auto elemType = type;
-        elemType.unpacked_dims.clear();
-
-        auto* dElem = graph.createGraphOutput("", name + idxSuffix + ".d");
-        dElem->type = elemType;
+    collectAggregateLeafPlan(type, name, {}, flop.binding.aggregate_leaves);
+    for (auto& leaf : flop.binding.aggregate_leaves) {
+        auto* dElem = graph.createGraphOutput("", leaf.name + ".d");
+        dElem->type = leaf.leaf_type;
         flop.binding.d_leaves.push_back(dElem);
 
-        auto* qElem = graph.createGraphInput("", name + idxSuffix + ".q");
-        qElem->type = elemType;
+        auto* qElem = graph.createGraphInput("", leaf.name + ".q");
+        qElem->type = leaf.leaf_type;
         flop.binding.q_leaves.push_back(qElem);
     }
 }
@@ -5032,33 +4982,84 @@ const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr) {
     return simpleSeq.expr;
 }
 
-// Connect an output port of the submodule to a parent signal
 static DFGNode* getOrCreateOutputPlaceholder(DFG& graph,
                                              ModuleInstanceBinding& binding,
-                                             const Module& resolvedSub,
-                                             const std::string& portName) {
-    auto [it, inserted] = binding.output_placeholders.try_emplace(
-        portName, graph.placeholderSignal(""));
-    if (inserted) {
-        if (auto* output = findOutputNode(resolvedSub, portName)) {
-            it->second->type = output->type;
+                                             const std::string& portName,
+                                             const std::string& leafName,
+                                             const AggregatePath& path,
+                                             const Type& leafType) {
+    for (auto& out : binding.output_bindings) {
+        if (out.port_name == portName && out.leaf_name == leafName) {
+            return out.placeholder;
         }
     }
-    return it->second;
+    auto* placeholder = graph.placeholderSignal("");
+    placeholder->type = leafType;
+    binding.output_bindings.push_back(ModuleInstanceOutputBinding{
+        .port_name = portName,
+        .leaf_name = leafName,
+        .path = path,
+        .placeholder = placeholder,
+    });
+    return placeholder;
 }
 
-void connectModuleOutput(DFG& graph, ModuleInstanceBinding& binding,
-                         const Module& resolvedSub,
-                         const std::string& portName,
-                         const std::string& parentSignalName,
-                         ResolutionContext& ctx,
-                         const std::optional<SourceLoc>& writeLoc) {
-    DFGOutput modOut(getOrCreateOutputPlaceholder(graph, binding, resolvedSub, portName));
-    recordFullWrite(
-        ctx, parentSignalName, writeLoc,
-        std::format("module-output:{}:{}", binding.instance_name, portName));
-    if (auto* target = lookupTargetNode(ctx, parentSignalName)) {
-        graph.connectDriver(target, modOut);
+static void bindInputPortLeaves(ModuleInstanceBinding& binding,
+                                const ModuleNode& inputPort,
+                                const ExprValue& value,
+                                const std::optional<SourceLoc>& loc) {
+    if (inputPort.binding.aggregate_leaves.size() != value.leaves.size()) {
+        throw CompilerError("Input port connection leaf count mismatch", loc);
+    }
+    for (size_t i = 0; i < inputPort.binding.aggregate_leaves.size(); ++i) {
+        const auto& leaf = inputPort.binding.aggregate_leaves[i];
+        binding.inputs.push_back(ModuleInstanceInputBinding{
+            .port_name = inputPort.name,
+            .leaf_name = leaf.name,
+            .path = leaf.path,
+            .driver = DFGOutput(value.leaves[i]),
+        });
+    }
+}
+
+static void connectOutputPortLeaves(DFG& graph,
+                                    ModuleInstanceBinding& binding,
+                                    const ModuleNode& outputPort,
+                                    const std::string& parentBaseName,
+                                    ResolutionContext& ctx,
+                                    const std::optional<SourceLoc>& loc) {
+    const Type* parentType = lookupDeclaredType(parentBaseName, ctx);
+    if (!parentType) {
+        throw CompilerError(
+            "Cannot find signal '" + parentBaseName + "' for output port connection", loc);
+    }
+    if (!sameAggregateStructTypedefShape(*parentType, outputPort.type)) {
+        throw CompilerError("whole-struct assignment requires matching typedef names", loc);
+    }
+
+    std::vector<AggregateLeafBinding> parentPlan;
+    collectAggregateLeafPlan(*parentType, parentBaseName, {}, parentPlan);
+    if (parentPlan.size() != outputPort.binding.aggregate_leaves.size()) {
+        throw CompilerError("Output port connection leaf count mismatch", loc);
+    }
+
+    for (size_t i = 0; i < outputPort.binding.aggregate_leaves.size(); ++i) {
+        const auto& outLeaf = outputPort.binding.aggregate_leaves[i];
+        const auto& parentLeaf = parentPlan[i];
+        if (!aggregatePathEqual(outLeaf.path, parentLeaf.path)) {
+            throw CompilerError("Output port connection leaf path mismatch", loc);
+        }
+        auto* placeholder = getOrCreateOutputPlaceholder(
+            graph, binding, outputPort.name, outLeaf.name, outLeaf.path, outLeaf.leaf_type);
+        placeholder->loc = loc;
+        recordFullWrite(
+            ctx, parentLeaf.name, loc,
+            std::format("module-output:{}:{}", binding.instance_name, outputPort.name));
+        if (auto* target = lookupTargetNode(ctx, parentLeaf.name)) {
+            graph.connectDriver(target, DFGOutput(placeholder));
+        } else {
+            throw CompilerError("Cannot assign to undeclared: " + parentLeaf.name, loc);
+        }
     }
 }
 
@@ -5080,8 +5081,22 @@ void resolveNamedPortConnection(
                 "Input port '" + portName + "' requires a connection expression");
         }
         auto* expr = extractPortExpr(*named.expr);
-        auto* driver = buildExprDFG(expr, ctx);
-        binding.inputs.push_back({portName, DFGOutput(driver)});
+        auto* port = findInputNode(resolvedSub, portName);
+        if (!port) throw CompilerError("Input port '" + portName + "' not found");
+
+        if (port->type.isStruct() || !port->type.unpacked_dims.empty()) {
+            ExprValue value = buildValueForTargetType(
+                expr, port->type, ctx, resolveSourceLoc(*expr, ctx.sm));
+            bindInputPortLeaves(binding, *port, value, resolveSourceLoc(*expr, ctx.sm));
+        } else {
+            auto* driver = buildExprDFG(expr, ctx);
+            binding.inputs.push_back(ModuleInstanceInputBinding{
+                .port_name = portName,
+                .leaf_name = portName,
+                .path = {},
+                .driver = DFGOutput(driver),
+            });
+        }
         if (ctx.domain_facts) {
             auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
             ChildInputConnectionFact connFact{
@@ -5107,9 +5122,25 @@ void resolveNamedPortConnection(
                 "Output port '" + portName + "' requires a connection expression");
         }
         auto* expr = extractPortExpr(*named.expr);
+        auto* outputPort = findOutputNode(resolvedSub, portName);
+        if (!outputPort) throw CompilerError("Output port '" + portName + "' not found");
         std::string connectName;
-        if (expr->kind == SyntaxKind::IdentifierName) {
+        if ((outputPort->type.isStruct() || !outputPort->type.unpacked_dims.empty()) &&
+            expr->kind == SyntaxKind::IdentifierName) {
             connectName = std::string(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            connectOutputPortLeaves(graph, binding, *outputPort, connectName, ctx, resolveSourceLoc(*expr, ctx.sm));
+            return;
+        } else if (expr->kind == SyntaxKind::IdentifierName) {
+            connectName = std::string(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            auto* placeholder = getOrCreateOutputPlaceholder(
+                graph, binding, portName, portName, {}, outputPort->type);
+            recordFullWrite(
+                ctx, connectName, resolveSourceLoc(*expr, ctx.sm),
+                std::format("module-output:{}:{}", binding.instance_name, portName));
+            if (auto* target = lookupTargetNode(ctx, connectName)) {
+                graph.connectDriver(target, DFGOutput(placeholder));
+            }
+            return;
         } else if (expr->kind == SyntaxKind::IdentifierSelectName) {
             auto& isel = expr->as<IdentifierSelectNameSyntax>();
             std::string baseName(isel.identifier.valueText());
@@ -5131,8 +5162,12 @@ void resolveNamedPortConnection(
             // If the element node exists (unpacked array element), use the normal path.
             // Otherwise, fall through to the canonical partial-write path for packed bit-selects.
             if (lookupTargetNode(ctx, connectName)) {
-                connectModuleOutput(graph, binding, resolvedSub, portName, connectName,
-                                    ctx, resolveSourceLoc(*expr, ctx.sm));
+                auto* placeholder = getOrCreateOutputPlaceholder(
+                    graph, binding, portName, portName, {}, outputPort->type);
+                recordFullWrite(
+                    ctx, connectName, resolveSourceLoc(*expr, ctx.sm),
+                    std::format("module-output:{}:{}", binding.instance_name, portName));
+                graph.connectDriver(lookupTargetNode(ctx, connectName), DFGOutput(placeholder));
                 return;
             }
 
@@ -5154,7 +5189,7 @@ void resolveNamedPortConnection(
                     "module-output:{}:{}", binding.instance_name, portName);
                 try {
                     auto* outBit = getOrCreateOutputPlaceholder(
-                        graph, binding, resolvedSub, portName);
+                        graph, binding, portName, portName, {}, outputPort->type);
                     outBit->loc = resolveSourceLoc(*expr, ctx.sm);
                     writePartialTargetSlice(
                         ctx, packedTargetName, idx, idx,
@@ -5172,9 +5207,6 @@ void resolveNamedPortConnection(
                 "Only simple identifier expressions supported for output port connections",
                 resolveSourceLoc(*expr, ctx.sm));
         }
-        connectModuleOutput(graph, binding, resolvedSub,
-                            portName, connectName,
-                            ctx, resolveSourceLoc(*expr, ctx.sm));
     } else {
         throw CompilerError(
             "Port name '" + portName + "' not found in submodule inputs or outputs");
@@ -5187,9 +5219,20 @@ void resolveWildcardPortConnection(
         ResolutionContext& ctx) {
     forEachInputNode(resolvedSub, [&](const ModuleNode& inp) {
         const std::string& name = inp.name;
-        auto* driver = lookupNamedNodeInModule(ctx, name);
-        if (driver) {
-            binding.inputs.push_back({name, DFGOutput(driver)});
+        if (inp.type.isStruct() || !inp.type.unpacked_dims.empty()) {
+            try {
+                ExprValue value = exprValueFromIdentifier(name, binding.loc, ctx);
+                bindInputPortLeaves(binding, inp, value, binding.loc);
+            } catch (const CompilerError&) {}
+        } else {
+            auto* driver = lookupNamedNodeInModule(ctx, name);
+            if (!driver) return;
+            binding.inputs.push_back(ModuleInstanceInputBinding{
+                .port_name = name,
+                .leaf_name = name,
+                .path = {},
+                .driver = DFGOutput(driver),
+            });
             if (ctx.domain_facts) {
                 auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
                 facts.child_input_connections.push_back(ChildInputConnectionFact{
@@ -5206,7 +5249,17 @@ void resolveWildcardPortConnection(
     });
     forEachOutputNode(resolvedSub, [&](const ModuleNode& out) {
         const std::string& name = out.name;
-        connectModuleOutput(graph, binding, resolvedSub, name, name, ctx, binding.loc);
+        if (out.type.isStruct() || !out.type.unpacked_dims.empty()) {
+            connectOutputPortLeaves(graph, binding, out, name, ctx, binding.loc);
+            return;
+        }
+        auto* placeholder = getOrCreateOutputPlaceholder(graph, binding, name, name, {}, out.type);
+        recordFullWrite(
+            ctx, name, binding.loc,
+            std::format("module-output:{}:{}", binding.instance_name, name));
+        if (auto* target = lookupTargetNode(ctx, name)) {
+            graph.connectDriver(target, DFGOutput(placeholder));
+        }
     });
 }
 
@@ -5255,7 +5308,7 @@ static void instantiateSubmoduleInstance(
         .instance_name = effectiveInstanceName,
         .module_type = submoduleName,
         .inputs = {},
-        .output_placeholders = {},
+        .output_bindings = {},
         .loc = resolveSourceLoc(instanceSyntax, ctx.sm),
     };
 
@@ -5368,6 +5421,28 @@ static std::set<std::string> collectNBATargets(const SyntaxList<MemberSyntax>& m
     return result;
 }
 
+static void declareLocalAggregateValue(ResolutionContext& ctx,
+                                       const std::string& name,
+                                       const Type& type) {
+    std::vector<AggregateLeafBinding> localLeafPlan;
+    collectAggregateLeafPlan(type, name, {}, localLeafPlan);
+    for (auto& leaf : localLeafPlan) {
+        auto* node = ctx.graph.signal("", leaf.name);
+        node->type = leaf.leaf_type;
+        leaf.leaf = node;
+        ctx.local_nodes[leaf.name] = node;
+        if (ctx.is_subroutine_scope) {
+            ctx.subroutine_locals.insert(leaf.name);
+        }
+    }
+
+    ctx.local_declared_types[name] = type;
+    ModuleNodeBinding binding;
+    binding.aggregate_leaves = localLeafPlan;
+    for (const auto& leaf : localLeafPlan) binding.leaves.push_back(leaf.leaf);
+    ctx.local_aggregate_bindings[name] = std::move(binding);
+}
+
 // Pre-populate DFG nodes for all DataDeclaration/NetDeclaration members in a
 // generate scope.  Must be called before any assignments in the same scope are
 // elaborated so that all local nodes exist when expressions reference them.
@@ -5391,36 +5466,39 @@ static void resolveGenerateScopeDecls(
         type.unpacked_dims = unpacked;
 
         if (isFlop) {
-            if (type.isStruct()) {
-                throw CompilerError("struct-typed flops are not supported in phase 2",
-                                    resolveSourceLoc(decl, ctx.sm));
-            }
             if (!type.unpacked_dims.empty())
                 throw CompilerError(
                     "Generate-scope flop arrays not yet supported: " + name);
 
-            auto* d_node = ctx.graph.createGraphOutput(ctx.instance_path, name + ".d");
-            d_node->type = type;
-            auto* q_node = ctx.graph.createGraphInput(ctx.instance_path, name + ".q");
-            q_node->type = type;
-
-            ctx.local_nodes[name + ".d"] = d_node;
-            ctx.local_nodes[name + ".q"] = q_node;
-            ctx.local_nodes[name]         = q_node;  // reads return .q
-
             // Qualified name used for FlopInfo and frontend-private trigger facts
             std::string qualifiedName = ctx.instance_path.empty()
                 ? name : ctx.instance_path + "." + name;
-
-            ctx.thisModule->flops.push_back(FlopInfo{
+            FlopInfo flop{
                 .name       = qualifiedName,
                 .type       = type,
                 .flop_type  = FLOP_D,
                 .reset_value = std::nullopt,
                 .clock_domain = InvalidClockId,
                 .reset_domains = {},
-                .binding    = FlopBinding{.d_leaves = {d_node}, .q_leaves = {q_node}},
-            });
+                .binding    = {},
+            };
+            prePopulateFlopNodes(ctx.graph, flop);
+            std::vector<AggregateLeafBinding> localLeafPlan;
+            collectAggregateLeafPlan(type, name, {}, localLeafPlan);
+            for (size_t i = 0; i < flop.binding.aggregate_leaves.size(); ++i) {
+                const std::string& localLeafName = localLeafPlan[i].name;
+                ctx.local_nodes[localLeafName + ".d"] = flop.binding.d_leaves[i];
+                ctx.local_nodes[localLeafName + ".q"] = flop.binding.q_leaves[i];
+            }
+            if (flop.binding.aggregate_leaves.size() == 1) {
+                ctx.local_nodes[name] = flop.binding.q_leaves.front();
+            }
+            ctx.local_declared_types[name] = type;
+            ctx.local_aggregate_bindings[name] = ModuleNodeBinding{
+                .aggregate_leaves = std::move(localLeafPlan),
+                .leaves = flop.binding.q_leaves,
+            };
+            ctx.thisModule->flops.push_back(std::move(flop));
         } else {
             // Wire / internal signal
             std::vector<AggregateLeafBinding> localLeafPlan;
@@ -5431,7 +5509,7 @@ static void resolveGenerateScopeDecls(
                 leaf.leaf = node;
             }
             if (!type.unpacked_dims.empty() || type.isStruct()) {
-                ctx.local_array_types[name] = type;
+                ctx.local_declared_types[name] = type;
             }
             ModuleNodeBinding binding;
             binding.aggregate_leaves = localLeafPlan;
@@ -5598,7 +5676,7 @@ void resolveGenerateMemberInPlace(
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
                     ctx.sm, false, {}, ctx.domain_facts, ctx.occurrence, {},
                     childPath, ctx.local_nodes,
-                    ctx.local_array_types, ctx.local_aggregate_bindings, {},
+                    ctx.local_declared_types, ctx.local_aggregate_bindings, {},
                     ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
                     ctx.moduleLookup, ctx.globalImports,
                     ctx.current_write_origin, ctx.partial_drivers, ctx.write_states};
@@ -5989,20 +6067,12 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Resolve inputs
     for (const auto& input : unresolved.inputs) {
         auto sig = resolveModuleNode(input, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
-        if (sig.type.isStruct()) {
-            throw CompilerError("struct-typed input ports are not supported in phase 2",
-                                resolveSourceLoc(*input.type.syntax, sourceManager));
-        }
         addInputNode(resolved, sig);
     }
 
     // Resolve outputs
     for (const auto& output : unresolved.outputs) {
         auto sig = resolveModuleNode(output, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
-        if (sig.type.isStruct()) {
-            throw CompilerError("struct-typed output ports are not supported in phase 2",
-                                resolveSourceLoc(*output.type.syntax, sourceManager));
-        }
         addOutputNode(resolved, sig);
     }
 
@@ -6016,10 +6086,6 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     std::set<std::string> flopNames;
     for (const auto& flop : unresolved.flops) {
         const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
-        if (resolvedModuleNode.type.isStruct()) {
-            throw CompilerError("struct-typed flops are not supported in phase 2",
-                                resolveSourceLoc(*flop.type.syntax, sourceManager));
-        }
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedModuleNode.name,
                 .type = resolvedModuleNode.type,

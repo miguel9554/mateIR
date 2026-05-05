@@ -49,6 +49,7 @@ struct ModuleNodeBinding {
 // Per-leaf .d (sink) and .q (source) bindings for a flop named value.
 // Scalar flops use the one-leaf case.
 struct FlopBinding {
+    std::vector<AggregateLeafBinding> aggregate_leaves;
     std::vector<DFGNode*> d_leaves;
     std::vector<DFGNode*> q_leaves;
 };
@@ -100,6 +101,11 @@ size_t linearUnpackedIndex(const std::vector<Dimension>& dims,
 // E.g. type [0:1][0:1] → {"[0][0]", "[0][1]", "[1][0]", "[1][1]"}
 // Scalars return {""}.
 std::vector<std::string> unpackedIndexSuffixes(const Type& type);
+void collectAggregateLeafPlan(const Type& type,
+                              const std::string& base_name,
+                              const AggregatePath& path,
+                              std::vector<AggregateLeafBinding>& out);
+size_t aggregateValueLeafCount(const Type& type);
 
 // Return the type with its first unpacked dimension removed.
 Type dropFirstUnpackedDim(Type type);
@@ -189,14 +195,23 @@ struct FlopInfo {
 
 struct ModuleInstanceInputBinding {
     std::string port_name;
+    std::string leaf_name;
+    AggregatePath path;
     DFGOutput driver;
+};
+
+struct ModuleInstanceOutputBinding {
+    std::string port_name;
+    std::string leaf_name;
+    AggregatePath path;
+    DFGNode* placeholder = nullptr;
 };
 
 struct ModuleInstanceBinding {
     std::string instance_name;
     std::string module_type;
     std::vector<ModuleInstanceInputBinding> inputs;
-    std::map<std::string, DFGNode*> output_placeholders;
+    std::vector<ModuleInstanceOutputBinding> output_bindings;
     std::optional<SourceLoc> loc;
 };
 

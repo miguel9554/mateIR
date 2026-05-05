@@ -15,9 +15,12 @@ namespace {
 
 // Return all leaf element names for a flop (expanding unpacked dimensions).
 std::vector<std::string> allElements(const std::string& baseName, const Type& type) {
+    std::vector<AggregateLeafBinding> plan;
+    collectAggregateLeafPlan(type, baseName, {}, plan);
     std::vector<std::string> names;
-    for (const auto& suffix : unpackedIndexSuffixes(type)) {
-        names.push_back(baseName + suffix);
+    names.reserve(plan.size());
+    for (const auto& leaf : plan) {
+        names.push_back(leaf.name);
     }
     return names;
 }
@@ -280,10 +283,10 @@ FlopInfo extractFlopClockAndReset(
 {
     auto flop = flopIn;
     DFGNode* dNode = nullptr;
-    if (!flopIn.type.unpacked_dims.empty() && flop_name != flopIn.name) {
-        dNode = graph.getGraphOutput(instance_path, flop_name + ".d");
-    } else {
+    if (flopIn.binding.d_leaves.size() == 1 && flop_name == flopIn.name) {
         dNode = scalarFlopDNode(flopIn);
+    } else {
+        dNode = graph.getGraphOutput(instance_path, flop_name + ".d");
     }
     if (!dNode) {
         throw CompilerError(std::format(
@@ -335,7 +338,13 @@ FlopInfo extractFlopClockAndReset(
         .reset_value = flop.reset_value,
     };
     flop.name = flop_name;
-    flop.type.unpacked_dims = {};
+    for (const auto& leaf : flopIn.binding.aggregate_leaves) {
+        if (leaf.name == flop_name) {
+            flop.type = leaf.leaf_type;
+            flop.binding.aggregate_leaves = {leaf};
+            break;
+        }
+    }
     return flop;
 }
 
@@ -458,7 +467,9 @@ static void resolveFlopsForModule(Module& resolved,
             {
                 auto* dNode = graph.getGraphOutput(dfgInstancePath, name + ".d");
                 auto* qNode = graph.getGraphInput(dfgInstancePath, name + ".q");
+                auto leafMeta = resolved_flops.back().binding.aggregate_leaves;
                 resolved_flops.back().binding = FlopBinding{
+                    .aggregate_leaves = std::move(leafMeta),
                     .d_leaves = {dNode},
                     .q_leaves = {qNode},
                 };

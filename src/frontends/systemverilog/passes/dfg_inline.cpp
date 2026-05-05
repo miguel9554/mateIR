@@ -32,9 +32,10 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
     // Step 1: Rewire inputs — replace uses of sub INPUT nodes with parent drivers
     for (const auto& inputBinding : binding.inputs) {
         const std::string& portName = inputBinding.port_name;
+        const std::string& leafName = inputBinding.leaf_name;
         DFGOutput driver = inputBinding.driver;
 
-        DFGNode* subInputNode = sub->dfg->getGraphInput("", portName);
+        DFGNode* subInputNode = sub->dfg->getGraphInput("", leafName);
         if (!subInputNode) continue;
 
         // Replace all uses of subInputNode in sub.dfg with the parent driver
@@ -72,10 +73,10 @@ void inlineModuleNode(Module& parent, ModuleInstanceBinding& binding) {
     }
 
     // Step 2: Rewire parent-side child output placeholders to actual child outputs.
-    for (const auto& [portName, placeholder] : binding.output_placeholders) {
-        DFGNode* subOutputNode = sub->dfg->getGraphOutput("", portName);
+    for (const auto& outputBinding : binding.output_bindings) {
+        DFGNode* subOutputNode = sub->dfg->getGraphOutput("", outputBinding.leaf_name);
         if (!subOutputNode) continue;
-        parent.dfg->redirectConsumers(placeholder, DFGOutput{subOutputNode, 0});
+        parent.dfg->redirectConsumers(outputBinding.placeholder, DFGOutput{subOutputNode, 0});
     }
 
     // Step 3: Set instance_path on all sub nodes (must happen before adopt so

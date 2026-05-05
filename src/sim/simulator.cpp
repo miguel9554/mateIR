@@ -89,6 +89,13 @@ bool isActiveLevel(const SimValue& value, edge_t active_edge) {
         : value.isZero();
 }
 
+const DFGNode* topInputLeafNode(const Module& module, const std::string& leafName) {
+    if (auto ref = findModuleNamedLeaf(module, leafName)) {
+        return ref->node;
+    }
+    return module.dfg ? module.dfg->getGraphInput("", leafName) : nullptr;
+}
+
 } // namespace
 
 // ============================================================================
@@ -532,36 +539,39 @@ void Simulator::buildTopInputDomainMaps() {
 void Simulator::buildTimeline() {
     // Determine which inputs are async (clocks, resets, and async data) from resolved input types
     forEachInputNode(module_, [&](const ModuleNode& input) {
-        const std::string& name = input.name;
+        std::vector<std::string> names;
+        for (const auto& leaf : moduleNodeLeafRefs(input)) names.push_back(leaf.leaf_name);
         if (std::holds_alternative<ClockSignal>(input.sync_type) ||
             std::holds_alternative<ResetSignal>(input.sync_type) ||
             std::holds_alternative<AsyncSignal>(input.sync_type)) {
-            async_inputs_.insert(name);
+            for (const auto& name : names) async_inputs_.insert(name);
         }
     });
 
     // Map each sync input to its clock domain.
     forEachInputNode(module_, [&](const ModuleNode& input) {
-        const std::string& name = input.name;
-        if (async_inputs_.count(name)) return;
+        std::vector<std::string> names;
+        for (const auto& leaf : moduleNodeLeafRefs(input)) names.push_back(leaf.leaf_name);
+        if (names.empty()) return;
+        if (async_inputs_.count(names.front())) return;
         const auto* sync = std::get_if<SyncSignal>(&input.sync_type);
         if (!sync) {
             if (std::holds_alternative<StaticSignal>(input.sync_type)) {
                 throw CompilerError(std::format(
-                    "Simulator: top-level input '{}' cannot be static", name));
+                    "Simulator: top-level input '{}' cannot be static", input.name));
             }
             throw CompilerError(std::format(
                 "Simulator: input '{}' has unsupported sync type for synchronous input",
-                name));
+                input.name));
         }
         ClockId id = sync->clock_domain;
         if (id == InvalidClockId || id.value >= ir_.clocks.size() ||
                 ir_.clocks[id.value].id != id) {
             throw CompilerError(std::format(
                 "Simulator: sync input '{}' references invalid ClockId {}",
-                name, id.value));
+                input.name, id.value));
         }
-        sync_input_clock_[name] = id;
+        for (const auto& name : names) sync_input_clock_[name] = id;
     });
 
         // Parse async input files: "time value" format per line
@@ -619,50 +629,53 @@ void Simulator::buildTimeline() {
 
 void Simulator::loadSyncInputs() {
     forEachInputNode(module_, [&](const ModuleNode& input) {
-        const std::string& name = input.name;
         if (!std::holds_alternative<SyncSignal>(input.sync_type)) return;
-        // (variable 'name' used by the rest of the loop body below)
-
-        std::string path = config_.inputs_dir + "/" + name + ".txt";
-        std::ifstream file(path);
-        if (!file.is_open()) {
-            throw CompilerError(std::format(
-                "Simulator: cannot open sync input file '{}'", path));
-        }
-
-        std::vector<SimValue> values;
-        std::string line;
-        while (std::getline(file, line)) {
-            if (line.empty() || line[0] == '#') continue;
-            std::istringstream iss(line);
-            std::string hex_text;
-            if (!(iss >> hex_text)) {
+        for (const auto& leaf : moduleNodeLeafRefs(input)) {
+            const std::string& name = leaf.leaf_name;
+            std::string path = config_.inputs_dir + "/" + name + ".txt";
+            std::ifstream file(path);
+            if (!file.is_open()) {
                 throw CompilerError(std::format(
-                    "Simulator: sync file '{}' has unparseable line: {}", path, line));
+                    "Simulator: cannot open sync input file '{}'", path));
             }
-            try {
-                if (input.type.width <= 0)
+
+            std::vector<SimValue> values;
+            std::string line;
+            while (std::getline(file, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                std::istringstream iss(line);
+                std::string hex_text;
+                if (!(iss >> hex_text)) {
                     throw CompilerError(std::format(
-                        "Simulator: sync input '{}' has no resolved type width", name));
-                values.push_back(SimValue::fromHexString(
-                    hex_text,
-                    input.type.width,
-                    input.type.isSigned()));
-            } catch (const std::invalid_argument&) {
-                throw CompilerError(std::format(
-                    "Simulator: sync file '{}' has bad hex value "
-                    "(expected leading token like 0x1a2b, optional trailing debug text): {}",
-                    path, line));
+                        "Simulator: sync file '{}' has unparseable line: {}", path, line));
+                }
+                try {
+                    const Type& leafType = leaf.node && leaf.node->type
+                        ? *leaf.node->type
+                        : input.type;
+                    if (leafType.width <= 0)
+                        throw CompilerError(std::format(
+                            "Simulator: sync input '{}' has no resolved type width", name));
+                    values.push_back(SimValue::fromHexString(
+                        hex_text,
+                        leafType.width,
+                        leafType.isSigned()));
+                } catch (const std::invalid_argument&) {
+                    throw CompilerError(std::format(
+                        "Simulator: sync file '{}' has bad hex value "
+                        "(expected leading token like 0x1a2b, optional trailing debug text): {}",
+                        path, line));
+                }
             }
-        }
 
-        if (values.empty()) {
-            throw CompilerError(std::format(
-                "Simulator: sync input file '{}' is empty", path));
-        }
+            if (values.empty()) {
+                throw CompilerError(std::format(
+                    "Simulator: sync input file '{}' is empty", path));
+            }
 
-        sync_input_data_[name] = std::move(values);
-        sync_input_pos_[name] = 0;
+            sync_input_data_[name] = std::move(values);
+            sync_input_pos_[name] = 0;
+        }
     });
 }
 
@@ -680,7 +693,7 @@ void Simulator::advanceSyncInputs(const std::set<ClockId>& active_clocks) {
         if (pos + 1 < sync_input_data_[name].size()) {
             pos++;
         }
-        if (auto* inputNode = module_.dfg->getGraphInput("", name)) {
+        if (auto* inputNode = topInputLeafNode(module_, name)) {
             root_->values[inputNode] = sync_input_data_[name][pos];
         }
     }
@@ -794,7 +807,7 @@ void Simulator::run() {
                         name, evt.time));
                 }
                 async_prev[name] = evt.value;
-                if (auto* inputNode = module_.dfg->getGraphInput("", name)) {
+                if (auto* inputNode = topInputLeafNode(module_, name)) {
                     root_->values[inputNode] = evt.value;
                 }
                 // Also initialize the root's async_values for edge detection
@@ -811,7 +824,7 @@ void Simulator::run() {
 
     // 3. Set sync input values from first line of their files
     for (const auto& [name, data] : sync_input_data_) {
-        if (auto* inputNode = module_.dfg->getGraphInput("", name)) {
+        if (auto* inputNode = topInputLeafNode(module_, name)) {
             root_->values[inputNode] = data[0];
         }
     }
@@ -871,7 +884,7 @@ void Simulator::run() {
             const SimValue& old_val = async_prev[name];
 
             root_->async_values[name] = new_val;
-            if (auto* inputNode = module_.dfg->getGraphInput("", name)) {
+            if (auto* inputNode = topInputLeafNode(module_, name)) {
                 root_->values[inputNode] = new_val;
             }
 

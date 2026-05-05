@@ -38,6 +38,8 @@ bool typeContainsStruct(const Type& type) {
     return false;
 }
 
+} // namespace
+
 void collectAggregateLeafPlan(const Type& type,
                               const std::string& base_name,
                               const AggregatePath& path,
@@ -82,8 +84,6 @@ void collectAggregateLeafPlan(const Type& type,
         .leaf_type = scalarLeafType(type),
     });
 }
-
-} // namespace
 
 // ============================================================================
 // Leaf layout helpers
@@ -148,6 +148,12 @@ std::vector<std::string> unpackedIndexSuffixes(const Type& type) {
     return result;
 }
 
+size_t aggregateValueLeafCount(const Type& type) {
+    std::vector<AggregateLeafBinding> plan;
+    collectAggregateLeafPlan(type, "", {}, plan);
+    return plan.size();
+}
+
 Type dropFirstUnpackedDim(Type type) {
     if (!type.unpacked_dims.empty()) {
         type.unpacked_dims.erase(type.unpacked_dims.begin());
@@ -179,9 +185,7 @@ DFGNode* leafAt(const ModuleNodeBinding& binding,
 }
 
 static size_t expectedModuleNodeLeafCount(const Type& type) {
-    std::vector<AggregateLeafBinding> plan;
-    collectAggregateLeafPlan(type, "", {}, plan);
-    return plan.size();
+    return aggregateValueLeafCount(type);
 }
 
 static void validateModuleNodeBindingShape(const ModuleNode& module_node) {
@@ -407,24 +411,21 @@ static std::vector<FlopLeafRef> flopLeafRefsImpl(const FlopInfo& flop,
     std::vector<FlopLeafRef> refs;
     refs.reserve(leaves.size());
     const std::string suffix = isQLeaf ? ".q" : ".d";
-
-    if (flop.type.unpacked_dims.empty()) {
-        refs.push_back(FlopLeafRef{
-            .flop = &flop,
-            .node = leaves.front(),
-            .leaf_name = flop.name + suffix,
-            .leaf_index = 0,
-            .is_q_leaf = isQLeaf,
-        });
-        return refs;
-    }
-
-    const auto idxSuffixes = unpackedIndexSuffixes(flop.type);
-    for (size_t i = 0; i < idxSuffixes.size(); ++i) {
+    for (size_t i = 0; i < leaves.size(); ++i) {
+        std::string leafName;
+        if (!flop.binding.aggregate_leaves.empty()) {
+            leafName = flop.binding.aggregate_leaves.at(i).name + suffix;
+        } else if (leaves.size() == 1) {
+            leafName = flop.name + suffix;
+        } else {
+            throw CompilerError(std::format(
+                "flop '{}' is missing aggregate leaf metadata for {} leaves",
+                flop.name, leaves.size()));
+        }
         refs.push_back(FlopLeafRef{
             .flop = &flop,
             .node = leaves[i],
-            .leaf_name = flop.name + idxSuffixes[i] + suffix,
+            .leaf_name = std::move(leafName),
             .leaf_index = i,
             .is_q_leaf = isQLeaf,
         });
@@ -895,6 +896,12 @@ static std::string flopToJson(const FlopInfo& f) {
     if (f.reset_value) {
         ss << ", \"reset_value\": " << *f.reset_value;
     }
+    ss << ", \"binding_leaves\": [";
+    for (size_t i = 0; i < f.binding.aggregate_leaves.size(); ++i) {
+        if (i) ss << ", ";
+        ss << aggregateLeafToJson(f.binding.aggregate_leaves[i]);
+    }
+    ss << "]";
     ss << "}";
     return ss.str();
 }

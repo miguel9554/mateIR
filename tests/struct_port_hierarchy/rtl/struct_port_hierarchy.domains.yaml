@@ -1,0 +1,12 @@
+module_name: struct_port_hierarchy
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - in_data
+      - in_valid

@@ -1,0 +1,11 @@
+module_name: struct_top_ports
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - in_s

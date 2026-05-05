@@ -64,6 +64,16 @@ private:
                 flopNames.insert(std::string(select.identifier.valueText()));
                 break;
             }
+            case SyntaxKind::MemberAccessExpression: {
+                auto& access = expr->as<MemberAccessExpressionSyntax>();
+                extractLhsName(access.left);
+                break;
+            }
+            case SyntaxKind::ScopedName: {
+                auto& scoped = expr->as<ScopedNameSyntax>();
+                extractLhsName(scoped.left);
+                break;
+            }
             case SyntaxKind::ConcatenationExpression: {
               auto& concat = expr->as<ConcatenationExpressionSyntax>();
               for (auto* part : concat.expressions) {
@@ -304,20 +314,34 @@ public:
     void handle(const TypedefDeclarationSyntax& node) {
         if (!currentModule && !currentPackage) throw CompilerError(
             "Typedef declaration must be inside a module or package.", resolveSourceLoc(node, sm));
-        if (node.type->kind != SyntaxKind::EnumType)
-            throw CompilerError(
-                "Only enum typedefs are supported (got " +
-                std::string(toString(node.type->kind)) + ")",
-                resolveSourceLoc(node, sm));
-        if (currentPackage) {
-            currentPackage->enumTypedefs.emplace_back(
-                std::string(node.name.valueText()),
-                &node.type->as<EnumTypeSyntax>());
-        } else {
-            currentModule->enumTypedefs.emplace_back(
-                std::string(node.name.valueText()),
-                &node.type->as<EnumTypeSyntax>());
+        const std::string typeName(node.name.valueText());
+        if (node.type->kind == SyntaxKind::EnumType) {
+            UnresolvedTypedef td{.name = typeName, .syntax = node.type};
+            if (currentPackage) {
+                currentPackage->enumTypedefs.push_back(td);
+            } else {
+                currentModule->enumTypedefs.push_back(td);
+            }
+            return;
         }
+        if (node.type->kind == SyntaxKind::StructType) {
+            UnresolvedTypedef td{.name = typeName, .syntax = node.type};
+            if (currentPackage) {
+                currentPackage->structTypedefs.push_back(td);
+            } else {
+                currentModule->structTypedefs.push_back(td);
+            }
+            return;
+        }
+        if (node.type->kind == SyntaxKind::UnionType) {
+            throw CompilerError(
+                "union types are not supported",
+                resolveSourceLoc(node, sm));
+        }
+        throw CompilerError(
+            "Only enum and struct typedefs are supported (got " +
+            std::string(toString(node.type->kind)) + ")",
+            resolveSourceLoc(node, sm));
     }
 
     void handle(const GenerateRegionSyntax& node) {

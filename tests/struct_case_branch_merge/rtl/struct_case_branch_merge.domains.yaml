@@ -1,0 +1,9 @@
+module_name: struct_case_branch_merge
+async_domain:
+- sel
+- ax
+- ay
+- bx
+- by
+- cx
+- cy

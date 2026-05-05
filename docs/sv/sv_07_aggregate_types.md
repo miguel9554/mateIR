@@ -13,31 +13,41 @@ All section references below are to IEEE Std 1800-2023.
 
 ### 7.2.1 Packed structures
 
-**Not supported (planned).** A packed structure (`struct packed { ... }`) is a
-mechanism for subdividing a contiguous bit vector into named fields. Although packed
-structures are synthesisable, the compiler does not yet support them. Encountering
-a `struct` type in a signal or port declaration throws a compile error.
+**Supported, with RTL-only semantics.** A packed structure (`struct packed { ... }`)
+is accepted when declared through a named `typedef struct packed`. The compiler
+does not preserve packedness as a distinct IR kind after frontend legality checks;
+structs are represented as named aggregate metadata and flattened to scalar DFG
+leaves.
 
-The planned IR representation is: a packed struct will be stored as a
-`Type` with `kind = Integer` (total width = sum of field widths, MSB-first
-per spec §7.2.1) plus a new metadata variant that records field names and their
-bit-slice offsets. Member access (`sig.field`) will lower into a `SLICE` DFG node
-using the precomputed offset. The struct is therefore treated as a flat bit vector
-at the DFG level — identical to how single-dimension packed arrays are handled
-today.
+Packed structs are treated as field-wise aggregates in the IR. The compiler does
+not currently support word-level packed-struct operations such as assigning a
+packed struct to a plain vector, taking a whole-struct bit/range select, or using
+a packed struct directly in arithmetic or bitwise operators.
 
 ### 7.2.2 Unpacked structures
 
-**Not supported (planned).** Unpacked structures (`struct { ... }` without
-`packed`) have implementation-defined member layout and can contain any data type.
-Support is planned alongside packed struct support.
+**Supported, with the same IR treatment as packed structs.** Unpacked structs are
+accepted when declared through a named `typedef struct`. The compiler does not
+preserve a packed/unpacked distinction in the IR; both forms flatten into named
+aggregate metadata plus per-leaf DFG nodes.
 
 ### 7.2.3 Assigning to structures
 
-**Not supported** while struct types are unsupported. Whole-struct assignment and
-member-by-member assignment will become valid once struct support is implemented.
-The `'{...}` assignment-pattern literal syntax (§5.10) is accepted by the parser
-today; it will drive struct assignments once type support is in place.
+**Supported for named typedef structs.** Whole-struct assignment lowers to
+element-by-element leaf assignment in declaration order. Field assignment lowers
+to the selected field leaf only.
+
+Struct compatibility is typedef-based: whole-struct assignment requires the same
+canonical typedef identity, not just the same unqualified type name.
+
+The `'{...}` assignment-pattern literal syntax (§5.10) is supported for struct
+literals in the following forms:
+
+- positional
+- named-member
+- default-member
+
+Unsupported literal forms include type-keyed and replicated patterns.
 
 ---
 
@@ -314,8 +324,8 @@ at run time and are not synthesisable.
 
 | §7 feature | Support |
 |---|---|
-| Packed structures (`struct packed`) | **No** — planned |
-| Unpacked structures (`struct`) | **No** — planned |
+| Packed structures (`struct packed`) | **Yes** — named typedef structs, field-wise IR |
+| Unpacked structures (`struct`) | **Yes** — named typedef structs, field-wise IR |
 | Packed unions (`union packed`) | **No** — planned |
 | Soft packed unions (`union soft packed`) | **No** — planned |
 | Tagged unions (`union tagged`) | **No** — not planned |
@@ -330,6 +340,8 @@ at run time and are not synthesisable.
 | Unpacked element select (variable index) | **Yes** — MUX tree over elements |
 | Unpacked variable-index write | **No** |
 | Unpacked sub-array slice | **No** |
+| Whole-struct assignment | **Yes** — leaf-wise, typedef identity required |
+| Struct literals (`'{...}`) | **Yes** — positional/named/default |
 | Whole-array assignment (unpacked) | **Yes** — element-by-element |
 | Dynamic arrays | **No** |
 | Associative arrays | **No** |

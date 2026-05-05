@@ -1,0 +1,12 @@
+module_name: struct_function_local
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - in_a
+      - in_b

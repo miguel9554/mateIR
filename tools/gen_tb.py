@@ -23,6 +23,8 @@ class Port:
     is_signed: bool
     param_dims: str  # e.g. "[WL-1:0]" or "" for scalar
     resolved_dims: str  # e.g. "[16-1:0]" with params substituted
+    named_struct_type: str  # preserved named type text for struct ports
+    struct_leaves: list[tuple[str, str]]  # [("field.sub", "logic [N:0]"), ...]
 
 
 @dataclass
@@ -35,11 +37,23 @@ class ModuleInfo:
 def parse_module(filepath: Path) -> ModuleInfo:
     tree = pyslang.SyntaxTree.fromFile(str(filepath))
     root = tree.root
-    module = next(
-        m for m in root.members if hasattr(m, 'header')
-    )
-    header = module.header
+    module = None
+    stem_name = filepath.stem
+    for member in root.members:
+        if 'ModuleDeclaration' not in str(member.kind):
+            continue
+        if not hasattr(member, 'header'):
+            continue
+        header = member.header
+        if header.name.valueText == stem_name:
+            module = member
+            break
+        if module is None:
+            module = member
+    if module is None:
+        raise ValueError(f"No module declaration found in {filepath}")
 
+    header = module.header
     mod_name = header.name.valueText
 
     # Parse parameters
@@ -66,7 +80,8 @@ def parse_module(filepath: Path) -> ModuleInfo:
 
     # Collect typedef definitions from all *_pkg.sv files in the same RTL directory
     # so that enum-typed ports (NamedType) can be resolved to their base dimensions.
-    typedef_map: dict[str, tuple[bool, str]] = {}  # name -> (is_signed, dims_str)
+    typedef_map: dict[str, tuple[str, bool, str]] = {}  # name -> (kind, is_signed, dims_str)
+    struct_leaves_map: dict[str, list[tuple[str, str]]] = {}
 
     def _extract_base_dims(type_node) -> tuple[bool, str]:
         """Return (is_signed, dims_str) for a DataTypeSyntax, recursing into EnumType."""
@@ -94,7 +109,31 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 try:
                     td_name = str(m.name.valueText)
                     is_signed, dims = _extract_base_dims(m.type)
-                    typedef_map[td_name] = (is_signed, dims)
+                    kind = str(m.type.kind)
+                    typedef_map[td_name] = (kind, is_signed, dims)
+                    if 'StructType' in kind:
+                        leaves: list[tuple[str, str]] = []
+                        for member in m.type.members:
+                            member_kind = str(member.type.kind)
+                            if 'NamedType' in member_kind:
+                                nested_type_name = str(member.type.name).strip()
+                                nested_lookup = nested_type_name.split("::")[-1]
+                                nested_leaves = struct_leaves_map.get(nested_type_name) or struct_leaves_map.get(nested_lookup) or []
+                                for declarator in member.declarators:
+                                    field_name = declarator.name.valueText
+                                    for nested_leaf, nested_type in nested_leaves:
+                                        leaves.append((f'{field_name}.{nested_leaf}', nested_type))
+                            else:
+                                m_signed, m_dims = _extract_base_dims(member.type)
+                                type_parts = ['logic']
+                                if m_signed:
+                                    type_parts.append('signed')
+                                if m_dims:
+                                    type_parts.append(m_dims)
+                                leaf_type = ' '.join(type_parts)
+                                for declarator in member.declarators:
+                                    leaves.append((declarator.name.valueText, leaf_type))
+                        struct_leaves_map[td_name] = leaves
                 except Exception:
                     pass
             # Descend into packages and modules
@@ -129,11 +168,20 @@ def parse_module(filepath: Path) -> ModuleInfo:
                     type_name = str(dt.name).strip()
                 except AttributeError:
                     type_name = ''
-                if type_name in typedef_map:
-                    is_signed, param_dims = typedef_map[type_name]
+                named_struct_type = ""
+                struct_leaves: list[tuple[str, str]] = []
+                unqualified_name = type_name.split("::")[-1]
+                lookup_name = type_name if type_name in typedef_map else unqualified_name
+                if lookup_name in typedef_map:
+                    td_kind, is_signed, param_dims = typedef_map[lookup_name]
+                    if 'StructType' in td_kind:
+                        named_struct_type = type_name
+                        struct_leaves = struct_leaves_map.get(lookup_name, [])
                 else:
                     # Unknown typedef — fall back to scalar logic
                     is_signed, param_dims = False, ''
+                    named_struct_type = ""
+                    struct_leaves = []
                 resolved_dims = resolve_dims(param_dims)
             else:
                 # Standard integer / implicit / logic type
@@ -146,6 +194,8 @@ def parse_module(filepath: Path) -> ModuleInfo:
                     dim_parts.append(str(dim).strip())
                 param_dims = ' '.join(dim_parts)
                 resolved_dims = resolve_dims(param_dims)
+                named_struct_type = ""
+                struct_leaves = []
 
             ports.append(Port(
                 name=port_name,
@@ -153,6 +203,8 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 is_signed=is_signed,
                 param_dims=param_dims,
                 resolved_dims=resolved_dims,
+                named_struct_type=named_struct_type,
+                struct_leaves=struct_leaves,
             ))
 
     return ModuleInfo(name=mod_name, parameters=params, ports=ports)
@@ -160,6 +212,8 @@ def parse_module(filepath: Path) -> ModuleInfo:
 
 def port_type_str(port: Port, use_resolved: bool = False) -> str:
     """Build type string like 'logic signed [WL-1:0]' or 'logic [8-1:0]'."""
+    if port.named_struct_type:
+        return port.named_struct_type
     parts = ['logic']
     if port.is_signed:
         parts.append('signed')
@@ -436,13 +490,24 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
             # Shorten reset instance name
             if sig in all_resets:
                 inst_name = f'u_{sig.replace("_n", "").replace("rst", "rst")}_recorder'
-            type_str = port_type_str(input_ports[sig], use_resolved=True)
-            lines.append(f'    async_recorder#(')
-            lines.append(f'        .filepath(path("{sig}.txt")),')
-            lines.append(f'        .TYPE({type_str})')
-            lines.append(f'    ) {inst_name}(')
-            lines.append(f'        .data(_if.{sig})')
-            lines.append(f'    );')
+            port = input_ports[sig]
+            if port.struct_leaves:
+                for leaf_name, leaf_type in port.struct_leaves:
+                    leaf_suffix = leaf_name.replace('.', '_')
+                    lines.append(f'    async_recorder#(')
+                    lines.append(f'        .filepath(path("{sig}.{leaf_name}.txt")),')
+                    lines.append(f'        .TYPE({leaf_type})')
+                    lines.append(f'    ) {inst_name}_{leaf_suffix}(')
+                    lines.append(f'        .data(_if.{sig}.{leaf_name})')
+                    lines.append(f'    );')
+            else:
+                type_str = port_type_str(port, use_resolved=True)
+                lines.append(f'    async_recorder#(')
+                lines.append(f'        .filepath(path("{sig}.txt")),')
+                lines.append(f'        .TYPE({type_str})')
+                lines.append(f'    ) {inst_name}(')
+                lines.append(f'        .data(_if.{sig})')
+                lines.append(f'    );')
 
     # Sync recorders - only for input signals in clock domains
     sync_entries = []
@@ -455,14 +520,25 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
         lines.append('')
         lines.append('    // Sync recorders')
         for clk, port in sync_entries:
-            type_str = port_type_str(port, use_resolved=True)
-            lines.append(f'    sync_recorder#(')
-            lines.append(f'        .filepath(path("{port.name}.txt")),')
-            lines.append(f'        .TYPE({type_str})')
-            lines.append(f'    ) u_{port.name}_recorder(')
-            lines.append(f'        .clk(_if.{clk}),')
-            lines.append(f'        .data(_if.{port.name})')
-            lines.append(f'    );')
+            if port.struct_leaves:
+                for leaf_name, leaf_type in port.struct_leaves:
+                    leaf_suffix = leaf_name.replace('.', '_')
+                    lines.append(f'    sync_recorder#(')
+                    lines.append(f'        .filepath(path("{port.name}.{leaf_name}.txt")),')
+                    lines.append(f'        .TYPE({leaf_type})')
+                    lines.append(f'    ) u_{port.name}_{leaf_suffix}_recorder(')
+                    lines.append(f'        .clk(_if.{clk}),')
+                    lines.append(f'        .data(_if.{port.name}.{leaf_name})')
+                    lines.append(f'    );')
+            else:
+                type_str = port_type_str(port, use_resolved=True)
+                lines.append(f'    sync_recorder#(')
+                lines.append(f'        .filepath(path("{port.name}.txt")),')
+                lines.append(f'        .TYPE({type_str})')
+                lines.append(f'    ) u_{port.name}_recorder(')
+                lines.append(f'        .clk(_if.{clk}),')
+                lines.append(f'        .data(_if.{port.name})')
+                lines.append(f'    );')
 
     lines.append('')
     lines.append('endmodule')

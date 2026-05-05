@@ -60,6 +60,44 @@ static_async_mix PASS
 static_flop_d PASS
 static_sync_mix PASS
 static_top_output PASS
+struct_typedef_collection PASS
+struct_field_read_write PASS
+struct_array_field_access PASS
+struct_array_whole_assign PASS
+struct_unknown_field_fail FAIL Unknown field 'bad' on struct type
+struct_whole_assign_phase2_fail PASS
+struct_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
+struct_package_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
+struct_package_port_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
+struct_to_vector_assign_fail FAIL struct/vector assignment is not supported
+vector_to_struct_assign_fail FAIL struct/vector assignment is not supported
+struct_conditional_expr PASS
+struct_if_branch_merge PASS
+struct_case_branch_merge PASS
+struct_conditional_typedef_mismatch_fail FAIL whole-struct conditional requires matching typedef names
+struct_if_struct_condition_fail FAIL whole struct cannot be used as a boolean condition
+struct_ternary_struct_condition_fail FAIL whole struct cannot be used as a boolean condition
+struct_literal_positional PASS
+struct_literal_named_members PASS
+struct_literal_default PASS
+struct_literal_typed_prefix_expr PASS
+struct_literal_duplicate_field_fail FAIL Struct literal has duplicate field
+struct_literal_unknown_field_fail FAIL Unknown field 'bad' on struct type
+struct_literal_missing_field_fail FAIL does not cover field
+struct_literal_type_keyed_fail FAIL Type-keyed struct literals are not supported
+struct_literal_replicated_fail FAIL Replicated struct literals are not supported
+struct_literal_context_required_fail FAIL Struct literal requires assignment context or explicit typedef prefix
+struct_port_decl_phase2_fail FAIL anonymous struct declarations are not supported
+struct_anonymous_decl_fail FAIL anonymous struct declarations are not supported
+struct_unpacked_field_fail FAIL struct fields cannot be unpacked arrays
+struct_member_default_fail FAIL struct member initializers/defaults are not supported
+struct_function_local PASS
+struct_instance_port_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
+struct_port_scalar_assign_fail FAIL struct/vector assignment is not supported
+struct_top_ports PASS
+struct_port_hierarchy PASS
+struct_flop_reset PASS
+union_typedef_fail FAIL union types are not supported
 submodule_output_bitselect_partial PASS
 submodule_multi_output_partial PASS
 subword_assign PASS

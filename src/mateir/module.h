@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <cstdint>
 #include <unordered_set>
 #include <vector>
 
@@ -17,17 +18,38 @@ namespace mate {
 // Leaf binding structures
 // ============================================================================
 
+enum class AggregatePathElemKind {
+    Field,
+    Index,
+};
+
+struct AggregatePathElem {
+    AggregatePathElemKind kind = AggregatePathElemKind::Field;
+    std::string field_name;
+    int64_t index = 0;
+};
+
+using AggregatePath = std::vector<AggregatePathElem>;
+
+struct AggregateLeafBinding {
+    DFGNode* leaf = nullptr;
+    std::string name;
+    AggregatePath path;
+    Type leaf_type;
+};
+
 // Declaration-order DFG leaves for a module node.
 // Scalars and packed vectors have exactly one leaf.
-// Unpacked arrays have one leaf per flattened element (declaration order,
-// outermost dimension first).
+// Unpacked/struct aggregates flatten in declaration order.
 struct ModuleNodeBinding {
+    std::vector<AggregateLeafBinding> aggregate_leaves;
     std::vector<DFGNode*> leaves;
 };
 
 // Per-leaf .d (sink) and .q (source) bindings for a flop named value.
 // Scalar flops use the one-leaf case.
 struct FlopBinding {
+    std::vector<AggregateLeafBinding> aggregate_leaves;
     std::vector<DFGNode*> d_leaves;
     std::vector<DFGNode*> q_leaves;
 };
@@ -79,6 +101,11 @@ size_t linearUnpackedIndex(const std::vector<Dimension>& dims,
 // E.g. type [0:1][0:1] → {"[0][0]", "[0][1]", "[1][0]", "[1][1]"}
 // Scalars return {""}.
 std::vector<std::string> unpackedIndexSuffixes(const Type& type);
+void collectAggregateLeafPlan(const Type& type,
+                              const std::string& base_name,
+                              const AggregatePath& path,
+                              std::vector<AggregateLeafBinding>& out);
+size_t aggregateValueLeafCount(const Type& type);
 
 // Return the type with its first unpacked dimension removed.
 Type dropFirstUnpackedDim(Type type);
@@ -168,14 +195,23 @@ struct FlopInfo {
 
 struct ModuleInstanceInputBinding {
     std::string port_name;
+    std::string leaf_name;
+    AggregatePath path;
     DFGOutput driver;
+};
+
+struct ModuleInstanceOutputBinding {
+    std::string port_name;
+    std::string leaf_name;
+    AggregatePath path;
+    DFGNode* placeholder = nullptr;
 };
 
 struct ModuleInstanceBinding {
     std::string instance_name;
     std::string module_type;
     std::vector<ModuleInstanceInputBinding> inputs;
-    std::map<std::string, DFGNode*> output_placeholders;
+    std::vector<ModuleInstanceOutputBinding> output_bindings;
     std::optional<SourceLoc> loc;
 };
 
@@ -188,6 +224,7 @@ struct Module {
     std::string instance_name;  // instance name (empty for the top module)
     std::vector<Param> parameters;
     std::vector<Param> localparams;
+    std::map<std::string, Type> named_types;
     std::map<std::string, ModuleNode> nodes;
     std::vector<FlopInfo> flops;
 

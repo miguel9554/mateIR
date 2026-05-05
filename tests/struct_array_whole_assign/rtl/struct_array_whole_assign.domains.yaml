@@ -1,0 +1,14 @@
+module_name: struct_array_whole_assign
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - in0_d
+      - in0_v
+      - in1_d
+      - in1_v

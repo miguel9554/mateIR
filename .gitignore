@@ -41,6 +41,12 @@ __pycache__/
 tests/**/*.txt
 !tests/regression_tests.txt
 tests/**/obj_dir
+tests/**/tb/generated/
+tests/**/work/**/obj_dir/
+tests/**/work/**/debug_output
+tests/**/work/**/output
+tests/**/work/**/*.hash
+tests/**/work/**/*.vcd
 **/*.gtkw
 **/debug_output
 external/slang-install/

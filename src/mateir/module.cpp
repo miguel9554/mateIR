@@ -725,6 +725,7 @@ static std::string typeToJson(const Type& t) {
     } else if (t.kind == TypeKind::Struct) {
         const auto& si = t.structInfo();
         ss << ", \"struct_type\": \"" << si.type_name << "\"";
+        ss << ", \"struct_identity\": \"" << si.type_identity << "\"";
         ss << ", \"struct_fields\": [";
         for (size_t i = 0; i < si.fields.size(); ++i) {
             if (i) ss << ", ";

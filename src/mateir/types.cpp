@@ -31,12 +31,14 @@ Type Type::makeEnum(std::string type_name, int width,
 }
 
 Type Type::makeStruct(std::string type_name,
+                      std::string type_identity,
                       std::vector<StructField> fields) {
     return Type{
         .kind = TypeKind::Struct,
         .width = 0,
         .metadata = StructInfo{
             .type_name = std::move(type_name),
+            .type_identity = std::move(type_identity),
             .fields = std::move(fields)
         },
         .packed_dims = {},

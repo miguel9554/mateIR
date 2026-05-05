@@ -56,6 +56,7 @@ struct StructField {
 
 struct StructInfo {
     std::string type_name;
+    std::string type_identity;
     std::vector<StructField> fields;
 };
 
@@ -83,6 +84,7 @@ struct Type {
                          std::vector<EnumMember> members);
 
     static Type makeStruct(std::string type_name,
+                           std::string type_identity,
                            std::vector<StructField> fields);
 
     bool isSigned() const {

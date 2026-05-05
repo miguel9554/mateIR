@@ -2291,7 +2291,7 @@ static bool sameAggregateStructTypedefShape(const Type& lhs, const Type& rhs) {
     }
     if (lhs.isStruct() || rhs.isStruct()) {
         if (!lhs.isStruct() || !rhs.isStruct()) return false;
-        if (lhs.structInfo().type_name != rhs.structInfo().type_name) return false;
+        if (lhs.structInfo().type_identity != rhs.structInfo().type_identity) return false;
         if (lhs.structInfo().fields.size() != rhs.structInfo().fields.size()) return false;
         for (size_t i = 0; i < lhs.structInfo().fields.size(); ++i) {
             if (!sameAggregateStructTypedefShape(*lhs.structInfo().fields[i].type,
@@ -5900,13 +5900,14 @@ static std::vector<StructField> resolveStructFields(
 static Type resolveStructTypedef(const UnresolvedTypedef& typedefDecl,
                                  const ParameterContext& ctx,
                                  const NamedTypeRegistry& namedTypeRegistry,
+                                 const std::string& typeIdentity,
                                  const PackageRegistry* pkgRegistry = nullptr) {
     if (typedefDecl.syntax->kind != SyntaxKind::StructType) {
         throw CompilerError("Expected struct typedef syntax");
     }
     const auto& structSyntax = typedefDecl.syntax->as<StructUnionTypeSyntax>();
     auto fields = resolveStructFields(structSyntax, typedefDecl.name, ctx, namedTypeRegistry, pkgRegistry);
-    return Type::makeStruct(typedefDecl.name, std::move(fields));
+    return Type::makeStruct(typedefDecl.name, typeIdentity, std::move(fields));
 }
 
 // Resolve all packages into a PackageRegistry
@@ -5941,7 +5942,8 @@ static PackageRegistry resolvePackages(
             if (entry.namedTypes.contains(td.name)) {
                 throw CompilerError("Duplicate typedef in package '" + pkg->name + "': " + td.name);
             }
-            entry.namedTypes[td.name] = resolveStructTypedef(td, emptyCtx, entry.namedTypes);
+            entry.namedTypes[td.name] = resolveStructTypedef(
+                td, emptyCtx, entry.namedTypes, pkg->name + "::" + td.name);
         }
         for (const auto* fn : pkg->functions)
             entry.functions[getFuncName(*fn)] = fn;
@@ -6049,7 +6051,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         if (namedTypeRegistry.contains(td.name)) {
             throw CompilerError("Duplicate typedef in module '" + unresolved.name + "': " + td.name);
         }
-        namedTypeRegistry[td.name] = resolveStructTypedef(td, *localCtx, namedTypeRegistry, &pkgRegistry);
+        namedTypeRegistry[td.name] = resolveStructTypedef(
+            td, *localCtx, namedTypeRegistry, unresolved.name + "::" + td.name, &pkgRegistry);
     }
     resolved.named_types = namedTypeRegistry;
 

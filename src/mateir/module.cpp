@@ -967,7 +967,6 @@ static std::string moduleToJson(const Module& m, int indent) {
     ss << ind(indent+1) << "\"signals\": [\n";
     first = true;
     forEachInternalNode(m, [&](const ModuleNode& sig) {
-        if (typeContainsStruct(sig.type)) return false;
         if (!first) ss << ",\n";
         ss << ind(indent+2) << moduleNodeToJson(sig);
         first = false;

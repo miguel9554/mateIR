@@ -91,6 +91,10 @@ struct_unpacked_field_fail FAIL struct fields cannot be unpacked arrays
 struct_member_default_fail FAIL struct member initializers/defaults are not supported
 struct_function_local PASS
 struct_instance_port_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
+struct_port_scalar_assign_fail FAIL struct/vector assignment is not supported
+struct_top_ports PASS
+struct_port_hierarchy PASS
+struct_flop_reset PASS
 union_typedef_fail FAIL union types are not supported
 submodule_output_bitselect_partial PASS
 submodule_multi_output_partial PASS

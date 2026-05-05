@@ -2,10 +2,12 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cstring>
+#include <cctype>
 #include <fstream>
 #include <map>
 #include <memory>
 #include <cmath>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -210,6 +212,19 @@ static InputSpec parse_arg(const char *arg) {
 // Hierarchy JSON parser
 // ============================================================================
 
+enum class SignalCategory { Input, Output, Signal, Flop, Param, Unknown };
+
+struct StructuredLeafSpec {
+    std::string name;
+    size_t width = 0;
+};
+
+struct ExpectedSignal {
+    std::string name;
+    SignalCategory category = SignalCategory::Unknown;
+    std::vector<StructuredLeafSpec> leaves;
+};
+
 struct HierarchyModule {
     std::string name;
     std::string instance_name;
@@ -218,10 +233,9 @@ struct HierarchyModule {
     std::set<std::string> signals;
     std::set<std::string> flops;
     std::set<std::string> params;   // parameters + localparams merged
+    std::vector<ExpectedSignal> structured_signals;
     std::vector<HierarchyModule> submodules;
 };
-
-enum class SignalCategory { Input, Output, Signal, Flop, Param, Unknown };
 
 static const char *category_label(SignalCategory c) {
     switch (c) {
@@ -239,6 +253,188 @@ struct CategorizedSignal {
     std::string name;
     SignalCategory category;
 };
+
+struct MatchedSignalValue {
+    std::string bits;
+    std::vector<std::string> consumed_names;
+};
+
+static std::string normalize_signal_name(const std::string &name) {
+    std::string out = name;
+    for (char &ch : out) {
+        if (ch == '.') ch = '_';
+    }
+    return out;
+}
+
+static std::string aggregate_root_name(const std::string &name) {
+    auto dot = name.find('.');
+    return dot == std::string::npos ? name : name.substr(0, dot);
+}
+
+static std::string signal_name_for_file(const std::string &name) {
+    std::string normalized = normalize_signal_name(name);
+    return normalized;
+}
+
+static std::string signal_name_for_file_or_exact(const std::string &name) {
+    std::string normalized = normalize_signal_name(name);
+    return normalized == name ? name : normalized;
+}
+
+static std::optional<std::string> lookup_signal_name(
+    const std::map<std::string, std::vector<VCDSignal *>> &signals,
+    const std::string &name) {
+    auto it = signals.find(name);
+    if (it != signals.end() && !it->second.empty()) return it->first;
+    std::string normalized = normalize_signal_name(name);
+    if (normalized != name) {
+        it = signals.find(normalized);
+        if (it != signals.end() && !it->second.empty()) return it->first;
+    }
+    return std::nullopt;
+}
+
+static VCDSignal *lookup_signal(
+    std::map<std::string, std::vector<VCDSignal *>> &signals,
+    const std::string &name,
+    std::string *matched_name = nullptr) {
+    auto it = signals.find(name);
+    if (it != signals.end() && !it->second.empty()) {
+        if (matched_name) *matched_name = it->first;
+        return it->second.front();
+    }
+    std::string normalized = normalize_signal_name(name);
+    if (normalized != name) {
+        it = signals.find(normalized);
+        if (it != signals.end() && !it->second.empty()) {
+            if (matched_name) *matched_name = it->first;
+            return it->second.front();
+        }
+    }
+    return nullptr;
+}
+
+static std::string signal_value_at(VCDFile *file, VCDSignal *signal, double ps_time, double ps_per_tick) {
+    VCDValue *value = file->get_signal_value_at(signal->hash, ps_time / ps_per_tick);
+    return value_to_string(value);
+}
+
+static size_t signal_width(const VCDSignal *signal) {
+    return static_cast<size_t>(signal->size);
+}
+
+static size_t expected_total_width(const ExpectedSignal &signal) {
+    size_t total = 0;
+    for (const auto &leaf : signal.leaves) total += leaf.width;
+    return total;
+}
+
+static std::vector<std::vector<const StructuredLeafSpec *>> group_structured_leaves(
+    const ExpectedSignal &expected) {
+    std::vector<std::vector<const StructuredLeafSpec *>> groups;
+    std::map<std::string, size_t> group_index;
+    for (const auto &leaf : expected.leaves) {
+        std::string group_name = aggregate_root_name(leaf.name);
+        auto [it, inserted] = group_index.emplace(group_name, groups.size());
+        if (inserted) {
+            groups.push_back({});
+        }
+        groups[it->second].push_back(&leaf);
+    }
+    return groups;
+}
+
+static std::optional<MatchedSignalValue> match_expected_signal(
+    VCDFile *file,
+    std::map<std::string, std::vector<VCDSignal *>> &signals,
+    const ExpectedSignal &expected,
+    double ps_time,
+    double ps_per_tick)
+{
+    if (expected.leaves.empty()) {
+        return std::nullopt;
+    }
+
+    std::string matched_name;
+    auto direct = lookup_signal(signals, expected.name, &matched_name);
+    if (direct && signal_width(direct) == expected_total_width(expected)) {
+        std::vector<std::string> consumed_names = {matched_name};
+        auto groups = group_structured_leaves(expected);
+        for (const auto &group : groups) {
+            if (group.empty()) {
+                continue;
+            }
+            std::string group_name = aggregate_root_name(group.front()->name);
+            if (group_name == expected.name) {
+                continue;
+            }
+            std::string group_match_name;
+            VCDSignal *group_signal = lookup_signal(signals, group_name, &group_match_name);
+            size_t group_width = 0;
+            for (const auto *leaf : group) group_width += leaf->width;
+            if (group_signal && signal_width(group_signal) == group_width) {
+                consumed_names.push_back(group_match_name);
+            }
+        }
+        return MatchedSignalValue{
+            .bits = signal_value_at(file, direct, ps_time, ps_per_tick),
+            .consumed_names = std::move(consumed_names),
+        };
+    }
+
+    auto groups = group_structured_leaves(expected);
+    std::vector<std::string> bits;
+    std::vector<std::string> consumed;
+    bits.reserve(expected.leaves.size());
+    consumed.reserve(expected.leaves.size());
+
+    for (const auto &group : groups) {
+        if (group.empty()) {
+            continue;
+        }
+        std::string group_name = aggregate_root_name(group.front()->name);
+        std::string group_match_name;
+        VCDSignal *group_signal = lookup_signal(signals, group_name, &group_match_name);
+        size_t group_width = 0;
+        for (const auto *leaf : group) group_width += leaf->width;
+        if (group_signal && signal_width(group_signal) == group_width) {
+            bits.push_back(signal_value_at(file, group_signal, ps_time, ps_per_tick));
+            consumed.push_back(group_match_name);
+            continue;
+        }
+
+        for (const auto *leaf : group) {
+            std::string leaf_match_name;
+            VCDSignal *signal = lookup_signal(signals, leaf->name, &leaf_match_name);
+            if (!signal) {
+                return std::nullopt;
+            }
+            bits.push_back(signal_value_at(file, signal, ps_time, ps_per_tick));
+            consumed.push_back(leaf_match_name);
+        }
+    }
+
+    std::string joined;
+    for (const auto &part : bits) joined += part;
+    return MatchedSignalValue{.bits = std::move(joined), .consumed_names = std::move(consumed)};
+}
+
+static std::optional<MatchedSignalValue> match_scalar_signal(
+    VCDFile *file,
+    std::map<std::string, std::vector<VCDSignal *>> &signals,
+    const std::string &name,
+    double ps_time,
+    double ps_per_tick)
+{
+    std::string matched_name;
+    VCDSignal *signal = lookup_signal(signals, name, &matched_name);
+    if (!signal) return std::nullopt;
+    return MatchedSignalValue{
+        .bits = signal_value_at(file, signal, ps_time, ps_per_tick),
+        .consumed_names = {matched_name},
+    };
+}
 
 // Expand a signal name with unpacked dimensions into all indexed VCD names.
 // e.g. "foo", [{0,2}]       -> {"foo[0]", "foo[1]", "foo[2]"}
@@ -345,16 +541,23 @@ struct HierarchyParser {
         return sign * val;
     }
 
-    // Parse a type object, returning its unpacked_dims as {left,right} pairs.
-    std::vector<std::pair<int,int>> parse_type_unpacked_dims() {
-        std::vector<std::pair<int,int>> dims;
+    struct ParsedType {
+        int width = 0;
+        std::vector<std::pair<int,int>> unpacked_dims;
+    };
+
+    // Parse a type object, returning its width and unpacked_dims.
+    ParsedType parse_type() {
+        ParsedType type;
         expect('{');
         skip_ws();
         if (peek() != '}') {
             do {
                 std::string key = parse_string();
                 expect(':');
-                if (key == "unpacked_dims") {
+                if (key == "width") {
+                    type.width = parse_integer();
+                } else if (key == "unpacked_dims") {
                     expect('[');
                     skip_ws();
                     if (peek() != ']') {
@@ -373,7 +576,7 @@ struct HierarchyParser {
                                 } while (peek() == ',' && (++p, true));
                             }
                             expect('}');
-                            dims.push_back({left, right});
+                            type.unpacked_dims.push_back({left, right});
                             skip_ws();
                         } while (peek() == ',' && (++p, true));
                     }
@@ -385,29 +588,33 @@ struct HierarchyParser {
             } while (peek() == ',' && (++p, true));
         }
         expect('}');
-        return dims;
+        return type;
     }
 
     // Parse [{..., "name": "x", "type": {...}, ...}, ...] collecting signal
     // names into out. Signals with unpacked_dims are expanded to "name[i]..."
     // to match the flat per-element names that VCD uses.
-    void parse_named_array(std::set<std::string> &out) {
+    void parse_named_array(std::set<std::string> &out,
+                           std::vector<ExpectedSignal> *structured,
+                           SignalCategory category) {
         expect('[');
         skip_ws();
         if (peek() == ']') { ++p; return; }
+        std::map<std::string, size_t> grouped_indices;
         do {
             skip_ws();
             expect('{');
             skip_ws();
             std::string found;
-            std::vector<std::pair<int,int>> unpacked_dims;
+            ParsedType parsed_type;
             std::set<std::string> binding_leaves;
+            std::vector<StructuredLeafSpec> structured_leaves;
             if (peek() != '}') {
                 do {
                     std::string key = parse_string();
                     expect(':');
                     if      (key == "name") found = parse_string();
-                    else if (key == "type") unpacked_dims = parse_type_unpacked_dims();
+                    else if (key == "type") parsed_type = parse_type();
                     else if (key == "binding_leaves") {
                         expect('[');
                         skip_ws();
@@ -416,17 +623,28 @@ struct HierarchyParser {
                                 expect('{');
                                 skip_ws();
                                 std::string leaf_name;
+                                size_t leaf_width = 0;
                                 if (peek() != '}') {
                                     do {
                                         std::string leaf_key = parse_string();
                                         expect(':');
                                         if (leaf_key == "name") leaf_name = parse_string();
+                                        else if (leaf_key == "type") {
+                                            ParsedType leaf_type = parse_type();
+                                            leaf_width = static_cast<size_t>(leaf_type.width);
+                                        }
                                         else skip_value();
                                         skip_ws();
                                     } while (peek() == ',' && (++p, true));
                                 }
                                 expect('}');
-                                if (!leaf_name.empty()) binding_leaves.insert(leaf_name);
+                                if (!leaf_name.empty()) {
+                                    binding_leaves.insert(leaf_name);
+                                    structured_leaves.push_back(StructuredLeafSpec{
+                                        .name = leaf_name,
+                                        .width = leaf_width,
+                                    });
+                                }
                                 skip_ws();
                             } while (peek() == ',' && (++p, true));
                         }
@@ -438,13 +656,39 @@ struct HierarchyParser {
             }
             expect('}');
             if (!found.empty()) {
-                if (!binding_leaves.empty()) {
-                    out.insert(binding_leaves.begin(), binding_leaves.end());
-                }
-                else if (!unpacked_dims.empty())
-                    expand_unpacked(found, unpacked_dims, 0, out);
-                else
+                if (category == SignalCategory::Flop && !binding_leaves.empty()) {
+                    std::string grouped_name = aggregate_root_name(found);
+                    if (structured) {
+                        auto [it, inserted] = grouped_indices.emplace(grouped_name, structured->size());
+                        if (inserted) {
+                            structured->push_back(ExpectedSignal{
+                                .name = grouped_name,
+                                .category = category,
+                            });
+                        }
+                        auto &group = (*structured)[it->second];
+                        if (group.leaves.empty()) {
+                            group.name = grouped_name;
+                            group.category = category;
+                        }
+                        for (auto &leaf : structured_leaves)
+                            group.leaves.push_back(std::move(leaf));
+                    }
+                } else if (!binding_leaves.empty()) {
+                    if (structured) {
+                        structured->push_back(ExpectedSignal{
+                            .name = found,
+                            .category = category,
+                            .leaves = std::move(structured_leaves),
+                        });
+                    }
+                } else if (category == SignalCategory::Flop) {
                     out.insert(found);
+                } else if (!parsed_type.unpacked_dims.empty()) {
+                    expand_unpacked(found, parsed_type.unpacked_dims, 0, out);
+                } else {
+                    out.insert(found);
+                }
             }
             skip_ws();
         } while (peek() == ',' && (++p, true));
@@ -461,12 +705,12 @@ struct HierarchyParser {
                 expect(':');
                 if      (key == "name")          m.name          = parse_string();
                 else if (key == "instance_name") m.instance_name = parse_string();
-                else if (key == "inputs")        parse_named_array(m.inputs);
-                else if (key == "outputs")       parse_named_array(m.outputs);
-                else if (key == "signals")       parse_named_array(m.signals);
-                else if (key == "flops")         parse_named_array(m.flops);
-                else if (key == "parameters")    parse_named_array(m.params);
-                else if (key == "localparams")   parse_named_array(m.params);
+                else if (key == "inputs")        parse_named_array(m.inputs, &m.structured_signals, SignalCategory::Input);
+                else if (key == "outputs")       parse_named_array(m.outputs, &m.structured_signals, SignalCategory::Output);
+                else if (key == "signals")       parse_named_array(m.signals, &m.structured_signals, SignalCategory::Signal);
+                else if (key == "flops")         parse_named_array(m.flops, &m.structured_signals, SignalCategory::Flop);
+                else if (key == "parameters")    parse_named_array(m.params, nullptr, SignalCategory::Param);
+                else if (key == "localparams")   parse_named_array(m.params, nullptr, SignalCategory::Param);
                 else if (key == "top")            m = parse_module();
                 else if (key == "submodules") {
                     expect('[');
@@ -559,6 +803,33 @@ static std::vector<CategorizedSignal> collect_expected_signals(const HierarchyMo
     return out;
 }
 
+static const std::vector<ExpectedSignal> &collect_structured_signals(const HierarchyModule &mod) {
+    return mod.structured_signals;
+}
+
+static bool is_structured_alias_signal(const HierarchyModule &mod, const std::string &name) {
+    for (const auto &expected : mod.structured_signals) {
+        auto groups = group_structured_leaves(expected);
+        for (const auto &group : groups) {
+            if (group.empty()) {
+                continue;
+            }
+            std::string group_name = aggregate_root_name(group.front()->name);
+            if (group_name == expected.name) {
+                continue;
+            }
+            if (group_name == name) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool should_ignore_extra_signal(const std::string &name) {
+    return name.find("unnamedblk") != std::string::npos;
+}
+
 static void collect_flat_signals(VCDScope *scope,
                                  const std::string &prefix,
                                  const std::set<std::string> &blocked_child_scopes,
@@ -605,6 +876,90 @@ static std::map<std::string, VCDScope *> build_child_scope_map(VCDScope *scope, 
         }
     }
     return out;
+}
+
+static bool has_scalar_signal(
+    const std::map<std::string, std::vector<VCDSignal *>> &signals,
+    const std::string &name,
+    std::string *matched_name = nullptr) {
+    auto it = signals.find(name);
+    if (it != signals.end() && !it->second.empty()) {
+        if (matched_name) *matched_name = it->first;
+        return true;
+    }
+    std::string normalized = normalize_signal_name(name);
+    if (normalized != name) {
+        it = signals.find(normalized);
+        if (it != signals.end() && !it->second.empty()) {
+            if (matched_name) *matched_name = it->first;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool has_structured_signal(
+    const std::map<std::string, std::vector<VCDSignal *>> &signals,
+    const ExpectedSignal &expected,
+    std::vector<std::string> *consumed_names = nullptr) {
+    std::string matched_name;
+    auto it = signals.find(expected.name);
+    if (it != signals.end() && !it->second.empty()) {
+        size_t total_width = expected_total_width(expected);
+        if (signal_width(it->second.front()) == total_width) {
+            if (consumed_names) consumed_names->push_back(it->first);
+            auto groups = group_structured_leaves(expected);
+            for (const auto &group : groups) {
+                if (group.empty()) {
+                    continue;
+                }
+                std::string group_name = aggregate_root_name(group.front()->name);
+                if (group_name == expected.name) {
+                    continue;
+                }
+                auto group_it = signals.find(group_name);
+                size_t group_width = 0;
+                for (const auto *leaf : group) group_width += leaf->width;
+                if (group_it != signals.end() && !group_it->second.empty() &&
+                        signal_width(group_it->second.front()) == group_width) {
+                    if (consumed_names) consumed_names->push_back(group_it->first);
+                }
+            }
+            return true;
+        }
+    }
+
+    std::vector<std::string> consumed;
+    consumed.reserve(expected.leaves.size());
+    auto groups = group_structured_leaves(expected);
+    for (const auto &group : groups) {
+        if (group.empty()) {
+            continue;
+        }
+        std::string group_name = aggregate_root_name(group.front()->name);
+        auto group_it = signals.find(group_name);
+        size_t group_width = 0;
+        for (const auto *leaf : group) group_width += leaf->width;
+    if (group_it != signals.end() && !group_it->second.empty() &&
+                signal_width(group_it->second.front()) == group_width) {
+            if (consumed_names) consumed_names->push_back(group_it->first);
+            continue;
+        }
+        for (const auto *leaf : group) {
+            std::string leaf_name = leaf->name;
+            auto leaf_it = signals.find(leaf_name);
+            if (leaf_it == signals.end() || leaf_it->second.empty()) {
+                std::string normalized = normalize_signal_name(leaf_name);
+                leaf_it = signals.find(normalized);
+                if (leaf_it == signals.end() || leaf_it->second.empty()) {
+                    return false;
+                }
+            }
+            consumed.push_back(leaf_it->first);
+        }
+    }
+    if (consumed_names) *consumed_names = std::move(consumed);
+    return true;
 }
 
 static std::string normalize_for_compare(const std::string &s) {
@@ -658,6 +1013,8 @@ static bool validate_hierarchy_recursive(
 {
     ScopeSummary summary;
     summary.scope_path = display_scope_path;
+    std::set<std::string> used1;
+    std::set<std::string> used2;
     bool recorded_scope_failure = false;
     auto mark_scope_failed = [&](const std::string &msg) {
         stats.errors.push_back(msg);
@@ -669,6 +1026,7 @@ static bool validate_hierarchy_recursive(
     };
 
     auto expected = collect_expected_signals(hier);
+    auto structured_expected = collect_structured_signals(hier);
     std::set<std::string> expected_children;
     for (const auto &sub : hier.submodules)
         expected_children.insert(sub.instance_name);
@@ -676,28 +1034,55 @@ static bool validate_hierarchy_recursive(
     auto signals2 = build_signal_map(scope2, expected_children, scope_path2, label2.c_str());
 
     for (const auto &entry : expected) {
-        auto it1 = signals1.find(entry.name);
-        auto it2 = signals2.find(entry.name);
-        if (it1 == signals1.end()) {
+        std::string matched1;
+        std::string matched2;
+        if (!has_scalar_signal(signals1, entry.name, &matched1)) {
             summary.signals.push_back({"(missing in " + label1 + ") " + entry.name, false, entry.category});
             mark_scope_failed(display_scope_path + ": missing in " + label1 + ": " + entry.name);
+        } else {
+            used1.insert(matched1);
         }
-        if (it2 == signals2.end()) {
+        if (!has_scalar_signal(signals2, entry.name, &matched2)) {
             summary.signals.push_back({"(missing in " + label2 + ") " + entry.name, false, entry.category});
             mark_scope_failed(display_scope_path + ": missing in " + label2 + ": " + entry.name);
+        } else {
+            used2.insert(matched2);
         }
-        if (it1 != signals1.end() && it2 != signals2.end())
+        if (!matched1.empty() && !matched2.empty())
+            summary.signals.push_back({entry.name, true, entry.category});
+    }
+
+    for (const auto &entry : structured_expected) {
+        std::vector<std::string> consumed1;
+        std::vector<std::string> consumed2;
+        if (!has_structured_signal(signals1, entry, &consumed1)) {
+            summary.signals.push_back({"(missing in " + label1 + ") " + entry.name, false, entry.category});
+            mark_scope_failed(display_scope_path + ": missing in " + label1 + ": " + entry.name);
+        } else {
+            used1.insert(consumed1.begin(), consumed1.end());
+        }
+        if (!has_structured_signal(signals2, entry, &consumed2)) {
+            summary.signals.push_back({"(missing in " + label2 + ") " + entry.name, false, entry.category});
+            mark_scope_failed(display_scope_path + ": missing in " + label2 + ": " + entry.name);
+        } else {
+            used2.insert(consumed2.begin(), consumed2.end());
+        }
+        if (!consumed1.empty() && !consumed2.empty())
             summary.signals.push_back({entry.name, true, entry.category});
     }
 
     for (const auto &[name, _] : signals1) {
-        if (get_category(&hier, name) == SignalCategory::Unknown) {
+        if (!used1.count(name) && get_category(&hier, name) == SignalCategory::Unknown &&
+                !is_structured_alias_signal(hier, name) &&
+                !should_ignore_extra_signal(name)) {
             summary.signals.push_back({"(extra in " + label1 + ") " + name, false, SignalCategory::Unknown});
             mark_scope_failed(display_scope_path + ": extra in " + label1 + ": " + name);
         }
     }
     for (const auto &[name, _] : signals2) {
-        if (get_category(&hier, name) == SignalCategory::Unknown) {
+        if (!used2.count(name) && get_category(&hier, name) == SignalCategory::Unknown &&
+                !is_structured_alias_signal(hier, name) &&
+                !should_ignore_extra_signal(name)) {
             summary.signals.push_back({"(extra in " + label2 + ") " + name, false, SignalCategory::Unknown});
             mark_scope_failed(display_scope_path + ": extra in " + label2 + ": " + name);
         }
@@ -752,8 +1137,11 @@ static void compare_hierarchy_recursive(
 {
     ScopeSummary summary;
     summary.scope_path = display_scope_path;
+    std::set<std::string> used1;
+    std::set<std::string> used2;
 
     auto expected = collect_expected_signals(hier);
+    auto structured_expected = collect_structured_signals(hier);
     std::set<std::string> expected_children;
     for (const auto &sub : hier.submodules)
         expected_children.insert(sub.instance_name);
@@ -764,19 +1152,23 @@ static void compare_hierarchy_recursive(
     std::printf("\n");
 
     for (const auto &entry : expected) {
-        auto it1 = signals1.find(entry.name);
-        auto it2 = signals2.find(entry.name);
-        if (it1 == signals1.end() || it2 == signals2.end()) {
+        std::string matched1;
+        std::string matched2;
+        auto sig1 = lookup_signal(signals1, entry.name, &matched1);
+        auto sig2 = lookup_signal(signals2, entry.name, &matched2);
+        if (!sig1 || !sig2) {
             summary.signals.push_back({"(validation bug) missing " + entry.name, false, entry.category});
             scope_failed = true;
             continue;
         }
+        used1.insert(matched1);
+        used2.insert(matched2);
 
         std::vector<std::string> detail_lines;
         int signal_match = 0;
         int signal_diff = 0;
-        bool passed = compare_signal_values(f1, it1->second.front(), ps1,
-                                            f2, it2->second.front(), ps2,
+        bool passed = compare_signal_values(f1, sig1, ps1,
+                                            f2, sig2, ps2,
                                             timestamps, signal_match, signal_diff, &detail_lines);
         stats.total_match += signal_match;
         stats.total_diff  += signal_diff;
@@ -786,6 +1178,71 @@ static void compare_hierarchy_recursive(
             std::printf("    \033[31mFAIL\033[0m  %s\n", entry.name.c_str());
             for (const auto &line : detail_lines)
                 std::printf("%s\n", line.c_str());
+        }
+    }
+
+    for (const auto &entry : structured_expected) {
+        std::vector<std::string> consumed1;
+        std::vector<std::string> consumed2;
+        if (!has_structured_signal(signals1, entry, &consumed1) ||
+            !has_structured_signal(signals2, entry, &consumed2)) {
+            summary.signals.push_back({"(validation bug) missing " + entry.name, false, entry.category});
+            scope_failed = true;
+            continue;
+        }
+        used1.insert(consumed1.begin(), consumed1.end());
+        used2.insert(consumed2.begin(), consumed2.end());
+
+        std::vector<std::string> detail_lines;
+        int signal_match = 0;
+        int signal_diff = 0;
+        bool passed = true;
+        for (double ps_time : timestamps) {
+            auto sample1 = match_expected_signal(f1, signals1, entry, ps_time, ps1);
+            auto sample2 = match_expected_signal(f2, signals2, entry, ps_time, ps2);
+            if (!sample1 || !sample2) {
+                passed = false;
+                break;
+            }
+            if (normalize_for_compare(sample1->bits) == normalize_for_compare(sample2->bits)) {
+                signal_match++;
+                continue;
+            }
+            signal_diff++;
+            passed = false;
+            if (detail_lines.size() < 10) {
+                std::ostringstream line;
+                line << "      @" << ps_time << " ps: f1=" << sample1->bits << "  f2=" << sample2->bits;
+                detail_lines.push_back(line.str());
+            } else if (detail_lines.size() == 10) {
+                detail_lines.push_back("      ... (further diffs suppressed)");
+            }
+        }
+        stats.total_match += signal_match;
+        stats.total_diff  += signal_diff;
+        summary.signals.push_back({entry.name, passed, entry.category});
+        if (!passed) {
+            scope_failed = true;
+            std::printf("    \033[31mFAIL\033[0m  %s\n", entry.name.c_str());
+            for (const auto &line : detail_lines)
+                std::printf("%s\n", line.c_str());
+        }
+    }
+
+    for (const auto &[name, _] : signals1) {
+        if (!used1.count(name) && get_category(&hier, name) == SignalCategory::Unknown &&
+                !is_structured_alias_signal(hier, name) &&
+                !should_ignore_extra_signal(name)) {
+            summary.signals.push_back({"(extra in " + label1 + ") " + name, false, SignalCategory::Unknown});
+            scope_failed = true;
+        }
+    }
+    for (const auto &[name, _] : signals2) {
+        if (!used2.count(name) && get_category(&hier, name) == SignalCategory::Unknown &&
+                !is_structured_alias_signal(hier, name) &&
+                !should_ignore_extra_signal(name)) {
+            summary.signals.push_back({"(extra in " + label2 + ") " + name, false, SignalCategory::Unknown});
+            scope_failed = true;
         }
     }
 

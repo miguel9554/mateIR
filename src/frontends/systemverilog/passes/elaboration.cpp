@@ -310,7 +310,14 @@ static ExprValue buildAssignmentPatternExprValueForTarget(
 static ExprValue buildValueForTargetType(const slang::syntax::ExpressionSyntax* expr,
                                          const Type& targetType,
                                          ResolutionContext& ctx,
-                                         const std::optional<SourceLoc>& loc);
+                                         const std::optional<SourceLoc>& loc,
+                                         bool allowAggregateScalarBroadcast = false);
+
+static ExprValue buildBroadcastValueFromScalar(
+    const ExprValue& scalarValue,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc);
 
 // Build a scalar-only expression. Throws if the expression resolves to an array.
 static DFGNode* buildExprDFG(const slang::syntax::ExpressionSyntax* expr,
@@ -1851,6 +1858,9 @@ static ExprValue selectDynamicUnpacked(const ExprValue& value,
         adjustedSel, ctx.graph.constant(S - 1), ctx.graph.constant(0));
     if (loc) truncSel->loc = *loc;
 
+    std::vector<AggregateLeafBinding> childPlan;
+    collectAggregateLeafPlan(childType, "", {}, childPlan);
+
     std::vector<DFGNode*> resultLeaves;
     resultLeaves.reserve(groupSize);
     for (size_t leafOffset = 0; leafOffset < groupSize; ++leafOffset) {
@@ -1858,8 +1868,7 @@ static ExprValue selectDynamicUnpacked(const ExprValue& value,
         std::vector<DFGNode*> armData;
         armValues.reserve(static_cast<size_t>(totalCodes));
         armData.reserve(static_cast<size_t>(totalCodes));
-        Type scalarType = childType;
-        scalarType.unpacked_dims.clear();
+        Type scalarType = childPlan.at(leafOffset).leaf_type;
         DFGNode* zeroNode = zeroScalarForType(ctx.graph, scalarType);
         for (int64_t v = 0; v < totalCodes; ++v) {
             armValues.push_back(v);
@@ -2630,7 +2639,8 @@ static ExprValue buildScalarExprValue(
 static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
                                          const Type& targetType,
                                          ResolutionContext& ctx,
-                                         const std::optional<SourceLoc>& loc);
+                                         const std::optional<SourceLoc>& loc,
+                                         bool allowAggregateScalarBroadcast);
 
 static ExprValue buildStructLiteralExprValue(const AssignmentPatternExpressionSyntax& patternExpr,
                                              const Type& structType,
@@ -2666,7 +2676,8 @@ static ExprValue buildStructLiteralExprValue(const AssignmentPatternExpressionSy
                 loc);
         }
         for (size_t i = 0; i < fields.size(); ++i) {
-            ExprValue fieldValue = buildValueForTargetType(pattern.items[i], *fields[i].type, ctx, loc);
+            ExprValue fieldValue = buildValueForTargetType(
+                pattern.items[i], *fields[i].type, ctx, loc, true);
             appendFieldValue(fieldValue, *fields[i].type);
         }
     } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
@@ -2721,7 +2732,7 @@ static ExprValue buildStructLiteralExprValue(const AssignmentPatternExpressionSy
                                 structType.structInfo().type_name, field.name),
                     loc);
             }
-            ExprValue fieldValue = buildValueForTargetType(expr, *field.type, ctx, loc);
+            ExprValue fieldValue = buildValueForTargetType(expr, *field.type, ctx, loc, true);
             appendFieldValue(fieldValue, *field.type);
         }
     } else if (patternExpr.pattern->kind == SyntaxKind::ReplicatedAssignmentPattern) {
@@ -2752,37 +2763,21 @@ static ExprValue buildStructLiteralExprValue(const AssignmentPatternExpressionSy
 static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
                                          const Type& targetType,
                                          ResolutionContext& ctx,
-                                         const std::optional<SourceLoc>& loc) {
+                                         const std::optional<SourceLoc>& loc,
+                                         bool allowAggregateScalarBroadcast) {
     if (targetType.isStruct() || !targetType.unpacked_dims.empty()) {
         if (expr->kind == SyntaxKind::AssignmentPatternExpression) {
             return buildAssignmentPatternExprValueForTarget(
                 expr->as<AssignmentPatternExpressionSyntax>(), targetType, ctx, loc);
         }
         ExprValue value = buildExprValue(expr, ctx);
-        if (value.scalar && !value.type.isStruct() && value.type.unpacked_dims.empty()) {
-            std::vector<AggregateLeafBinding> plan;
-            collectAggregateLeafPlan(targetType, "", {}, plan);
-            std::vector<DFGNode*> leaves;
-            leaves.reserve(plan.size());
-            std::vector<AggregatePath> leafPaths;
-            leafPaths.reserve(plan.size());
-            for (const auto& leaf : plan) {
-                ExprValue scalar = buildScalarExprValue(expr, ctx);
-                ExprValue coerced = coerceAssignmentExprToWidth(ctx, std::move(scalar), leaf.leaf_type, loc);
-                leaves.push_back(coerced.scalar);
-                leafPaths.push_back(leaf.path);
-            }
-            return ExprValue{
-                .type = targetType,
-                .scalar = nullptr,
-                .leaves = std::move(leaves),
-                .leaf_paths = std::move(leafPaths),
-            };
-        }
         if (!sameAggregateStructTypedefShape(value.type, targetType)) {
             bool rhsStructAggregate = typeContainsStructValue(value.type);
             if (rhsStructAggregate) {
                 throw CompilerError("whole-struct assignment requires matching typedef names", loc);
+            }
+            if (allowAggregateScalarBroadcast && targetType.isStruct() && targetType.unpacked_dims.empty()) {
+                return buildBroadcastValueFromScalar(value, targetType, ctx, loc);
             }
             throw CompilerError("struct/vector assignment is not supported", loc);
         }
@@ -2791,6 +2786,53 @@ static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
 
     ExprValue scalar = buildScalarExprValue(expr, ctx);
     return coerceAssignmentExprToWidth(ctx, std::move(scalar), targetType, loc);
+}
+
+static ExprValue buildBroadcastValueFromScalar(
+    const ExprValue& scalarValue,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc) {
+    if (targetType.isStruct() && targetType.unpacked_dims.empty()) {
+        std::vector<DFGNode*> leaves;
+        const auto& fields = targetType.structInfo().fields;
+        for (const auto& field : fields) {
+            ExprValue fieldValue = buildBroadcastValueFromScalar(
+                scalarValue, *field.type, ctx, loc);
+            if (field.type->isStruct() || !field.type->unpacked_dims.empty()) {
+                if (fieldValue.leaves.empty()) {
+                    throw CompilerError("Struct literal field expression did not produce aggregate leaves", loc);
+                }
+                leaves.insert(leaves.end(), fieldValue.leaves.begin(), fieldValue.leaves.end());
+            } else {
+                if (!fieldValue.scalar) {
+                    throw CompilerError("Struct literal field expression did not produce a scalar DFG node", loc);
+                }
+                leaves.push_back(fieldValue.scalar);
+            }
+        }
+
+        std::vector<AggregateLeafBinding> plan;
+        collectAggregateLeafPlan(targetType, "", {}, plan);
+        if (plan.size() != leaves.size()) {
+            throw CompilerError("Struct literal leaf shape mismatch", loc);
+        }
+        std::vector<AggregatePath> leafPaths;
+        leafPaths.reserve(plan.size());
+        for (const auto& leaf : plan) {
+            leafPaths.push_back(leaf.path);
+        }
+
+        return ExprValue{
+            .type = targetType,
+            .scalar = nullptr,
+            .leaves = std::move(leaves),
+            .leaf_paths = std::move(leafPaths),
+        };
+    }
+
+    ExprValue scalarCopy = scalarValue;
+    return coerceAssignmentExprToWidth(ctx, std::move(scalarCopy), targetType, loc);
 }
 
 static ExprValue buildAssignmentPatternExprValueForTarget(

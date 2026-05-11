@@ -31,6 +31,7 @@ void printUsage(const char* progName) {
               << "  --flops-initial <mode>    Flop init: random (default), zeros, ones\n"
               << "  --flops-seed <n>          Seed for random flop initialization\n"
               << "  --debug-nodes <n1,n2,...> Comma-separated node names for debug DOTs\n"
+              << "  --debug-node-deps <...>   Comma-separated node names to dump direct DFG inputs\n"
               << "  --params <K=V,K=V,...>    Comma-separated top parameter overrides\n";
 }
 
@@ -87,6 +88,7 @@ int main(int argc, char** argv) {
     std::string flopsInitialStr;
     std::string flopsSeedStr;
     std::string debugNodesStr;
+    std::string debugNodeDepsStr;
     std::string paramsStr;
     std::string emitInferredDomainsPath;
     std::vector<std::string> domainFiles;
@@ -107,6 +109,7 @@ int main(int argc, char** argv) {
                    std::strcmp(argv[i], "--flops-initial") == 0 ||
                    std::strcmp(argv[i], "--flops-seed") == 0 ||
                    std::strcmp(argv[i], "--debug-nodes") == 0 ||
+                   std::strcmp(argv[i], "--debug-node-deps") == 0 ||
                    std::strcmp(argv[i], "--params") == 0 ||
                    std::strcmp(argv[i], "--emit-inferred-domains") == 0) {
             if (i + 1 >= argc) {
@@ -123,6 +126,7 @@ int main(int argc, char** argv) {
             else if (opt == "--flops-initial") flopsInitialStr = value;
             else if (opt == "--flops-seed") flopsSeedStr = value;
             else if (opt == "--debug-nodes") debugNodesStr = value;
+            else if (opt == "--debug-node-deps") debugNodeDepsStr = value;
             else if (opt == "--params") paramsStr = value;
             else if (opt == "--emit-inferred-domains") emitInferredDomainsPath = value;
         } else if (std::strcmp(argv[i], "--domains") == 0) {
@@ -200,7 +204,7 @@ int main(int argc, char** argv) {
             std::cout << "========================================\n";
             std::cout << "Running static analysis...\n";
             std::cout << "========================================\n";
-            StaticAnalysisConsumer analyzer(std::cout);
+            StaticAnalysisConsumer analyzer(std::cout, parseDebugNodes(debugNodeDepsStr));
             analyzer.consume(mateir);
         }
 

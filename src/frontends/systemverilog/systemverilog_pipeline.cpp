@@ -24,6 +24,7 @@
 #include <functional>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <set>
 #include <unordered_set>
 
@@ -112,7 +113,8 @@ const DFGNode* findDebugLeaf(const Module& module,
 }
 
 void validateDebugSpecsBeforePipeline(const Module& topModule,
-                                      const std::vector<DebugNodeSpec>& specs) {
+                                      const std::vector<DebugNodeSpec>& specs,
+                                      const std::string& optionName) {
     if (specs.empty()) return;
 
     std::set<size_t> foundSpecs;
@@ -130,8 +132,8 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
 
             if (!found && !spec.module_path.empty())
                 throw CompilerError(std::format(
-                    "debug_dfg_nodes: node '{}' not found in module '{}' outputs, signals, or flop .d/.q leaves",
-                    spec.node_name, module.name));
+                    "{}: node '{}' not found in module '{}' outputs, signals, or flop .d/.q leaves",
+                    optionName, spec.node_name, module.name));
 
             if (found) foundSpecs.insert(i);
         }
@@ -142,8 +144,8 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
     for (size_t i = 0; i < specs.size(); i++) {
         if (!foundSpecs.contains(i))
             throw CompilerError(std::format(
-                "debug_dfg_nodes: node '{}' not found in any module outputs, signals, or flop .d/.q leaves",
-                specs[i].node_name));
+                "{}: node '{}' not found in any module outputs, signals, or flop .d/.q leaves",
+                optionName, specs[i].node_name));
     }
 }
 
@@ -156,7 +158,7 @@ void runMateIRPipeline(MateIR& ir,
                        const std::vector<DebugNodeSpec>& debugSpecs) {
     Module& topModule = ir.top;
 
-    validateDebugSpecsBeforePipeline(topModule, debugSpecs);
+    validateDebugSpecsBeforePipeline(topModule, debugSpecs, "debug_dfg_nodes");
 
     std::set<size_t> satisfiedDebugSpecs;
 
@@ -239,6 +241,7 @@ void runMateIRPipeline(MateIR& ir,
                         << module.dfg->toJsonCone(node);
                 }
             }
+
         };
 
         std::function<void(const Module&, std::ostream&)> dumpFlopsRecursive =
@@ -338,6 +341,7 @@ void runMateIRPipeline(MateIR& ir,
                     << module.dfg->toJsonCone(node);
             }
         }
+
     };
 
     runPipeline(topModule, topModule.name);

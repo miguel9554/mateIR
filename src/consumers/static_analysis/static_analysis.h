@@ -1,9 +1,11 @@
 #pragma once
 
 #include "consumers/ir_consumer.h"
+#include "mateir/debug.h"
 
 #include <cstddef>
 #include <iosfwd>
+#include <vector>
 
 namespace mate {
 
@@ -18,13 +20,15 @@ struct StaticAnalysisSummary {
 
 class StaticAnalysisConsumer final : public IRConsumer {
 public:
-    explicit StaticAnalysisConsumer(std::ostream& out);
+    explicit StaticAnalysisConsumer(std::ostream& out,
+                                    std::vector<DebugNodeSpec> debug_dfg_node_deps = {});
 
     std::string name() const override;
     void consume(const MateIR& ir) override;
 
 private:
     std::ostream& out_;
+    std::vector<DebugNodeSpec> debug_dfg_node_deps_;
 };
 
 StaticAnalysisSummary analyzeMateIR(const MateIR& ir);

@@ -484,6 +484,7 @@ std::optional<ModuleNodeLeafRef> findModuleNamedLeaf(
 }
 
 DFGNode* findModuleDebugLeafNode(Module& module, const std::string& leaf_name) {
+    if (auto named = findModuleNamedLeaf(module, leaf_name)) return named->node;
     if (auto output = findModuleDrivenLeaf(module, leaf_name)) return output->node;
 
     for (const auto& flop : module.flops) {

@@ -32,6 +32,7 @@ void printUsage(const char* progName) {
               << "  --flops-seed <n>          Seed for random flop initialization\n"
               << "  --debug-nodes <n1,n2,...> Comma-separated node names for debug DOTs\n"
               << "  --debug-node-deps <...>   Comma-separated node names to dump direct DFG inputs\n"
+              << "  --dump-passes             Dump per-pass DFG .dot/.json and final DFG dump\n"
               << "  --params <K=V,K=V,...>    Comma-separated top parameter overrides\n";
 }
 
@@ -81,6 +82,7 @@ std::unique_ptr<Frontend> makeFrontend(const std::string& frontendName) {
 int main(int argc, char** argv) {
     bool simulateMode = false;
     bool analyzeMode = false;
+    bool dumpPasses = false;
     std::string frontendName = "systemverilog";
     std::string topModule;
     std::string inputsDir;
@@ -102,6 +104,8 @@ int main(int argc, char** argv) {
             analyzeMode = true;
         } else if (std::strcmp(argv[i], "--infer-top-domains") == 0) {
             topDomainMode = TopDomainMode::Infer;
+        } else if (std::strcmp(argv[i], "--dump-passes") == 0) {
+            dumpPasses = true;
         } else if (std::strcmp(argv[i], "--frontend") == 0 ||
                    std::strcmp(argv[i], "--top") == 0 ||
                    std::strcmp(argv[i], "--inputs-dir") == 0 ||
@@ -189,6 +193,7 @@ int main(int argc, char** argv) {
             frontendOptions.emit_inferred_domains_path = emitInferredDomainsPath;
         }
         frontendOptions.debug_dfg_nodes = parseDebugNodes(debugNodesStr);
+        frontendOptions.dump_passes = dumpPasses;
         parseParams(paramsStr, frontendOptions.parameters);
 
         auto frontend = makeFrontend(frontendName);
@@ -198,6 +203,7 @@ int main(int argc, char** argv) {
         std::cout << "\nmateir:\n";
         std::cout << "========================================\n";
         mateir.top.print();
+        if (dumpPasses) mateir.top.dumpDfgFiles();
         std::cout << "\n";
 
         if (analyzeMode) {

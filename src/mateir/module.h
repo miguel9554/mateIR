@@ -236,6 +236,7 @@ struct Module {
     std::unique_ptr<DFG> dfg;
 
     void print(int indent = 0) const;
+    void dumpDfgFiles() const;
 };
 
 bool isInputNode(const ModuleNode& node);

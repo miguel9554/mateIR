@@ -23,6 +23,7 @@ struct FrontendOptions {
     TopDomainMode top_domain_mode = TopDomainMode::Yaml;
     std::optional<std::string> emit_inferred_domains_path;
     std::vector<DebugNodeSpec> debug_dfg_nodes;
+    bool dump_passes = false;
 };
 
 class Frontend {

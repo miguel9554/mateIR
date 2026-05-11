@@ -155,7 +155,8 @@ void runMateIRPipeline(MateIR& ir,
                        const std::optional<std::string>& emitInferredDomainsPath,
                        const std::map<std::string, std::string>& cdcPathsByModule,
                        FrontendDomainFacts& domainFacts,
-                       const std::vector<DebugNodeSpec>& debugSpecs) {
+                       const std::vector<DebugNodeSpec>& debugSpecs,
+                       bool dumpPasses) {
     Module& topModule = ir.top;
 
     validateDebugSpecsBeforePipeline(topModule, debugSpecs, "debug_dfg_nodes");
@@ -208,9 +209,13 @@ void runMateIRPipeline(MateIR& ir,
             }
 
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::filesystem::create_directories(dir);
-            std::ofstream(std::format("{}/{:02}_{}.dot", dir, number, passName)) << module.dfg->toDot(passName);
-            std::ofstream(std::format("{}/{:02}_{}.json", dir, number, passName)) << module.dfg->toJson();
+            if (dumpPasses || !debugSpecs.empty()) {
+                std::filesystem::create_directories(dir);
+            }
+            if (dumpPasses) {
+                std::ofstream(std::format("{}/{:02}_{}.dot", dir, number, passName)) << module.dfg->toDot(passName);
+                std::ofstream(std::format("{}/{:02}_{}.json", dir, number, passName)) << module.dfg->toJson();
+            }
 
             if (!debugSpecs.empty()) {
                 for (size_t specIdx = 0; specIdx < debugSpecs.size(); specIdx++) {
@@ -271,7 +276,7 @@ void runMateIRPipeline(MateIR& ir,
         runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg, preOptRoots); });
         runPass(5, "constant_fold", [&]{ constantFold(*module.dfg, preOptRoots); });
         runPass(6, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
-        {
+        if (dumpPasses) {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::ofstream f(std::format("{}/06_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
@@ -315,7 +320,7 @@ void runMateIRPipeline(MateIR& ir,
         runPass(topDomainMode == TopDomainMode::Infer ? 12 : 11,
                 "domains_propagate_and_check",
                 [&]{ domainsPropagateAndCheck(ir, domainFacts); });
-        {
+        if (dumpPasses) {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::ofstream f(std::format("{}/{}_domains_propagate_flops.txt",
                                         dir,
@@ -326,6 +331,7 @@ void runMateIRPipeline(MateIR& ir,
 
         if (!debugSpecs.empty()) {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
+            std::filesystem::create_directories(dir);
             for (const auto& spec : debugSpecs) {
                 const DFGNode* node = nullptr;
                 bool pathMatches = debugPathMatches(currentPath, spec.module_path);
@@ -384,7 +390,8 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
     auto cdcPathsByModule = loadCdcPathsByModule(options.source_files, options.domain_files);
     runMateIRPipeline(ir, topDomainPath, options.top_domain_mode,
                       options.emit_inferred_domains_path,
-                      cdcPathsByModule, domainFacts, options.debug_dfg_nodes);
+                      cdcPathsByModule, domainFacts, options.debug_dfg_nodes,
+                      options.dump_passes);
 
     return ir;
 }

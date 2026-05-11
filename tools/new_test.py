@@ -22,6 +22,7 @@ def main():
     (base / "tb").mkdir()
     (base / "work" / "verilator").mkdir(parents=True)
     (base / "work" / "custom-sim" / "stimuli").mkdir(parents=True)
+    (base / "work" / "static").mkdir(parents=True)
     (base / "work" / "vcd-diff").mkdir(parents=True)
     (base / "work" / "validate").mkdir(parents=True)
 
@@ -68,6 +69,9 @@ endmodule
     # Verilator Makefile — symlink to shared template
     makefile_path = base / "work" / "verilator" / "Makefile"
     os.symlink("../../../common/verilator.mk", makefile_path)
+
+    # Static analysis Makefile — symlink to shared template
+    os.symlink("../../../common/static.mk", base / "work" / "static" / "Makefile")
 
     # VCD-diff Makefile — symlink to shared template
     os.symlink("../../../common/vcd-diff.mk", base / "work" / "vcd-diff" / "Makefile")

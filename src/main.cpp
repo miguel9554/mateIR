@@ -21,6 +21,7 @@ void printUsage(const char* progName) {
               << "  --frontend <name>         HDL frontend: systemverilog (default)\n"
               << "  --top <module>            Top module name (required for multi-file designs)\n"
               << "  --domains <file>          Top-level domain YAML file\n"
+              << "  --infer-top-domains       Infer top-level clocks/resets instead of loading --domains\n"
               << "  --analyze                 Run static analysis consumer on mateir\n"
               << "  --simulate                Run cycle-based simulation consumer\n"
               << "  --inputs-dir <dir>        Directory containing input stimuli files\n"
@@ -87,12 +88,15 @@ int main(int argc, char** argv) {
     std::string paramsStr;
     std::vector<std::string> domainFiles;
     std::vector<std::string> sourceFiles;
+    TopDomainMode topDomainMode = TopDomainMode::Yaml;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--simulate") == 0) {
             simulateMode = true;
         } else if (std::strcmp(argv[i], "--analyze") == 0) {
             analyzeMode = true;
+        } else if (std::strcmp(argv[i], "--infer-top-domains") == 0) {
+            topDomainMode = TopDomainMode::Infer;
         } else if (std::strcmp(argv[i], "--frontend") == 0 ||
                    std::strcmp(argv[i], "--top") == 0 ||
                    std::strcmp(argv[i], "--inputs-dir") == 0 ||
@@ -149,6 +153,9 @@ int main(int argc, char** argv) {
             if (inputsDir.empty()) throw CompilerError("--simulate requires --inputs-dir <dir>");
             if (outputDir.empty()) throw CompilerError("--simulate requires --output-dir <dir>");
         }
+        if (topDomainMode == TopDomainMode::Infer && !domainFiles.empty()) {
+            throw CompilerError("--infer-top-domains cannot be used with --domains");
+        }
 
         std::cout << "========================================\n";
         std::cout << "mate\n";
@@ -165,6 +172,7 @@ int main(int argc, char** argv) {
         frontendOptions.source_files = sourceFiles;
         if (!topModule.empty()) frontendOptions.top_module = topModule;
         frontendOptions.domain_files = domainFiles;
+        frontendOptions.top_domain_mode = topDomainMode;
         frontendOptions.debug_dfg_nodes = parseDebugNodes(debugNodesStr);
         parseParams(paramsStr, frontendOptions.parameters);
 

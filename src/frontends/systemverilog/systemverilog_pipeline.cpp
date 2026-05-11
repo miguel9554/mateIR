@@ -10,6 +10,7 @@
 #include "frontends/systemverilog/passes/flop_resolve.h"
 #include "frontends/systemverilog/passes/global_domain_resolve.h"
 #include "frontends/systemverilog/passes/io_domains_set.h"
+#include "frontends/systemverilog/passes/top_io_domains_infer.h"
 #include "frontends/systemverilog/passes/type_propagation.h"
 #include "frontends/systemverilog/domain_facts.h"
 #include "util/debug.h"
@@ -35,7 +36,7 @@ std::string loadTopDomainPath(
     if (domainFiles.empty()) {
         throw CompilerError(std::format(
             "No top-level domains file provided for module '{}' "
-            "(use --domains to specify)", topModuleName));
+            "(use --domains or --infer-top-domains)", topModuleName));
     }
     std::optional<std::string> topDomainPath;
     for (const auto& path : domainFiles) {
@@ -146,7 +147,8 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
 }
 
 void runMateIRPipeline(MateIR& ir,
-                       const std::string& topDomainPath,
+                       const std::optional<std::string>& topDomainPath,
+                       TopDomainMode topDomainMode,
                        const std::map<std::string, std::string>& cdcPathsByModule,
                        FrontendDomainFacts& domainFacts,
                        const std::vector<DebugNodeSpec>& debugSpecs) {
@@ -269,9 +271,15 @@ void runMateIRPipeline(MateIR& ir,
             std::ofstream f(std::format("{}/06_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        runPass(7, "load_top_io_domains", [&]{
-            loadTopIODomains(module, topDomainPath, domainFacts);
-        });
+        if (topDomainMode == TopDomainMode::Yaml) {
+            runPass(7, "load_top_io_domains", [&]{
+                loadTopIODomains(module, *topDomainPath, domainFacts);
+            });
+        } else {
+            runPass(7, "infer_top_clock_reset_domains", [&]{
+                inferTopClockResetDomains(module, domainFacts);
+            });
+        }
         runPass(8, "cdc_annotations", [&]{
             loadCdcAnnotations(module, cdcPathsByModule, domainFacts);
         });
@@ -350,9 +358,13 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
     ir.source_files = options.source_files;
     ir.frontend_module_count = extracted.modules.size();
 
-    auto topDomainPath = loadTopDomainPath(options.domain_files, ir.top.name);
+    std::optional<std::string> topDomainPath;
+    if (options.top_domain_mode == TopDomainMode::Yaml) {
+        topDomainPath = loadTopDomainPath(options.domain_files, ir.top.name);
+    }
     auto cdcPathsByModule = loadCdcPathsByModule(options.source_files, options.domain_files);
-    runMateIRPipeline(ir, topDomainPath, cdcPathsByModule, domainFacts, options.debug_dfg_nodes);
+    runMateIRPipeline(ir, topDomainPath, options.top_domain_mode,
+                      cdcPathsByModule, domainFacts, options.debug_dfg_nodes);
 
     return ir;
 }

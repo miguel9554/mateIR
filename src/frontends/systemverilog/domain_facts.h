@@ -61,12 +61,14 @@ enum class TopInputAsyncReason {
     Unused,
     OutputOnly,
     Multidomain,
+    Synchronizer,
 };
 
 struct TopAsyncInputFact {
     std::string port_name;
     TopInputAsyncReason reason;
     std::set<ClockId> evidence_clock_domains;
+    std::set<std::string> evidence_synchronizer_flops;
 };
 
 struct ResolvedTopClockDomainFact {

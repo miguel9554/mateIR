@@ -15,6 +15,11 @@ namespace mate {
 
 namespace {
 
+struct TopInputInferenceEvidence {
+    std::set<ClockId> clock_domains;
+    std::set<std::string> synchronizer_flops;
+};
+
 std::string edgeSuffix(edge_t edge) {
     return edge == POSEDGE ? "posedge" : "negedge";
 }
@@ -32,8 +37,23 @@ const char* asyncReasonName(TopInputAsyncReason reason) {
         case TopInputAsyncReason::Unused: return "unused";
         case TopInputAsyncReason::OutputOnly: return "output_only";
         case TopInputAsyncReason::Multidomain: return "multidomain";
+        case TopInputAsyncReason::Synchronizer: return "synchronizer";
     }
     return "unused";
+}
+
+InstancePath childPath(InstancePath path, const std::string& instanceName) {
+    path.elems.push_back(instanceName);
+    return path;
+}
+
+std::string pathString(const InstancePath& path) {
+    std::string out;
+    for (const auto& elem : path.elems) {
+        if (!out.empty()) out += ".";
+        out += elem;
+    }
+    return out.empty() ? "<top>" : out;
 }
 
 void collectTopInputLeaves(
@@ -74,22 +94,46 @@ void walkConeForTopInputs(
 
 void collectFlopConeEvidence(
         const Module& module,
+        const InstancePath& path,
+        const FrontendDomainFacts& domainFacts,
         const std::map<const DFGNode*, std::string>& topInputPortByLeaf,
         const std::set<std::string>& excludedPorts,
-        std::map<std::string, std::set<ClockId>>& evidenceByPort) {
+        std::map<std::string, TopInputInferenceEvidence>& evidenceByPort) {
+    ModuleOccurrenceKey key{path, module.name};
+    const auto* moduleFacts = domainFacts.find(key);
+    if (!moduleFacts) {
+        throw CompilerError(std::format(
+            "top_io_domains_infer: missing domain facts for module '{}' at {}",
+            module.name, pathString(path)));
+    }
+
     for (const auto& flop : module.flops) {
         std::set<std::string> conePorts;
         for (DFGNode* leaf : flopDLeaves(flop))
             walkConeForTopInputs(leaf, topInputPortByLeaf, conePorts);
 
+        bool isSynchronizer = moduleFacts->cdc.synchronizer_flops.contains(flop.name);
         for (const auto& portName : conePorts) {
             if (excludedPorts.contains(portName)) continue;
-            evidenceByPort[portName].insert(flop.clock_domain);
+            if (isSynchronizer) {
+                std::string flopRef = path.elems.empty()
+                    ? flop.name
+                    : std::format("{}.{}", pathString(path), flop.name);
+                evidenceByPort[portName].synchronizer_flops.insert(std::move(flopRef));
+            } else {
+                evidenceByPort[portName].clock_domains.insert(flop.clock_domain);
+            }
         }
     }
 
     for (const auto& sub : module.hierarchyInstantiation)
-        collectFlopConeEvidence(sub, topInputPortByLeaf, excludedPorts, evidenceByPort);
+        collectFlopConeEvidence(
+            sub,
+            childPath(path, sub.instance_name),
+            domainFacts,
+            topInputPortByLeaf,
+            excludedPorts,
+            evidenceByPort);
 }
 
 void collectTopOutputReachability(
@@ -139,6 +183,16 @@ std::string clockDomainList(const MateIR& ir, const std::set<ClockId>& domains) 
     return joined;
 }
 
+std::string synchronizerList(const std::set<std::string>& synchronizerFlops) {
+    std::string joined;
+    size_t i = 0;
+    for (const auto& flopName : synchronizerFlops) {
+        if (i++) joined += ", ";
+        joined += flopName;
+    }
+    return joined;
+}
+
 void emitAsyncDiagnostic(
         const MateIR& ir,
         const std::string& portName,
@@ -148,6 +202,9 @@ void emitAsyncDiagnostic(
     if (asyncFact.reason == TopInputAsyncReason::Multidomain &&
             !asyncFact.evidence_clock_domains.empty()) {
         std::cout << ": " << clockDomainList(ir, asyncFact.evidence_clock_domains);
+    } else if (asyncFact.reason == TopInputAsyncReason::Synchronizer &&
+            !asyncFact.evidence_synchronizer_flops.empty()) {
+        std::cout << ": " << synchronizerList(asyncFact.evidence_synchronizer_flops);
     }
     std::cout << ")" << std::endl;
 }
@@ -246,8 +303,8 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
     std::map<const DFGNode*, std::string> topInputPortByLeaf;
     collectTopInputLeaves(module, topInputPortByLeaf);
 
-    std::map<std::string, std::set<ClockId>> evidenceByPort;
-    collectFlopConeEvidence(module, topInputPortByLeaf, excludedPorts, evidenceByPort);
+    std::map<std::string, TopInputInferenceEvidence> evidenceByPort;
+    collectFlopConeEvidence(module, {}, domainFacts, topInputPortByLeaf, excludedPorts, evidenceByPort);
 
     std::set<std::string> outputReachablePorts;
     collectTopOutputReachability(module, topInputPortByLeaf, excludedPorts, outputReachablePorts);
@@ -261,10 +318,11 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
 
     for (const auto& portName : topPortNames) {
         auto evidenceIt = evidenceByPort.find(portName);
-        const std::set<ClockId>* evidence =
+        const TopInputInferenceEvidence* evidence =
             evidenceIt == evidenceByPort.end() ? nullptr : &evidenceIt->second;
 
-        if (!evidence || evidence->empty()) {
+        if (!evidence ||
+                (evidence->clock_domains.empty() && evidence->synchronizer_flops.empty())) {
             TopInputAsyncReason reason = outputReachablePorts.contains(portName)
                 ? TopInputAsyncReason::OutputOnly
                 : TopInputAsyncReason::Unused;
@@ -279,18 +337,37 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
                 .port_name = portName,
                 .reason = reason,
                 .evidence_clock_domains = {},
+                .evidence_synchronizer_flops = {},
             };
             emitAsyncDiagnostic(ir, portName, domainFacts.top_inputs->async_input_facts.at(portName));
             continue;
         }
 
-        if (evidence->size() == 1) {
-            auto domainName = resolvedTopClockDomainName(domainFacts, *evidence->begin());
+        if (!evidence->synchronizer_flops.empty()) {
+            moduleFacts.ports[portName] = LocalPortDomainFact{
+                .port_name = portName,
+                .cls = LocalPortClass::Async,
+                .local_domain_name = std::nullopt,
+                .edge = std::nullopt,
+            };
+            domainFacts.top_inputs->async_inputs.insert(portName);
+            domainFacts.top_inputs->async_input_facts[portName] = TopAsyncInputFact{
+                .port_name = portName,
+                .reason = TopInputAsyncReason::Synchronizer,
+                .evidence_clock_domains = evidence->clock_domains,
+                .evidence_synchronizer_flops = evidence->synchronizer_flops,
+            };
+            emitAsyncDiagnostic(ir, portName, domainFacts.top_inputs->async_input_facts.at(portName));
+            continue;
+        }
+
+        if (evidence->clock_domains.size() == 1) {
+            auto domainName = resolvedTopClockDomainName(domainFacts, *evidence->clock_domains.begin());
             if (!domainName) {
                 throw CompilerError(std::format(
                     "top_io_domains_infer: no top-level clock domain name resolved for ClockId {} "
                     "while classifying top input '{}'",
-                    evidence->begin()->value, portName));
+                    evidence->clock_domains.begin()->value, portName));
             }
             moduleFacts.ports[portName] = LocalPortDomainFact{
                 .port_name = portName,
@@ -315,7 +392,8 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
         domainFacts.top_inputs->async_input_facts[portName] = TopAsyncInputFact{
             .port_name = portName,
             .reason = TopInputAsyncReason::Multidomain,
-            .evidence_clock_domains = *evidence,
+            .evidence_clock_domains = evidence->clock_domains,
+            .evidence_synchronizer_flops = {},
         };
         emitAsyncDiagnostic(ir, portName, domainFacts.top_inputs->async_input_facts.at(portName));
     }

@@ -48,6 +48,12 @@ const DFGNode* firstDLeaf(const FlopInfo& flop) {
     return leaves.empty() ? nullptr : leaves.front();
 }
 
+std::string synchronizerHint(const Module& module, const FlopInfo& flop) {
+    return std::format(
+        " If intentional, add '{}' to synchronizer_flops in {}.cdc.yaml.",
+        flop.name, module.name);
+}
+
 void validateCdcForModule(
         const Module& module,
         const InstancePath& path,
@@ -82,15 +88,17 @@ void validateCdcForModule(
             if (sync->clock_domain == flop.clock_domain) continue;
             throw CompilerError(std::format(
                 "domains_propagate_and_check: flop '{}' in module '{}' at {} "
-                "samples Sync input from a different clock domain - cross-domain violation",
-                flop.name, module.name, pathString(path)), firstDLeaf(flop));
+                "samples Sync input from a different clock domain - cross-domain violation{}",
+                flop.name, module.name, pathString(path),
+                synchronizerHint(module, flop)), firstDLeaf(flop));
         }
 
         throw CompilerError(std::format(
             "domains_propagate_and_check: flop '{}' in module '{}' at {} "
-            "samples {} input without a declared synchronizer",
+            "samples {} input without a declared synchronizer{}",
             flop.name, module.name, pathString(path),
-            syncKindStr(*dDomain.sync_type)), firstDLeaf(flop));
+            syncKindStr(*dDomain.sync_type),
+            synchronizerHint(module, flop)), firstDLeaf(flop));
     }
 
     for (const auto& sub : module.hierarchyInstantiation)

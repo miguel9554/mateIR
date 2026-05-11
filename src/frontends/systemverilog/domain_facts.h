@@ -57,6 +57,18 @@ struct TopSyncInputFact {
     std::string clock_domain_name;
 };
 
+enum class TopInputAsyncReason {
+    Unused,
+    OutputOnly,
+    Multidomain,
+};
+
+struct TopAsyncInputFact {
+    std::string port_name;
+    TopInputAsyncReason reason;
+    std::set<ClockId> evidence_clock_domains;
+};
+
 struct ResolvedTopClockDomainFact {
     std::string domain_name;
     ClockId clock_domain;
@@ -76,6 +88,7 @@ struct TopInputDomainFacts {
     std::map<std::string, TopResetInputFact> resets;
     std::map<std::string, TopSyncInputFact> sync_inputs;
     std::set<std::string> async_inputs;
+    std::map<std::string, TopAsyncInputFact> async_input_facts;
     std::map<std::string, ResolvedTopClockDomainFact> resolved_clocks;
     std::map<std::string, ResolvedTopResetDomainFact> resolved_resets;
 };

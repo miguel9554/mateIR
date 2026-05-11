@@ -286,7 +286,12 @@ void runMateIRPipeline(MateIR& ir,
         runPass(9, "global_domain_resolve", [&]{
             resolveGlobalDomains(ir, domainFacts);
         });
-        runPass(10, "dce", [&]{
+        if (topDomainMode == TopDomainMode::Infer) {
+            runPass(10, "infer_top_data_input_domains", [&]{
+                inferTopDataInputDomains(ir, domainFacts);
+            });
+        }
+        runPass(topDomainMode == TopDomainMode::Infer ? 11 : 10, "dce", [&]{
             auto keepAlive = collectRoots(ModuleRootSelection{
                 .parameters = true,
                 .localparams = true,
@@ -302,10 +307,14 @@ void runMateIRPipeline(MateIR& ir,
         module.dfg->validateNoOrphans();
         module.dfg->validateStrictLiveDFG();
         validateFrontendDomainFacts(module, domainFacts);
-        runPass(11, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(ir, domainFacts); });
+        runPass(topDomainMode == TopDomainMode::Infer ? 12 : 11,
+                "domains_propagate_and_check",
+                [&]{ domainsPropagateAndCheck(ir, domainFacts); });
         {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/11_domains_propagate_flops.txt", dir));
+            std::ofstream f(std::format("{}/{}_domains_propagate_flops.txt",
+                                        dir,
+                                        topDomainMode == TopDomainMode::Infer ? "12" : "11"));
             dumpFlopsRecursive(module, f);
         }
         validateNoCombLoops(module);

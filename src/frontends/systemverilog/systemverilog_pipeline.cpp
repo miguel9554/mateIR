@@ -10,6 +10,7 @@
 #include "frontends/systemverilog/passes/flop_resolve.h"
 #include "frontends/systemverilog/passes/global_domain_resolve.h"
 #include "frontends/systemverilog/passes/io_domains_set.h"
+#include "frontends/systemverilog/passes/top_io_domains_emit.h"
 #include "frontends/systemverilog/passes/top_io_domains_infer.h"
 #include "frontends/systemverilog/passes/type_propagation.h"
 #include "frontends/systemverilog/domain_facts.h"
@@ -149,6 +150,7 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
 void runMateIRPipeline(MateIR& ir,
                        const std::optional<std::string>& topDomainPath,
                        TopDomainMode topDomainMode,
+                       const std::optional<std::string>& emitInferredDomainsPath,
                        const std::map<std::string, std::string>& cdcPathsByModule,
                        FrontendDomainFacts& domainFacts,
                        const std::vector<DebugNodeSpec>& debugSpecs) {
@@ -343,6 +345,10 @@ void runMateIRPipeline(MateIR& ir,
     std::string dir = DEBUG_OUTPUT_DIR + "/" + topModule.name;
     std::filesystem::create_directories(dir);
     std::ofstream(dir + "/hierarchy.json") << hierarchyToJson(ir);
+
+    if (topDomainMode == TopDomainMode::Infer && emitInferredDomainsPath) {
+        emitInferredTopDomainsYaml(topModule, domainFacts, *emitInferredDomainsPath);
+    }
 }
 
 } // namespace
@@ -373,6 +379,7 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
     }
     auto cdcPathsByModule = loadCdcPathsByModule(options.source_files, options.domain_files);
     runMateIRPipeline(ir, topDomainPath, options.top_domain_mode,
+                      options.emit_inferred_domains_path,
                       cdcPathsByModule, domainFacts, options.debug_dfg_nodes);
 
     return ir;

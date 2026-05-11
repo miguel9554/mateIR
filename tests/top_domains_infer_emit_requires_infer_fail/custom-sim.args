@@ -1,0 +1,1 @@
+--emit-inferred-domains rtl/top_domains_infer_emit_requires_infer_fail.generated.domains.yaml

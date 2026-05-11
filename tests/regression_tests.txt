@@ -36,6 +36,7 @@ global_domains_repeated_instances PASS
 global_domains_unsupported_clock_expr FAIL global_domain_resolve: unsupported clock/reset connection expression
 global_domains_wrapper_clock_alias PASS
 top_domains_infer_clk_rst_pass PASS
+top_domains_infer_emit_yaml_roundtrip_pass PASS
 top_domains_infer_data_single_clock_pass PASS
 top_domains_infer_data_unused_async_pass PASS
 top_domains_infer_data_output_only_async_pass PASS
@@ -45,6 +46,7 @@ top_domains_infer_cdc_sidecar_sync_pass PASS
 top_domains_infer_cdc_no_sidecar_cross_clock_fail FAIL cross-domain violation If intentional, add 'b_meta' to synchronizer_flops
 top_domains_infer_hierarchy_alias_pass PASS
 top_domains_infer_clock_reset_conflict_fail FAIL conflicting inferred clock/reset role
+top_domains_infer_emit_requires_infer_fail FAIL --emit-inferred-domains requires --infer-top-domains
 top_domains_infer_reset_polarity_conflict_fail FAIL conflicting inferred reset polarity
 top_domains_infer_with_domains_fail FAIL --infer-top-domains cannot be used with --domains
 inout_arg_fail FAIL inout ports not supported

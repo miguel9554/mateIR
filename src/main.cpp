@@ -22,6 +22,8 @@ void printUsage(const char* progName) {
               << "  --top <module>            Top module name (required for multi-file designs)\n"
               << "  --domains <file>          Top-level domain YAML file\n"
               << "  --infer-top-domains       Infer top-level clocks/resets instead of loading --domains\n"
+              << "  --emit-inferred-domains <file>\n"
+              << "                            Write inferred top-level domains YAML (infer mode only)\n"
               << "  --analyze                 Run static analysis consumer on mateir\n"
               << "  --simulate                Run cycle-based simulation consumer\n"
               << "  --inputs-dir <dir>        Directory containing input stimuli files\n"
@@ -86,6 +88,7 @@ int main(int argc, char** argv) {
     std::string flopsSeedStr;
     std::string debugNodesStr;
     std::string paramsStr;
+    std::string emitInferredDomainsPath;
     std::vector<std::string> domainFiles;
     std::vector<std::string> sourceFiles;
     TopDomainMode topDomainMode = TopDomainMode::Yaml;
@@ -104,7 +107,8 @@ int main(int argc, char** argv) {
                    std::strcmp(argv[i], "--flops-initial") == 0 ||
                    std::strcmp(argv[i], "--flops-seed") == 0 ||
                    std::strcmp(argv[i], "--debug-nodes") == 0 ||
-                   std::strcmp(argv[i], "--params") == 0) {
+                   std::strcmp(argv[i], "--params") == 0 ||
+                   std::strcmp(argv[i], "--emit-inferred-domains") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "ERROR: " << argv[i] << " requires an argument\n";
                 printUsage(argv[0]);
@@ -120,6 +124,7 @@ int main(int argc, char** argv) {
             else if (opt == "--flops-seed") flopsSeedStr = value;
             else if (opt == "--debug-nodes") debugNodesStr = value;
             else if (opt == "--params") paramsStr = value;
+            else if (opt == "--emit-inferred-domains") emitInferredDomainsPath = value;
         } else if (std::strcmp(argv[i], "--domains") == 0) {
             while (i + 1 < argc && argv[i + 1][0] != '-') {
                 std::string_view arg(argv[i + 1]);
@@ -156,6 +161,9 @@ int main(int argc, char** argv) {
         if (topDomainMode == TopDomainMode::Infer && !domainFiles.empty()) {
             throw CompilerError("--infer-top-domains cannot be used with --domains");
         }
+        if (!emitInferredDomainsPath.empty() && topDomainMode != TopDomainMode::Infer) {
+            throw CompilerError("--emit-inferred-domains requires --infer-top-domains");
+        }
 
         std::cout << "========================================\n";
         std::cout << "mate\n";
@@ -173,6 +181,9 @@ int main(int argc, char** argv) {
         if (!topModule.empty()) frontendOptions.top_module = topModule;
         frontendOptions.domain_files = domainFiles;
         frontendOptions.top_domain_mode = topDomainMode;
+        if (!emitInferredDomainsPath.empty()) {
+            frontendOptions.emit_inferred_domains_path = emitInferredDomainsPath;
+        }
         frontendOptions.debug_dfg_nodes = parseDebugNodes(debugNodesStr);
         parseParams(paramsStr, frontendOptions.parameters);
 

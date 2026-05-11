@@ -314,7 +314,6 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
         if (!excludedPorts.contains(input.name))
             topPortNames.push_back(input.name);
     });
-    std::ranges::sort(topPortNames);
 
     for (const auto& portName : topPortNames) {
         auto evidenceIt = evidenceByPort.find(portName);

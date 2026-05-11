@@ -9,6 +9,7 @@
 #include <sstream>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace mate {
@@ -170,6 +171,11 @@ struct LocalDependencyWalkResult {
     std::vector<const DFGNode*> escaped_inputs;
 };
 
+struct HierarchyPoint {
+    std::string kind;
+    std::string path;
+};
+
 std::vector<const DFGNode*> collectGlobalDependencies(const DFGNode* root) {
     std::set<const DFGNode*> visited;
     std::queue<const DFGNode*> q;
@@ -223,6 +229,20 @@ LocalDependencyWalkResult collectLocalDependencies(const Module& module,
                 .node = leaf.node,
             });
         }
+    }
+    for (const auto& sub : module.hierarchyInstantiation) {
+        forEachOutputNode(sub, [&](const ModuleNode& output) {
+            for (const auto& leaf : moduleNodeLeafRefs(output)) {
+                if (!leaf.node) continue;
+                stopSet.emplace(leaf.node, LocalDependencyRef{
+                    .kind = "submodule_output",
+                    .name = sub.instance_name.empty()
+                        ? leaf.leaf_name
+                        : sub.instance_name + "." + leaf.leaf_name,
+                    .node = leaf.node,
+                });
+            }
+        });
     }
 
     std::set<const DFGNode*> visited;
@@ -286,6 +306,191 @@ DebugNodeMatch findDebugNodeInIR(const Module& topModule,
 
     recurse(topModule, topModule.name);
     return result;
+}
+
+const DFGNode* findGlobalSourceNode(const Module& topModule,
+                                    const std::string& sourceName) {
+    if (!topModule.dfg) return nullptr;
+    for (const auto& node : topModule.dfg->nodes) {
+        if (node->kind() != DFGOp::INPUT) continue;
+        if (dependencyDisplayName(node.get()) == sourceName) return node.get();
+    }
+    return nullptr;
+}
+
+std::string modulePathWithLeaf(const std::string& modulePath,
+                               const std::string& leafName) {
+    return modulePath.empty() ? leafName : modulePath + "." + leafName;
+}
+
+void addHierarchyPoint(std::unordered_map<const DFGNode*, std::vector<HierarchyPoint>>& points,
+                       const DFGNode* node,
+                       std::string kind,
+                       std::string path) {
+    if (!node) return;
+    points[node].push_back(HierarchyPoint{
+        .kind = std::move(kind),
+        .path = std::move(path),
+    });
+}
+
+void collectHierarchyPoints(const Module& module,
+                            const std::string& currentPath,
+                            std::unordered_map<const DFGNode*, std::vector<HierarchyPoint>>& points) {
+    forEachInputNode(module, [&](const ModuleNode& input) {
+        for (const auto& leaf : moduleNodeLeafRefs(input)) {
+            addHierarchyPoint(points, leaf.node, "module_input",
+                              modulePathWithLeaf(currentPath, leaf.leaf_name));
+        }
+    });
+    forEachOutputNode(module, [&](const ModuleNode& output) {
+        for (const auto& leaf : moduleNodeLeafRefs(output)) {
+            addHierarchyPoint(points, leaf.node, "module_output",
+                              modulePathWithLeaf(currentPath, leaf.leaf_name));
+        }
+    });
+    forEachInternalNode(module, [&](const ModuleNode& signal) {
+        for (const auto& leaf : moduleNodeLeafRefs(signal)) {
+            addHierarchyPoint(points, leaf.node, "module_internal",
+                              modulePathWithLeaf(currentPath, leaf.leaf_name));
+        }
+    });
+    for (const auto& flop : module.flops) {
+        for (const auto& leaf : flopQLeafRefs(flop)) {
+            addHierarchyPoint(points, leaf.node, "flop_q",
+                              modulePathWithLeaf(currentPath, leaf.leaf_name));
+        }
+        for (const auto& leaf : flopDLeafRefs(flop)) {
+            addHierarchyPoint(points, leaf.node, "flop_d",
+                              modulePathWithLeaf(currentPath, leaf.leaf_name));
+        }
+    }
+    for (const auto& sub : module.hierarchyInstantiation) {
+        collectHierarchyPoints(sub, currentPath + "." + sub.instance_name, points);
+    }
+}
+
+std::unordered_map<const DFGNode*, std::vector<HierarchyPoint>>
+buildHierarchyPointIndex(const Module& topModule) {
+    std::unordered_map<const DFGNode*, std::vector<HierarchyPoint>> points;
+    collectHierarchyPoints(topModule, topModule.name, points);
+    return points;
+}
+
+std::vector<std::vector<const DFGNode*>> findForwardPaths(const Module& topModule,
+                                                          const DFGNode* source,
+                                                          const DFGNode* target) {
+    if (!topModule.dfg || !source || !target) return {};
+
+    std::unordered_map<const DFGNode*, std::vector<const DFGNode*>> consumers;
+    for (const auto& node : topModule.dfg->nodes) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
+            consumers[input.node].push_back(node.get());
+        });
+    }
+
+    std::vector<std::vector<const DFGNode*>> paths;
+    std::vector<const DFGNode*> currentPath;
+    std::set<const DFGNode*> active;
+
+    std::function<void(const DFGNode*)> dfs = [&](const DFGNode* node) {
+        if (!active.insert(node).second) {
+            throw CompilerError(
+                "debug_dfg_node_paths: encountered a cycle while enumerating paths", node);
+        }
+
+        currentPath.push_back(node);
+
+        if (node == target) {
+            paths.push_back(currentPath);
+        } else if (auto it = consumers.find(node); it != consumers.end()) {
+            for (const DFGNode* consumer : it->second) {
+                dfs(consumer);
+            }
+        }
+
+        currentPath.pop_back();
+        active.erase(node);
+    };
+
+    dfs(source);
+    return paths;
+}
+
+std::string relativeHierPath(const std::string& topName,
+                             const std::string& fullPath) {
+    const std::string prefix = topName + ".";
+    if (fullPath == topName) return "";
+    if (fullPath.starts_with(prefix)) return fullPath.substr(prefix.size());
+    return fullPath;
+}
+
+std::vector<std::string> collapsePathToHierarchySequence(
+    const std::string& topName,
+    const std::vector<const DFGNode*>& path,
+    const std::unordered_map<const DFGNode*, std::vector<HierarchyPoint>>& hierarchyPoints) {
+    std::vector<std::string> result;
+    for (const DFGNode* node : path) {
+        auto it = hierarchyPoints.find(node);
+        if (it == hierarchyPoints.end()) continue;
+        for (const auto& point : it->second) {
+            const std::string rel = relativeHierPath(topName, point.path);
+            if (rel.empty()) continue;
+            if (result.empty() || result.back() != rel) {
+                result.push_back(rel);
+            }
+        }
+    }
+    return result;
+}
+
+void collectModuleInstanceNames(const Module& module,
+                                const std::string& currentPath,
+                                std::unordered_map<std::string, std::string>& names) {
+    names[currentPath] = module.name;
+    for (const auto& sub : module.hierarchyInstantiation) {
+        const std::string subPath = currentPath.empty()
+            ? sub.instance_name
+            : currentPath + "." + sub.instance_name;
+        collectModuleInstanceNames(sub, subPath, names);
+    }
+}
+
+std::unordered_map<std::string, std::string>
+buildModuleInstanceNameIndex(const Module& topModule) {
+    std::unordered_map<std::string, std::string> names;
+    collectModuleInstanceNames(topModule, "", names);
+    return names;
+}
+
+std::string moduleContextPathForVariable(
+    const std::string& relPath,
+    const std::unordered_map<std::string, std::string>& moduleNames) {
+    std::string best;
+    size_t pos = relPath.find('.');
+    while (pos != std::string::npos) {
+        const std::string candidate = relPath.substr(0, pos);
+        if (moduleNames.contains(candidate)) best = candidate;
+        pos = relPath.find('.', pos + 1);
+    }
+    return best;
+}
+
+std::string moduleNameForContextPath(
+    const std::string& contextPath,
+    const std::unordered_map<std::string, std::string>& moduleNames) {
+    if (auto it = moduleNames.find(contextPath); it != moduleNames.end()) {
+        return it->second;
+    }
+    return contextPath;
+}
+
+std::string localNameWithinContext(const std::string& relPath,
+                                   const std::string& contextPath) {
+    if (contextPath.empty()) return relPath;
+    const std::string prefix = contextPath + ".";
+    if (relPath.starts_with(prefix)) return relPath.substr(prefix.size());
+    return relPath;
 }
 
 void printRequestedNodeDeps(const MateIR& ir,
@@ -364,6 +569,97 @@ void printRequestedNodeDeps(const MateIR& ir,
             throw CompilerError(std::format(
                 "debug_dfg_node_deps: local dependency reduction for '{}' escaped module '{}'; reached nonlocal graph inputs: {}",
                 spec.node_name, match.module->name, escaped.str()));
+        }
+    }
+}
+
+void printRequestedNodePaths(const MateIR& ir,
+                             const std::vector<DebugNodePathSpec>& specs,
+                             std::ostream& out) {
+    if (specs.empty()) return;
+
+    const auto hierarchyPoints = buildHierarchyPointIndex(ir.top);
+    const auto moduleNames = buildModuleInstanceNameIndex(ir.top);
+
+    out << "  dfg_node_paths:\n";
+    for (const auto& spec : specs) {
+        const DFGNode* source = findGlobalSourceNode(ir.top, spec.source_name);
+        if (!source) {
+            throw CompilerError(std::format(
+                "debug_dfg_node_paths: source '{}' not found among global INPUT nodes",
+                spec.source_name));
+        }
+
+        const DebugNodeMatch match = findDebugNodeInIR(ir.top, spec.target);
+        if (!match.node || !match.module) {
+            throw CompilerError(std::format(
+                "debug_dfg_node_paths: target '{}' not found in any module outputs, signals, or flop .d/.q leaves",
+                spec.target.node_name));
+        }
+
+        const auto paths = findForwardPaths(ir.top, source, match.node);
+        if (paths.empty()) {
+            throw CompilerError(std::format(
+                "debug_dfg_node_paths: no forward dependency path from '{}' to '{}'",
+                spec.source_name, spec.target.node_name));
+        }
+
+        std::vector<std::vector<std::string>> compactPaths;
+        std::set<std::string> seenCompactPaths;
+        for (const auto& path : paths) {
+            auto compact = collapsePathToHierarchySequence(ir.top.name, path, hierarchyPoints);
+            if (compact.empty()) continue;
+
+            std::ostringstream key;
+            for (const auto& step : compact) key << step << "\n";
+            if (!seenCompactPaths.insert(key.str()).second) continue;
+            compactPaths.push_back(std::move(compact));
+        }
+
+        if (compactPaths.empty()) {
+            throw CompilerError(std::format(
+                "debug_dfg_node_paths: no hierarchy-visible path from '{}' to '{}'",
+                spec.source_name, spec.target.node_name));
+        }
+
+        out << "    request: " << spec.source_name << " -> ";
+        if (!spec.target.module_path.empty()) out << spec.target.module_path << ":";
+        out << spec.target.node_name << "\n";
+        out << "      paths: " << compactPaths.size()
+            << " unique hierarchy path(s)";
+        if (compactPaths.size() != paths.size()) {
+            out << " (" << paths.size() << " raw DFG path(s))";
+        }
+        out << "\n";
+
+        for (size_t pathIndex = 0; pathIndex < compactPaths.size(); ++pathIndex) {
+            const auto& compact = compactPaths[pathIndex];
+            out << "      path[" << pathIndex << "]:\n";
+
+            size_t groupStart = 0;
+            while (groupStart < compact.size()) {
+                const std::string contextPath =
+                    moduleContextPathForVariable(compact[groupStart], moduleNames);
+                const std::string moduleName =
+                    moduleNameForContextPath(contextPath, moduleNames);
+                size_t groupEnd = groupStart + 1;
+                while (groupEnd < compact.size() &&
+                       moduleContextPathForVariable(compact[groupEnd], moduleNames) ==
+                           contextPath) {
+                    ++groupEnd;
+                }
+
+                out << "        (" << moduleName << ":" << contextPath << ")\n";
+                out << "          ";
+                for (size_t i = groupStart; i < groupEnd; ++i) {
+                    if (i > groupStart) out << " -> ";
+                    out << localNameWithinContext(compact[i], contextPath);
+                }
+                if (groupEnd < compact.size()) out << " ->";
+                out << "\n";
+
+                groupStart = groupEnd;
+            }
         }
     }
 }
@@ -460,9 +756,11 @@ void printModuleDomains(const MateIR& ir,
 } // namespace
 
 StaticAnalysisConsumer::StaticAnalysisConsumer(std::ostream& out,
-                                               std::vector<DebugNodeSpec> debug_dfg_node_deps)
+                                               std::vector<DebugNodeSpec> debug_dfg_node_deps,
+                                               std::vector<DebugNodePathSpec> debug_dfg_node_paths)
     : out_(out),
-      debug_dfg_node_deps_(std::move(debug_dfg_node_deps)) {}
+      debug_dfg_node_deps_(std::move(debug_dfg_node_deps)),
+      debug_dfg_node_paths_(std::move(debug_dfg_node_paths)) {}
 
 std::string StaticAnalysisConsumer::name() const {
     return "static-analysis";
@@ -482,6 +780,7 @@ void StaticAnalysisConsumer::consume(const MateIR& ir) {
     out_ << "  domain_usage:\n";
     printModuleDomains(ir, ir.top, out_);
     printRequestedNodeDeps(ir, debug_dfg_node_deps_, out_);
+    printRequestedNodePaths(ir, debug_dfg_node_paths_, out_);
 }
 
 StaticAnalysisSummary analyzeMateIR(const MateIR& ir) {

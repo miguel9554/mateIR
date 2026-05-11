@@ -32,6 +32,7 @@ void printUsage(const char* progName) {
               << "  --flops-seed <n>          Seed for random flop initialization\n"
               << "  --debug-nodes <n1,n2,...> Comma-separated node names for debug DOTs\n"
               << "  --debug-node-deps <...>   Comma-separated node names to dump direct DFG inputs\n"
+              << "  --debug-node-paths <...>  Comma-separated SOURCE=TARGET queries to dump one dependency chain\n"
               << "  --dump-passes             Dump per-pass DFG .dot/.json and final DFG dump\n"
               << "  --params <K=V,K=V,...>    Comma-separated top parameter overrides\n";
 }
@@ -70,6 +71,31 @@ std::vector<DebugNodeSpec> parseDebugNodes(const std::string& debugNodesStr) {
     return specs;
 }
 
+std::vector<DebugNodePathSpec> parseDebugNodePaths(const std::string& debugPathsStr) {
+    std::vector<DebugNodePathSpec> specs;
+    if (debugPathsStr.empty()) return specs;
+    for (const auto& entry : splitComma(debugPathsStr)) {
+        auto eq = entry.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 >= entry.size()) {
+            throw CompilerError(
+                "--debug-node-paths entries must have the form SOURCE=TARGET");
+        }
+
+        DebugNodePathSpec spec;
+        spec.source_name = entry.substr(0, eq);
+
+        const std::string target = entry.substr(eq + 1);
+        auto colon = target.find(':');
+        if (colon == std::string::npos)
+            spec.target = {"", target};
+        else
+            spec.target = {target.substr(0, colon), target.substr(colon + 1)};
+
+        specs.push_back(std::move(spec));
+    }
+    return specs;
+}
+
 std::unique_ptr<Frontend> makeFrontend(const std::string& frontendName) {
     if (frontendName == "systemverilog" || frontendName == "sv" || frontendName == "verilog") {
         return std::make_unique<SystemVerilogFrontend>();
@@ -91,6 +117,7 @@ int main(int argc, char** argv) {
     std::string flopsSeedStr;
     std::string debugNodesStr;
     std::string debugNodeDepsStr;
+    std::string debugNodePathsStr;
     std::string paramsStr;
     std::string emitInferredDomainsPath;
     std::vector<std::string> domainFiles;
@@ -114,6 +141,7 @@ int main(int argc, char** argv) {
                    std::strcmp(argv[i], "--flops-seed") == 0 ||
                    std::strcmp(argv[i], "--debug-nodes") == 0 ||
                    std::strcmp(argv[i], "--debug-node-deps") == 0 ||
+                   std::strcmp(argv[i], "--debug-node-paths") == 0 ||
                    std::strcmp(argv[i], "--params") == 0 ||
                    std::strcmp(argv[i], "--emit-inferred-domains") == 0) {
             if (i + 1 >= argc) {
@@ -131,6 +159,7 @@ int main(int argc, char** argv) {
             else if (opt == "--flops-seed") flopsSeedStr = value;
             else if (opt == "--debug-nodes") debugNodesStr = value;
             else if (opt == "--debug-node-deps") debugNodeDepsStr = value;
+            else if (opt == "--debug-node-paths") debugNodePathsStr = value;
             else if (opt == "--params") paramsStr = value;
             else if (opt == "--emit-inferred-domains") emitInferredDomainsPath = value;
         } else if (std::strcmp(argv[i], "--domains") == 0) {
@@ -210,7 +239,9 @@ int main(int argc, char** argv) {
             std::cout << "========================================\n";
             std::cout << "Running static analysis...\n";
             std::cout << "========================================\n";
-            StaticAnalysisConsumer analyzer(std::cout, parseDebugNodes(debugNodeDepsStr));
+            StaticAnalysisConsumer analyzer(std::cout,
+                                           parseDebugNodes(debugNodeDepsStr),
+                                           parseDebugNodePaths(debugNodePathsStr));
             analyzer.consume(mateir);
         }
 

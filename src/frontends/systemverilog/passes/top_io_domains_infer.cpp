@@ -209,6 +209,15 @@ void emitAsyncDiagnostic(
     std::cout << ")" << std::endl;
 }
 
+void emitSyncDiagnostic(
+        const std::string& portName,
+        const TopSyncInputFact& syncFact) {
+    std::cout << "top_io_domains_infer: top input '" << portName
+              << "' inferred sync (clock_domain: "
+              << syncFact.clock_domain_name
+              << ")" << std::endl;
+}
+
 } // namespace
 
 void inferTopClockResetDomains(Module& module, FrontendDomainFacts& domainFacts) {
@@ -378,6 +387,7 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
                 .port_name = portName,
                 .clock_domain_name = *domainName,
             };
+            emitSyncDiagnostic(portName, domainFacts.top_inputs->sync_inputs.at(portName));
             continue;
         }
 

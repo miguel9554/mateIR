@@ -21,7 +21,8 @@ struct StaticAnalysisSummary {
 class StaticAnalysisConsumer final : public IRConsumer {
 public:
     explicit StaticAnalysisConsumer(std::ostream& out,
-                                    std::vector<DebugNodeSpec> debug_dfg_node_deps = {});
+                                    std::vector<DebugNodeSpec> debug_dfg_node_deps = {},
+                                    std::vector<DebugNodePathSpec> debug_dfg_node_paths = {});
 
     std::string name() const override;
     void consume(const MateIR& ir) override;
@@ -29,6 +30,7 @@ public:
 private:
     std::ostream& out_;
     std::vector<DebugNodeSpec> debug_dfg_node_deps_;
+    std::vector<DebugNodePathSpec> debug_dfg_node_paths_;
 };
 
 StaticAnalysisSummary analyzeMateIR(const MateIR& ir);

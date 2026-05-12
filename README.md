@@ -59,6 +59,12 @@ clock_domains:
 The schema is in `src/domains.schema.json`. Every port must be assigned to a
 clock domain, a reset, or the async domain.
 
+Top-level domain inference is also available for the top module with
+`--infer-top-domains`. In that mode the compiler infers top-level clocks,
+resets, synchronous inputs, and async inputs from flop trigger facts, flop D
+cones, and optional `.cdc.yaml` sidecars. Inference can optionally emit a
+schema-valid `.domains.yaml` with `--emit-inferred-domains <file>`.
+
 ## Usage
 
 The executable now has two explicit boundaries: a frontend (`--frontend
@@ -69,6 +75,13 @@ architecture is described in `docs/mateir_architecture.md`.
 **Compile a single-module design:**
 ```
 ./build/dev/mate --domains module.domains.yaml module.v
+```
+
+**Compile by inferring top-level domains and emit a reusable YAML sidecar:**
+```
+./build/dev/mate --top module --infer-top-domains \
+    --emit-inferred-domains module.inferred.domains.yaml \
+    module.v
 ```
 
 **Run static analysis:**
@@ -93,6 +106,8 @@ root module. Submodules are resolved automatically from the same file set.
 
 **Optional flags:**
 - `--params KEY=VAL,...` — override top-module parameters
+- `--infer-top-domains` — infer top-level clocks, resets, and input domains instead of loading `--domains`
+- `--emit-inferred-domains FILE` — write inferred top-level domains YAML; requires `--infer-top-domains`
 - `--flops-initial zeros|ones|random` — flip-flop initial state for simulation
 - `--flops-seed N` — seed for random initialisation
 
@@ -134,10 +149,11 @@ The compiler runs the following passes in order on the top module's flat DFG:
 | 3 | type_propagation | Infer bit-widths across the DFG |
 | 4–7 | condition_normalization + constant_fold (×2) | Normalise and re-fold MUX conditions |
 | 8 | flop_resolve | Identify clock/reset from `always_ff` triggers; strip reset MUX; tag ports |
-| 9 | load_top_io_domains | Apply `.domains.yaml`; assign top-level IO domains |
+| 9 | load_top_io_domains / infer_top_clock_reset_domains | Apply top-level YAML or infer top-level clocks/resets |
 | 10 | cdc_annotations | Load explicit CDC synchronizer annotations |
 | 11 | global_domain_resolve | Propagate clock domains through hierarchy |
-| 12 | dce | Dead-code elimination |
+| 12 | infer_top_data_input_domains | Infer top-level data inputs in infer mode |
+| 13 | dce | Dead-code elimination |
 
 After the pipeline, combinational dependency analysis validates that there are
 no combinational loops in the design.

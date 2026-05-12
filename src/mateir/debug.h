@@ -12,4 +12,11 @@ struct DebugNodeSpec {
     std::string node_name;
 };
 
+struct DebugNodePathSpec {
+    // Global source node name as shown in dependency dumps, such as
+    // "spi_sdi0" or "u_rxreg.counter.q".
+    std::string source_name;
+    DebugNodeSpec target;
+};
+
 } // namespace mate

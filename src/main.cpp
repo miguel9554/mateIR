@@ -21,6 +21,10 @@ void printUsage(const char* progName) {
               << "  --frontend <name>         HDL frontend: systemverilog (default)\n"
               << "  --top <module>            Top module name (required for multi-file designs)\n"
               << "  --domains <file>          Top-level domain YAML file\n"
+              << "  --infer-top-domains       Infer top-level clocks/resets instead of loading --domains\n"
+              << "  --infer-synchronizers     Infer CDC synchronizer flops instead of loading .cdc.yaml sidecars\n"
+              << "  --emit-inferred-domains <file>\n"
+              << "                            Write inferred top-level domains YAML (infer mode only)\n"
               << "  --analyze                 Run static analysis consumer on mateir\n"
               << "  --simulate                Run cycle-based simulation consumer\n"
               << "  --inputs-dir <dir>        Directory containing input stimuli files\n"
@@ -28,6 +32,9 @@ void printUsage(const char* progName) {
               << "  --flops-initial <mode>    Flop init: random (default), zeros, ones\n"
               << "  --flops-seed <n>          Seed for random flop initialization\n"
               << "  --debug-nodes <n1,n2,...> Comma-separated node names for debug DOTs\n"
+              << "  --debug-node-deps <...>   Comma-separated node names to dump direct DFG inputs\n"
+              << "  --debug-node-paths <...>  Comma-separated SOURCE=TARGET queries to dump one dependency chain\n"
+              << "  --dump-passes             Dump per-pass DFG .dot/.json and final DFG dump\n"
               << "  --params <K=V,K=V,...>    Comma-separated top parameter overrides\n";
 }
 
@@ -65,6 +72,31 @@ std::vector<DebugNodeSpec> parseDebugNodes(const std::string& debugNodesStr) {
     return specs;
 }
 
+std::vector<DebugNodePathSpec> parseDebugNodePaths(const std::string& debugPathsStr) {
+    std::vector<DebugNodePathSpec> specs;
+    if (debugPathsStr.empty()) return specs;
+    for (const auto& entry : splitComma(debugPathsStr)) {
+        auto eq = entry.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 >= entry.size()) {
+            throw CompilerError(
+                "--debug-node-paths entries must have the form SOURCE=TARGET");
+        }
+
+        DebugNodePathSpec spec;
+        spec.source_name = entry.substr(0, eq);
+
+        const std::string target = entry.substr(eq + 1);
+        auto colon = target.find(':');
+        if (colon == std::string::npos)
+            spec.target = {"", target};
+        else
+            spec.target = {target.substr(0, colon), target.substr(colon + 1)};
+
+        specs.push_back(std::move(spec));
+    }
+    return specs;
+}
+
 std::unique_ptr<Frontend> makeFrontend(const std::string& frontendName) {
     if (frontendName == "systemverilog" || frontendName == "sv" || frontendName == "verilog") {
         return std::make_unique<SystemVerilogFrontend>();
@@ -77,6 +109,7 @@ std::unique_ptr<Frontend> makeFrontend(const std::string& frontendName) {
 int main(int argc, char** argv) {
     bool simulateMode = false;
     bool analyzeMode = false;
+    bool dumpPasses = false;
     std::string frontendName = "systemverilog";
     std::string topModule;
     std::string inputsDir;
@@ -84,15 +117,26 @@ int main(int argc, char** argv) {
     std::string flopsInitialStr;
     std::string flopsSeedStr;
     std::string debugNodesStr;
+    std::string debugNodeDepsStr;
+    std::string debugNodePathsStr;
     std::string paramsStr;
+    std::string emitInferredDomainsPath;
     std::vector<std::string> domainFiles;
     std::vector<std::string> sourceFiles;
+    TopDomainMode topDomainMode = TopDomainMode::Yaml;
+    bool inferSynchronizers = false;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--simulate") == 0) {
             simulateMode = true;
         } else if (std::strcmp(argv[i], "--analyze") == 0) {
             analyzeMode = true;
+        } else if (std::strcmp(argv[i], "--infer-top-domains") == 0) {
+            topDomainMode = TopDomainMode::Infer;
+        } else if (std::strcmp(argv[i], "--infer-synchronizers") == 0) {
+            inferSynchronizers = true;
+        } else if (std::strcmp(argv[i], "--dump-passes") == 0) {
+            dumpPasses = true;
         } else if (std::strcmp(argv[i], "--frontend") == 0 ||
                    std::strcmp(argv[i], "--top") == 0 ||
                    std::strcmp(argv[i], "--inputs-dir") == 0 ||
@@ -100,7 +144,10 @@ int main(int argc, char** argv) {
                    std::strcmp(argv[i], "--flops-initial") == 0 ||
                    std::strcmp(argv[i], "--flops-seed") == 0 ||
                    std::strcmp(argv[i], "--debug-nodes") == 0 ||
-                   std::strcmp(argv[i], "--params") == 0) {
+                   std::strcmp(argv[i], "--debug-node-deps") == 0 ||
+                   std::strcmp(argv[i], "--debug-node-paths") == 0 ||
+                   std::strcmp(argv[i], "--params") == 0 ||
+                   std::strcmp(argv[i], "--emit-inferred-domains") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "ERROR: " << argv[i] << " requires an argument\n";
                 printUsage(argv[0]);
@@ -115,7 +162,10 @@ int main(int argc, char** argv) {
             else if (opt == "--flops-initial") flopsInitialStr = value;
             else if (opt == "--flops-seed") flopsSeedStr = value;
             else if (opt == "--debug-nodes") debugNodesStr = value;
+            else if (opt == "--debug-node-deps") debugNodeDepsStr = value;
+            else if (opt == "--debug-node-paths") debugNodePathsStr = value;
             else if (opt == "--params") paramsStr = value;
+            else if (opt == "--emit-inferred-domains") emitInferredDomainsPath = value;
         } else if (std::strcmp(argv[i], "--domains") == 0) {
             while (i + 1 < argc && argv[i + 1][0] != '-') {
                 std::string_view arg(argv[i + 1]);
@@ -149,6 +199,12 @@ int main(int argc, char** argv) {
             if (inputsDir.empty()) throw CompilerError("--simulate requires --inputs-dir <dir>");
             if (outputDir.empty()) throw CompilerError("--simulate requires --output-dir <dir>");
         }
+        if (topDomainMode == TopDomainMode::Infer && !domainFiles.empty()) {
+            throw CompilerError("--infer-top-domains cannot be used with --domains");
+        }
+        if (!emitInferredDomainsPath.empty() && topDomainMode != TopDomainMode::Infer) {
+            throw CompilerError("--emit-inferred-domains requires --infer-top-domains");
+        }
 
         std::cout << "========================================\n";
         std::cout << "mate\n";
@@ -163,9 +219,15 @@ int main(int argc, char** argv) {
 
         FrontendOptions frontendOptions;
         frontendOptions.source_files = sourceFiles;
+        frontendOptions.infer_synchronizers = inferSynchronizers;
         if (!topModule.empty()) frontendOptions.top_module = topModule;
         frontendOptions.domain_files = domainFiles;
+        frontendOptions.top_domain_mode = topDomainMode;
+        if (!emitInferredDomainsPath.empty()) {
+            frontendOptions.emit_inferred_domains_path = emitInferredDomainsPath;
+        }
         frontendOptions.debug_dfg_nodes = parseDebugNodes(debugNodesStr);
+        frontendOptions.dump_passes = dumpPasses;
         parseParams(paramsStr, frontendOptions.parameters);
 
         auto frontend = makeFrontend(frontendName);
@@ -175,13 +237,16 @@ int main(int argc, char** argv) {
         std::cout << "\nmateir:\n";
         std::cout << "========================================\n";
         mateir.top.print();
+        if (dumpPasses) mateir.top.dumpDfgFiles();
         std::cout << "\n";
 
         if (analyzeMode) {
             std::cout << "========================================\n";
             std::cout << "Running static analysis...\n";
             std::cout << "========================================\n";
-            StaticAnalysisConsumer analyzer(std::cout);
+            StaticAnalysisConsumer analyzer(std::cout,
+                                           parseDebugNodes(debugNodeDepsStr),
+                                           parseDebugNodePaths(debugNodePathsStr));
             analyzer.consume(mateir);
         }
 

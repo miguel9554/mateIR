@@ -1,6 +1,7 @@
 #include "frontends/systemverilog/passes/cdc_check.h"
 
 #include <format>
+#include <iostream>
 #include <string>
 
 namespace mate {
@@ -29,18 +30,17 @@ const char* syncKindStr(const SyncType& syncType) {
     return "Async";
 }
 
-const ModuleDomainFacts& requireFacts(
+ModuleDomainFacts& requireFacts(
         const Module& module,
         const InstancePath& path,
-        const FrontendDomainFacts& facts) {
+        FrontendDomainFacts& facts) {
     ModuleOccurrenceKey key{path, module.name};
-    const auto* moduleFacts = facts.find(key);
-    if (!moduleFacts) {
+    if (!facts.find(key)) {
         throw CompilerError(std::format(
             "domains_propagate_and_check: missing domain facts for module '{}' at {}",
             module.name, pathString(path)));
     }
-    return *moduleFacts;
+    return facts.getOrCreate(key);
 }
 
 const DFGNode* firstDLeaf(const FlopInfo& flop) {
@@ -48,12 +48,19 @@ const DFGNode* firstDLeaf(const FlopInfo& flop) {
     return leaves.empty() ? nullptr : leaves.front();
 }
 
+std::string synchronizerHint(const Module& module, const FlopInfo& flop) {
+    return std::format(
+        " If intentional, add '{}' to synchronizer_flops in {}.cdc.yaml.",
+        flop.name, module.name);
+}
+
 void validateCdcForModule(
         const Module& module,
         const InstancePath& path,
-        const FrontendDomainFacts& facts,
-        const SyncDomainAnalysis& analysis) {
-    const ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
+        FrontendDomainFacts& facts,
+        const SyncDomainAnalysis& analysis,
+        bool infer_synchronizers) {
+    ModuleDomainFacts& moduleFacts = requireFacts(module, path, facts);
 
     for (const auto& flop : module.flops) {
         auto domainIt = analysis.flop_d_domains.find(&flop);
@@ -69,6 +76,14 @@ void validateCdcForModule(
         bool isSynchronizer = moduleFacts.cdc.synchronizer_flops.contains(flop.name);
         if (isSynchronizer) continue;
 
+        auto inferSynchronizer = [&](const std::string& reason) {
+            moduleFacts.cdc.synchronizer_flops.insert(flop.name);
+            std::cout << "cdc_infer: inferred synchronizer flop '"
+                      << flop.name << "' in module '" << module.name
+                      << "' at " << pathString(path)
+                      << " (" << reason << ")" << std::endl;
+        };
+
         if (!dDomain.sync_type) {
             throw CompilerError(std::format(
                 "domains_propagate_and_check: flop '{}' in module '{}' at {} "
@@ -80,21 +95,33 @@ void validateCdcForModule(
 
         if (const auto* sync = std::get_if<SyncSignal>(&*dDomain.sync_type)) {
             if (sync->clock_domain == flop.clock_domain) continue;
+            if (infer_synchronizers) {
+                inferSynchronizer("samples Sync input from a different clock domain");
+                continue;
+            }
             throw CompilerError(std::format(
                 "domains_propagate_and_check: flop '{}' in module '{}' at {} "
-                "samples Sync input from a different clock domain - cross-domain violation",
-                flop.name, module.name, pathString(path)), firstDLeaf(flop));
+                "samples Sync input from a different clock domain - cross-domain violation{}",
+                flop.name, module.name, pathString(path),
+                synchronizerHint(module, flop)), firstDLeaf(flop));
+        }
+
+        if (infer_synchronizers) {
+            inferSynchronizer(std::format("samples {} input", syncKindStr(*dDomain.sync_type)));
+            continue;
         }
 
         throw CompilerError(std::format(
             "domains_propagate_and_check: flop '{}' in module '{}' at {} "
-            "samples {} input without a declared synchronizer",
+            "samples {} input without a declared synchronizer{}",
             flop.name, module.name, pathString(path),
-            syncKindStr(*dDomain.sync_type)), firstDLeaf(flop));
+            syncKindStr(*dDomain.sync_type),
+            synchronizerHint(module, flop)), firstDLeaf(flop));
     }
 
     for (const auto& sub : module.hierarchyInstantiation)
-        validateCdcForModule(sub, childPath(path, sub.instance_name), facts, analysis);
+        validateCdcForModule(
+            sub, childPath(path, sub.instance_name), facts, analysis, infer_synchronizers);
 }
 
 } // anonymous namespace
@@ -110,11 +137,12 @@ void checkCdcAndCrossModuleConnections(
         Module& top,
         const DFG& topDFG,
         const MateIR& ir,
-        const FrontendDomainFacts& domainFacts,
-        const SyncDomainAnalysis& analysis) {
+        FrontendDomainFacts& domainFacts,
+        const SyncDomainAnalysis& analysis,
+        bool infer_synchronizers) {
     (void)topDFG;
     (void)ir;
-    validateCdcForModule(top, {}, domainFacts, analysis);
+    validateCdcForModule(top, {}, domainFacts, analysis, infer_synchronizers);
 }
 
 } // namespace mate

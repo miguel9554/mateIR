@@ -484,6 +484,7 @@ std::optional<ModuleNodeLeafRef> findModuleNamedLeaf(
 }
 
 DFGNode* findModuleDebugLeafNode(Module& module, const std::string& leaf_name) {
+    if (auto named = findModuleNamedLeaf(module, leaf_name)) return named->node;
     if (auto output = findModuleDrivenLeaf(module, leaf_name)) return output->node;
 
     for (const auto& flop : module.flops) {
@@ -658,27 +659,18 @@ void Module::print(int indent) const {
         std::cout << std::endl;
     }
 
-    // Write DFG to files
-    if (this->dfg) {
-        ensureDebugOutputDir();
-        std::string graphName = this->name + "_dfg";
+}
 
-        // Write DOT file
-        std::string dotFilename = DEBUG_OUTPUT_DIR + "/" + graphName + ".dot";
-        std::ofstream dotOut(dotFilename);
-        if (dotOut) {
-            dotOut << this->dfg->toDot(graphName);
-            std::cout << indent_str(indent + 1) << "Wrote DFG to: " << dotFilename << std::endl;
-        }
-
-        // Write JSON file
-        std::string jsonFilename = DEBUG_OUTPUT_DIR + "/" + graphName + ".json";
-        std::ofstream jsonOut(jsonFilename);
-        if (jsonOut) {
-            jsonOut << this->dfg->toJson();
-            std::cout << indent_str(indent + 1) << "Wrote DFG JSON to: " << jsonFilename << std::endl;
-        }
-    }
+void Module::dumpDfgFiles() const {
+    if (!this->dfg) return;
+    ensureDebugOutputDir();
+    std::string graphName = this->name + "_dfg";
+    std::string dotFilename = DEBUG_OUTPUT_DIR + "/" + graphName + ".dot";
+    std::ofstream(dotFilename) << this->dfg->toDot(graphName);
+    std::cout << "Wrote DFG to: " << dotFilename << std::endl;
+    std::string jsonFilename = DEBUG_OUTPUT_DIR + "/" + graphName + ".json";
+    std::ofstream(jsonFilename) << this->dfg->toJson();
+    std::cout << "Wrote DFG JSON to: " << jsonFilename << std::endl;
 }
 
 // ============================================================================

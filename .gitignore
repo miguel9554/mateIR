@@ -45,6 +45,7 @@ tests/**/tb/generated/
 tests/**/work/**/obj_dir/
 tests/**/work/**/debug_output
 tests/**/work/**/output
+tests/**/work/**/*.log
 tests/**/work/**/*.hash
 tests/**/work/**/*.vcd
 **/*.gtkw

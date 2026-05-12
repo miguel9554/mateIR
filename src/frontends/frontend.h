@@ -10,12 +10,21 @@
 
 namespace mate {
 
+enum class TopDomainMode {
+    Yaml,
+    Infer,
+};
+
 struct FrontendOptions {
     std::vector<std::string> source_files;
     std::optional<std::string> top_module;
     std::map<std::string, int64_t> parameters;
     std::vector<std::string> domain_files;
+    TopDomainMode top_domain_mode = TopDomainMode::Yaml;
+    bool infer_synchronizers = false;
+    std::optional<std::string> emit_inferred_domains_path;
     std::vector<DebugNodeSpec> debug_dfg_nodes;
+    bool dump_passes = false;
 };
 
 class Frontend {

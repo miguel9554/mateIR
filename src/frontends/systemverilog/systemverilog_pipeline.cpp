@@ -10,6 +10,8 @@
 #include "frontends/systemverilog/passes/flop_resolve.h"
 #include "frontends/systemverilog/passes/global_domain_resolve.h"
 #include "frontends/systemverilog/passes/io_domains_set.h"
+#include "frontends/systemverilog/passes/top_io_domains_emit.h"
+#include "frontends/systemverilog/passes/top_io_domains_infer.h"
 #include "frontends/systemverilog/passes/type_propagation.h"
 #include "frontends/systemverilog/domain_facts.h"
 #include "util/debug.h"
@@ -22,6 +24,7 @@
 #include <functional>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <set>
 #include <unordered_set>
 
@@ -35,7 +38,7 @@ std::string loadTopDomainPath(
     if (domainFiles.empty()) {
         throw CompilerError(std::format(
             "No top-level domains file provided for module '{}' "
-            "(use --domains to specify)", topModuleName));
+            "(use --domains or --infer-top-domains)", topModuleName));
     }
     std::optional<std::string> topDomainPath;
     for (const auto& path : domainFiles) {
@@ -110,7 +113,8 @@ const DFGNode* findDebugLeaf(const Module& module,
 }
 
 void validateDebugSpecsBeforePipeline(const Module& topModule,
-                                      const std::vector<DebugNodeSpec>& specs) {
+                                      const std::vector<DebugNodeSpec>& specs,
+                                      const std::string& optionName) {
     if (specs.empty()) return;
 
     std::set<size_t> foundSpecs;
@@ -128,8 +132,8 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
 
             if (!found && !spec.module_path.empty())
                 throw CompilerError(std::format(
-                    "debug_dfg_nodes: node '{}' not found in module '{}' outputs, signals, or flop .d/.q leaves",
-                    spec.node_name, module.name));
+                    "{}: node '{}' not found in module '{}' outputs, signals, or flop .d/.q leaves",
+                    optionName, spec.node_name, module.name));
 
             if (found) foundSpecs.insert(i);
         }
@@ -140,19 +144,23 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
     for (size_t i = 0; i < specs.size(); i++) {
         if (!foundSpecs.contains(i))
             throw CompilerError(std::format(
-                "debug_dfg_nodes: node '{}' not found in any module outputs, signals, or flop .d/.q leaves",
-                specs[i].node_name));
+                "{}: node '{}' not found in any module outputs, signals, or flop .d/.q leaves",
+                optionName, specs[i].node_name));
     }
 }
 
 void runMateIRPipeline(MateIR& ir,
-                       const std::string& topDomainPath,
+                       const std::optional<std::string>& topDomainPath,
+                       TopDomainMode topDomainMode,
+                       bool inferSynchronizers,
+                       const std::optional<std::string>& emitInferredDomainsPath,
                        const std::map<std::string, std::string>& cdcPathsByModule,
                        FrontendDomainFacts& domainFacts,
-                       const std::vector<DebugNodeSpec>& debugSpecs) {
+                       const std::vector<DebugNodeSpec>& debugSpecs,
+                       bool dumpPasses) {
     Module& topModule = ir.top;
 
-    validateDebugSpecsBeforePipeline(topModule, debugSpecs);
+    validateDebugSpecsBeforePipeline(topModule, debugSpecs, "debug_dfg_nodes");
 
     std::set<size_t> satisfiedDebugSpecs;
 
@@ -202,9 +210,13 @@ void runMateIRPipeline(MateIR& ir,
             }
 
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::filesystem::create_directories(dir);
-            std::ofstream(std::format("{}/{:02}_{}.dot", dir, number, passName)) << module.dfg->toDot(passName);
-            std::ofstream(std::format("{}/{:02}_{}.json", dir, number, passName)) << module.dfg->toJson();
+            if (dumpPasses || !debugSpecs.empty()) {
+                std::filesystem::create_directories(dir);
+            }
+            if (dumpPasses) {
+                std::ofstream(std::format("{}/{:02}_{}.dot", dir, number, passName)) << module.dfg->toDot(passName);
+                std::ofstream(std::format("{}/{:02}_{}.json", dir, number, passName)) << module.dfg->toJson();
+            }
 
             if (!debugSpecs.empty()) {
                 for (size_t specIdx = 0; specIdx < debugSpecs.size(); specIdx++) {
@@ -235,6 +247,7 @@ void runMateIRPipeline(MateIR& ir,
                         << module.dfg->toJsonCone(node);
                 }
             }
+
         };
 
         std::function<void(const Module&, std::ostream&)> dumpFlopsRecursive =
@@ -264,21 +277,36 @@ void runMateIRPipeline(MateIR& ir,
         runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg, preOptRoots); });
         runPass(5, "constant_fold", [&]{ constantFold(*module.dfg, preOptRoots); });
         runPass(6, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
-        {
+        if (dumpPasses) {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::ofstream f(std::format("{}/06_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
-        runPass(7, "load_top_io_domains", [&]{
-            loadTopIODomains(module, topDomainPath, domainFacts);
-        });
+        if (topDomainMode == TopDomainMode::Yaml) {
+            runPass(7, "load_top_io_domains", [&]{
+                loadTopIODomains(module, *topDomainPath, domainFacts);
+            });
+        } else {
+            runPass(7, "infer_top_clock_reset_domains", [&]{
+                inferTopClockResetDomains(module, domainFacts);
+            });
+        }
         runPass(8, "cdc_annotations", [&]{
-            loadCdcAnnotations(module, cdcPathsByModule, domainFacts);
+            if (inferSynchronizers) {
+                loadCdcAnnotations(module, {}, domainFacts);
+            } else {
+                loadCdcAnnotations(module, cdcPathsByModule, domainFacts);
+            }
         });
         runPass(9, "global_domain_resolve", [&]{
             resolveGlobalDomains(ir, domainFacts);
         });
-        runPass(10, "dce", [&]{
+        if (topDomainMode == TopDomainMode::Infer) {
+            runPass(10, "infer_top_data_input_domains", [&]{
+                inferTopDataInputDomains(ir, domainFacts);
+            });
+        }
+        runPass(topDomainMode == TopDomainMode::Infer ? 11 : 10, "dce", [&]{
             auto keepAlive = collectRoots(ModuleRootSelection{
                 .parameters = true,
                 .localparams = true,
@@ -294,16 +322,21 @@ void runMateIRPipeline(MateIR& ir,
         module.dfg->validateNoOrphans();
         module.dfg->validateStrictLiveDFG();
         validateFrontendDomainFacts(module, domainFacts);
-        runPass(11, "domains_propagate_and_check", [&]{ domainsPropagateAndCheck(ir, domainFacts); });
-        {
+        runPass(topDomainMode == TopDomainMode::Infer ? 12 : 11,
+                "domains_propagate_and_check",
+                [&]{ domainsPropagateAndCheck(ir, domainFacts, inferSynchronizers); });
+        if (dumpPasses) {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/11_domains_propagate_flops.txt", dir));
+            std::ofstream f(std::format("{}/{}_domains_propagate_flops.txt",
+                                        dir,
+                                        topDomainMode == TopDomainMode::Infer ? "12" : "11"));
             dumpFlopsRecursive(module, f);
         }
         validateNoCombLoops(module);
 
         if (!debugSpecs.empty()) {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
+            std::filesystem::create_directories(dir);
             for (const auto& spec : debugSpecs) {
                 const DFGNode* node = nullptr;
                 bool pathMatches = debugPathMatches(currentPath, spec.module_path);
@@ -319,6 +352,7 @@ void runMateIRPipeline(MateIR& ir,
                     << module.dfg->toJsonCone(node);
             }
         }
+
     };
 
     runPipeline(topModule, topModule.name);
@@ -326,6 +360,10 @@ void runMateIRPipeline(MateIR& ir,
     std::string dir = DEBUG_OUTPUT_DIR + "/" + topModule.name;
     std::filesystem::create_directories(dir);
     std::ofstream(dir + "/hierarchy.json") << hierarchyToJson(ir);
+
+    if (topDomainMode == TopDomainMode::Infer && emitInferredDomainsPath) {
+        emitInferredTopDomainsYaml(topModule, domainFacts, *emitInferredDomainsPath);
+    }
 }
 
 } // namespace
@@ -350,9 +388,16 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
     ir.source_files = options.source_files;
     ir.frontend_module_count = extracted.modules.size();
 
-    auto topDomainPath = loadTopDomainPath(options.domain_files, ir.top.name);
+    std::optional<std::string> topDomainPath;
+    if (options.top_domain_mode == TopDomainMode::Yaml) {
+        topDomainPath = loadTopDomainPath(options.domain_files, ir.top.name);
+    }
     auto cdcPathsByModule = loadCdcPathsByModule(options.source_files, options.domain_files);
-    runMateIRPipeline(ir, topDomainPath, cdcPathsByModule, domainFacts, options.debug_dfg_nodes);
+    runMateIRPipeline(ir, topDomainPath, options.top_domain_mode,
+                      options.infer_synchronizers,
+                      options.emit_inferred_domains_path,
+                      cdcPathsByModule, domainFacts, options.debug_dfg_nodes,
+                      options.dump_passes);
 
     return ir;
 }

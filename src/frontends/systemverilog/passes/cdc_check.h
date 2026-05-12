@@ -15,7 +15,8 @@ void checkCdcAndCrossModuleConnections(
     Module& top,
     const DFG& topDFG,
     const MateIR& ir,
-    const FrontendDomainFacts& domainFacts,
-    const SyncDomainAnalysis& analysis);
+    FrontendDomainFacts& domainFacts,
+    const SyncDomainAnalysis& analysis,
+    bool infer_synchronizers);
 
 } // namespace mate

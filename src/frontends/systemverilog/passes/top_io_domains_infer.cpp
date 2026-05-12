@@ -17,7 +17,9 @@ namespace {
 
 struct TopInputInferenceEvidence {
     std::set<ClockId> clock_domains;
+    std::set<ClockId> impossible_clock_domains;
     std::set<std::string> synchronizer_flops;
+    std::map<ClockId, std::set<std::string>> impossible_domain_synchronizer_flops;
 };
 
 std::string edgeSuffix(edge_t edge) {
@@ -30,16 +32,6 @@ std::string reserveUniqueName(const std::string& base, std::set<std::string>& us
         std::string candidate = std::format("{}_{}", base, n);
         if (usedNames.insert(candidate).second) return candidate;
     }
-}
-
-const char* asyncReasonName(TopInputAsyncReason reason) {
-    switch (reason) {
-        case TopInputAsyncReason::Unused: return "unused";
-        case TopInputAsyncReason::OutputOnly: return "output_only";
-        case TopInputAsyncReason::Multidomain: return "multidomain";
-        case TopInputAsyncReason::Synchronizer: return "synchronizer";
-    }
-    return "unused";
 }
 
 InstancePath childPath(InstancePath path, const std::string& instanceName) {
@@ -119,7 +111,10 @@ void collectFlopConeEvidence(
                 std::string flopRef = path.elems.empty()
                     ? flop.name
                     : std::format("{}.{}", pathString(path), flop.name);
-                evidenceByPort[portName].synchronizer_flops.insert(std::move(flopRef));
+                evidenceByPort[portName].impossible_clock_domains.insert(flop.clock_domain);
+                evidenceByPort[portName].synchronizer_flops.insert(flopRef);
+                evidenceByPort[portName].impossible_domain_synchronizer_flops[flop.clock_domain]
+                    .insert(std::move(flopRef));
             } else {
                 evidenceByPort[portName].clock_domains.insert(flop.clock_domain);
             }
@@ -183,14 +178,36 @@ std::string clockDomainList(const MateIR& ir, const std::set<ClockId>& domains) 
     return joined;
 }
 
-std::string synchronizerList(const std::set<std::string>& synchronizerFlops) {
+std::string sinkDomainsSummary(const MateIR& ir,
+                               const std::set<ClockId>& domains) {
+    return domains.empty() ? "none" : clockDomainList(ir, domains);
+}
+
+template <typename MapT>
+std::string synchronizedIntoSummary(const MateIR& ir, const MapT& syncedInto) {
+    std::vector<std::string> refs;
+    for (const auto& [domain, flops] : syncedInto) {
+        std::string domainName = domain.value < ir.clocks.size()
+            ? ir.clocks[domain.value].display_name
+            : std::format("clock_{}", domain.value);
+        for (const auto& flop : flops) {
+            refs.push_back(domainName + "@" + flop);
+        }
+    }
+    std::ranges::sort(refs);
+
     std::string joined;
-    size_t i = 0;
-    for (const auto& flopName : synchronizerFlops) {
-        if (i++) joined += ", ";
-        joined += flopName;
+    for (size_t i = 0; i < refs.size(); ++i) {
+        if (i) joined += ", ";
+        joined += refs[i];
     }
     return joined;
+}
+
+std::string synchronizerExclusionSummaryOrNone(const MateIR& ir,
+                                               const TopAsyncInputFact& asyncFact) {
+    const std::string summary = synchronizedIntoSummary(ir, asyncFact.impossible_domain_synchronizer_flops);
+    return summary.empty() ? "none" : summary;
 }
 
 void emitAsyncDiagnostic(
@@ -198,23 +215,24 @@ void emitAsyncDiagnostic(
         const std::string& portName,
         const TopAsyncInputFact& asyncFact) {
     std::cout << "top_io_domains_infer: top input '" << portName
-              << "' inferred async (" << asyncReasonName(asyncFact.reason);
-    if (asyncFact.reason == TopInputAsyncReason::Multidomain &&
-            !asyncFact.evidence_clock_domains.empty()) {
-        std::cout << ": " << clockDomainList(ir, asyncFact.evidence_clock_domains);
-    } else if (asyncFact.reason == TopInputAsyncReason::Synchronizer &&
-            !asyncFact.evidence_synchronizer_flops.empty()) {
-        std::cout << ": " << synchronizerList(asyncFact.evidence_synchronizer_flops);
-    }
+              << "' inferred async (sinks: "
+              << sinkDomainsSummary(ir, asyncFact.evidence_clock_domains)
+              << "; synced-into: "
+              << synchronizerExclusionSummaryOrNone(ir, asyncFact);
     std::cout << ")" << std::endl;
 }
 
 void emitSyncDiagnostic(
+        const MateIR& ir,
         const std::string& portName,
         const TopSyncInputFact& syncFact) {
     std::cout << "top_io_domains_infer: top input '" << portName
-              << "' inferred sync (clock_domain: "
+              << "' inferred sync (sinks: "
               << syncFact.clock_domain_name
+              << "; synced-into: "
+              << (synchronizedIntoSummary(ir, syncFact.synced_into_domain_synchronizer_flops).empty()
+                    ? "none"
+                    : synchronizedIntoSummary(ir, syncFact.synced_into_domain_synchronizer_flops))
               << ")" << std::endl;
 }
 
@@ -345,13 +363,17 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
                 .port_name = portName,
                 .reason = reason,
                 .evidence_clock_domains = {},
+                .impossible_clock_domains = {},
                 .evidence_synchronizer_flops = {},
+                .impossible_domain_synchronizer_flops = {},
             };
             emitAsyncDiagnostic(ir, portName, domainFacts.top_inputs->async_input_facts.at(portName));
             continue;
         }
 
-        if (!evidence->synchronizer_flops.empty()) {
+        const std::set<ClockId>& positiveDomains = evidence->clock_domains;
+
+        if (positiveDomains.empty() && !evidence->synchronizer_flops.empty()) {
             moduleFacts.ports[portName] = LocalPortDomainFact{
                 .port_name = portName,
                 .cls = LocalPortClass::Async,
@@ -362,20 +384,22 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
             domainFacts.top_inputs->async_input_facts[portName] = TopAsyncInputFact{
                 .port_name = portName,
                 .reason = TopInputAsyncReason::Synchronizer,
-                .evidence_clock_domains = evidence->clock_domains,
+                .evidence_clock_domains = positiveDomains,
+                .impossible_clock_domains = evidence->impossible_clock_domains,
                 .evidence_synchronizer_flops = evidence->synchronizer_flops,
+                .impossible_domain_synchronizer_flops = evidence->impossible_domain_synchronizer_flops,
             };
             emitAsyncDiagnostic(ir, portName, domainFacts.top_inputs->async_input_facts.at(portName));
             continue;
         }
 
-        if (evidence->clock_domains.size() == 1) {
-            auto domainName = resolvedTopClockDomainName(domainFacts, *evidence->clock_domains.begin());
+        if (positiveDomains.size() == 1) {
+            auto domainName = resolvedTopClockDomainName(domainFacts, *positiveDomains.begin());
             if (!domainName) {
                 throw CompilerError(std::format(
                     "top_io_domains_infer: no top-level clock domain name resolved for ClockId {} "
                     "while classifying top input '{}'",
-                    evidence->clock_domains.begin()->value, portName));
+                    positiveDomains.begin()->value, portName));
             }
             moduleFacts.ports[portName] = LocalPortDomainFact{
                 .port_name = portName,
@@ -386,8 +410,9 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
             domainFacts.top_inputs->sync_inputs[portName] = TopSyncInputFact{
                 .port_name = portName,
                 .clock_domain_name = *domainName,
+                .synced_into_domain_synchronizer_flops = evidence->impossible_domain_synchronizer_flops,
             };
-            emitSyncDiagnostic(portName, domainFacts.top_inputs->sync_inputs.at(portName));
+            emitSyncDiagnostic(ir, portName, domainFacts.top_inputs->sync_inputs.at(portName));
             continue;
         }
 
@@ -401,8 +426,10 @@ void inferTopDataInputDomains(MateIR& ir, FrontendDomainFacts& domainFacts) {
         domainFacts.top_inputs->async_input_facts[portName] = TopAsyncInputFact{
             .port_name = portName,
             .reason = TopInputAsyncReason::Multidomain,
-            .evidence_clock_domains = evidence->clock_domains,
+            .evidence_clock_domains = positiveDomains,
+            .impossible_clock_domains = evidence->impossible_clock_domains,
             .evidence_synchronizer_flops = {},
+            .impossible_domain_synchronizer_flops = evidence->impossible_domain_synchronizer_flops,
         };
         emitAsyncDiagnostic(ir, portName, domainFacts.top_inputs->async_input_facts.at(portName));
     }

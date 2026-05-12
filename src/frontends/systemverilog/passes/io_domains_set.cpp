@@ -295,6 +295,7 @@ void loadTopIODomains(Module& module,
             domainFacts.top_inputs->sync_inputs[portName] = TopSyncInputFact{
                 .port_name = portName,
                 .clock_domain_name = cls.clock_name,
+                .synced_into_domain_synchronizer_flops = {},
             };
         }
     }

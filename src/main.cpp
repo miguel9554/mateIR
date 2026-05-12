@@ -22,6 +22,7 @@ void printUsage(const char* progName) {
               << "  --top <module>            Top module name (required for multi-file designs)\n"
               << "  --domains <file>          Top-level domain YAML file\n"
               << "  --infer-top-domains       Infer top-level clocks/resets instead of loading --domains\n"
+              << "  --infer-synchronizers     Infer CDC synchronizer flops instead of loading .cdc.yaml sidecars\n"
               << "  --emit-inferred-domains <file>\n"
               << "                            Write inferred top-level domains YAML (infer mode only)\n"
               << "  --analyze                 Run static analysis consumer on mateir\n"
@@ -123,6 +124,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> domainFiles;
     std::vector<std::string> sourceFiles;
     TopDomainMode topDomainMode = TopDomainMode::Yaml;
+    bool inferSynchronizers = false;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--simulate") == 0) {
@@ -131,6 +133,8 @@ int main(int argc, char** argv) {
             analyzeMode = true;
         } else if (std::strcmp(argv[i], "--infer-top-domains") == 0) {
             topDomainMode = TopDomainMode::Infer;
+        } else if (std::strcmp(argv[i], "--infer-synchronizers") == 0) {
+            inferSynchronizers = true;
         } else if (std::strcmp(argv[i], "--dump-passes") == 0) {
             dumpPasses = true;
         } else if (std::strcmp(argv[i], "--frontend") == 0 ||
@@ -215,6 +219,7 @@ int main(int argc, char** argv) {
 
         FrontendOptions frontendOptions;
         frontendOptions.source_files = sourceFiles;
+        frontendOptions.infer_synchronizers = inferSynchronizers;
         if (!topModule.empty()) frontendOptions.top_module = topModule;
         frontendOptions.domain_files = domainFiles;
         frontendOptions.top_domain_mode = topDomainMode;

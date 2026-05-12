@@ -10,6 +10,8 @@ namespace mate {
 // - Validates clock/reset trigger facts against YAML-derived frontend facts
 // - Propagates final SyncType through the flat DFG using ClockId/ResetId domains
 // - Validates CDC fanin using ClockId comparisons and CDC sidecar synchronizer escapes
-void domainsPropagateAndCheck(MateIR& ir, const FrontendDomainFacts& domainFacts);
+void domainsPropagateAndCheck(MateIR& ir,
+                              FrontendDomainFacts& domainFacts,
+                              bool infer_synchronizers = false);
 
 } // namespace mate

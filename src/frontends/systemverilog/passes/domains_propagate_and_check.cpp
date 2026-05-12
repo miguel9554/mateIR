@@ -5,13 +5,16 @@
 
 namespace mate {
 
-void domainsPropagateAndCheck(MateIR& ir, const FrontendDomainFacts& domainFacts) {
+void domainsPropagateAndCheck(MateIR& ir,
+                              FrontendDomainFacts& domainFacts,
+                              bool infer_synchronizers) {
     Module& module = ir.top;
     if (!module.dfg) return;
 
     validateFlopTriggerFacts(module, domainFacts);
     SyncDomainAnalysis analysis = propagateSyncDomains(ir, domainFacts);
-    checkCdcAndCrossModuleConnections(module, *module.dfg, ir, domainFacts, analysis);
+    checkCdcAndCrossModuleConnections(
+        module, *module.dfg, ir, domainFacts, analysis, infer_synchronizers);
 }
 
 } // namespace mate

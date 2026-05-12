@@ -152,6 +152,7 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
 void runMateIRPipeline(MateIR& ir,
                        const std::optional<std::string>& topDomainPath,
                        TopDomainMode topDomainMode,
+                       bool inferSynchronizers,
                        const std::optional<std::string>& emitInferredDomainsPath,
                        const std::map<std::string, std::string>& cdcPathsByModule,
                        FrontendDomainFacts& domainFacts,
@@ -291,7 +292,11 @@ void runMateIRPipeline(MateIR& ir,
             });
         }
         runPass(8, "cdc_annotations", [&]{
-            loadCdcAnnotations(module, cdcPathsByModule, domainFacts);
+            if (inferSynchronizers) {
+                loadCdcAnnotations(module, {}, domainFacts);
+            } else {
+                loadCdcAnnotations(module, cdcPathsByModule, domainFacts);
+            }
         });
         runPass(9, "global_domain_resolve", [&]{
             resolveGlobalDomains(ir, domainFacts);
@@ -319,7 +324,7 @@ void runMateIRPipeline(MateIR& ir,
         validateFrontendDomainFacts(module, domainFacts);
         runPass(topDomainMode == TopDomainMode::Infer ? 12 : 11,
                 "domains_propagate_and_check",
-                [&]{ domainsPropagateAndCheck(ir, domainFacts); });
+                [&]{ domainsPropagateAndCheck(ir, domainFacts, inferSynchronizers); });
         if (dumpPasses) {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::ofstream f(std::format("{}/{}_domains_propagate_flops.txt",
@@ -389,6 +394,7 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
     }
     auto cdcPathsByModule = loadCdcPathsByModule(options.source_files, options.domain_files);
     runMateIRPipeline(ir, topDomainPath, options.top_domain_mode,
+                      options.infer_synchronizers,
                       options.emit_inferred_domains_path,
                       cdcPathsByModule, domainFacts, options.debug_dfg_nodes,
                       options.dump_passes);

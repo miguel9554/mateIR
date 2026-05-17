@@ -4833,15 +4833,12 @@ void resolveProceduralTimingInPlace(
 
     switch (timingControl->kind){
         case SyntaxKind::ImplicitEventControl:
-            std::cout << "We are on combo procedural" << std::endl;
             ctx.is_sequential = false;
             ctx.combDrivers.clear();
             break;
         case SyntaxKind::EventControlWithExpression:{
-            std::cout << "We are on flop procedural" << std::endl;
             const auto& eventControl = timingControl->as<EventControlWithExpressionSyntax>();
             triggerFacts = extractAsyncTriggerFacts((eventControl.expr), triggerFacts, ctx.sm);
-            std::cout << "Triggers:\n";
             ctx.is_sequential = true;
             break;
         }

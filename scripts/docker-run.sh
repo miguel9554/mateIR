@@ -6,7 +6,9 @@ docker_args=(
   --rm
 )
 
-if [ -t 0 ] && [ -t 1 ]; then
+if [[ "${DOCKER_LSP:-0}" == "1" ]]; then
+  docker_args+=(-i)
+elif [ -t 0 ] && [ -t 1 ]; then
   docker_args+=(-it)
 fi
 

@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-venv \
     python-is-python3 \
+    clangd-18 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV VIRTUAL_ENV=/opt/compiler-venv

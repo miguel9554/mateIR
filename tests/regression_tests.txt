@@ -41,7 +41,7 @@ top_domains_infer_data_single_clock_pass PASS
 top_domains_infer_data_unused_async_pass PASS
 top_domains_infer_data_output_only_async_pass PASS
 top_domains_infer_data_hierarchy_pass PASS
-top_domains_infer_data_multidomain_fail FAIL inferred async (multidomain
+top_domains_infer_data_multidomain_fail FAIL inferred async (sinks: clk_a, clk_b; synced-into: none)
 top_domains_infer_cdc_sidecar_sync_pass PASS
 top_domains_infer_cdc_no_sidecar_cross_clock_fail FAIL cross-domain violation If intentional, add 'b_meta' to synchronizer_flops
 top_domains_infer_hierarchy_alias_pass PASS
@@ -62,6 +62,7 @@ module_node_role_collision_fail FAIL duplicate named-value node 'dup' across rol
 module_node_role_collision_input_signal_fail FAIL duplicate named-value node 'dup' across roles 'input' and 'internal'
 module_node_role_collision_output_signal_fail FAIL duplicate named-value node 'dup' across roles 'output' and 'internal'
 overlapping_partial_writes FAIL Overlapping partial writes for target 'bus'
+package_import_fail FAIL Unsupported package member: PackageImportDeclaration
 partial_then_full_write_conflict FAIL Multiple drivers for target 'bus'
 partial_branch_merge PASS
 phase8_multiclock_cdc_fail FAIL samples Async input without a declared synchronizer

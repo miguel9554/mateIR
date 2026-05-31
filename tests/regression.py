@@ -97,7 +97,23 @@ def run_clean(name):
 
 
 def run_validate(name):
-    """Run make validate for a test case. Returns (success, output)."""
+    """Run a PASS test's specialized script or default validation recipe."""
+    static_work_dir = TESTS_DIR / name / "work" / "static"
+    regression_script = static_work_dir / "regression.sh"
+    if regression_script.exists():
+        env = os.environ.copy()
+        # The simulator is built once upfront; avoid racing cmake in parallel tests.
+        env["STATIC_BUILD_TARGET"] = "noop"
+        result = subprocess.run(
+            ["bash", str(regression_script)],
+            cwd=static_work_dir,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        output = result.stdout + result.stderr
+        return result.returncode == 0, output
+
     work_dir = TESTS_DIR / name / "work" / "validate"
     result = subprocess.run(
         # SIM_BUILD_TARGET=noop prevents each per-test sub-make from re-invoking

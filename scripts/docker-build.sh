@@ -8,7 +8,7 @@ if ! docker image inspect mate-slang:latest >/dev/null 2>&1; then
     bash "$(dirname "$0")/build_slang_image.sh"
 fi
 docker build --network=host -t mate-dev .
-docker build --network=host -t mate-dev:claude -f Dockerfile.claude .
+#docker build --network=host -t mate-dev:claude -f Dockerfile.claude .
 
 # Extract slang from the image into external/slang-install for host-side LSP.
 CID=$(docker create mate-dev:latest)

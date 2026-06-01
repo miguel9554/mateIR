@@ -43,6 +43,10 @@ module pkg_scope_test
     op_t             cu_op_out;
     logic [7:0]      cu_result;
     logic            cu_valid;
+    logic [DATA_WIDTH-1:0] imported_width_data;
+    logic [types_pkg::DATA_WIDTH-1:0] qualified_width_data;
+    assign imported_width_data = data_in;
+    assign qualified_width_data = imported_width_data;
 
     types_pkg::dir_t   dp_dir_out;    // qualified type for wire declaration
     types_pkg::phase_t dp_phase_out;  // qualified type for wire declaration

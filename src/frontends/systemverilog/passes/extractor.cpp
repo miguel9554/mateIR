@@ -142,11 +142,13 @@ public:
             currentPackage = pkg.get();
             for (auto* member : node.members) {
                 if (member->kind == SyntaxKind::TypedefDeclaration ||
+                    member->kind == SyntaxKind::ParameterDeclarationStatement ||
                     member->kind == SyntaxKind::FunctionDeclaration ||
                     member->kind == SyntaxKind::TaskDeclaration ||
-                    member->kind == SyntaxKind::EmptyMember)
+                    member->kind == SyntaxKind::EmptyMember) {
+                    pkg->members.push_back(member);
                     member->visit(*this);
-                else
+                } else
                     throw CompilerError(
                         "Unsupported package member: " + std::string(toString(member->kind)),
                         resolveSourceLoc(*member, sm));
@@ -253,6 +255,9 @@ public:
     }
 
     void handle(const ParameterDeclarationStatementSyntax& node) {
+        if (currentPackage) return;
+        if (!currentModule) throw CompilerError(
+            "Parameter declaration must be inside module or package.", resolveSourceLoc(node, sm));
         currentModule->localparams = extractParameter(node.parameter, currentModule->localparams);
     }
 

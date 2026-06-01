@@ -2,7 +2,10 @@
 // Contains 6 typedef enums exercising varied bit-widths.
 package types_pkg;
 
-    typedef enum logic [1:0] {
+    parameter int DIR_WIDTH = 2;
+    parameter int DATA_WIDTH = 8;
+
+    typedef enum logic [DIR_WIDTH-1:0] {
         DIR_N = 2'b00,
         DIR_E = 2'b01,
         DIR_S = 2'b10,

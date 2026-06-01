@@ -1,4 +1,5 @@
 #include "frontends/systemverilog/passes/elaboration.h"
+#include "frontends/systemverilog/syntax_helpers.h"
 #include "mateir/dfg.h"
 #include "mateir/module.h"
 #include "frontends/systemverilog/unresolved.h"
@@ -52,6 +53,7 @@ using PartialDriverMap = std::unordered_map<std::string, PartialTargetState>;
 struct PackageEntry {
     NamedTypeRegistry  namedTypes;
     EnumMemberMap enumMembers;
+    std::map<std::string, std::pair<int64_t, Type>> constants;
     std::map<std::string, const FunctionDeclarationSyntax*> functions;
 };
 using PackageRegistry = std::map<std::string, PackageEntry>;
@@ -1260,10 +1262,10 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                 throw CompilerError("Unknown package: " + pkgName);
             }
             auto memberIt = pkgIt->second.enumMembers.find(itemName);
-            if (memberIt == pkgIt->second.enumMembers.end()) {
-                throw CompilerError("Unknown package member: " + pkgName + "::" + itemName);
-            }
-            return memberIt->second.first;
+            if (memberIt != pkgIt->second.enumMembers.end()) return memberIt->second.first;
+            auto constantIt = pkgIt->second.constants.find(itemName);
+            if (constantIt != pkgIt->second.constants.end()) return constantIt->second.first;
+            throw CompilerError("Unknown package member: " + pkgName + "::" + itemName);
         }
 
         case SyntaxKind::EqualityExpression: {
@@ -1333,26 +1335,28 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 // VirtualInterfaceType
 // ImplicitType
 
+Type resolveType(
+    const DataTypeSyntax& syntax,
+    const ParameterContext& ctx,
+    const NamedTypeRegistry& namedTypeRegistry,
+    const PackageRegistry* pkgRegistry);
+
 // Resolve an UnresolvedParam to Param
 // TODO: Actually evaluate the type syntax and dimension expressions
 Param resolveParameter(const UnresolvedParam& param, const ParameterContext& topCtx,
                                ParameterContext& localCtx, bool isLocal = false,
-                               const NamedTypeRegistry* namedTypeRegistry = nullptr) {
+                               const NamedTypeRegistry* namedTypeRegistry = nullptr,
+                               const PackageRegistry* pkgRegistry = nullptr) {
     Param resolved;
     resolved.name = param.name;
 
-    if (param.type.syntax->kind == SyntaxKind::ImplicitType) {
-        resolved.type = Type::makeInteger(32, false);
-    } else if (param.type.syntax->kind == SyntaxKind::NamedType && namedTypeRegistry) {
-        auto& named = param.type.syntax->as<NamedTypeSyntax>();
-        std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
-        auto it = namedTypeRegistry->find(typeName);
-        if (it == namedTypeRegistry->end())
-            throw CompilerError("Unknown type for localparam: " + typeName);
-        resolved.type = it->second;
-    } else {
-        throw CompilerError("Only implicit param type supported");
-    }
+    const NamedTypeRegistry emptyRegistry;
+    resolved.type = param.type.syntax->kind == SyntaxKind::ImplicitType
+        ? Type::makeInteger(32, false)
+        : resolveType(
+            *param.type.syntax, localCtx,
+            namedTypeRegistry ? *namedTypeRegistry : emptyRegistry,
+            pkgRegistry);
 
     // TODO only support for scalar params
     if (param.dimensions.syntax) {
@@ -1369,7 +1373,7 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
         for (const auto& [k, v] : localCtx.values) {
             mergedCtx.values[k] = v;
         }
-        resolved.value = evaluateConstantExpr(param.defaultValue, mergedCtx);
+        resolved.value = evaluateConstantExpr(param.defaultValue, mergedCtx, pkgRegistry);
         localCtx.values[param.name] = resolved.value;
         return resolved;
     }
@@ -1389,7 +1393,7 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
             mergedCtx.values[k] = v;
         }
 
-        resolved.value = evaluateConstantExpr(param.defaultValue, mergedCtx);
+        resolved.value = evaluateConstantExpr(param.defaultValue, mergedCtx, pkgRegistry);
         localCtx.values[param.name] = resolved.value;
     } else {
         std::ostringstream oss;
@@ -1425,6 +1429,7 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
 std::vector<Dimension> ResolveDimensions(
         const SyntaxList<VariableDimensionSyntax>& dimensionsSyntaxList,
         const ParameterContext& ctx,
+        const PackageRegistry* pkgRegistry = nullptr,
         const slang::SourceManager* sm = nullptr){
     std::vector<Dimension> resolvedDimensions;
     // Parse dimensionsSyntax from syntax
@@ -1446,15 +1451,15 @@ std::vector<Dimension> ResolveDimensions(
             if (rangeSpec.selector->kind == SyntaxKind::BitSelect) {
                 // [N] in a declaration means an unpacked array of N elements: [0:N-1]
                 auto& bitSelect = rangeSpec.selector->as<BitSelectSyntax>();
-                int64_t size = evaluateConstantExpr(bitSelect.expr, ctx);
+                int64_t size = evaluateConstantExpr(bitSelect.expr, ctx, pkgRegistry);
                 resolvedDimensions.push_back(Dimension{
                     .left = 0,
                     .right = static_cast<int>(size - 1)
                 });
             } else if (rangeSpec.selector->kind == SyntaxKind::SimpleRangeSelect) {
                 auto& rangeSelect = rangeSpec.selector->as<RangeSelectSyntax>();
-                int64_t left = evaluateConstantExpr(rangeSelect.left, ctx);
-                int64_t right = evaluateConstantExpr(rangeSelect.right, ctx);
+                int64_t left = evaluateConstantExpr(rangeSelect.left, ctx, pkgRegistry);
+                int64_t right = evaluateConstantExpr(rangeSelect.right, ctx, pkgRegistry);
                 resolvedDimensions.push_back(Dimension{
                     .left = static_cast<int>(left),
                     .right = static_cast<int>(right)
@@ -1539,6 +1544,7 @@ Type resolveType(
     SyntaxList<VariableDimensionSyntax> packedDimensionsSyntax = nullptr;
 
     bool is_signed;
+    int scalarWidth = 1;
 
     switch (syntax.kind){
         case SyntaxKind::ImplicitType: {
@@ -1551,21 +1557,44 @@ Type resolveType(
             is_signed = (syntax.as<IntegerTypeSyntax>()).signing.rawText() == "signed";
             break;
         }
+        case SyntaxKind::BitType: {
+            packedDimensionsSyntax = (syntax.as<IntegerTypeSyntax>()).dimensions;
+            is_signed = (syntax.as<IntegerTypeSyntax>()).signing.rawText() == "signed";
+            break;
+        }
         case SyntaxKind::RegType: {
             packedDimensionsSyntax = (syntax.as<IntegerTypeSyntax>()).dimensions;
             is_signed = (syntax.as<IntegerTypeSyntax>()).signing.rawText() == "signed";
             break;
         }
+        case SyntaxKind::ByteType:
+            scalarWidth = 8;
+            is_signed = syntax.as<IntegerTypeSyntax>().signing.rawText() != "unsigned";
+            break;
+        case SyntaxKind::ShortIntType:
+            scalarWidth = 16;
+            is_signed = syntax.as<IntegerTypeSyntax>().signing.rawText() != "unsigned";
+            break;
+        case SyntaxKind::IntType:
+        case SyntaxKind::IntegerType:
+            scalarWidth = 32;
+            is_signed = syntax.as<IntegerTypeSyntax>().signing.rawText() != "unsigned";
+            break;
+        case SyntaxKind::LongIntType:
+        case SyntaxKind::TimeType:
+            scalarWidth = 64;
+            is_signed = syntax.as<IntegerTypeSyntax>().signing.rawText() != "unsigned";
+            break;
         default:
             throw CompilerError(
                 "Unsupported type: " +
                 std::string(toString(syntax.kind)));
     }
 
-    const auto packedDimensions = ResolveDimensions(packedDimensionsSyntax, ctx);
+    const auto packedDimensions = ResolveDimensions(packedDimensionsSyntax, ctx, pkgRegistry);
 
     // Compute total width as product of all dimension sizes
-    int width = 1;
+    int width = scalarWidth;
     for (const auto& dim : packedDimensions) {
         width *= dim.size();
     }
@@ -2956,10 +2985,12 @@ static DFGNode* buildExprScalarImpl(
             if (pkgIt == ctx.pkgRegistry.end())
                 throw CompilerError("Unknown package: " + pkgName, resolveSourceLoc(*expr, ctx.sm));
             auto mit = pkgIt->second.enumMembers.find(itemName);
-            if (mit == pkgIt->second.enumMembers.end())
+            auto cit = pkgIt->second.constants.find(itemName);
+            if (mit == pkgIt->second.enumMembers.end() && cit == pkgIt->second.constants.end())
                 throw CompilerError("Unknown package member: " + pkgName + "::" + itemName, resolveSourceLoc(*expr, ctx.sm));
-            auto* n = ctx.graph.constant(mit->second.first);
-            n->type = mit->second.second;
+            const auto& valueAndType = mit != pkgIt->second.enumMembers.end() ? mit->second : cit->second;
+            auto* n = ctx.graph.constant(valueAndType.first);
+            n->type = valueAndType.second;
             n->loc  = resolveSourceLoc(*expr, ctx.sm);
             return n;
         }
@@ -4411,7 +4442,7 @@ static DFGNode* inlineSubroutineCall(
                 Type localType = resolveType(*dataDecl.type, sub.params, sub.namedTypeRegistry, &sub.pkgRegistry);
                 for (auto* d : dataDecl.declarators) {
                     Type declaredType = localType;
-                    auto unpacked = ResolveDimensions(d->dimensions, sub.params, &sub.sm);
+                    auto unpacked = ResolveDimensions(d->dimensions, sub.params, &sub.pkgRegistry, &sub.sm);
                     if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
                         unpacked.clear();
                     declaredType.unpacked_dims = unpacked;
@@ -4633,7 +4664,7 @@ void resolveSequentialBlockStatementInPlace(
             Type localType = resolveType(*dataDecl.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
             for (auto* decl : dataDecl.declarators) {
                 Type declaredType = localType;
-                auto unpacked = ResolveDimensions(decl->dimensions, ctx.params, &ctx.sm);
+                auto unpacked = ResolveDimensions(decl->dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm);
                 if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
                     unpacked.clear();
                 declaredType.unpacked_dims = unpacked;
@@ -4867,7 +4898,7 @@ ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterCont
         namedTypeRegistry,
         pkgRegistry);
 
-    if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, sm);
+    if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, pkgRegistry, sm);
 
     // For some reason getting 1 dimension of [0:0]
     if(resolved.type.unpacked_dims.size() == 1 && resolved.type.unpacked_dims[0].left == 0 && resolved.type.unpacked_dims[0].right == 0){
@@ -5498,7 +5529,7 @@ static void resolveGenerateScopeDecls(
         Type type = resolveType(typeSyntax, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
 
         // Resolve unpacked dimensions from the declarator
-        auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.sm);
+        auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm);
         // ResolveDimensions returns [{0,0}] for empty dims — clear it for scalars
         if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
             unpacked.clear();
@@ -5914,36 +5945,80 @@ static PackageRegistry resolvePackages(
     PackageRegistry registry;
     for (const auto& pkg : packages) {
         PackageEntry entry;
-        ParameterContext emptyCtx;
-        for (const auto& td : pkg->enumTypedefs) {
-            auto& typeName = td.name;
-            auto* enumSyntax = &td.syntax->as<EnumTypeSyntax>();
-            int width = 32;
-            if (enumSyntax->baseType)
-                width = resolveType(*enumSyntax->baseType, emptyCtx, {}).width;
-            std::vector<EnumMember> members;
-            int64_t nextValue = 0;
-            for (const auto* decl : enumSyntax->members) {
-                int64_t val = nextValue;
-                if (decl->initializer)
-                    val = evaluateConstantExpr(decl->initializer->expr, emptyCtx);
-                members.push_back({std::string(decl->name.valueText()), val});
-                nextValue = val + 1;
+        ParameterContext packageCtx;
+        for (const auto* member : pkg->members) {
+            if (member->kind == SyntaxKind::ParameterDeclarationStatement) {
+                const auto& statement = member->as<ParameterDeclarationStatementSyntax>();
+                auto params = extractParameter(statement.parameter, {});
+                for (const auto& param : params) {
+                    if (!param.defaultValue) {
+                        throw CompilerError(
+                            "Package constant '" + pkg->name + "::" + param.name +
+                            "' must have a default value");
+                    }
+                    Type type = param.type.syntax->kind == SyntaxKind::ImplicitType
+                        ? Type::makeInteger(32, false)
+                        : resolveType(*param.type.syntax, packageCtx, entry.namedTypes, &registry);
+                    if (type.isAggregate()) {
+                        throw CompilerError(
+                            "Aggregate package constant not supported: " +
+                            pkg->name + "::" + param.name);
+                    }
+                    int64_t value = evaluateConstantExpr(param.defaultValue, packageCtx, &registry);
+                    if (entry.constants.contains(param.name) || entry.enumMembers.contains(param.name)) {
+                        throw CompilerError(
+                            "Duplicate package member in '" + pkg->name + "': " + param.name);
+                    }
+                    entry.constants[param.name] = {value, type};
+                    packageCtx.values[param.name] = static_cast<int>(value);
+                }
+                continue;
             }
-            Type enumType = Type::makeEnum(typeName, width, members);
-            entry.namedTypes[typeName] = enumType;
-            for (const auto& m : members)
-                entry.enumMembers[m.name] = {m.value, enumType};
-        }
-        for (const auto& td : pkg->structTypedefs) {
-            if (entry.namedTypes.contains(td.name)) {
-                throw CompilerError("Duplicate typedef in package '" + pkg->name + "': " + td.name);
+            if (member->kind == SyntaxKind::TypedefDeclaration) {
+                const auto& syntax = member->as<TypedefDeclarationSyntax>();
+                UnresolvedTypedef td{
+                    .name = std::string(syntax.name.valueText()),
+                    .syntax = syntax.type,
+                };
+                if (entry.namedTypes.contains(td.name)) {
+                    throw CompilerError("Duplicate typedef in package '" + pkg->name + "': " + td.name);
+                }
+                if (td.syntax->kind == SyntaxKind::EnumType) {
+                    const auto& enumSyntax = td.syntax->as<EnumTypeSyntax>();
+                    int width = 32;
+                    if (enumSyntax.baseType)
+                        width = resolveType(*enumSyntax.baseType, packageCtx, entry.namedTypes, &registry).width;
+                    std::vector<EnumMember> members;
+                    int64_t nextValue = 0;
+                    for (const auto* decl : enumSyntax.members) {
+                        int64_t value = nextValue;
+                        if (decl->initializer)
+                            value = evaluateConstantExpr(decl->initializer->expr, packageCtx, &registry);
+                        members.push_back({std::string(decl->name.valueText()), value});
+                        nextValue = value + 1;
+                    }
+                    Type enumType = Type::makeEnum(td.name, width, members);
+                    entry.namedTypes[td.name] = enumType;
+                    for (const auto& enumMember : members) {
+                        entry.enumMembers[enumMember.name] = {enumMember.value, enumType};
+                        packageCtx.values[enumMember.name] = static_cast<int>(enumMember.value);
+                    }
+                    continue;
+                }
+                if (td.syntax->kind == SyntaxKind::StructType) {
+                    entry.namedTypes[td.name] = resolveStructTypedef(
+                        td, packageCtx, entry.namedTypes, pkg->name + "::" + td.name, &registry);
+                    continue;
+                }
+                throw CompilerError(
+                    "Only enum and struct typedefs are supported (got " +
+                    std::string(toString(td.syntax->kind)) + ")");
             }
-            entry.namedTypes[td.name] = resolveStructTypedef(
-                td, emptyCtx, entry.namedTypes, pkg->name + "::" + td.name);
+            if (member->kind == SyntaxKind::FunctionDeclaration) {
+                const auto* fn = &member->as<FunctionDeclarationSyntax>();
+                entry.functions[getFuncName(*fn)] = fn;
+            }
         }
-        for (const auto* fn : pkg->functions)
-            entry.functions[getFuncName(*fn)] = fn;
         registry[pkg->name] = std::move(entry);
     }
     return registry;
@@ -5970,6 +6045,8 @@ static void applyImports(
                 enumMemberValues[k] = v;
                 localCtx.values[k]  = v.first;
             }
+            for (const auto& [k, v] : entry.constants)
+                localCtx.values[k] = static_cast<int>(v.first);
         } else {
             // explicit import of a single name
             auto it = entry.namedTypes.find(*spec.item);
@@ -5980,6 +6057,9 @@ static void applyImports(
                 enumMemberValues[mit->first] = mit->second;
                 localCtx.values[mit->first]  = mit->second.first;
             }
+            auto cit = entry.constants.find(*spec.item);
+            if (cit != entry.constants.end())
+                localCtx.values[cit->first] = static_cast<int>(cit->second.first);
         }
     }
 }
@@ -6055,13 +6135,13 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
     // Resolve parameters
     for (const auto& param : unresolved.parameters) {
-        resolved.parameters.push_back(resolveParameter(param, topCtx, *localCtx));
+        resolved.parameters.push_back(resolveParameter(param, topCtx, *localCtx, false, &namedTypeRegistry, &pkgRegistry));
     }
 
     // Resolve localparams (cannot be overridden by instantiation context)
     // Pass enum registry so enum-typed localparams (e.g. localparam op_t X = OP_NOP) are handled
     for (const auto& param : unresolved.localparams) {
-        resolved.localparams.push_back(resolveParameter(param, topCtx, *localCtx, true, &namedTypeRegistry));
+        resolved.localparams.push_back(resolveParameter(param, topCtx, *localCtx, true, &namedTypeRegistry, &pkgRegistry));
     }
 
     auto mergedCtx = std::make_unique<ParameterContext>(topCtx);

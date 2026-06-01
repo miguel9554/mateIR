@@ -31,6 +31,9 @@ struct UnresolvedTypedef {
 
 struct UnresolvedPackage {
     std::string name;
+    // Package declarations must be elaborated in source order because constants
+    // can size typedefs and later constants can depend on earlier declarations.
+    std::vector<const slang::syntax::MemberSyntax*> members;
     std::vector<UnresolvedTypedef> enumTypedefs;
     std::vector<UnresolvedTypedef> structTypedefs;
     std::vector<const slang::syntax::FunctionDeclarationSyntax*> functions;

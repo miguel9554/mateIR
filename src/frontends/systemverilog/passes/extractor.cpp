@@ -144,7 +144,6 @@ public:
                 if (member->kind == SyntaxKind::TypedefDeclaration ||
                     member->kind == SyntaxKind::FunctionDeclaration ||
                     member->kind == SyntaxKind::TaskDeclaration ||
-                    member->kind == SyntaxKind::PackageImportDeclaration ||
                     member->kind == SyntaxKind::EmptyMember)
                     member->visit(*this);
                 else

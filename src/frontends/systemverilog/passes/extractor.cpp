@@ -125,6 +125,7 @@ public:
         SyntaxKind::TaskDeclaration,
         SyntaxKind::ContinuousAssign,
         SyntaxKind::TypedefDeclaration,
+        SyntaxKind::PackageImportDeclaration,
         // SyntaxKind::DefParam,
         // SyntaxKind::ElabSystemTask,
         // SyntaxKind::LocalVariableDeclaration,
@@ -165,7 +166,7 @@ public:
         module->parameters = std::move(headerInfo.parameters);
         module->inputs = std::move(headerInfo.inputs);
         module->outputs = std::move(headerInfo.outputs);
-        module->imports = std::move(headerInfo.imports);
+        module->headerImports = std::move(headerInfo.headerImports);
 
         // Set current module context
         currentModule = module.get();
@@ -298,19 +299,19 @@ public:
     }
 
     void handle(const PackageImportDeclarationSyntax& node) {
-        // Compilation-unit-scope import (outside any module or package)
-        if (currentModule == nullptr && currentPackage == nullptr) {
-            for (const auto* item : node.items) {
-                ImportSpec spec;
-                spec.package_name = std::string(item->package.valueText());
-                bool isWildcard = (item->item.kind == slang::parsing::TokenKind::Star);
-                spec.item = isWildcard ? std::nullopt
-                                       : std::optional<std::string>(item->item.valueText());
-                globalImports.push_back(spec);
-            }
+        auto* destination = currentModule ? &currentModule->bodyImports : &globalImports;
+        if (currentPackage) {
+            throw CompilerError(
+                "Package body imports are not supported.", resolveSourceLoc(node, sm));
         }
-        // Body-level imports inside a module body are not yet supported (deferred)
-        // Package body imports are handled via the package member loop in handlePackage
+        for (const auto* item : node.items) {
+            ImportSpec spec;
+            spec.package_name = std::string(item->package.valueText());
+            bool isWildcard = (item->item.kind == slang::parsing::TokenKind::Star);
+            spec.item = isWildcard ? std::nullopt
+                                   : std::optional<std::string>(item->item.valueText());
+            destination->push_back(std::move(spec));
+        }
     }
 
     void handle(const TypedefDeclarationSyntax& node) {

@@ -37,6 +37,8 @@ module pkg_scope_test
     output logic [3:0] prio_out      // types_pkg::weight_score(weight_in, shape_in) — explicit pkg::
 );
 
+    import body_scope_pkg::*;
+
     // -----------------------------------------------------------------------
     // Submodule wires — mix of qualified and unqualified types
     // -----------------------------------------------------------------------
@@ -45,8 +47,10 @@ module pkg_scope_test
     logic            cu_valid;
     logic [DATA_WIDTH-1:0] imported_width_data;
     logic [types_pkg::DATA_WIDTH-1:0] qualified_width_data;
+    body_word_t body_imported_word;
     assign imported_width_data = data_in;
     assign qualified_width_data = imported_width_data;
+    assign body_imported_word = data_in[BODY_WIDTH-1:0];
 
     types_pkg::dir_t   dp_dir_out;    // qualified type for wire declaration
     types_pkg::phase_t dp_phase_out;  // qualified type for wire declaration

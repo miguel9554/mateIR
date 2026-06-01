@@ -70,3 +70,8 @@ package types_pkg;
     endfunction
 
 endpackage
+
+package body_scope_pkg;
+    parameter int BODY_WIDTH = 3;
+    typedef logic [BODY_WIDTH-1:0] body_word_t;
+endpackage

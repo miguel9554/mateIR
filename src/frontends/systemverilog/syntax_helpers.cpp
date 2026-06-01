@@ -55,7 +55,7 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
             bool isWildcard = (item->item.kind == slang::parsing::TokenKind::Star);
             spec.item = isWildcard ? std::nullopt
                                    : std::optional<std::string>(item->item.valueText());
-            info.imports.push_back(spec);
+            info.headerImports.push_back(spec);
         }
     }
 

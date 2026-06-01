@@ -6077,16 +6077,76 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     if (domainFacts) domainFacts->getOrCreate(occurrence);
     auto localCtx = std::make_unique<ParameterContext>(topCtx);
 
-    // === Build enum registry from typedef enum declarations ===
-    // Must happen before any type resolution or parameter evaluation so that
-    // enum member names are available as constants.
+    // Header imports are visible to parameters and ports. Body imports are
+    // applied only after the header has been resolved.
     NamedTypeRegistry  namedTypeRegistry;
     EnumMemberMap enumMemberValues;
 
-    // Seed registry from package imports (global first, then module-header imports)
+    // Seed the header namespace from package imports.
     applyImports(globalImports,      pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
-    applyImports(unresolved.imports, pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
+    applyImports(unresolved.headerImports, pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
 
+    // Resolve header parameters before body imports and body-local typedefs.
+    for (const auto& param : unresolved.parameters) {
+        resolved.parameters.push_back(resolveParameter(
+            param, topCtx, *localCtx, false, &namedTypeRegistry, &pkgRegistry));
+    }
+
+    auto mergeLocalCtx = [&]() {
+        auto merged = std::make_unique<ParameterContext>(topCtx);
+        for (const auto& [k, v] : localCtx->values) {
+            merged->values[k] = v;
+        }
+        return merged;
+    };
+    auto mergedCtx = mergeLocalCtx();
+
+    std::set<const EnumTypeSyntax*> seenInlineEnums;
+    auto registerInlineEnum = [&](const UnresolvedSignal& sig) {
+        if (!sig.type.syntax || sig.type.syntax->kind != SyntaxKind::EnumType) return;
+        auto* enumSyntax = &sig.type.syntax->as<EnumTypeSyntax>();
+        if (!seenInlineEnums.insert(enumSyntax).second) return;
+        std::string typeName = "$anon_enum_" +
+            std::to_string(reinterpret_cast<uintptr_t>(enumSyntax));
+        int width = 32;
+        if (enumSyntax->baseType) {
+            width = resolveType(
+                *enumSyntax->baseType, *mergedCtx, namedTypeRegistry, &pkgRegistry).width;
+        }
+        std::vector<EnumMember> members;
+        int64_t nextValue = 0;
+        for (const auto* decl : enumSyntax->members) {
+            int64_t value = nextValue;
+            if (decl->initializer)
+                value = evaluateConstantExpr(decl->initializer->expr, *mergedCtx, &pkgRegistry);
+            members.push_back({std::string(decl->name.valueText()), value});
+            nextValue = value + 1;
+        }
+        Type enumType = Type::makeEnum(typeName, width, members);
+        namedTypeRegistry[typeName] = enumType;
+        for (const auto& member : members) {
+            mergedCtx->values[member.name] = member.value;
+            enumMemberValues[member.name] = {member.value, enumType};
+        }
+    };
+
+    // Ports are resolved before body imports become visible.
+    for (const auto& sig : unresolved.inputs)  registerInlineEnum(sig);
+    for (const auto& sig : unresolved.outputs) registerInlineEnum(sig);
+    for (const auto& input : unresolved.inputs) {
+        addInputNode(resolved, resolveModuleNode(
+            input, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+    }
+    for (const auto& output : unresolved.outputs) {
+        addOutputNode(resolved, resolveModuleNode(
+            output, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+    }
+
+    // The extractor groups body members by kind, so body imports are currently
+    // module-body-wide rather than lexically ordered within the body.
+    applyImports(unresolved.bodyImports, pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
+
+    // === Build body-local enum and struct typedef registries ===
     for (const auto& td : unresolved.enumTypedefs) {
         const auto& typeName = td.name;
         auto* enumSyntax = &td.syntax->as<EnumTypeSyntax>();
@@ -6096,8 +6156,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         // Resolve the underlying base type width (e.g. logic [1:0] → width 2)
         int width = 32;  // default if no explicit base type
         if (enumSyntax->baseType) {
-            // Use an empty registry — base types must be integer types
-            Type base = resolveType(*enumSyntax->baseType, *localCtx, {});
+            Type base = resolveType(*enumSyntax->baseType, *localCtx, namedTypeRegistry, &pkgRegistry);
             width = base.width;
         }
 
@@ -6107,7 +6166,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         for (const auto* decl : enumSyntax->members) {
             int64_t val = nextValue;
             if (decl->initializer) {
-                val = evaluateConstantExpr(decl->initializer->expr, *localCtx);
+                val = evaluateConstantExpr(decl->initializer->expr, *localCtx, &pkgRegistry);
             }
             members.push_back({std::string(decl->name.valueText()), val});
             nextValue = val + 1;
@@ -6131,72 +6190,16 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         namedTypeRegistry[td.name] = resolveStructTypedef(
             td, *localCtx, namedTypeRegistry, unresolved.name + "::" + td.name, &pkgRegistry);
     }
-    resolved.named_types = namedTypeRegistry;
-
-    // Resolve parameters
-    for (const auto& param : unresolved.parameters) {
-        resolved.parameters.push_back(resolveParameter(param, topCtx, *localCtx, false, &namedTypeRegistry, &pkgRegistry));
-    }
-
     // Resolve localparams (cannot be overridden by instantiation context)
     // Pass enum registry so enum-typed localparams (e.g. localparam op_t X = OP_NOP) are handled
     for (const auto& param : unresolved.localparams) {
         resolved.localparams.push_back(resolveParameter(param, topCtx, *localCtx, true, &namedTypeRegistry, &pkgRegistry));
     }
 
-    auto mergedCtx = std::make_unique<ParameterContext>(topCtx);
-    for (const auto& [k, v] : (*localCtx).values) {
-        (*mergedCtx).values[k] = v;
-    }
-
-    // Pre-scan: register inline enum types from ports/signals so their member names are
-    // available in enumMemberValues and mergedCtx->values before DFG elaboration begins.
-    {
-        std::set<const EnumTypeSyntax*> seen;
-        auto registerInlineEnum = [&](const UnresolvedSignal& sig) {
-            if (!sig.type.syntax || sig.type.syntax->kind != SyntaxKind::EnumType) return;
-            auto* enumSyntax = &sig.type.syntax->as<EnumTypeSyntax>();
-            if (!seen.insert(enumSyntax).second) return;  // same syntax node already registered
-            std::string typeName = "$anon_enum_" +
-                std::to_string(reinterpret_cast<uintptr_t>(enumSyntax));
-            int width = 32;
-            if (enumSyntax->baseType) {
-                NamedTypeRegistry emptyReg;
-                width = resolveType(*enumSyntax->baseType, *mergedCtx, emptyReg).width;
-            }
-            std::vector<EnumMember> members;
-            int64_t nextValue = 0;
-            for (const auto* decl : enumSyntax->members) {
-                int64_t val = nextValue;
-                if (decl->initializer)
-                    val = evaluateConstantExpr(decl->initializer->expr, *mergedCtx);
-                members.push_back({std::string(decl->name.valueText()), val});
-                nextValue = val + 1;
-            }
-            Type enumType = Type::makeEnum(typeName, width, members);
-            namedTypeRegistry[typeName] = enumType;
-            for (const auto& m : members) {
-                mergedCtx->values[m.name] = m.value;
-                enumMemberValues[m.name] = {m.value, enumType};
-            }
-        };
-        for (const auto& sig : unresolved.inputs)  registerInlineEnum(sig);
-        for (const auto& sig : unresolved.outputs) registerInlineEnum(sig);
-        for (const auto& sig : unresolved.signals) registerInlineEnum(sig);
-        for (const auto& sig : unresolved.flops)   registerInlineEnum(sig);
-    }
-
-    // Resolve inputs
-    for (const auto& input : unresolved.inputs) {
-        auto sig = resolveModuleNode(input, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
-        addInputNode(resolved, sig);
-    }
-
-    // Resolve outputs
-    for (const auto& output : unresolved.outputs) {
-        auto sig = resolveModuleNode(output, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
-        addOutputNode(resolved, sig);
-    }
+    mergedCtx = mergeLocalCtx();
+    for (const auto& sig : unresolved.signals) registerInlineEnum(sig);
+    for (const auto& sig : unresolved.flops)   registerInlineEnum(sig);
+    resolved.named_types = namedTypeRegistry;
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
@@ -6236,7 +6239,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
     };
     addWildcardFunctions(globalImports);
-    addWildcardFunctions(unresolved.imports);
+    addWildcardFunctions(unresolved.headerImports);
+    addWildcardFunctions(unresolved.bodyImports);
 
     // === Create single DFG and pre-populate ===
     resolved.dfg = std::make_unique<DFG>();

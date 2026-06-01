@@ -127,8 +127,10 @@ struct UnresolvedModule {
     std::vector<UnresolvedTypedef> enumTypedefs;
     std::vector<UnresolvedTypedef> structTypedefs;
 
-    // Package imports (from module header)
-    std::vector<ImportSpec> imports;
+    // Package imports are separated because body imports must not affect the
+    // module header namespace (parameters and ports).
+    std::vector<ImportSpec> headerImports;
+    std::vector<ImportSpec> bodyImports;
 
     // Automatic function/task declarations
     std::vector<const slang::syntax::FunctionDeclarationSyntax*> functions;

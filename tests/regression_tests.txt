@@ -6,6 +6,7 @@
 
 apb_gpio PASS
 array_indexing PASS
+body_import_header_leak_fail FAIL Parameter 'WIDTH' not found in context
 axi_spi_slave PASS
 cdc_sidecar_async_sync_pass PASS
 cdc_sidecar_cross_clock_pass PASS

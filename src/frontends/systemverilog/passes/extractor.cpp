@@ -342,6 +342,10 @@ public:
                 "union types are not supported",
                 resolveSourceLoc(node, sm));
         }
+        // Package members are elaborated in source order from their retained
+        // syntax nodes. Allow aliases of supported underlying types through;
+        // resolvePackages validates the underlying type.
+        if (currentPackage) return;
         throw CompilerError(
             "Only enum and struct typedefs are supported (got " +
             std::string(toString(node.type->kind)) + ")",

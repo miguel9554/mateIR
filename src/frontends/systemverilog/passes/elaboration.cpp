@@ -6010,9 +6010,9 @@ static PackageRegistry resolvePackages(
                         td, packageCtx, entry.namedTypes, pkg->name + "::" + td.name, &registry);
                     continue;
                 }
-                throw CompilerError(
-                    "Only enum and struct typedefs are supported (got " +
-                    std::string(toString(td.syntax->kind)) + ")");
+                entry.namedTypes[td.name] =
+                    resolveType(*td.syntax, packageCtx, entry.namedTypes, &registry);
+                continue;
             }
             if (member->kind == SyntaxKind::FunctionDeclaration) {
                 const auto* fn = &member->as<FunctionDeclarationSyntax>();

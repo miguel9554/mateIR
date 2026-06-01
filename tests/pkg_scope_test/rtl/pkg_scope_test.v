@@ -232,4 +232,4 @@ module pkg_scope_test
     assign opp_dir_out  = opp_dir_reg;
     assign prio_out     = prio_reg;
 
-endmodule
+endmodule : pkg_scope_test

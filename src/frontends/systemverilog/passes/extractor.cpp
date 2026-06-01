@@ -167,8 +167,6 @@ public:
         module->outputs = std::move(headerInfo.outputs);
         module->imports = std::move(headerInfo.imports);
 
-        if (node.blockName) throw CompilerError("Can't parse blockName", resolveSourceLoc(node, sm));
-
         // Set current module context
         currentModule = module.get();
 

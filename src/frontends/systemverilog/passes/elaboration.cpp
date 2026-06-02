@@ -1,5 +1,5 @@
 #include "frontends/systemverilog/passes/elaboration.h"
-#include "frontends/systemverilog/constant_value.h"
+#include "mateir/constant_value.h"
 #include "frontends/systemverilog/syntax_helpers.h"
 #include "mateir/dfg.h"
 #include "mateir/module.h"
@@ -147,6 +147,10 @@ static Module resolveModule(const UnresolvedModule& unresolved,
                                     FrontendDomainFacts* domainFacts);
 
 namespace {
+
+ConstantValue integerConstant(int64_t value) {
+    return ConstantValue::bits(Type::makeInteger(64, true), value);
+}
 
 std::string formatLocOrUnknown(const std::optional<SourceLoc>& loc) {
     return loc ? loc->str() : std::string("<unknown>");
@@ -1225,7 +1229,7 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                 throw CompilerError(
                     "Parameter '" + paramName + "' not found in context");
             }
-            return it->second;
+            return it->second.requireInt64("Parameter '" + paramName + "'");
         }
 
         case SyntaxKind::ParenthesizedExpression: {
@@ -1413,6 +1417,34 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
                                            const slang::SourceManager& sm) {
     if (!expr) throw CompilerError("Cannot evaluate null constant expression");
     switch (expr->kind) {
+        case SyntaxKind::IdentifierName: {
+            std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            auto it = ctx.values.find(name);
+            if (it == ctx.values.end()) {
+                throw CompilerError(
+                    "Parameter '" + name + "' not found in context",
+                    resolveSourceLoc(*expr, sm));
+            }
+            return it->second;
+        }
+        case SyntaxKind::ScopedName: {
+            const auto& scoped = expr->as<ScopedNameSyntax>();
+            std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            auto pkgIt = pkgRegistry.find(pkgName);
+            if (pkgIt == pkgRegistry.end()) {
+                throw CompilerError("Unknown package: " + pkgName, resolveSourceLoc(*expr, sm));
+            }
+            auto constantIt = pkgIt->second.constants.find(itemName);
+            if (constantIt != pkgIt->second.constants.end()) return constantIt->second;
+            auto enumIt = pkgIt->second.enumMembers.find(itemName);
+            if (enumIt != pkgIt->second.enumMembers.end()) {
+                return ConstantValue::bits(enumIt->second.second, enumIt->second.first);
+            }
+            throw CompilerError(
+                "Unknown package member: " + pkgName + "::" + itemName,
+                resolveSourceLoc(*expr, sm));
+        }
         case SyntaxKind::UnbasedUnsizedLiteralExpression: {
             const auto& literal = expr->as<LiteralExpressionSyntax>();
             const auto text = literal.literal.rawText();
@@ -1560,6 +1592,12 @@ Type resolveType(
     const NamedTypeRegistry& namedTypeRegistry,
     const PackageRegistry* pkgRegistry);
 
+std::vector<Dimension> ResolveDimensions(
+    const SyntaxList<VariableDimensionSyntax>& dimensionsSyntaxList,
+    const ParameterContext& ctx,
+    const PackageRegistry* pkgRegistry,
+    const slang::SourceManager* sm);
+
 // Resolve an UnresolvedParam to Param
 // TODO: Actually evaluate the type syntax and dimension expressions
 Param resolveParameter(const UnresolvedParam& param, const ParameterContext& topCtx,
@@ -1578,11 +1616,9 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
             namedTypeRegistry ? *namedTypeRegistry : emptyRegistry,
             pkgRegistry);
 
-    // TODO only support for scalar params
     if (param.dimensions.syntax && !param.dimensions.syntax->empty()) {
-        throw CompilerError(
-            "Param with dimensions not supported.",
-            sm ? std::optional<SourceLoc>(resolveSourceLoc(*param.type.syntax, *sm)) : std::nullopt);
+        resolved.type.unpacked_dims =
+            ResolveDimensions(*param.dimensions.syntax, localCtx, pkgRegistry, sm);
     }
 
     // Localparams cannot be overridden by instantiation context
@@ -1595,7 +1631,16 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
         for (const auto& [k, v] : localCtx.values) {
             mergedCtx.values[k] = v;
         }
-        resolved.value = evaluateConstantExpr(param.defaultValue, mergedCtx, pkgRegistry);
+        if (!pkgRegistry || !sm) {
+            throw CompilerError("Typed localparam evaluation requires package registry and source manager");
+        }
+        try {
+            resolved.value = evaluateConstantValue(
+                param.defaultValue, resolved.type, mergedCtx, *pkgRegistry, *sm);
+        } catch (const CompilerError& error) {
+            if (error.loc) throw;
+            throw CompilerError(error.what(), resolveSourceLoc(*param.defaultValue, *sm));
+        }
         localCtx.values[param.name] = resolved.value;
         return resolved;
     }
@@ -1615,7 +1660,16 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
             mergedCtx.values[k] = v;
         }
 
-        resolved.value = evaluateConstantExpr(param.defaultValue, mergedCtx, pkgRegistry);
+        if (!pkgRegistry || !sm) {
+            throw CompilerError("Typed parameter evaluation requires package registry and source manager");
+        }
+        try {
+            resolved.value = evaluateConstantValue(
+                param.defaultValue, resolved.type, mergedCtx, *pkgRegistry, *sm);
+        } catch (const CompilerError& error) {
+            if (error.loc) throw;
+            throw CompilerError(error.what(), resolveSourceLoc(*param.defaultValue, *sm));
+        }
         localCtx.values[param.name] = resolved.value;
     } else {
         std::ostringstream oss;
@@ -1625,12 +1679,12 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
 
         oss << "Top context values:\n";
         for (const auto& [k, v] : topCtx.values) {
-            oss << "  '" << k << "' -> '" << v << "'\n";
+            oss << "  '" << k << "' -> '" << v.debugString() << "'\n";
         }
 
         oss << "\nLocal context values:\n";
         for (const auto& [k, v] : localCtx.values) {
-            oss << "  '" << k << "' -> '" << v << "'\n";
+            oss << "  '" << k << "' -> '" << v.debugString() << "'\n";
         }
 
         throw CompilerError(oss.str());
@@ -2033,7 +2087,9 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
         }
         auto paramIt = ctx.params.values.find(baseName);
         if (paramIt != ctx.params.values.end()) {
-            auto* n = ctx.graph.constant(paramIt->second);
+                auto* n = ctx.graph.constant(
+                    paramIt->second.requireInt64("DFG parameter '" + baseName + "'"));
+                n->type = paramIt->second.type();
             if (loc) n->loc = *loc;
             return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
         }
@@ -3174,7 +3230,9 @@ static DFGNode* buildExprScalarImpl(
                 }
                 auto paramIt = ctx.params.values.find(baseName);
                 if (paramIt != ctx.params.values.end()) {
-                    auto* n = ctx.graph.constant(paramIt->second);
+                    auto* n = ctx.graph.constant(
+                        paramIt->second.requireInt64("DFG parameter '" + baseName + "'"));
+                    n->type = paramIt->second.type();
                     n->loc = resolveSourceLoc(*expr, ctx.sm);
                     return n;
                 }
@@ -4942,7 +5000,7 @@ void resolveForLoopStatementInPlace(
         decl.declarator->initializer->expr.get(), ctx.params, ctx.sm, *forLoop);
 
     ParameterContext iterCtx = ctx.params;
-    iterCtx.values[loopVar] = initVal;
+    iterCtx.values[loopVar] = integerConstant(initVal);
 
     while (evaluateConstantExpr(forLoop->stopExpr, iterCtx, ctx.sm, *forLoop)) {
         ResolutionContext iterBodyCtx {
@@ -4963,7 +5021,7 @@ void resolveForLoopStatementInPlace(
         ctx.write_states = iterBodyCtx.write_states;
 
         iterCtx.values[loopVar] =
-            evaluateStepExpr(forLoop->steps[0], loopVar, iterCtx);
+            integerConstant(evaluateStepExpr(forLoop->steps[0], loopVar, iterCtx));
     }
 }
 
@@ -5239,7 +5297,9 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
 
 ParameterContext parseParameterValueAssignment(
         const ParameterValueAssignmentSyntax& paramAssign,
-        const ParameterContext& evalCtx) {
+        const ParameterContext& evalCtx,
+        const PackageRegistry& pkgRegistry,
+        const slang::SourceManager& sm) {
     ParameterContext result;
     for (const auto* param : paramAssign.parameters) {
         if (param->kind == SyntaxKind::OrderedParamAssignment) {
@@ -5252,8 +5312,34 @@ ParameterContext parseParameterValueAssignment(
                 throw CompilerError(
                     "Named parameter '" + paramName + "' has no value");
             }
-            int64_t value = evaluateConstantExpr(named.expr, evalCtx);
-            result.values[paramName] = static_cast<int>(value);
+            if (named.expr->kind == SyntaxKind::IdentifierName) {
+                std::string name(named.expr->as<IdentifierNameSyntax>().identifier.valueText());
+                auto it = evalCtx.values.find(name);
+                if (it == evalCtx.values.end()) {
+                    throw CompilerError(
+                        "Parameter '" + name + "' not found in context",
+                        resolveSourceLoc(*named.expr, sm));
+                }
+                result.values[paramName] = it->second;
+            } else if (named.expr->kind == SyntaxKind::ScopedName) {
+                const auto& scoped = named.expr->as<ScopedNameSyntax>();
+                std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                auto pkgIt = pkgRegistry.find(pkgName);
+                if (pkgIt == pkgRegistry.end()) {
+                    throw CompilerError("Unknown package: " + pkgName, resolveSourceLoc(*named.expr, sm));
+                }
+                auto constantIt = pkgIt->second.constants.find(itemName);
+                if (constantIt == pkgIt->second.constants.end()) {
+                    throw CompilerError(
+                        "Unknown package constant: " + pkgName + "::" + itemName,
+                        resolveSourceLoc(*named.expr, sm));
+                }
+                result.values[paramName] = constantIt->second;
+            } else {
+                result.values[paramName] =
+                    integerConstant(evaluateConstantExpr(named.expr, evalCtx, &pkgRegistry));
+            }
         } else {
             throw CompilerError(
                 "Unsupported parameter assignment kind: " +
@@ -5636,14 +5722,14 @@ int64_t evaluateStepExpr(
             auto it = ctx.values.find(loopVar);
             if (it == ctx.values.end())
                 throw CompilerError("Loop variable '" + loopVar + "' not found in context during increment");
-            return it->second + 1;
+            return it->second.requireInt64("Loop variable '" + loopVar + "'") + 1;
         }
         case SyntaxKind::PostdecrementExpression:
         case SyntaxKind::UnaryPredecrementExpression: {
             auto it = ctx.values.find(loopVar);
             if (it == ctx.values.end())
                 throw CompilerError("Loop variable '" + loopVar + "' not found in context during decrement");
-            return it->second - 1;
+            return it->second.requireInt64("Loop variable '" + loopVar + "'") - 1;
         }
         default:
             throw CompilerError(
@@ -5962,10 +6048,12 @@ void resolveGenerateMemberInPlace(
 
             // Build per-iteration context with the genvar bound
             ParameterContext iterCtx = ctx.params;
-            iterCtx.values[genvarName] = evaluateConstantExpr(loopGen.initialExpr, ctx.params, ctx.sm, loopGen);
+            iterCtx.values[genvarName] =
+                integerConstant(evaluateConstantExpr(loopGen.initialExpr, ctx.params, ctx.sm, loopGen));
 
             while (evaluateConstantExpr(loopGen.stopExpr, iterCtx, ctx.sm, loopGen)) {
-                int64_t genval = iterCtx.values.at(genvarName);
+                int64_t genval =
+                    iterCtx.values.at(genvarName).requireInt64("Generate loop variable '" + genvarName + "'");
                 std::string childPath = (ctx.instance_path.empty() ? "" : ctx.instance_path + ".")
                                         + blockName + "[" + std::to_string(genval) + "]";
 
@@ -5988,7 +6076,7 @@ void resolveGenerateMemberInPlace(
                 ctx.write_states = iterResCtx.write_states;
 
                 iterCtx.values[genvarName] =
-                    evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx);
+                    integerConstant(evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx));
             }
             break;
         }
@@ -6084,7 +6172,8 @@ void resolveGenerateMemberInPlace(
 
             ParameterContext instCtx;
             if (moduleInst.parameters)
-                instCtx = parseParameterValueAssignment(*moduleInst.parameters, ctx.params);
+                instCtx = parseParameterValueAssignment(
+                    *moduleInst.parameters, ctx.params, ctx.pkgRegistry, ctx.sm);
 
             for (const auto* inst : moduleInst.instances) {
                 std::string baseName;
@@ -6208,11 +6297,7 @@ static PackageRegistry resolvePackages(
                             "Duplicate package member in '" + pkg->name + "': " + param.name);
                     }
                     entry.constants.emplace(param.name, value);
-                    if (auto scalar = value.asInt64();
-                        scalar && *scalar >= std::numeric_limits<int>::min() &&
-                        *scalar <= std::numeric_limits<int>::max()) {
-                        packageCtx.values[param.name] = static_cast<int>(*scalar);
-                    }
+                    packageCtx.values[param.name] = value;
                 }
                 continue;
             }
@@ -6243,7 +6328,8 @@ static PackageRegistry resolvePackages(
                     entry.namedTypes[td.name] = enumType;
                     for (const auto& enumMember : members) {
                         entry.enumMembers[enumMember.name] = {enumMember.value, enumType};
-                        packageCtx.values[enumMember.name] = static_cast<int>(enumMember.value);
+                        packageCtx.values[enumMember.name] =
+                            ConstantValue::bits(enumType, enumMember.value);
                     }
                     continue;
                 }
@@ -6285,13 +6371,10 @@ static void applyImports(
                 namedTypeRegistry[k] = v;
             for (const auto& [k, v] : entry.enumMembers) {
                 enumMemberValues[k] = v;
-                localCtx.values[k]  = v.first;
+                localCtx.values[k] = ConstantValue::bits(v.second, v.first);
             }
             for (const auto& [k, v] : entry.constants)
-                if (auto scalar = v.asInt64();
-                    scalar && *scalar >= std::numeric_limits<int>::min() &&
-                    *scalar <= std::numeric_limits<int>::max())
-                    localCtx.values[k] = static_cast<int>(*scalar);
+                localCtx.values[k] = v;
         } else {
             // explicit import of a single name
             auto it = entry.namedTypes.find(*spec.item);
@@ -6300,14 +6383,12 @@ static void applyImports(
             auto mit = entry.enumMembers.find(*spec.item);
             if (mit != entry.enumMembers.end()) {
                 enumMemberValues[mit->first] = mit->second;
-                localCtx.values[mit->first]  = mit->second.first;
+                localCtx.values[mit->first] =
+                    ConstantValue::bits(mit->second.second, mit->second.first);
             }
             auto cit = entry.constants.find(*spec.item);
             if (cit != entry.constants.end())
-                if (auto scalar = cit->second.asInt64();
-                    scalar && *scalar >= std::numeric_limits<int>::min() &&
-                    *scalar <= std::numeric_limits<int>::max())
-                    localCtx.values[cit->first] = static_cast<int>(*scalar);
+                localCtx.values[cit->first] = cit->second;
         }
     }
 }
@@ -6373,7 +6454,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         Type enumType = Type::makeEnum(typeName, width, members);
         namedTypeRegistry[typeName] = enumType;
         for (const auto& member : members) {
-            mergedCtx->values[member.name] = member.value;
+            mergedCtx->values[member.name] = ConstantValue::bits(enumType, member.value);
             enumMemberValues[member.name] = {member.value, enumType};
         }
     };
@@ -6426,7 +6507,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         // Inject member names as integer constants (for evaluateConstantExpr in localparams)
         // and as typed entries (for buildExprDFG)
         for (const auto& member : members) {
-            localCtx->values[member.name] = member.value;
+            localCtx->values[member.name] = ConstantValue::bits(enumType, member.value);
             enumMemberValues[member.name] = {member.value, enumType};
         }
     }
@@ -6497,18 +6578,23 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
     // Pre-populate module PARAMETERS
     for (auto& parameter : resolved.parameters) {
-        parameter.dfg_node = graph.named_constant(parameter.value, "", parameter.name);
+        if (auto scalar = parameter.value.asInt64()) {
+            parameter.dfg_node = graph.named_constant(*scalar, "", parameter.name);
+            parameter.dfg_node->type = parameter.type;
+        }
     }
 
     // Pre-populate module LOCALPARAMS
     // For enum-typed localparams, fix the node type and inject into enumMemberValues
     // so that buildExprDFG returns properly-typed CONST nodes for them.
     for (auto& parameter : resolved.localparams) {
-        auto* node = graph.named_constant(parameter.value, "", parameter.name);
+        auto scalar = parameter.value.asInt64();
+        if (!scalar) continue;
+        auto* node = graph.named_constant(*scalar, "", parameter.name);
         parameter.dfg_node = node;
+        node->type = parameter.type;
         if (parameter.type.isEnum()) {
-            node->type = parameter.type;
-            enumMemberValues[parameter.name] = {static_cast<int64_t>(parameter.value), parameter.type};
+            enumMemberValues[parameter.name] = {*scalar, parameter.type};
         }
     }
 
@@ -6569,7 +6655,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
         ParameterContext instCtx;
         if (moduleInst->parameters) {
-            instCtx = parseParameterValueAssignment(*moduleInst->parameters, *mergedCtx);
+            instCtx = parseParameterValueAssignment(
+                *moduleInst->parameters, *mergedCtx, pkgRegistry, sourceManager);
         }
 
         // Process each instance: resolve the submodule fresh per instance so

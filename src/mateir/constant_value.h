@@ -1,5 +1,7 @@
 #pragma once
 
+// Typed elaboration-time constants shared by frontend resolution and MateIR metadata.
+
 #include "mateir/types.h"
 
 #include <cstdint>
@@ -32,6 +34,7 @@ class ConstantValue {
 public:
     using Payload = std::variant<ConstantBitVector, ConstantReal, ConstantAggregate>;
 
+    ConstantValue();
     static ConstantValue bits(Type type, int64_t value);
     static ConstantValue bitWords(Type type, std::vector<uint64_t> words);
     static ConstantValue real(Type type, double value);
@@ -61,6 +64,7 @@ public:
 
     std::optional<int64_t> asInt64() const;
     int64_t requireInt64(std::string_view context) const;
+    std::string debugString() const;
 
 private:
     ConstantValue(Type type, Payload payload);

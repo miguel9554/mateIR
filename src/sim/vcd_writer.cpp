@@ -231,11 +231,13 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
         vcd_tracer::module params_mod(scope, "params");
         for (const auto* params : {&mod.parameters, &mod.localparams}) {
             for (const auto& param : *params) {
+                auto scalar = param.value.asInt64();
+                if (!scalar) continue;
                 unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
                 auto v = std::make_unique<vcd_tracer::value<int64_t>>();
                 v->set_bit_size(w);
                 v->elaborate(params_mod.get_add_fn(), param.name);
-                v->set(static_cast<int64_t>(param.value));
+                v->set(*scalar);
                 params_.push_back(std::move(v));
             }
         }
@@ -336,11 +338,13 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
                           const std::unordered_set<const DFGNode*>& alive) {
     for (const auto* params : {&mod.parameters, &mod.localparams}) {
         for (const auto& param : *params) {
+            auto scalar = param.value.asInt64();
+            if (!scalar) continue;
             unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
             auto v = std::make_unique<vcd_tracer::value<int64_t>>();
             v->set_bit_size(w);
             v->elaborate(scope.get_add_fn(), param.name);
-            v->set(static_cast<int64_t>(param.value));
+            v->set(*scalar);
             params_.push_back(std::move(v));
         }
     }

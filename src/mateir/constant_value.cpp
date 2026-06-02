@@ -1,4 +1,4 @@
-#include "frontends/systemverilog/constant_value.h"
+#include "mateir/constant_value.h"
 
 #include "mateir/module.h"
 #include "util/source_loc.h"
@@ -98,6 +98,10 @@ void validateElementType(const Type& expected, const ConstantValue& value) {
 
 ConstantValue::ConstantValue(Type type, Payload payload)
     : type_(std::move(type)), payload_(std::move(payload)) {}
+
+ConstantValue::ConstantValue()
+    : ConstantValue(Type::makeInteger(32, false),
+                    ConstantBitVector{.words = {0}, .width = 32, .is_signed = false}) {}
 
 ConstantValue ConstantValue::bits(Type type, int64_t value) {
     const int width = integralWidth(type);
@@ -309,6 +313,13 @@ int64_t ConstantValue::requireInt64(std::string_view context) const {
     auto value = asInt64();
     if (!value) throw CompilerError(std::string(context) + " does not fit in int64_t");
     return *value;
+}
+
+std::string ConstantValue::debugString() const {
+    if (auto value = asInt64()) return std::to_string(*value);
+    if (isReal()) return std::to_string(asReal().value);
+    if (isAggregate()) return "<aggregate>";
+    return "<wide-bits>";
 }
 
 } // namespace mate

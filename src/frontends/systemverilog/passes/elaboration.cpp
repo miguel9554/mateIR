@@ -1437,12 +1437,29 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
             return ConstantValue::concatenate(expectedType, values);
         }
         case SyntaxKind::AssignmentPatternExpression: {
-            if (!expectedType.isStruct() || !expectedType.unpacked_dims.empty()) {
+            const auto& assignment = expr->as<AssignmentPatternExpressionSyntax>();
+            if (!expectedType.unpacked_dims.empty()) {
+                if (assignment.pattern->kind != SyntaxKind::SimpleAssignmentPattern) {
+                    throw CompilerError(
+                        "Only ordered array assignment patterns are supported for package constants",
+                        resolveSourceLoc(*expr, sm));
+                }
+                const auto& pattern = assignment.pattern->as<SimpleAssignmentPatternSyntax>();
+                Type elementType = expectedType;
+                elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+                std::vector<ConstantValue> values;
+                values.reserve(pattern.items.size());
+                for (const auto* item : pattern.items) {
+                    values.push_back(evaluateConstantValue(
+                        item, elementType, ctx, pkgRegistry, sm));
+                }
+                return ConstantValue::array(expectedType, std::move(values));
+            }
+            if (!expectedType.isStruct()) {
                 throw CompilerError(
-                    "Assignment patterns are currently supported only for struct package constants",
+                    "Assignment pattern requires an aggregate package constant type",
                     resolveSourceLoc(*expr, sm));
             }
-            const auto& assignment = expr->as<AssignmentPatternExpressionSyntax>();
             if (assignment.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
                 const auto& pattern = assignment.pattern->as<SimpleAssignmentPatternSyntax>();
                 const auto& fields = expectedType.structInfo().fields;
@@ -1548,7 +1565,8 @@ Type resolveType(
 Param resolveParameter(const UnresolvedParam& param, const ParameterContext& topCtx,
                                ParameterContext& localCtx, bool isLocal = false,
                                const NamedTypeRegistry* namedTypeRegistry = nullptr,
-                               const PackageRegistry* pkgRegistry = nullptr) {
+                               const PackageRegistry* pkgRegistry = nullptr,
+                               const slang::SourceManager* sm = nullptr) {
     Param resolved;
     resolved.name = param.name;
 
@@ -1561,8 +1579,10 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
             pkgRegistry);
 
     // TODO only support for scalar params
-    if (param.dimensions.syntax) {
-        throw CompilerError("Param with dimensions not supported.");
+    if (param.dimensions.syntax && !param.dimensions.syntax->empty()) {
+        throw CompilerError(
+            "Param with dimensions not supported.",
+            sm ? std::optional<SourceLoc>(resolveSourceLoc(*param.type.syntax, *sm)) : std::nullopt);
     }
 
     // Localparams cannot be overridden by instantiation context
@@ -6169,6 +6189,10 @@ static PackageRegistry resolvePackages(
                     Type type = param.type.syntax->kind == SyntaxKind::ImplicitType
                         ? Type::makeInteger(32, false)
                         : resolveType(*param.type.syntax, packageCtx, entry.namedTypes, &registry);
+                    if (param.dimensions.syntax && !param.dimensions.syntax->empty()) {
+                        type.unpacked_dims =
+                            ResolveDimensions(*param.dimensions.syntax, packageCtx, &registry, &sourceManager);
+                    }
                     ConstantValue value = [&]() {
                         try {
                             return evaluateConstantValue(
@@ -6313,7 +6337,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Resolve header parameters before body imports and body-local typedefs.
     for (const auto& param : unresolved.parameters) {
         resolved.parameters.push_back(resolveParameter(
-            param, topCtx, *localCtx, false, &namedTypeRegistry, &pkgRegistry));
+            param, topCtx, *localCtx, false, &namedTypeRegistry, &pkgRegistry, &sourceManager));
     }
 
     auto mergeLocalCtx = [&]() {
@@ -6417,7 +6441,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Resolve localparams (cannot be overridden by instantiation context)
     // Pass enum registry so enum-typed localparams (e.g. localparam op_t X = OP_NOP) are handled
     for (const auto& param : unresolved.localparams) {
-        resolved.localparams.push_back(resolveParameter(param, topCtx, *localCtx, true, &namedTypeRegistry, &pkgRegistry));
+        resolved.localparams.push_back(resolveParameter(
+            param, topCtx, *localCtx, true, &namedTypeRegistry, &pkgRegistry, &sourceManager));
     }
 
     mergedCtx = mergeLocalCtx();

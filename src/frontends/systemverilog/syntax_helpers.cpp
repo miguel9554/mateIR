@@ -35,7 +35,7 @@ std::vector<UnresolvedParam> extractParameter(const ParameterDeclarationBaseSynt
         params.push_back(UnresolvedParam{
             .name = paramName,
             .type = typeInfo,
-            .dimensions = {},
+            .dimensions = {&(declarator->dimensions)},
             .defaultValue = defaultValue
         });
     }

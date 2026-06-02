@@ -1,4 +1,5 @@
 #include "frontends/systemverilog/passes/elaboration.h"
+#include "frontends/systemverilog/constant_value.h"
 #include "frontends/systemverilog/syntax_helpers.h"
 #include "mateir/dfg.h"
 #include "mateir/module.h"
@@ -14,6 +15,7 @@
 #include <format>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <source_location>
 #include <map>
 #include <memory>
@@ -53,7 +55,7 @@ using PartialDriverMap = std::unordered_map<std::string, PartialTargetState>;
 struct PackageEntry {
     NamedTypeRegistry  namedTypes;
     EnumMemberMap enumMembers;
-    std::map<std::string, std::pair<int64_t, Type>> constants;
+    std::map<std::string, ConstantValue> constants;
     std::map<std::string, const FunctionDeclarationSyntax*> functions;
 };
 using PackageRegistry = std::map<std::string, PackageEntry>;
@@ -1264,7 +1266,8 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             auto memberIt = pkgIt->second.enumMembers.find(itemName);
             if (memberIt != pkgIt->second.enumMembers.end()) return memberIt->second.first;
             auto constantIt = pkgIt->second.constants.find(itemName);
-            if (constantIt != pkgIt->second.constants.end()) return constantIt->second.first;
+            if (constantIt != pkgIt->second.constants.end())
+                return constantIt->second.requireInt64("Package constant " + pkgName + "::" + itemName);
             throw CompilerError("Unknown package member: " + pkgName + "::" + itemName);
         }
 
@@ -1324,6 +1327,40 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                             resolveSourceLoc(contextNode, sm));
     }
     return evaluateConstantExpr(expr, ctx, pkgRegistry);
+}
+
+static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
+                                           const Type& expectedType,
+                                           const ParameterContext& ctx,
+                                           const PackageRegistry& pkgRegistry) {
+    if (!expr) throw CompilerError("Cannot evaluate null constant expression");
+    switch (expr->kind) {
+        case SyntaxKind::UnbasedUnsizedLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            const auto text = literal.literal.rawText();
+            return ConstantValue::fill(expectedType, text.size() > 1 && text[1] == '1');
+        }
+        case SyntaxKind::IntegerLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            return ConstantValue::integerLiteral(expectedType, literal.literal.rawText());
+        }
+        case SyntaxKind::IntegerVectorExpression: {
+            const auto& literal = expr->as<IntegerVectorExpressionSyntax>();
+            return ConstantValue::vectorLiteral(expectedType, literal.size.rawText(),
+                                                literal.base.rawText(), literal.value.rawText());
+        }
+        case SyntaxKind::ParenthesizedExpression:
+            return evaluateConstantValue(
+                expr->as<ParenthesizedExpressionSyntax>().expression, expectedType, ctx, pkgRegistry);
+        default:
+            break;
+    }
+    if (expectedType.isAggregate()) {
+        throw CompilerError(
+            "Unsupported aggregate package constant expression: " +
+            std::string(toString(expr->kind)));
+    }
+    return ConstantValue::bits(expectedType, evaluateConstantExpr(expr, ctx, &pkgRegistry));
 }
 
 // IntegerType
@@ -2988,9 +3025,15 @@ static DFGNode* buildExprScalarImpl(
             auto cit = pkgIt->second.constants.find(itemName);
             if (mit == pkgIt->second.enumMembers.end() && cit == pkgIt->second.constants.end())
                 throw CompilerError("Unknown package member: " + pkgName + "::" + itemName, resolveSourceLoc(*expr, ctx.sm));
-            const auto& valueAndType = mit != pkgIt->second.enumMembers.end() ? mit->second : cit->second;
-            auto* n = ctx.graph.constant(valueAndType.first);
-            n->type = valueAndType.second;
+            if (mit == pkgIt->second.enumMembers.end()) {
+                auto* n = ctx.graph.constant(cit->second.requireInt64(
+                    "DFG package constant " + pkgName + "::" + itemName));
+                n->type = cit->second.type();
+                n->loc  = resolveSourceLoc(*expr, ctx.sm);
+                return n;
+            }
+            auto* n = ctx.graph.constant(mit->second.first);
+            n->type = mit->second.second;
             n->loc  = resolveSourceLoc(*expr, ctx.sm);
             return n;
         }
@@ -5959,18 +6002,18 @@ static PackageRegistry resolvePackages(
                     Type type = param.type.syntax->kind == SyntaxKind::ImplicitType
                         ? Type::makeInteger(32, false)
                         : resolveType(*param.type.syntax, packageCtx, entry.namedTypes, &registry);
-                    if (type.isAggregate()) {
-                        throw CompilerError(
-                            "Aggregate package constant not supported: " +
-                            pkg->name + "::" + param.name);
-                    }
-                    int64_t value = evaluateConstantExpr(param.defaultValue, packageCtx, &registry);
+                    ConstantValue value = evaluateConstantValue(
+                        param.defaultValue, type, packageCtx, registry);
                     if (entry.constants.contains(param.name) || entry.enumMembers.contains(param.name)) {
                         throw CompilerError(
                             "Duplicate package member in '" + pkg->name + "': " + param.name);
                     }
-                    entry.constants[param.name] = {value, type};
-                    packageCtx.values[param.name] = static_cast<int>(value);
+                    entry.constants.emplace(param.name, value);
+                    if (auto scalar = value.asInt64();
+                        scalar && *scalar >= std::numeric_limits<int>::min() &&
+                        *scalar <= std::numeric_limits<int>::max()) {
+                        packageCtx.values[param.name] = static_cast<int>(*scalar);
+                    }
                 }
                 continue;
             }
@@ -6046,7 +6089,10 @@ static void applyImports(
                 localCtx.values[k]  = v.first;
             }
             for (const auto& [k, v] : entry.constants)
-                localCtx.values[k] = static_cast<int>(v.first);
+                if (auto scalar = v.asInt64();
+                    scalar && *scalar >= std::numeric_limits<int>::min() &&
+                    *scalar <= std::numeric_limits<int>::max())
+                    localCtx.values[k] = static_cast<int>(*scalar);
         } else {
             // explicit import of a single name
             auto it = entry.namedTypes.find(*spec.item);
@@ -6059,7 +6105,10 @@ static void applyImports(
             }
             auto cit = entry.constants.find(*spec.item);
             if (cit != entry.constants.end())
-                localCtx.values[cit->first] = static_cast<int>(cit->second.first);
+                if (auto scalar = cit->second.asInt64();
+                    scalar && *scalar >= std::numeric_limits<int>::min() &&
+                    *scalar <= std::numeric_limits<int>::max())
+                    localCtx.values[cit->first] = static_cast<int>(*scalar);
         }
     }
 }

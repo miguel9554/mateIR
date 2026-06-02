@@ -57,6 +57,7 @@ struct StructField {
 struct StructInfo {
     std::string type_name;
     std::string type_identity;
+    bool is_packed = false;
     std::vector<StructField> fields;
 };
 
@@ -85,6 +86,7 @@ struct Type {
 
     static Type makeStruct(std::string type_name,
                            std::string type_identity,
+                           bool is_packed,
                            std::vector<StructField> fields);
 
     bool isSigned() const {
@@ -96,6 +98,7 @@ struct Type {
 
     bool isEnum() const { return kind == TypeKind::Enum; }
     bool isStruct() const { return kind == TypeKind::Struct; }
+    bool isPackedStruct() const { return isStruct() && structInfo().is_packed; }
     bool isAggregate() const { return isStruct() || !unpacked_dims.empty(); }
 
     const EnumInfo& enumInfo() const {

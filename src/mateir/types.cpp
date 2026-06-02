@@ -32,13 +32,21 @@ Type Type::makeEnum(std::string type_name, int width,
 
 Type Type::makeStruct(std::string type_name,
                       std::string type_identity,
+                      bool is_packed,
                       std::vector<StructField> fields) {
+    int width = 0;
+    if (is_packed) {
+        for (const auto& field : fields) {
+            width += field.type->width;
+        }
+    }
     return Type{
         .kind = TypeKind::Struct,
-        .width = 0,
+        .width = width,
         .metadata = StructInfo{
             .type_name = std::move(type_name),
             .type_identity = std::move(type_identity),
+            .is_packed = is_packed,
             .fields = std::move(fields)
         },
         .packed_dims = {},

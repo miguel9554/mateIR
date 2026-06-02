@@ -32,6 +32,7 @@ public:
     using Payload = std::variant<ConstantBitVector, ConstantReal, ConstantAggregate>;
 
     static ConstantValue bits(Type type, int64_t value);
+    static ConstantValue bitWords(Type type, std::vector<uint64_t> words);
     static ConstantValue real(Type type, double value);
     static ConstantValue aggregate(Type type, std::vector<ConstantValue> elements);
     static ConstantValue concatenate(Type type, const std::vector<ConstantValue>& elements);

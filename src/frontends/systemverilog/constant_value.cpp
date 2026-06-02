@@ -23,14 +23,24 @@ void maskHighBits(std::vector<uint64_t>& words, int width) {
     if (highBits != 0) words.back() &= (uint64_t(1) << highBits) - 1;
 }
 
-int scalarWidth(const Type& type) {
-    if (type.isAggregate()) {
-        throw CompilerError("Aggregate constant cannot be represented as one bit vector");
+int integralWidth(const Type& type) {
+    if (!type.unpacked_dims.empty() || (type.isStruct() && !type.isPackedStruct())) {
+        throw CompilerError("Integral constant cannot be assigned to an unpacked aggregate");
     }
     if (type.width <= 0) {
-        throw CompilerError("Constant bit vector type must have a positive width");
+        throw CompilerError("Integral constant type must have a positive width");
     }
     return type.width;
+}
+
+std::vector<uint64_t> sliceWords(const std::vector<uint64_t>& words, int offset, int width) {
+    std::vector<uint64_t> result(wordCount(width), 0);
+    for (int bit = 0; bit < width; ++bit) {
+        if (((words[(offset + bit) / 64] >> ((offset + bit) % 64)) & 1) != 0) {
+            result[bit / 64] |= uint64_t(1) << (bit % 64);
+        }
+    }
+    return result;
 }
 
 std::vector<uint64_t> parseDigits(std::string_view text, int base, int width) {
@@ -64,29 +74,36 @@ size_t aggregateElementCount(const Type& type) {
     throw CompilerError("Expected aggregate constant type");
 }
 
-Type aggregateElementType(const Type& type, size_t index) {
-    if (!type.unpacked_dims.empty()) {
-        Type element = type;
-        element.unpacked_dims.erase(element.unpacked_dims.begin());
-        return element;
-    }
-    if (type.isStruct()) {
-        return *type.structInfo().fields.at(index).type;
-    }
-    throw CompilerError("Expected aggregate constant type");
-}
-
 } // namespace
 
 ConstantValue::ConstantValue(Type type, Payload payload)
     : type_(std::move(type)), payload_(std::move(payload)) {}
 
 ConstantValue ConstantValue::bits(Type type, int64_t value) {
-    const int width = scalarWidth(type);
-    const bool isSigned = type.isSigned();
+    const int width = integralWidth(type);
     std::vector<uint64_t> words(wordCount(width), value < 0 ? UINT64_MAX : 0);
     words[0] = static_cast<uint64_t>(value);
     maskHighBits(words, width);
+    return bitWords(std::move(type), std::move(words));
+}
+
+ConstantValue ConstantValue::bitWords(Type type, std::vector<uint64_t> words) {
+    const int width = integralWidth(type);
+    words.resize(wordCount(width), 0);
+    maskHighBits(words, width);
+    if (type.isPackedStruct()) {
+        std::vector<ConstantValue> reversedElements;
+        reversedElements.reserve(type.structInfo().fields.size());
+        int offset = 0;
+        for (size_t i = type.structInfo().fields.size(); i-- > 0;) {
+            const Type& fieldType = *type.structInfo().fields[i].type;
+            reversedElements.push_back(bitWords(fieldType, sliceWords(words, offset, fieldType.width)));
+            offset += fieldType.width;
+        }
+        std::reverse(reversedElements.begin(), reversedElements.end());
+        return aggregate(std::move(type), std::move(reversedElements));
+    }
+    const bool isSigned = type.isSigned();
     return ConstantValue(
         std::move(type),
         ConstantBitVector{.words = std::move(words),
@@ -110,8 +127,7 @@ ConstantValue ConstantValue::aggregate(Type type, std::vector<ConstantValue> ele
 }
 
 ConstantValue ConstantValue::concatenate(Type type, const std::vector<ConstantValue>& elements) {
-    const int width = scalarWidth(type);
-    const bool isSigned = type.isSigned();
+    const int width = integralWidth(type);
     std::vector<uint64_t> words(wordCount(width), 0);
     size_t outputBit = 0;
     for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
@@ -122,31 +138,16 @@ ConstantValue ConstantValue::concatenate(Type type, const std::vector<ConstantVa
             if (set) words[outputBit / 64] |= uint64_t(1) << (outputBit % 64);
         }
     }
-    return ConstantValue(
-        std::move(type),
-        ConstantBitVector{.words = std::move(words), .width = width, .is_signed = isSigned});
+    return bitWords(std::move(type), std::move(words));
 }
 
 ConstantValue ConstantValue::fill(const Type& type, bool one) {
-    if (!type.isAggregate()) {
-        return bits(type, one ? -1 : 0);
-    }
-    std::vector<ConstantValue> elements;
-    const size_t count = aggregateElementCount(type);
-    elements.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        elements.push_back(fill(aggregateElementType(type, i), one));
-    }
-    return aggregate(type, std::move(elements));
+    return bits(type, one ? -1 : 0);
 }
 
 ConstantValue ConstantValue::integerLiteral(const Type& type, std::string_view text) {
-    const int width = scalarWidth(type);
-    return ConstantValue(
-        type,
-        ConstantBitVector{.words = parseDigits(text, 10, width),
-                          .width = width,
-                          .is_signed = type.isSigned()});
+    const int width = integralWidth(type);
+    return bitWords(type, parseDigits(text, 10, width));
 }
 
 ConstantValue ConstantValue::vectorLiteral(const Type& type,
@@ -157,12 +158,8 @@ ConstantValue ConstantValue::vectorLiteral(const Type& type,
     if (baseText.find_first_of("hH") != std::string_view::npos) base = 16;
     else if (baseText.find_first_of("bB") != std::string_view::npos) base = 2;
     else if (baseText.find_first_of("oO") != std::string_view::npos) base = 8;
-    const int width = scalarWidth(type);
-    return ConstantValue(
-        type,
-        ConstantBitVector{.words = parseDigits(valueText, base, width),
-                          .width = width,
-                          .is_signed = type.isSigned()});
+    const int width = integralWidth(type);
+    return bitWords(type, parseDigits(valueText, base, width));
 }
 
 bool ConstantValue::isBits() const {

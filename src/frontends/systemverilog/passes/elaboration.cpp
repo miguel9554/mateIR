@@ -5978,7 +5978,8 @@ static Type resolveStructTypedef(const UnresolvedTypedef& typedefDecl,
     }
     const auto& structSyntax = typedefDecl.syntax->as<StructUnionTypeSyntax>();
     auto fields = resolveStructFields(structSyntax, typedefDecl.name, ctx, namedTypeRegistry, pkgRegistry);
-    return Type::makeStruct(typedefDecl.name, typeIdentity, std::move(fields));
+    return Type::makeStruct(
+        typedefDecl.name, typeIdentity, !structSyntax.packed.isMissing(), std::move(fields));
 }
 
 // Resolve all packages into a PackageRegistry

@@ -74,6 +74,26 @@ size_t aggregateElementCount(const Type& type) {
     throw CompilerError("Expected aggregate constant type");
 }
 
+bool sameType(const Type& lhs, const Type& rhs) {
+    if (lhs.kind != rhs.kind || lhs.width != rhs.width ||
+        lhs.packed_dims != rhs.packed_dims || lhs.unpacked_dims != rhs.unpacked_dims) {
+        return false;
+    }
+    if (lhs.isStruct()) {
+        return lhs.structInfo().type_identity == rhs.structInfo().type_identity;
+    }
+    if (lhs.isEnum()) {
+        return lhs.enumInfo().type_name == rhs.enumInfo().type_name;
+    }
+    return lhs.isSigned() == rhs.isSigned();
+}
+
+void validateElementType(const Type& expected, const ConstantValue& value) {
+    if (!sameType(expected, value.type())) {
+        throw CompilerError("Aggregate constant element type does not match its declared type");
+    }
+}
+
 } // namespace
 
 ConstantValue::ConstantValue(Type type, Payload payload)
@@ -124,6 +144,52 @@ ConstantValue ConstantValue::aggregate(Type type, std::vector<ConstantValue> ele
         throw CompilerError("Aggregate constant element count does not match its type");
     }
     return ConstantValue(std::move(type), ConstantAggregate{.elements = std::move(elements)});
+}
+
+ConstantValue ConstantValue::orderedStruct(Type type, std::vector<ConstantValue> fields) {
+    if (!type.isStruct() || !type.unpacked_dims.empty()) {
+        throw CompilerError("Ordered struct constant requires a struct type");
+    }
+    if (fields.size() != type.structInfo().fields.size()) {
+        throw CompilerError("Struct constant field count does not match its declared type");
+    }
+    for (size_t i = 0; i < fields.size(); ++i) {
+        validateElementType(*type.structInfo().fields[i].type, fields[i]);
+    }
+    return aggregate(std::move(type), std::move(fields));
+}
+
+ConstantValue ConstantValue::namedStruct(Type type, std::map<std::string, ConstantValue> fields) {
+    if (!type.isStruct() || !type.unpacked_dims.empty()) {
+        throw CompilerError("Named struct constant requires a struct type");
+    }
+    std::vector<ConstantValue> orderedFields;
+    orderedFields.reserve(type.structInfo().fields.size());
+    for (const auto& field : type.structInfo().fields) {
+        auto it = fields.find(field.name);
+        if (it == fields.end()) {
+            throw CompilerError("Struct constant is missing field: " + field.name);
+        }
+        validateElementType(*field.type, it->second);
+        orderedFields.push_back(std::move(it->second));
+        fields.erase(it);
+    }
+    if (!fields.empty()) {
+        throw CompilerError("Unknown struct constant field: " + fields.begin()->first);
+    }
+    return aggregate(std::move(type), std::move(orderedFields));
+}
+
+ConstantValue ConstantValue::array(Type type, std::vector<ConstantValue> elements) {
+    if (type.unpacked_dims.empty()) {
+        throw CompilerError("Array constant requires an unpacked array type");
+    }
+    Type elementType = type;
+    elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+    for (const auto& element : elements) {
+        validateElementType(elementType, element);
+    }
+    return aggregate(std::move(type), std::move(elements));
 }
 
 ConstantValue ConstantValue::concatenate(Type type, const std::vector<ConstantValue>& elements) {

@@ -1350,6 +1350,83 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
             return ConstantValue::vectorLiteral(expectedType, literal.size.rawText(),
                                                 literal.base.rawText(), literal.value.rawText());
         }
+        case SyntaxKind::AssignmentPatternExpression: {
+            if (!expectedType.isStruct() || !expectedType.unpacked_dims.empty()) {
+                throw CompilerError(
+                    "Assignment patterns are currently supported only for struct package constants",
+                    resolveSourceLoc(*expr, sm));
+            }
+            const auto& assignment = expr->as<AssignmentPatternExpressionSyntax>();
+            if (assignment.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
+                const auto& pattern = assignment.pattern->as<SimpleAssignmentPatternSyntax>();
+                const auto& fields = expectedType.structInfo().fields;
+                if (pattern.items.size() != fields.size()) {
+                    throw CompilerError(
+                        "Struct assignment pattern field count does not match its declared type",
+                        resolveSourceLoc(*expr, sm));
+                }
+                std::vector<ConstantValue> values;
+                values.reserve(fields.size());
+                for (size_t i = 0; i < fields.size(); ++i) {
+                    values.push_back(evaluateConstantValue(
+                        pattern.items[i], *fields[i].type, ctx, pkgRegistry, sm));
+                }
+                return ConstantValue::orderedStruct(expectedType, std::move(values));
+            }
+            if (assignment.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+                const auto& pattern = assignment.pattern->as<StructuredAssignmentPatternSyntax>();
+                std::map<std::string, const ExpressionSyntax*> expressions;
+                const ExpressionSyntax* defaultExpr = nullptr;
+                for (const auto* item : pattern.items) {
+                    if (item->key->kind == SyntaxKind::DefaultPatternKeyExpression ||
+                        (item->key->kind == SyntaxKind::IdentifierName &&
+                         item->key->as<IdentifierNameSyntax>().identifier.valueText() == "default")) {
+                        if (defaultExpr) {
+                            throw CompilerError(
+                                "Struct assignment pattern has multiple default keys",
+                                resolveSourceLoc(*item, sm));
+                        }
+                        defaultExpr = item->expr;
+                        continue;
+                    }
+                    if (item->key->kind != SyntaxKind::IdentifierName) {
+                        throw CompilerError(
+                            "Only named fields are supported in struct assignment patterns",
+                            resolveSourceLoc(*item->key, sm));
+                    }
+                    std::string name(item->key->as<IdentifierNameSyntax>().identifier.valueText());
+                    if (!expressions.emplace(name, item->expr).second) {
+                        throw CompilerError(
+                            "Duplicate field in struct assignment pattern: " + name,
+                            resolveSourceLoc(*item->key, sm));
+                    }
+                }
+                std::map<std::string, ConstantValue> values;
+                for (const auto& field : expectedType.structInfo().fields) {
+                    auto it = expressions.find(field.name);
+                    const ExpressionSyntax* fieldExpr =
+                        it != expressions.end() ? it->second : defaultExpr;
+                    if (!fieldExpr) {
+                        throw CompilerError(
+                            "Struct assignment pattern is missing field: " + field.name,
+                            resolveSourceLoc(*expr, sm));
+                    }
+                    values.emplace(
+                        field.name,
+                        evaluateConstantValue(fieldExpr, *field.type, ctx, pkgRegistry, sm));
+                    if (it != expressions.end()) expressions.erase(it);
+                }
+                if (!expressions.empty()) {
+                    throw CompilerError(
+                        "Unknown field in struct assignment pattern: " + expressions.begin()->first,
+                        resolveSourceLoc(*expr, sm));
+                }
+                return ConstantValue::namedStruct(expectedType, std::move(values));
+            }
+            throw CompilerError(
+                "Replicated struct assignment patterns are not supported",
+                resolveSourceLoc(*expr, sm));
+        }
         case SyntaxKind::ParenthesizedExpression:
             return evaluateConstantValue(
                 expr->as<ParenthesizedExpressionSyntax>().expression, expectedType, ctx, pkgRegistry, sm);

@@ -3,6 +3,7 @@
 #include "mateir/types.h"
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,6 +36,9 @@ public:
     static ConstantValue bitWords(Type type, std::vector<uint64_t> words);
     static ConstantValue real(Type type, double value);
     static ConstantValue aggregate(Type type, std::vector<ConstantValue> elements);
+    static ConstantValue orderedStruct(Type type, std::vector<ConstantValue> fields);
+    static ConstantValue namedStruct(Type type, std::map<std::string, ConstantValue> fields);
+    static ConstantValue array(Type type, std::vector<ConstantValue> elements);
     static ConstantValue concatenate(Type type, const std::vector<ConstantValue>& elements);
     static ConstantValue fill(const Type& type, bool one);
     static ConstantValue integerLiteral(const Type& type, std::string_view text);

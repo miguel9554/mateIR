@@ -1332,7 +1332,8 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
                                            const Type& expectedType,
                                            const ParameterContext& ctx,
-                                           const PackageRegistry& pkgRegistry) {
+                                           const PackageRegistry& pkgRegistry,
+                                           const slang::SourceManager& sm) {
     if (!expr) throw CompilerError("Cannot evaluate null constant expression");
     switch (expr->kind) {
         case SyntaxKind::UnbasedUnsizedLiteralExpression: {
@@ -1351,14 +1352,15 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
         }
         case SyntaxKind::ParenthesizedExpression:
             return evaluateConstantValue(
-                expr->as<ParenthesizedExpressionSyntax>().expression, expectedType, ctx, pkgRegistry);
+                expr->as<ParenthesizedExpressionSyntax>().expression, expectedType, ctx, pkgRegistry, sm);
         default:
             break;
     }
     if (expectedType.isAggregate()) {
         throw CompilerError(
             "Unsupported aggregate package constant expression: " +
-            std::string(toString(expr->kind)));
+            std::string(toString(expr->kind)),
+            resolveSourceLoc(*expr, sm));
     }
     return ConstantValue::bits(expectedType, evaluateConstantExpr(expr, ctx, &pkgRegistry));
 }
@@ -5984,7 +5986,8 @@ static Type resolveStructTypedef(const UnresolvedTypedef& typedefDecl,
 
 // Resolve all packages into a PackageRegistry
 static PackageRegistry resolvePackages(
-    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages)
+    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
+    const slang::SourceManager& sourceManager)
 {
     PackageRegistry registry;
     for (const auto& pkg : packages) {
@@ -6003,8 +6006,16 @@ static PackageRegistry resolvePackages(
                     Type type = param.type.syntax->kind == SyntaxKind::ImplicitType
                         ? Type::makeInteger(32, false)
                         : resolveType(*param.type.syntax, packageCtx, entry.namedTypes, &registry);
-                    ConstantValue value = evaluateConstantValue(
-                        param.defaultValue, type, packageCtx, registry);
+                    ConstantValue value = [&]() {
+                        try {
+                            return evaluateConstantValue(
+                                param.defaultValue, type, packageCtx, registry, sourceManager);
+                        } catch (const CompilerError& error) {
+                            if (error.loc) throw;
+                            throw CompilerError(
+                                error.what(), resolveSourceLoc(*param.defaultValue, sourceManager));
+                        }
+                    }();
                     if (entry.constants.contains(param.name) || entry.enumMembers.contains(param.name)) {
                         throw CompilerError(
                             "Duplicate package member in '" + pkg->name + "': " + param.name);
@@ -6406,7 +6417,7 @@ Module resolveModules(
             modules.size()));
     }
 
-    PackageRegistry pkgRegistry = resolvePackages(packages);
+    PackageRegistry pkgRegistry = resolvePackages(packages, sourceManager);
 
     ModuleLookup moduleLookup;
     for (const auto& module : modules) {
@@ -6427,7 +6438,7 @@ Module resolveModules(
     const ParameterContext& topParams,
     FrontendDomainFacts* domainFacts) {
 
-    PackageRegistry pkgRegistry = resolvePackages(packages);
+    PackageRegistry pkgRegistry = resolvePackages(packages, sourceManager);
 
     ModuleLookup moduleLookup;
     for (const auto& module : modules) {

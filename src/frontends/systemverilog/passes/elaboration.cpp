@@ -388,6 +388,68 @@ const Type* lookupDeclaredType(const std::string& baseName,
 //   SimplePropertyExpr → SimpleSequenceExpr → ExpressionSyntax
 const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr);
 
+static int64_t bitstreamWidth(const Type& type) {
+    int64_t width = 0;
+    if (type.isStruct()) {
+        for (const auto& field : type.structInfo().fields) {
+            width += bitstreamWidth(*field.type);
+        }
+    } else {
+        width = type.width;
+    }
+    if (width <= 0) {
+        throw CompilerError("Cannot determine bit-stream width for type");
+    }
+    for (const auto& dim : type.unpacked_dims) {
+        width *= static_cast<int64_t>(dim.size());
+    }
+    return width;
+}
+
+static const ExpressionSyntax* singleOrderedSystemFunctionArg(
+    const InvocationExpressionSyntax& invocation,
+    std::string_view functionName) {
+    if (!invocation.arguments || invocation.arguments->parameters.size() != 1 ||
+        invocation.arguments->parameters[0]->kind != SyntaxKind::OrderedArgument) {
+        throw CompilerError(std::string(functionName) + " requires exactly one ordered argument");
+    }
+    return extractPortExpr(
+        *invocation.arguments->parameters[0]->as<OrderedArgumentSyntax>().expr);
+}
+
+static std::optional<int64_t> staticBitsWidth(
+    const ExpressionSyntax* expr,
+    const ParameterContext& ctx,
+    const PackageRegistry* pkgRegistry,
+    const NamedTypeRegistry* namedTypeRegistry) {
+    if (!expr) throw CompilerError("$bits argument cannot be null");
+    if (expr->kind == SyntaxKind::IdentifierName) {
+        std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
+        if (namedTypeRegistry) {
+            auto typeIt = namedTypeRegistry->find(name);
+            if (typeIt != namedTypeRegistry->end()) return bitstreamWidth(typeIt->second);
+        }
+        auto valueIt = ctx.values.find(name);
+        if (valueIt != ctx.values.end()) return bitstreamWidth(valueIt->second.type());
+        return std::nullopt;
+    }
+    if (expr->kind == SyntaxKind::ScopedName) {
+        if (!pkgRegistry) return std::nullopt;
+        const auto& scoped = expr->as<ScopedNameSyntax>();
+        std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+        std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+        auto pkgIt = pkgRegistry->find(pkgName);
+        if (pkgIt == pkgRegistry->end()) return std::nullopt;
+        auto typeIt = pkgIt->second.namedTypes.find(itemName);
+        if (typeIt != pkgIt->second.namedTypes.end()) return bitstreamWidth(typeIt->second);
+        auto constantIt = pkgIt->second.constants.find(itemName);
+        if (constantIt != pkgIt->second.constants.end()) return bitstreamWidth(constantIt->second.type());
+        auto enumIt = pkgIt->second.enumMembers.find(itemName);
+        if (enumIt != pkgIt->second.enumMembers.end()) return bitstreamWidth(enumIt->second.second);
+    }
+    return std::nullopt;
+}
+
 using DriverMap = std::unordered_map<std::string, DFGNode*>;
 
 struct ConditionalBranch {
@@ -1204,6 +1266,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
 // Throws if a referenced parameter is not in the context
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
                               const PackageRegistry* pkgRegistry = nullptr,
+                              const NamedTypeRegistry* namedTypeRegistry = nullptr,
                               std::source_location caller = std::source_location::current()) {
     if (!expr) {
         throw CompilerError(
@@ -1224,6 +1287,9 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
         case SyntaxKind::IdentifierName: {
             auto& name = expr->as<IdentifierNameSyntax>();
             std::string paramName(name.identifier.valueText());
+            if (namedTypeRegistry && namedTypeRegistry->contains(paramName)) {
+                throw CompilerError("Type name '" + paramName + "' cannot be used as an integer constant");
+            }
             auto it = ctx.values.find(paramName);
             if (it == ctx.values.end()) {
                 throw CompilerError(
@@ -1234,53 +1300,53 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 
         case SyntaxKind::ParenthesizedExpression: {
             auto& paren = expr->as<ParenthesizedExpressionSyntax>();
-            return evaluateConstantExpr(paren.expression, ctx, pkgRegistry);
+            return evaluateConstantExpr(paren.expression, ctx, pkgRegistry, namedTypeRegistry);
         }
 
         case SyntaxKind::UnaryPlusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            return evaluateConstantExpr(unary.operand, ctx, pkgRegistry);
+            return evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry);
         }
 
         case SyntaxKind::UnaryMinusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            return -evaluateConstantExpr(unary.operand, ctx, pkgRegistry);
+            return -evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry);
         }
 
         case SyntaxKind::AddExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) +
-                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) +
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
         }
 
         case SyntaxKind::SubtractExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) -
-                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) -
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
         }
 
         case SyntaxKind::MultiplyExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) *
-                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) *
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
         }
 
         case SyntaxKind::DivideExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
             if (divisor == 0) {
                 throw CompilerError("Division by zero in constant expression");
             }
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) / divisor;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) / divisor;
         }
 
         case SyntaxKind::ModExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
             if (divisor == 0) {
                 throw CompilerError("Modulo by zero in constant expression");
             }
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) % divisor;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) % divisor;
         }
 
         case SyntaxKind::IntegerVectorExpression: {
@@ -1297,7 +1363,7 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                     throw CompilerError("Constant concatenation does not fit in int64_t");
                 }
                 const uint64_t itemValue = static_cast<uint64_t>(
-                    evaluateConstantExpr(item, ctx, pkgRegistry));
+                    evaluateConstantExpr(item, ctx, pkgRegistry, namedTypeRegistry));
                 const uint64_t mask = itemWidth == 64
                     ? UINT64_MAX
                     : (uint64_t(1) << itemWidth) - 1;
@@ -1330,56 +1396,75 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 
         case SyntaxKind::EqualityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) == evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) == evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry) ? 1 : 0;
         }
         case SyntaxKind::InequalityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) != evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) != evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry) ? 1 : 0;
         }
         case SyntaxKind::LessThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) < evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) < evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry) ? 1 : 0;
         }
         case SyntaxKind::LessThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) <= evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) <= evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry) ? 1 : 0;
         }
         case SyntaxKind::GreaterThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) > evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) > evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry) ? 1 : 0;
         }
         case SyntaxKind::GreaterThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) >= evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) >= evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry) ? 1 : 0;
         }
         case SyntaxKind::LogicalAndExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry) && evaluateConstantExpr(binary.right, ctx, pkgRegistry)) ? 1 : 0;
+            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) && evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry)) ? 1 : 0;
         }
         case SyntaxKind::LogicalOrExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry) || evaluateConstantExpr(binary.right, ctx, pkgRegistry)) ? 1 : 0;
+            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) || evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry)) ? 1 : 0;
+        }
+        case SyntaxKind::ConditionalExpression: {
+            const auto& conditional = expr->as<ConditionalExpressionSyntax>();
+            if (conditional.predicate->conditions.size() != 1) {
+                throw CompilerError("Only single condition supported in constant ternary expression");
+            }
+            if (conditional.predicate->conditions[0]->matchesClause) {
+                throw CompilerError("Matches clause not supported in constant ternary expression");
+            }
+            return evaluateConstantExpr(
+                evaluateConstantExpr(conditional.predicate->conditions[0]->expr, ctx, pkgRegistry, namedTypeRegistry)
+                    ? conditional.left
+                    : conditional.right,
+                ctx, pkgRegistry, namedTypeRegistry);
         }
 
         case SyntaxKind::PowerExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return intPowConst(evaluateConstantExpr(binary.left, ctx, pkgRegistry),
-                               evaluateConstantExpr(binary.right, ctx, pkgRegistry));
+            return intPowConst(evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry),
+                               evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry));
         }
 
         case SyntaxKind::InvocationExpression: {
             const auto& invocation = expr->as<InvocationExpressionSyntax>();
-            if (invocation.left->kind != SyntaxKind::SystemName ||
-                invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText() != "$clog2") {
+            if (invocation.left->kind != SyntaxKind::SystemName) {
                 throw CompilerError("Only $clog2 is supported in constant system-function calls");
             }
-            if (!invocation.arguments || invocation.arguments->parameters.size() != 1 ||
-                invocation.arguments->parameters[0]->kind != SyntaxKind::OrderedArgument) {
-                throw CompilerError("$clog2 requires exactly one ordered argument");
+            const std::string systemName(invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText());
+            if (systemName == "$bits") {
+                const auto* argument = singleOrderedSystemFunctionArg(invocation, "$bits");
+                if (auto width = staticBitsWidth(argument, ctx, pkgRegistry, namedTypeRegistry)) {
+                    return *width;
+                }
+                throw CompilerError("$bits argument is not a known type or constant expression");
             }
-            const auto* argument = extractPortExpr(
-                *invocation.arguments->parameters[0]->as<OrderedArgumentSyntax>().expr);
-            int64_t value = evaluateConstantExpr(argument, ctx, pkgRegistry);
+            if (systemName != "$clog2") {
+                throw CompilerError("Only $clog2 and $bits are supported in constant system-function calls");
+            }
+            const auto* argument = singleOrderedSystemFunctionArg(invocation, "$clog2");
+            int64_t value = evaluateConstantExpr(argument, ctx, pkgRegistry, namedTypeRegistry);
             if (value < 0) {
                 throw CompilerError("$clog2 argument must not be negative");
             }
@@ -1402,18 +1487,20 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
                               const slang::SourceManager& sm,
                               const slang::syntax::SyntaxNode& contextNode,
-                              const PackageRegistry* pkgRegistry = nullptr) {
+                              const PackageRegistry* pkgRegistry = nullptr,
+                              const NamedTypeRegistry* namedTypeRegistry = nullptr) {
     if (!expr) {
         throw CompilerError("Cannot evaluate null expression",
                             resolveSourceLoc(contextNode, sm));
     }
-    return evaluateConstantExpr(expr, ctx, pkgRegistry);
+    return evaluateConstantExpr(expr, ctx, pkgRegistry, namedTypeRegistry);
 }
 
 static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
                                            const Type& expectedType,
                                            const ParameterContext& ctx,
                                            const PackageRegistry& pkgRegistry,
+                                           const NamedTypeRegistry* namedTypeRegistry,
                                            const slang::SourceManager& sm) {
     if (!expr) throw CompilerError("Cannot evaluate null constant expression");
     switch (expr->kind) {
@@ -1464,7 +1551,7 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
             for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
                 values.push_back(evaluateConstantValue(
                     item, Type::makeInteger(constantExprWidth(item), false),
-                    ctx, pkgRegistry, sm));
+                    ctx, pkgRegistry, namedTypeRegistry, sm));
             }
             return ConstantValue::concatenate(expectedType, values);
         }
@@ -1483,7 +1570,7 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
                 values.reserve(pattern.items.size());
                 for (const auto* item : pattern.items) {
                     values.push_back(evaluateConstantValue(
-                        item, elementType, ctx, pkgRegistry, sm));
+                        item, elementType, ctx, pkgRegistry, namedTypeRegistry, sm));
                 }
                 return ConstantValue::array(expectedType, std::move(values));
             }
@@ -1504,7 +1591,7 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
                 values.reserve(fields.size());
                 for (size_t i = 0; i < fields.size(); ++i) {
                     values.push_back(evaluateConstantValue(
-                        pattern.items[i], *fields[i].type, ctx, pkgRegistry, sm));
+                        pattern.items[i], *fields[i].type, ctx, pkgRegistry, namedTypeRegistry, sm));
                 }
                 return ConstantValue::orderedStruct(expectedType, std::move(values));
             }
@@ -1548,7 +1635,7 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
                     }
                     values.emplace(
                         field.name,
-                        evaluateConstantValue(fieldExpr, *field.type, ctx, pkgRegistry, sm));
+                        evaluateConstantValue(fieldExpr, *field.type, ctx, pkgRegistry, namedTypeRegistry, sm));
                     if (it != expressions.end()) expressions.erase(it);
                 }
                 if (!expressions.empty()) {
@@ -1564,7 +1651,7 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
         }
         case SyntaxKind::ParenthesizedExpression:
             return evaluateConstantValue(
-                expr->as<ParenthesizedExpressionSyntax>().expression, expectedType, ctx, pkgRegistry, sm);
+                expr->as<ParenthesizedExpressionSyntax>().expression, expectedType, ctx, pkgRegistry, namedTypeRegistry, sm);
         default:
             break;
     }
@@ -1574,7 +1661,7 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
             std::string(toString(expr->kind)),
             resolveSourceLoc(*expr, sm));
     }
-    return ConstantValue::bits(expectedType, evaluateConstantExpr(expr, ctx, &pkgRegistry));
+    return ConstantValue::bits(expectedType, evaluateConstantExpr(expr, ctx, &pkgRegistry, namedTypeRegistry));
 }
 
 // IntegerType
@@ -1636,7 +1723,7 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
         }
         try {
             resolved.value = evaluateConstantValue(
-                param.defaultValue, resolved.type, mergedCtx, *pkgRegistry, *sm);
+                param.defaultValue, resolved.type, mergedCtx, *pkgRegistry, namedTypeRegistry, *sm);
         } catch (const CompilerError& error) {
             if (error.loc) throw;
             throw CompilerError(error.what(), resolveSourceLoc(*param.defaultValue, *sm));
@@ -1665,7 +1752,7 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
         }
         try {
             resolved.value = evaluateConstantValue(
-                param.defaultValue, resolved.type, mergedCtx, *pkgRegistry, *sm);
+                param.defaultValue, resolved.type, mergedCtx, *pkgRegistry, namedTypeRegistry, *sm);
         } catch (const CompilerError& error) {
             if (error.loc) throw;
             throw CompilerError(error.what(), resolveSourceLoc(*param.defaultValue, *sm));
@@ -3932,6 +4019,22 @@ static DFGNode* buildExprScalarImpl(
         }
 
         case SyntaxKind::InvocationExpression: {
+            const auto& invocation = expr->as<InvocationExpressionSyntax>();
+            if (invocation.left->kind == SyntaxKind::SystemName &&
+                invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText() == "$bits") {
+                const auto* argument = singleOrderedSystemFunctionArg(invocation, "$bits");
+                int64_t width = 0;
+                if (auto staticWidth = staticBitsWidth(
+                        argument, ctx.params, &ctx.pkgRegistry, &ctx.namedTypeRegistry)) {
+                    width = *staticWidth;
+                } else {
+                    width = bitstreamWidth(buildExprValue(argument, ctx).type);
+                }
+                auto* node = ctx.graph.constant(width);
+                node->type = Type::makeInteger(32, true);
+                node->loc = resolveSourceLoc(*expr, ctx.sm);
+                return node;
+            }
             return inlineSubroutineCall(expr->as<InvocationExpressionSyntax>(), ctx);
         }
 
@@ -6285,7 +6388,7 @@ static PackageRegistry resolvePackages(
                     ConstantValue value = [&]() {
                         try {
                             return evaluateConstantValue(
-                                param.defaultValue, type, packageCtx, registry, sourceManager);
+                                param.defaultValue, type, packageCtx, registry, &entry.namedTypes, sourceManager);
                         } catch (const CompilerError& error) {
                             if (error.loc) throw;
                             throw CompilerError(

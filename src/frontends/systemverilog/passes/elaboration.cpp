@@ -1310,6 +1310,30 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                                evaluateConstantExpr(binary.right, ctx, pkgRegistry));
         }
 
+        case SyntaxKind::InvocationExpression: {
+            const auto& invocation = expr->as<InvocationExpressionSyntax>();
+            if (invocation.left->kind != SyntaxKind::SystemName ||
+                invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText() != "$clog2") {
+                throw CompilerError("Only $clog2 is supported in constant system-function calls");
+            }
+            if (!invocation.arguments || invocation.arguments->parameters.size() != 1 ||
+                invocation.arguments->parameters[0]->kind != SyntaxKind::OrderedArgument) {
+                throw CompilerError("$clog2 requires exactly one ordered argument");
+            }
+            const auto* argument = extractPortExpr(
+                *invocation.arguments->parameters[0]->as<OrderedArgumentSyntax>().expr);
+            int64_t value = evaluateConstantExpr(argument, ctx, pkgRegistry);
+            if (value < 0) {
+                throw CompilerError("$clog2 argument must not be negative");
+            }
+            int64_t result = 0;
+            for (int64_t remaining = value > 0 ? value - 1 : 0;
+                 remaining > 0; remaining >>= 1) {
+                ++result;
+            }
+            return result;
+        }
+
         default:
             throw CompilerError(
                 "Unsupported expression kind in constant evaluation: " +

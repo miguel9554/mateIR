@@ -283,6 +283,38 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
     return {value, width, is_signed};
 }
 
+static int constantExprWidth(const ExpressionSyntax* expr) {
+    if (!expr) throw CompilerError("Cannot determine width of null constant expression");
+    switch (expr->kind) {
+        case SyntaxKind::IntegerLiteralExpression:
+            return 32;
+        case SyntaxKind::IntegerVectorExpression: {
+            const auto& literal = expr->as<IntegerVectorExpressionSyntax>();
+            if (!literal.size.rawText().empty()) {
+                return std::stoi(std::string(literal.size.rawText()));
+            }
+            return parseIntegerVectorExpression(literal).width;
+        }
+        case SyntaxKind::ParenthesizedExpression:
+            return constantExprWidth(expr->as<ParenthesizedExpressionSyntax>().expression);
+        case SyntaxKind::ConcatenationExpression: {
+            int width = 0;
+            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
+                const int itemWidth = constantExprWidth(item);
+                if (itemWidth > std::numeric_limits<int>::max() - width) {
+                    throw CompilerError("Constant concatenation width exceeds supported range");
+                }
+                width += itemWidth;
+            }
+            return width;
+        }
+        default:
+            throw CompilerError(
+                "Cannot determine width of constant expression: " +
+                std::string(toString(expr->kind)));
+    }
+}
+
 // Exception thrown by return statements during function inlining
 struct ReturnValue {
     DFGNode* value; // nullptr for void return
@@ -1252,6 +1284,27 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             return parseIntegerVectorExpression(vecExpr).value;
         }
 
+        case SyntaxKind::ConcatenationExpression: {
+            uint64_t result = 0;
+            int resultWidth = 0;
+            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
+                const int itemWidth = constantExprWidth(item);
+                if (itemWidth > 64 || resultWidth > 64 - itemWidth) {
+                    throw CompilerError("Constant concatenation does not fit in int64_t");
+                }
+                const uint64_t itemValue = static_cast<uint64_t>(
+                    evaluateConstantExpr(item, ctx, pkgRegistry));
+                const uint64_t mask = itemWidth == 64
+                    ? UINT64_MAX
+                    : (uint64_t(1) << itemWidth) - 1;
+                result = itemWidth == 64
+                    ? itemValue
+                    : (result << itemWidth) | (itemValue & mask);
+                resultWidth += itemWidth;
+            }
+            return static_cast<int64_t>(result);
+        }
+
         case SyntaxKind::ScopedName: {
             if (!pkgRegistry) {
                 throw CompilerError("Package-qualified constant requires package registry");
@@ -1373,6 +1426,15 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
             const auto& literal = expr->as<IntegerVectorExpressionSyntax>();
             return ConstantValue::vectorLiteral(expectedType, literal.size.rawText(),
                                                 literal.base.rawText(), literal.value.rawText());
+        }
+        case SyntaxKind::ConcatenationExpression: {
+            std::vector<ConstantValue> values;
+            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
+                values.push_back(evaluateConstantValue(
+                    item, Type::makeInteger(constantExprWidth(item), false),
+                    ctx, pkgRegistry, sm));
+            }
+            return ConstantValue::concatenate(expectedType, values);
         }
         case SyntaxKind::AssignmentPatternExpression: {
             if (!expectedType.isStruct() || !expectedType.unpacked_dims.empty()) {

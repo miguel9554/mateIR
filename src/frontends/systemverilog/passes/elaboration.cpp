@@ -3,6 +3,7 @@
 #include "frontends/systemverilog/syntax_helpers.h"
 #include "mateir/dfg.h"
 #include "mateir/module.h"
+#include "frontends/systemverilog/passes/type_propagation.h"
 #include "frontends/systemverilog/unresolved.h"
 #include "util/source_loc_resolve.h"
 #include "slang/syntax/AllSyntax.h"
@@ -955,7 +956,7 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
         if (selected == result) continue;
         auto* mux = ctx.graph.mux(it->condition, selected, result);
         mux->loc = loc;
-        if (targetType && targetType->isEnum()) {
+        if (targetType) {
             mux->type = *targetType;
         }
         result = mux;
@@ -1015,10 +1016,8 @@ static std::set<std::string> collectAssignedSignals(const std::vector<CaseBranch
 
 static int64_t selectorCodeCountOrThrow(DFGNode* selectorNode,
                                         const std::optional<SourceLoc>& loc) {
-    if (!selectorNode || !selectorNode->hasType()) {
-        throw CompilerError("Case selector must have a known type during elaboration", loc);
-    }
-    int width = selectorNode->type->width;
+    Type selectorType = resolveNodeTypeNow(selectorNode);
+    int width = selectorType.width;
     if (width <= 0 || width >= 63) {
         throw CompilerError(
             "Case selector width " + std::to_string(width) + " is unsupported for mux lowering",
@@ -2880,7 +2879,13 @@ static ExprValue coerceAssignmentExprToWidth(ResolutionContext& ctx,
         return value;
     }
 
-    if (!expr->hasType()) return value;
+    if (!expr->hasType()) {
+        if (targetType) {
+            expr->type = *targetType;
+            value.type = *targetType;
+        }
+        return value;
+    }
     if (targetType && expr->type->kind == targetType->kind &&
         expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
         value.type = *targetType;

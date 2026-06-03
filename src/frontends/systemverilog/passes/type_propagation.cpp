@@ -405,4 +405,40 @@ bool propagateTypes(DFG& graph) {
     return anyChanged;
 }
 
+Type resolveNodeTypeNow(DFGNode* node) {
+    if (!node) {
+        throw CompilerError("Directed type inference requested for null DFG node");
+    }
+
+    std::unordered_set<DFGNode*> visited;
+    std::vector<DFGNode*> order;
+    postOrderVisit(node, visited, order);
+
+    bool changed;
+    do {
+        changed = false;
+        for (DFGNode* candidate : order) {
+            if (inferNodeType(candidate)) {
+                changed = true;
+            }
+        }
+    } while (changed);
+
+    for (DFGNode* candidate : order) {
+        if (!candidate->hasType()) {
+            throw CompilerError(std::format(
+                "Directed type inference: node {} remains untyped while resolving {}",
+                candidate->str(), node->str()), candidate->loc);
+        }
+    }
+
+    if (!node->hasType()) {
+        throw CompilerError(std::format(
+            "Directed type inference failed to resolve root node {}", node->str()),
+            node->loc);
+    }
+
+    return *node->type;
+}
+
 } // namespace mate

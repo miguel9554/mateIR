@@ -8,7 +8,8 @@ module general_features_test (
     output logic [7:0]  dynamic_part_case_o,
     output logic [7:0]  unpacked_const_case_o,
     output logic [7:0]  unpacked_dynamic_case_o,
-    output logic [7:0]  multi_item_case_o
+    output logic [7:0]  multi_item_case_o,
+    output logic [7:0]  concat_case_o
 );
 
     logic [1:0] lanes [4];
@@ -51,6 +52,14 @@ module general_features_test (
             4'h0, 4'h2, 4'h4, 4'h6: multi_item_case_o = 8'h50;
             4'h1, 4'h3, 4'h5, 4'h7: multi_item_case_o = 8'h51;
             default: multi_item_case_o = 8'h52;
+        endcase
+
+        unique case ({data[12], data[6:5]})
+            3'b000: concat_case_o = 8'h60;
+            3'b001: concat_case_o = 8'h61;
+            3'b010: concat_case_o = 8'h62;
+            3'b011: concat_case_o = 8'h63;
+            default: concat_case_o = 8'h64;
         endcase
     end
 

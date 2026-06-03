@@ -26,6 +26,7 @@ enum_top_test PASS
 enum_cast_width_fail FAIL cast width mismatch
 full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'
 func_test PASS
+general_features_test PASS
 generate_test PASS
 global_domains_chained_clock_alias PASS
 global_domains_clock_alias PASS

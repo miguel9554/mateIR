@@ -2427,11 +2427,17 @@ static ExprValue applySelector(const ExprValue& input,
             throw CompilerError("Range-select on unpacked array is not supported", loc);
         }
         const auto& rangeSelect = selector.as<RangeSelectSyntax>();
-        auto* leftNode = buildExprDFG(rangeSelect.left, ctx);
-        auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
+        int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left);
+        int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right);
+        auto* leftNode = ctx.graph.constant(left);
+        auto* rightNode = ctx.graph.constant(right);
         auto* sliceNode = ctx.graph.slice(value.scalar, leftNode, rightNode);
         sliceNode->loc = loc;
-        return ExprValue{.type = sliceNode->type.value_or(Type{}), .scalar = sliceNode, .leaves = {}, .leaf_paths = {}};
+        Type sliceType = Type::makeInteger(
+            static_cast<int>(std::llabs(left - right) + 1),
+            value.type.isSigned());
+        sliceNode->type = sliceType;
+        return ExprValue{.type = sliceType, .scalar = sliceNode, .leaves = {}, .leaf_paths = {}};
     } else if (selector.kind == SyntaxKind::AscendingRangeSelect ||
                selector.kind == SyntaxKind::DescendingRangeSelect) {
         if (!value.scalar || !value.type.unpacked_dims.empty() || value.type.isStruct()) {
@@ -2471,6 +2477,7 @@ static ExprValue applySelector(const ExprValue& input,
                     int64_t low = isAscending ? v : v - width + 1;
                     auto* slice = ctx.graph.slice(value.scalar, ctx.graph.constant(high), ctx.graph.constant(low));
                     slice->loc = loc;
+                    slice->type = Type::makeInteger(static_cast<int>(width), value.type.isSigned());
                     armData.push_back(slice);
                 } else {
                     armData.push_back(zeroNode);
@@ -3494,6 +3501,7 @@ static DFGNode* buildExprScalarImpl(
                                     } else {
                                         Type narrowed = *currentSelectedType;
                                         narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                                        indexedSignalNode->type = narrowed;
                                         currentSelectedType = narrowed;
                                     }
                                     baseName = elemKey;
@@ -3506,6 +3514,7 @@ static DFGNode* buildExprScalarImpl(
                                     } else {
                                         Type narrowed = *currentSelectedType;
                                         narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                                        indexedSignalNode->type = narrowed;
                                         currentSelectedType = narrowed;
                                     }
                                     baseName = elemKey;
@@ -3528,6 +3537,7 @@ static DFGNode* buildExprScalarImpl(
                                 Type narrowed = *currentSelectedType;
                                 narrowed.width = static_cast<int>(elemWidth);
                                 narrowed.packed_dims.erase(narrowed.packed_dims.begin());
+                                indexedSignalNode->type = narrowed;
                                 currentSelectedType = narrowed;
                                 continue;
                             }
@@ -3557,6 +3567,7 @@ static DFGNode* buildExprScalarImpl(
                             std::string elemKey = baseName + "[" + std::to_string(lo) + "]";
                             if (auto* elemNode = lookupLeafNode(ctx, elemKey)) {
                                 indexedSignalNode = elemNode;
+                                indexedSignalNode->type = narrowed;
                             } else {
                                 throw CompilerError(
                                     "Internal error: unpacked array leaf not found for " + elemKey,
@@ -3608,20 +3619,34 @@ static DFGNode* buildExprScalarImpl(
                             }
 
                             indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
+                            indexedSignalNode->type = armType;
                         }
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        currentSelectedType->unpacked_dims.erase(
-                            currentSelectedType->unpacked_dims.begin());
+                        Type narrowed = *currentSelectedType;
+                        narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                        indexedSignalNode->type = narrowed;
+                        currentSelectedType = narrowed;
                     } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect){
-                        // Per SV spec, both bounds must be constant expressions.
-                        // If non-constant bounds somehow reach here, type_propagation
-                        // will reject the SLICE with a [BUG] message.
+                        if (!currentSelectedType || !currentSelectedType->unpacked_dims.empty() ||
+                                currentSelectedType->isStruct()) {
+                            throw CompilerError(
+                                "Range-select requires a packed source with known type",
+                                resolveSourceLoc(*expr, ctx.sm));
+                        }
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
-                        auto* leftNode = buildExprDFG(rangeSelect.left, ctx);
-                        auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
+                        int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                            ctx.sm, *rangeSelect.left);
+                        int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                             ctx.sm, *rangeSelect.right);
+                        auto* leftNode = ctx.graph.constant(left);
+                        auto* rightNode = ctx.graph.constant(right);
                         indexedSignalNode = ctx.graph.slice(indexedSignalNode, leftNode, rightNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        currentSelectedType.reset();
+                        Type narrowed = Type::makeInteger(
+                            static_cast<int>(std::llabs(left - right) + 1),
+                            currentSelectedType->isSigned());
+                        indexedSignalNode->type = narrowed;
+                        currentSelectedType = narrowed;
                     } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
                         // [base +: width] → [base+width-1 : base]
                         // Per SV spec, width must be constant; base may be dynamic.
@@ -3668,6 +3693,8 @@ static DFGNode* buildExprScalarImpl(
                                     auto* low  = ctx.graph.constant(v);
                                     auto* slice = ctx.graph.slice(indexedSignalNode, high, low);
                                     slice->loc = resolveSourceLoc(*expr, ctx.sm);
+                                    slice->type = Type::makeInteger(
+                                        static_cast<int>(width), currentSelectedType->isSigned());
                                     armData.push_back(slice);
                                 } else {
                                     armData.push_back(zeroNode);
@@ -3680,6 +3707,7 @@ static DFGNode* buildExprScalarImpl(
                         currentSelectedType = Type::makeInteger(
                             static_cast<int>(width),
                             currentSelectedType ? currentSelectedType->isSigned() : false);
+                        indexedSignalNode->type = *currentSelectedType;
                     } else if (elemSelect->selector->kind == SyntaxKind::DescendingRangeSelect) {
                         // [base -: width] → [base : base-width+1]
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
@@ -3724,6 +3752,8 @@ static DFGNode* buildExprScalarImpl(
                                     auto* low  = ctx.graph.constant(v - width + 1);
                                     auto* slice = ctx.graph.slice(indexedSignalNode, high, low);
                                     slice->loc = resolveSourceLoc(*expr, ctx.sm);
+                                    slice->type = Type::makeInteger(
+                                        static_cast<int>(width), currentSelectedType->isSigned());
                                     armData.push_back(slice);
                                 } else {
                                     armData.push_back(zeroNode);
@@ -3736,6 +3766,7 @@ static DFGNode* buildExprScalarImpl(
                         currentSelectedType = Type::makeInteger(
                             static_cast<int>(width),
                             currentSelectedType ? currentSelectedType->isSigned() : false);
+                        indexedSignalNode->type = *currentSelectedType;
                     } else {
                         throw CompilerError(
                             "Only BitSelect and RangeSelect supported, got: " +

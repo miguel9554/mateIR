@@ -1510,7 +1510,12 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
         throw CompilerError("Cannot evaluate null expression",
                             resolveSourceLoc(contextNode, sm));
     }
-    return evaluateConstantExpr(expr, ctx, pkgRegistry, namedTypeRegistry);
+    try {
+        return evaluateConstantExpr(expr, ctx, pkgRegistry, namedTypeRegistry);
+    } catch (const CompilerError& error) {
+        if (error.loc) throw;
+        throw CompilerError(error.what(), resolveSourceLoc(*expr, sm));
+    }
 }
 
 static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,

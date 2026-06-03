@@ -434,8 +434,9 @@ static std::optional<int64_t> staticBitsWidth(
         return std::nullopt;
     }
     if (expr->kind == SyntaxKind::ScopedName) {
-        if (!pkgRegistry) return std::nullopt;
         const auto& scoped = expr->as<ScopedNameSyntax>();
+        if (scoped.separator.rawText() != "::") return std::nullopt;
+        if (!pkgRegistry) return std::nullopt;
         std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
         std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
         auto pkgIt = pkgRegistry->find(pkgName);
@@ -448,6 +449,10 @@ static std::optional<int64_t> staticBitsWidth(
         if (enumIt != pkgIt->second.enumMembers.end()) return bitstreamWidth(enumIt->second.second);
     }
     return std::nullopt;
+}
+
+static bool isPackageScopedName(const ScopedNameSyntax& scoped) {
+    return scoped.separator.rawText() == "::";
 }
 
 using DriverMap = std::unordered_map<std::string, DFGNode*>;
@@ -1376,10 +1381,22 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
         }
 
         case SyntaxKind::ScopedName: {
+            const auto& scoped = expr->as<ScopedNameSyntax>();
+            if (!isPackageScopedName(scoped)) {
+                if (scoped.left->kind == SyntaxKind::IdentifierName &&
+                    scoped.right->kind == SyntaxKind::IdentifierName) {
+                    std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                    std::string fieldName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                    auto valueIt = ctx.values.find(baseName);
+                    if (valueIt != ctx.values.end()) {
+                        return valueIt->second.field(fieldName).requireInt64(baseName + "." + fieldName);
+                    }
+                }
+                throw CompilerError("Unsupported constant field selection");
+            }
             if (!pkgRegistry) {
                 throw CompilerError("Package-qualified constant requires package registry");
             }
-            auto& scoped = expr->as<ScopedNameSyntax>();
             std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
             std::string itemName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
             auto pkgIt = pkgRegistry->find(pkgName);
@@ -1516,6 +1533,20 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
         }
         case SyntaxKind::ScopedName: {
             const auto& scoped = expr->as<ScopedNameSyntax>();
+            if (!isPackageScopedName(scoped)) {
+                if (scoped.left->kind == SyntaxKind::IdentifierName &&
+                    scoped.right->kind == SyntaxKind::IdentifierName) {
+                    std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                    std::string fieldName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                    auto valueIt = ctx.values.find(baseName);
+                    if (valueIt != ctx.values.end()) {
+                        return valueIt->second.field(fieldName);
+                    }
+                }
+                throw CompilerError(
+                    "Unsupported aggregate constant field selection",
+                    resolveSourceLoc(*expr, sm));
+            }
             std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
             std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
             auto pkgIt = pkgRegistry.find(pkgName);
@@ -2890,6 +2921,22 @@ DFGNode* tryBuildConstantExprNode(const ExpressionSyntax* expr, ResolutionContex
     }
 }
 
+static ExprValue constantValueToExprValue(const ConstantValue& value,
+                                          ResolutionContext& ctx,
+                                          const SourceLoc& loc,
+                                          std::string_view name) {
+    auto scalar = value.asInt64();
+    if (!scalar) {
+        throw CompilerError(
+            "Aggregate constant field is not scalar: " + std::string(name),
+            loc);
+    }
+    auto* node = ctx.graph.constant(*scalar);
+    node->type = value.type();
+    node->loc = loc;
+    return ExprValue{.type = value.type(), .scalar = node, .leaves = {}, .leaf_paths = {}};
+}
+
 static ExprValue buildExprValue(
         const ExpressionSyntax* expr,
         ResolutionContext& ctx
@@ -2969,12 +3016,26 @@ static ExprValue buildExprValue(
 
     if (expr->kind == SyntaxKind::ScopedName) {
         const auto& scoped = expr->as<ScopedNameSyntax>();
-        bool treatAsFieldAccess = scoped.left->kind != SyntaxKind::IdentifierName;
+        bool treatAsFieldAccess = !isPackageScopedName(scoped) ||
+                                  scoped.left->kind != SyntaxKind::IdentifierName;
         if (!treatAsFieldAccess && scoped.left->kind == SyntaxKind::IdentifierName) {
             std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
             treatAsFieldAccess = lookupDeclaredType(baseName, ctx) != nullptr;
         }
         if (treatAsFieldAccess) {
+            if (scoped.left->kind == SyntaxKind::IdentifierName &&
+                scoped.right->kind == SyntaxKind::IdentifierName) {
+                std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                std::string fieldName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                auto valueIt = ctx.params.values.find(baseName);
+                if (valueIt != ctx.params.values.end()) {
+                    return constantValueToExprValue(
+                        valueIt->second.field(fieldName),
+                        ctx,
+                        resolveSourceLoc(*expr, ctx.sm),
+                        baseName + "." + fieldName);
+                }
+            }
             ExprValue base = buildExprValue(&scoped.left->as<ExpressionSyntax>(), ctx);
             if (scoped.right->kind == SyntaxKind::IdentifierName) {
                 return selectStructField(
@@ -3336,7 +3397,8 @@ static DFGNode* buildExprScalarImpl(
         case SyntaxKind::ScopedName: {
             // Struct-like scoped access on declared objects (e.g. s.a)
             auto& scoped = expr->as<ScopedNameSyntax>();
-            bool treatAsFieldAccess = scoped.left->kind != SyntaxKind::IdentifierName;
+            bool treatAsFieldAccess = !isPackageScopedName(scoped) ||
+                                      scoped.left->kind != SyntaxKind::IdentifierName;
             if (!treatAsFieldAccess && scoped.left->kind == SyntaxKind::IdentifierName) {
                 std::string baseName = std::string(
                     scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
@@ -4965,9 +5027,12 @@ void resolveCaseStatementInPlace(
 
     if (caseStatement->uniqueOrPriority) {
         auto keyword = caseStatement->uniqueOrPriority.kind;
-        if (keyword == slang::parsing::TokenKind::UniqueKeyword ||
-                keyword == slang::parsing::TokenKind::Unique0Keyword) {
-            throw CompilerError("unique/unique0 modifiers are not supported on case",
+        if (keyword == slang::parsing::TokenKind::UniqueKeyword) {
+            // With no casez/casex support, case item selection is an exact
+            // match over fully-known values, so every supported case is
+            // already unique regardless of the modifier.
+        } else if (keyword == slang::parsing::TokenKind::Unique0Keyword) {
+            throw CompilerError("unique0 modifiers are not supported on case",
                                 resolveSourceLoc(*caseStatement, ctx.sm));
         }
     }

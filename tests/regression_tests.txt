@@ -123,5 +123,4 @@ unpacked_array_copy PASS
 unpacked_reverse_index PASS
 unique_if_fail FAIL unique/unique0 modifiers are not supported on if
 unique0_if_fail FAIL unique/unique0 modifiers are not supported on if
-unique_case_fail FAIL unique/unique0 modifiers are not supported on case
-unique0_case_fail FAIL unique/unique0 modifiers are not supported on case
+unique0_case_fail FAIL unique0 modifiers are not supported on case

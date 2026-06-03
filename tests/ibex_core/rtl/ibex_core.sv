@@ -7,6 +7,8 @@
   `define RVFI
 `endif
 
+ `define SYNTHESIS
+
 `include "prim_assert.sv"
 `include "dv_fcov_macros.svh"
 

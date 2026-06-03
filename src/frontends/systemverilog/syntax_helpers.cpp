@@ -93,7 +93,7 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
                 UnresolvedSignal portInfo{
                     .name = portName,
                     .type = typeInfo,
-                    .dimensions = {}
+                    .dimensions = {&(port.declarator->dimensions)}
                 };
 
                 if (dir == TokenKind::InputKeyword) {
@@ -112,7 +112,7 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
                 UnresolvedSignal portInfo{
                     .name = portName,
                     .type = typeInfo,
-                    .dimensions = {}
+                    .dimensions = {&(port.declarator->dimensions)}
                 };
 
                 if (dir == TokenKind::InputKeyword) {

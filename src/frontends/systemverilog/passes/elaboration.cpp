@@ -2985,6 +2985,19 @@ static ExprValue buildExprValue(
         return retagConstOrReturnValue(inner, castType, loc);
     }
 
+    if (expr->kind == SyntaxKind::SignedCastExpression) {
+        auto& castExpr = expr->as<SignedCastExpressionSyntax>();
+        bool makeSigned = castExpr.signing.valueText() == "signed";
+        ExprValue inner = buildScalarExprValue(castExpr.inner->expression, ctx);
+        Type newType = Type::makeInteger(inner.type.width, makeSigned,
+                                        inner.type.packed_dims, inner.type.unpacked_dims);
+        if (inner.scalar->kind() == DFGOp::CONST) {
+            inner.scalar->type = newType;
+        }
+        inner.type = newType;
+        return inner;
+    }
+
     if (expr->kind == SyntaxKind::ConditionalExpression) {
         return buildConditionalExprValue(expr->as<ConditionalExpressionSyntax>(), ctx);
     }

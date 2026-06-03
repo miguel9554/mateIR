@@ -4891,23 +4891,18 @@ static DFGNode* inlineSubroutineCall(
     sub.currently_inlining.insert(funcName);
     sub.current_write_origin = "subroutine:" + funcName;
 
-    // 4. Bind input formals to actual argument DFG nodes
+    // 4. Bind formals to actual argument DFG nodes.
     const auto* portList = decl->prototype->portList;
-    std::vector<const ExpressionSyntax*> actuals;
-    if (invoc.arguments) {
-        for (const auto* arg : invoc.arguments->parameters) {
-            if (arg->kind != SyntaxKind::OrderedArgument)
-                throw CompilerError("Only ordered function arguments are supported",
-                                    resolveSourceLoc(invoc, ctx.sm));
-            actuals.push_back(extractPortExpr(*arg->as<OrderedArgumentSyntax>().expr));
-        }
-    }
-
     std::vector<std::pair<std::string, const ExpressionSyntax*>> outputBindings;
+
+    struct FormalArg {
+        std::string name;
+        slang::parsing::TokenKind direction;
+    };
+    std::vector<FormalArg> formals;
 
     if (portList) {
         slang::parsing::TokenKind curDir = slang::parsing::TokenKind::InputKeyword; // default
-        size_t argIdx = 0;
         for (const auto* portBase : portList->ports) {
             if (portBase->kind != SyntaxKind::FunctionPort) continue;
             auto& port = portBase->as<FunctionPortSyntax>();
@@ -4917,31 +4912,99 @@ static DFGNode* inlineSubroutineCall(
                 curDir = port.direction.kind;
 
             std::string formalName(port.declarator->name.valueText());
-
-            if (curDir == slang::parsing::TokenKind::InputKeyword) {
-                if (argIdx >= actuals.size())
-                    throw CompilerError(
-                        "Too few arguments in call to function '" + funcName + "'",
-                        resolveSourceLoc(invoc, ctx.sm));
-                auto* argNode = buildExprDFG(actuals[argIdx++], ctx);
-                sub.combDrivers[formalName] = argNode;
-                sub.subroutine_locals.insert(formalName);  // input formals are locals in sub-ctx
-            } else if (curDir == slang::parsing::TokenKind::OutputKeyword) {
-                if (argIdx >= actuals.size())
-                    throw CompilerError(
-                        "Too few arguments in call to '" + funcName + "'",
-                        resolveSourceLoc(invoc, ctx.sm));
-                outputBindings.emplace_back(formalName, actuals[argIdx++]);
-                sub.subroutine_locals.insert(formalName);
-            } else if (curDir == slang::parsing::TokenKind::InOutKeyword) {
-                throw CompilerError(
-                    "inout ports not supported: " + formalName,
-                    resolveSourceLoc(invoc, ctx.sm));
-            } else if (curDir == slang::parsing::TokenKind::RefKeyword) {
-                throw CompilerError(
-                    "ref ports not supported: " + formalName,
-                    resolveSourceLoc(invoc, ctx.sm));
+            if (std::any_of(formals.begin(), formals.end(),
+                            [&](const FormalArg& formal) { return formal.name == formalName; })) {
+                throw CompilerError("Duplicate function formal: " + formalName,
+                                    resolveSourceLoc(invoc, ctx.sm));
             }
+            formals.push_back({formalName, curDir});
+        }
+    }
+
+    std::vector<const ExpressionSyntax*> actuals(formals.size(), nullptr);
+    if (invoc.arguments) {
+        if (!portList && !invoc.arguments->parameters.empty()) {
+            throw CompilerError("Function '" + funcName + "' does not declare arguments",
+                                resolveSourceLoc(invoc, ctx.sm));
+        }
+
+        size_t orderedIdx = 0;
+        bool seenNamed = false;
+        std::set<std::string> namedActuals;
+        for (const auto* arg : invoc.arguments->parameters) {
+            if (arg->kind == SyntaxKind::OrderedArgument) {
+                if (seenNamed) {
+                    throw CompilerError(
+                        "Ordered function arguments cannot appear after named arguments",
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                if (orderedIdx >= formals.size()) {
+                    throw CompilerError("Too many arguments in call to function '" + funcName + "'",
+                                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                actuals[orderedIdx++] = extractPortExpr(*arg->as<OrderedArgumentSyntax>().expr);
+            } else if (arg->kind == SyntaxKind::NamedArgument) {
+                seenNamed = true;
+                const auto& named = arg->as<NamedArgumentSyntax>();
+                std::string actualName(named.name.valueText());
+                if (!named.expr) {
+                    throw CompilerError(
+                        "Named function argument '." + actualName + "' requires an expression",
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                if (!namedActuals.insert(actualName).second) {
+                    throw CompilerError(
+                        "Duplicate named function argument: " + actualName,
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                auto formalIt = std::find_if(
+                    formals.begin(), formals.end(),
+                    [&](const FormalArg& formal) { return formal.name == actualName; });
+                if (formalIt == formals.end()) {
+                    throw CompilerError(
+                        "Unknown named function argument '." + actualName +
+                        "' in call to function '" + funcName + "'",
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                const size_t idx = static_cast<size_t>(std::distance(formals.begin(), formalIt));
+                if (actuals[idx]) {
+                    throw CompilerError(
+                        "Function argument '" + actualName + "' was already bound",
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                actuals[idx] = extractPortExpr(*named.expr);
+            } else {
+                throw CompilerError(
+                    "Unsupported function argument kind: " + std::string(toString(arg->kind)),
+                    resolveSourceLoc(*arg, ctx.sm));
+            }
+        }
+    }
+
+    for (size_t i = 0; i < formals.size(); ++i) {
+        const auto& formal = formals[i];
+        const ExpressionSyntax* actual = actuals[i];
+        if (!actual) {
+            throw CompilerError(
+                "Missing argument '" + formal.name + "' in call to function '" + funcName + "'",
+                resolveSourceLoc(invoc, ctx.sm));
+        }
+
+        if (formal.direction == slang::parsing::TokenKind::InputKeyword) {
+            auto* argNode = buildExprDFG(actual, ctx);
+            sub.combDrivers[formal.name] = argNode;
+            sub.subroutine_locals.insert(formal.name);  // input formals are locals in sub-ctx
+        } else if (formal.direction == slang::parsing::TokenKind::OutputKeyword) {
+            outputBindings.emplace_back(formal.name, actual);
+            sub.subroutine_locals.insert(formal.name);
+        } else if (formal.direction == slang::parsing::TokenKind::InOutKeyword) {
+            throw CompilerError(
+                "inout ports not supported: " + formal.name,
+                resolveSourceLoc(invoc, ctx.sm));
+        } else if (formal.direction == slang::parsing::TokenKind::RefKeyword) {
+            throw CompilerError(
+                "ref ports not supported: " + formal.name,
+                resolveSourceLoc(invoc, ctx.sm));
         }
     }
 

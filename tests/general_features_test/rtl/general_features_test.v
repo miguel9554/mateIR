@@ -9,10 +9,20 @@ module general_features_test (
     output logic [7:0]  unpacked_const_case_o,
     output logic [7:0]  unpacked_dynamic_case_o,
     output logic [7:0]  multi_item_case_o,
-    output logic [7:0]  concat_case_o
+    output logic [7:0]  concat_case_o,
+    output logic [7:0]  named_arg_func_o
 );
 
     logic [1:0] lanes [4];
+
+    function automatic logic [7:0] select_named(input logic [1:0] sel,
+                                                input logic [7:0] if_match,
+                                                input logic [7:0] if_other);
+        unique case (sel)
+            2'b10: select_named = if_match;
+            default: select_named = if_other;
+        endcase
+    endfunction
 
     always_comb begin
         lanes[0] = data[1:0];
@@ -61,6 +71,8 @@ module general_features_test (
             3'b011: concat_case_o = 8'h63;
             default: concat_case_o = 8'h64;
         endcase
+
+        named_arg_func_o = select_named(.if_other(8'h71), .sel(data[1:0]), .if_match(8'h70));
     end
 
 endmodule

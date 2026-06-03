@@ -4178,7 +4178,8 @@ static DFGNode* buildExprScalarImpl(
 }
 
 void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
-        ResolutionContext& ctx){
+        ResolutionContext& ctx,
+        DFGNode* prebuiltRhs = nullptr){
     const auto& left = assignExpr.left;
     const auto& right = assignExpr.right;
     const auto assignLoc = resolveSourceLoc(assignExpr, ctx.sm);
@@ -4347,9 +4348,12 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
     // Build the expression value of the RHS. Whole-array assignments consume the
     // array-valued form; scalar paths below use RHSexprNode.
-    ExprValue RHSvalue = (right->kind == SyntaxKind::AssignmentPatternExpression)
-        ? ExprValue{.type = Type{}, .scalar = nullptr, .leaves = {}, .leaf_paths = {}}
-        : buildExprValue(right, ctx);
+    ExprValue RHSvalue = prebuiltRhs
+        ? ExprValue{.type = prebuiltRhs->type ? *prebuiltRhs->type : Type{},
+                    .scalar = prebuiltRhs, .leaves = {}, .leaf_paths = {}}
+        : (right->kind == SyntaxKind::AssignmentPatternExpression)
+            ? ExprValue{.type = Type{}, .scalar = nullptr, .leaves = {}, .leaf_paths = {}}
+            : buildExprValue(right, ctx);
     DFGNode* RHSexprNode = RHSvalue.scalar;
 
     // LHS concatenation: {elem_n, ..., elem_0} = RHS
@@ -5039,6 +5043,7 @@ static DFGNode* inlineSubroutineCall(
                     declaredType.unpacked_dims = unpacked;
                     std::string localName(d->name.valueText());
                     sub.subroutine_locals.insert(localName);
+                    sub.local_declared_types[localName] = declaredType;
                     if (declaredType.isStruct() || !declaredType.unpacked_dims.empty()) {
                         declareLocalAggregateValue(sub, localName, declaredType);
                     }
@@ -5088,6 +5093,43 @@ void resolveExpressionStatementInPlace(
 
     const auto expectedKind = ctx.is_sequential ? SyntaxKind::NonblockingAssignmentExpression :
                                                   SyntaxKind::AssignmentExpression;
+
+    // Compound assignment: x op= y  →  x = x op y
+    auto compoundOp = [&]() -> std::optional<std::function<DFGNode*(DFGNode*, DFGNode*)>> {
+        switch (expr->kind) {
+            case SyntaxKind::AddAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.add(a, b); };
+            case SyntaxKind::SubtractAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.sub(a, b); };
+            case SyntaxKind::MultiplyAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.mul(a, b); };
+            case SyntaxKind::AndAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.bitwiseAnd(a, b); };
+            case SyntaxKind::OrAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.bitwiseOr(a, b); };
+            case SyntaxKind::XorAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.bitwiseXor(a, b); };
+            case SyntaxKind::LogicalLeftShiftAssignmentExpression:
+            case SyntaxKind::ArithmeticLeftShiftAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.shl(a, b); };
+            case SyntaxKind::ArithmeticRightShiftAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.asr(a, b); };
+            default:
+                return std::nullopt;
+        }
+    }();
+
+    if (compoundOp) {
+        const auto& assignExpr = expr->as<slang::syntax::BinaryExpressionSyntax>();
+        auto loc = resolveSourceLoc(*exprStatement, ctx.sm);
+        DFGNode* lhsNode = buildExprDFG(assignExpr.left, ctx);
+        DFGNode* rhsNode = buildExprDFG(assignExpr.right, ctx);
+        DFGNode* combined = (*compoundOp)(lhsNode, rhsNode);
+        combined->loc = loc;
+        resolveAssignExpression(assignExpr, ctx, combined);
+        return;
+    }
+
     if (expr->kind != expectedKind){
         throw CompilerError(
         "Can only process assign expression. Current: " + std::string(toString(expr->kind)),
@@ -5269,6 +5311,7 @@ void resolveSequentialBlockStatementInPlace(
                 declaredType.unpacked_dims = unpacked;
                 std::string localName(decl->name.valueText());
                 ctx.subroutine_locals.insert(localName);
+                ctx.local_declared_types[localName] = declaredType;
                 if (declaredType.isStruct() || !declaredType.unpacked_dims.empty()) {
                     declareLocalAggregateValue(ctx, localName, declaredType);
                 }

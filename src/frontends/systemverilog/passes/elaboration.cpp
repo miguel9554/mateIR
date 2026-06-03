@@ -1318,6 +1318,11 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             return -evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry);
         }
 
+        case SyntaxKind::UnaryLogicalNotExpression: {
+            auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
+            return evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry) == 0 ? 1 : 0;
+        }
+
         case SyntaxKind::AddExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
             return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) +

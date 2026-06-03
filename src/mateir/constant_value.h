@@ -3,6 +3,7 @@
 // Typed elaboration-time constants shared by frontend resolution and MateIR metadata.
 
 #include "mateir/types.h"
+#include "util/source_loc.h"
 
 #include <cstdint>
 #include <map>
@@ -63,7 +64,8 @@ public:
     std::vector<const ConstantValue*> scalarLeaves() const;
 
     std::optional<int64_t> asInt64() const;
-    int64_t requireInt64(std::string_view context) const;
+    int64_t requireInt64(std::string_view context,
+                         std::optional<SourceLoc> loc = std::nullopt) const;
     std::string debugString() const;
 
 private:

@@ -309,9 +309,10 @@ std::optional<int64_t> ConstantValue::asInt64() const {
     return static_cast<int64_t>(low);
 }
 
-int64_t ConstantValue::requireInt64(std::string_view context) const {
+int64_t ConstantValue::requireInt64(std::string_view context,
+                                     std::optional<SourceLoc> loc) const {
     auto value = asInt64();
-    if (!value) throw CompilerError(std::string(context) + " does not fit in int64_t");
+    if (!value) throw CompilerError(std::string(context) + " does not fit in int64_t", loc);
     return *value;
 }
 

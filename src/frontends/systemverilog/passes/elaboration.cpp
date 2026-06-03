@@ -2215,7 +2215,7 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
         auto paramIt = ctx.params.values.find(baseName);
         if (paramIt != ctx.params.values.end()) {
                 auto* n = ctx.graph.constant(
-                    paramIt->second.requireInt64("DFG parameter '" + baseName + "'"));
+                    paramIt->second.requireInt64("DFG parameter '" + baseName + "'", loc));
                 n->type = paramIt->second.type();
             if (loc) n->loc = *loc;
             return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
@@ -3417,10 +3417,11 @@ static DFGNode* buildExprScalarImpl(
                 }
                 auto paramIt = ctx.params.values.find(baseName);
                 if (paramIt != ctx.params.values.end()) {
+                    auto exprLoc = resolveSourceLoc(*expr, ctx.sm);
                     auto* n = ctx.graph.constant(
-                        paramIt->second.requireInt64("DFG parameter '" + baseName + "'"));
+                        paramIt->second.requireInt64("DFG parameter '" + baseName + "'", exprLoc));
                     n->type = paramIt->second.type();
-                    n->loc = resolveSourceLoc(*expr, ctx.sm);
+                    n->loc = exprLoc;
                     return n;
                 }
             }

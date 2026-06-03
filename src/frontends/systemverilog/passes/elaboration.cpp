@@ -5128,20 +5128,25 @@ void resolveCaseStatementInPlace(
         } else if (item->kind == SyntaxKind::StandardCaseItem) {
             const auto& caseItem = item->as<StandardCaseItemSyntax>();
 
-            if (caseItem.expressions.size() != 1) {
-                throw CompilerError("Multiple expressions per case item not yet supported",
-                                    resolveSourceLoc(*caseStatement, ctx.sm));
+            if (caseItem.expressions.empty()) {
+                throw CompilerError("Case item must have at least one expression",
+                                    resolveSourceLoc(caseItem, ctx.sm));
             }
 
-            int64_t caseValue = normalizeSelectorCode(
-                evaluateConstantExpr(caseItem.expressions[0], ctx.params, ctx.sm, *caseStatement, &ctx.pkgRegistry),
-                selectorNode,
-                caseLoc);
+            std::vector<int64_t> caseValues;
+            caseValues.reserve(caseItem.expressions.size());
+            for (const auto* caseExpr : caseItem.expressions) {
+                caseValues.push_back(normalizeSelectorCode(
+                    evaluateConstantExpr(caseExpr, ctx.params, ctx.sm, *caseExpr,
+                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry),
+                    selectorNode,
+                    resolveSourceLoc(*caseExpr, ctx.sm)));
+            }
 
             restoreDrivers(ctx, baselineDrivers);
             executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
             normalCases.push_back({
-                {caseValue},
+                std::move(caseValues),
                 modifiedDriversSince(ctx, baselineDrivers),
                 modifiedPartialDriversSince(ctx, baselineDrivers)
             });

@@ -5973,6 +5973,105 @@ static std::set<std::string> collectNBATargets(const SyntaxList<MemberSyntax>& m
     return result;
 }
 
+static void collectGenerateNBATargetsFromMember(const MemberSyntax* member,
+                                                const ParameterContext& ctx,
+                                                const slang::SourceManager& sm,
+                                                std::set<std::string>& out);
+
+static void collectGenerateNBATargetsFromMembers(const SyntaxList<MemberSyntax>& members,
+                                                 const ParameterContext& ctx,
+                                                 const slang::SourceManager& sm,
+                                                 std::set<std::string>& out) {
+    auto directTargets = collectNBATargets(members);
+    out.insert(directTargets.begin(), directTargets.end());
+    for (const auto* member : members) {
+        collectGenerateNBATargetsFromMember(member, ctx, sm, out);
+    }
+}
+
+static void collectGenerateNBATargetsFromSelectedBlock(const MemberSyntax* block,
+                                                       const ParameterContext& ctx,
+                                                       const slang::SourceManager& sm,
+                                                       std::set<std::string>& out) {
+    if (!block) return;
+    if (block->kind == SyntaxKind::GenerateBlock) {
+        collectGenerateNBATargetsFromMembers(
+            block->as<GenerateBlockSyntax>().members, ctx, sm, out);
+    } else {
+        collectGenerateNBATargetsFromMember(block, ctx, sm, out);
+    }
+}
+
+static void collectGenerateNBATargetsFromMember(const MemberSyntax* member,
+                                                const ParameterContext& ctx,
+                                                const slang::SourceManager& sm,
+                                                std::set<std::string>& out) {
+    switch (member->kind) {
+        case SyntaxKind::GenerateRegion: {
+            collectGenerateNBATargetsFromMembers(
+                member->as<GenerateRegionSyntax>().members, ctx, sm, out);
+            break;
+        }
+        case SyntaxKind::GenerateBlock: {
+            collectGenerateNBATargetsFromMembers(
+                member->as<GenerateBlockSyntax>().members, ctx, sm, out);
+            break;
+        }
+        case SyntaxKind::IfGenerate: {
+            const auto& ifGen = member->as<IfGenerateSyntax>();
+            int64_t cond = evaluateConstantExpr(ifGen.condition, ctx, sm, ifGen);
+            const MemberSyntax* selectedBlock = cond ? ifGen.block
+                : (ifGen.elseClause
+                   ? static_cast<const MemberSyntax*>(ifGen.elseClause->clause.get()) : nullptr);
+            collectGenerateNBATargetsFromSelectedBlock(selectedBlock, ctx, sm, out);
+            break;
+        }
+        case SyntaxKind::LoopGenerate: {
+            const auto& loopGen = member->as<LoopGenerateSyntax>();
+            std::string genvarName(loopGen.identifier.valueText());
+            ParameterContext iterCtx = ctx;
+            iterCtx.values[genvarName] =
+                integerConstant(evaluateConstantExpr(loopGen.initialExpr, ctx, sm, loopGen));
+
+            while (evaluateConstantExpr(loopGen.stopExpr, iterCtx, sm, loopGen)) {
+                collectGenerateNBATargetsFromSelectedBlock(loopGen.block, iterCtx, sm, out);
+                iterCtx.values[genvarName] =
+                    integerConstant(evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx));
+            }
+            break;
+        }
+        case SyntaxKind::CaseGenerate: {
+            const auto& caseGen = member->as<CaseGenerateSyntax>();
+            int64_t selector = evaluateConstantExpr(caseGen.condition, ctx, sm, caseGen);
+
+            const MemberSyntax* selectedBlock = nullptr;
+            const MemberSyntax* defaultBlock = nullptr;
+            for (const auto* item : caseGen.items) {
+                if (item->kind == SyntaxKind::DefaultCaseItem) {
+                    const auto& defItem = item->as<DefaultCaseItemSyntax>();
+                    defaultBlock = static_cast<const MemberSyntax*>(defItem.clause.get());
+                } else if (item->kind == SyntaxKind::StandardCaseItem) {
+                    if (selectedBlock) continue;
+                    const auto& stdItem = item->as<StandardCaseItemSyntax>();
+                    for (size_t ei = 0; ei < stdItem.expressions.size(); ++ei) {
+                        int64_t val = evaluateConstantExpr(
+                            stdItem.expressions[ei], ctx, sm, stdItem);
+                        if (val == selector) {
+                            selectedBlock = static_cast<const MemberSyntax*>(stdItem.clause.get());
+                            break;
+                        }
+                    }
+                }
+            }
+            collectGenerateNBATargetsFromSelectedBlock(
+                selectedBlock ? selectedBlock : defaultBlock, ctx, sm, out);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 static void declareLocalAggregateValue(ResolutionContext& ctx,
                                        const std::string& name,
                                        const Type& type) {
@@ -6699,15 +6798,28 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     for (const auto& sig : unresolved.flops)   registerInlineEnum(sig);
     resolved.named_types = namedTypeRegistry;
 
+    std::set<std::string> generateParentFlopNames;
+    for (const auto* genBlock : unresolved.generateBlocks) {
+        collectGenerateNBATargetsFromMember(
+            genBlock, *mergedCtx, sourceManager, generateParentFlopNames);
+    }
+    for (const auto& flop : unresolved.flops) {
+        generateParentFlopNames.erase(flop.name);
+    }
+    auto isGenerateParentFlop = [&](const UnresolvedSignal& signal) {
+        return generateParentFlopNames.contains(signal.name);
+    };
+
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
+        if (isGenerateParentFlop(signal)) continue;
         auto sig = resolveModuleNode(signal, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
         addInternalNode(resolved, sig);
     }
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;
-    for (const auto& flop : unresolved.flops) {
+    auto addResolvedFlop = [&](const UnresolvedSignal& flop) {
         const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedModuleNode.name,
@@ -6719,6 +6831,19 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                 .binding = {},
                 });
         flopNames.insert(flop.name);
+    };
+    for (const auto& flop : unresolved.flops) {
+        addResolvedFlop(flop);
+    }
+    for (const auto& signal : unresolved.signals) {
+        if (isGenerateParentFlop(signal)) {
+            addResolvedFlop(signal);
+        }
+    }
+    for (const auto& output : unresolved.outputs) {
+        if (isGenerateParentFlop(output)) {
+            addResolvedFlop(output);
+        }
     }
 
     // === Build subroutine registry from module-local functions ===

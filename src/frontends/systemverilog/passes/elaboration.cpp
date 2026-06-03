@@ -2427,8 +2427,10 @@ static ExprValue applySelector(const ExprValue& input,
             throw CompilerError("Range-select on unpacked array is not supported", loc);
         }
         const auto& rangeSelect = selector.as<RangeSelectSyntax>();
-        int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left);
-        int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right);
+        int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left,
+                                            &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+        int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right,
+                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
         auto* leftNode = ctx.graph.constant(left);
         auto* rightNode = ctx.graph.constant(right);
         auto* sliceNode = ctx.graph.slice(value.scalar, leftNode, rightNode);
@@ -2445,11 +2447,13 @@ static ExprValue applySelector(const ExprValue& input,
         }
         const auto& rangeSelect = selector.as<RangeSelectSyntax>();
         auto* baseNode = buildExprDFG(rangeSelect.left, ctx);
-        int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right);
+        int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right,
+                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
         DFGNode* sliceNode = nullptr;
         bool isAscending = selector.kind == SyntaxKind::AscendingRangeSelect;
         try {
-            int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left);
+            int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left,
+                                                &ctx.pkgRegistry, &ctx.namedTypeRegistry);
             int64_t high = isAscending ? base + width - 1 : base;
             int64_t low = isAscending ? base : base - width + 1;
             sliceNode = ctx.graph.slice(value.scalar, ctx.graph.constant(high), ctx.graph.constant(low));
@@ -3635,9 +3639,11 @@ static DFGNode* buildExprScalarImpl(
                         }
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params,
-                                                            ctx.sm, *rangeSelect.left);
+                                                            ctx.sm, *rangeSelect.left,
+                                                            &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                         int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params,
-                                                             ctx.sm, *rangeSelect.right);
+                                                             ctx.sm, *rangeSelect.right,
+                                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                         auto* leftNode = ctx.graph.constant(left);
                         auto* rightNode = ctx.graph.constant(right);
                         indexedSignalNode = ctx.graph.slice(indexedSignalNode, leftNode, rightNode);
@@ -3653,10 +3659,12 @@ static DFGNode* buildExprScalarImpl(
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
                         int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
-                                                             ctx.sm, *rangeSelect.right);
+                                                             ctx.sm, *rangeSelect.right,
+                                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                         try {
                             int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
-                                                                ctx.sm, *rangeSelect.left);
+                                                                ctx.sm, *rangeSelect.left,
+                                                                &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                             auto* high = ctx.graph.constant(base + width - 1);
                             auto* low  = ctx.graph.constant(base);
                             indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
@@ -3713,10 +3721,12 @@ static DFGNode* buildExprScalarImpl(
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
                         int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
-                                                             ctx.sm, *rangeSelect.right);
+                                                             ctx.sm, *rangeSelect.right,
+                                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                         try {
                             int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
-                                                                ctx.sm, *rangeSelect.left);
+                                                                ctx.sm, *rangeSelect.left,
+                                                                &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                             auto* high = ctx.graph.constant(base);
                             auto* low  = ctx.graph.constant(base - width + 1);
                             indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
@@ -4536,8 +4546,12 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect) {
                 const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                 try {
-                    int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params);
-                    int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params);
+                    int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                        ctx.sm, *rangeSelect.left,
+                                                        &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                    int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                         ctx.sm, *rangeSelect.right,
+                                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                     if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
                         const auto& dim = currentSelectedType->packed_dims.front();
                         int64_t elemWidth = packedSuffixWidth(*currentSelectedType, 1);
@@ -4562,8 +4576,12 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 // base +: width → high = base + width - 1, low = base
                 const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                 try {
-                    int64_t base  = evaluateConstantExpr(rangeSelect.left, ctx.params);
-                    int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params);
+                    int64_t base  = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                         ctx.sm, *rangeSelect.left,
+                                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                    int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                         ctx.sm, *rangeSelect.right,
+                                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                     rangeLow  = base;
                     rangeHigh = base + width - 1;
                 } catch (const std::runtime_error&) {

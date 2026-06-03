@@ -5418,6 +5418,9 @@ void resolveStatementInPlace(
             throw ReturnValue{val};
         }
 
+        case SyntaxKind::EmptyStatement:
+            break;
+
         default:
             throw CompilerError(
                 "We expect all statements to be expressions. Current: " + std::string(toString(statement->kind)),

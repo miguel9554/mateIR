@@ -4141,6 +4141,48 @@ static DFGNode* buildExprScalarImpl(
             return node;
         }
 
+        case SyntaxKind::InsideExpression: {
+            auto& inside = expr->as<InsideExpressionSyntax>();
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            DFGNode* lhs = buildExprDFG(inside.expr, ctx);
+            DFGNode* result = nullptr;
+
+            for (const auto* rangeExpr : inside.ranges->valueRanges) {
+                DFGNode* match;
+                if (rangeExpr->kind == SyntaxKind::ValueRangeExpression) {
+                    auto& vr = rangeExpr->as<ValueRangeExpressionSyntax>();
+                    if (vr.op.kind != slang::parsing::TokenKind::Colon) {
+                        throw CompilerError(
+                            "inside: only [lo:hi] ranges are supported, not +/- forms",
+                            loc);
+                    }
+                    DFGNode* lo = buildExprDFG(vr.left, ctx);
+                    DFGNode* hi = buildExprDFG(vr.right, ctx);
+                    auto* geq = ctx.graph.ge(lhs, lo);
+                    geq->type = Type::makeInteger(1, false);
+                    auto* leq = ctx.graph.le(lhs, hi);
+                    leq->type = Type::makeInteger(1, false);
+                    match = ctx.graph.bitwiseAnd(geq, leq);
+                    match->type = Type::makeInteger(1, false);
+                } else {
+                    DFGNode* val = buildExprDFG(rangeExpr, ctx);
+                    match = ctx.graph.eq(lhs, val);
+                    match->type = Type::makeInteger(1, false);
+                }
+                match->loc = loc;
+                result = result ? ctx.graph.bitwiseOr(result, match) : match;
+                if (result->type) result->type = Type::makeInteger(1, false);
+            }
+
+            if (!result) {
+                // empty range list — never matches
+                result = ctx.graph.constant(0);
+            }
+            result->type = Type::makeInteger(1, false);
+            result->loc = loc;
+            return result;
+        }
+
         case SyntaxKind::ConditionalExpression: {
             return buildScalarExprValue(expr, ctx).scalar;
         }

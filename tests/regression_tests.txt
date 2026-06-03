@@ -122,6 +122,7 @@ task_func_test PASS
 uart PASS
 unpacked_array_copy PASS
 unpacked_reverse_index PASS
+inside_operator PASS
 unique_if_fail FAIL unique/unique0 modifiers are not supported on if
 unique0_if_fail FAIL unique/unique0 modifiers are not supported on if
 unique0_case_fail FAIL unique0 modifiers are not supported on case

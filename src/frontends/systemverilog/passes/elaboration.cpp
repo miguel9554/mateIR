@@ -4750,19 +4750,41 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 std::format("{} NOT a flop and assigned on seq. block", baseName),
                 resolveSourceLoc(assignExpr, ctx.sm));
         }
+        std::vector<AggregateLeafBinding> lhsPlan;
+        std::string lhsBase = baseName + indexSuffix;
+        collectAggregateLeafPlan(*assignmentTargetType, lhsBase, {}, lhsPlan);
+
         if (!sameAggregateStructTypedefShape(*assignmentTargetType, RHSvalue.type)) {
-            bool rhsStructAggregate = typeContainsStructValue(RHSvalue.type);
-            if (rhsStructAggregate) {
+            if (typeContainsStructValue(RHSvalue.type)) {
                 throw CompilerError(
                     "whole-struct assignment requires matching typedef names",
                     assignLoc);
             }
-            throw CompilerError("struct/vector assignment is not supported", assignLoc);
+            // RHS is a scalar integer bit-compatible with a packed struct LHS.
+            // Slice it into per-field SLICE nodes, MSB-first (declaration order).
+            if (!RHSvalue.scalar) {
+                throw CompilerError("struct/vector assignment is not supported", assignLoc);
+            }
+            // Compute each leaf's LSB offset inside the scalar.
+            int64_t cursor = 0; // accumulates from LSB end
+            std::vector<int64_t> lsbOffsets(lhsPlan.size());
+            for (int64_t i = static_cast<int64_t>(lhsPlan.size()) - 1; i >= 0; --i) {
+                lsbOffsets[i] = cursor;
+                cursor += lhsPlan[i].leaf_type.width;
+            }
+            RHSvalue.leaves.resize(lhsPlan.size());
+            for (size_t i = 0; i < lhsPlan.size(); ++i) {
+                int64_t lo = lsbOffsets[i];
+                int64_t hi = lo + lhsPlan[i].leaf_type.width - 1;
+                auto* loNode = ctx.graph.constant(lo);
+                auto* hiNode = ctx.graph.constant(hi);
+                auto* sliceNode = ctx.graph.slice(RHSvalue.scalar, hiNode, loNode);
+                sliceNode->type = lhsPlan[i].leaf_type;
+                sliceNode->loc = assignLoc;
+                RHSvalue.leaves[i] = sliceNode;
+            }
         }
 
-        std::vector<AggregateLeafBinding> lhsPlan;
-        std::string lhsBase = baseName + indexSuffix;
-        collectAggregateLeafPlan(*assignmentTargetType, lhsBase, {}, lhsPlan);
         if (RHSvalue.leaves.size() != lhsPlan.size()) {
             throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
         }
@@ -4799,7 +4821,13 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             typeContainsStructValue(RHSvalue.type) &&
             (!assignmentTargetType ||
              !typeContainsStructValue(*assignmentTargetType))) {
-        throw CompilerError("struct/vector assignment is not supported", assignLoc);
+        // Struct RHS assigned to a scalar LHS: concatenate field leaves MSB-first.
+        if (RHSvalue.leaves.empty()) {
+            throw CompilerError("struct/vector assignment is not supported", assignLoc);
+        }
+        RHSexprNode = ctx.graph.concat(RHSvalue.leaves);
+        RHSexprNode->type = Type::makeInteger(RHSvalue.type.width, false);
+        RHSexprNode->loc = assignLoc;
     }
 
     if (!RHSexprNode) {

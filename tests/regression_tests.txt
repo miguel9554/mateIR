@@ -86,8 +86,6 @@ struct_whole_assign_phase2_fail PASS
 struct_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
 struct_package_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
 struct_package_port_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
-struct_to_vector_assign_fail FAIL struct/vector assignment is not supported
-vector_to_struct_assign_fail FAIL struct/vector assignment is not supported
 struct_conditional_expr PASS
 struct_if_branch_merge PASS
 struct_case_branch_merge PASS

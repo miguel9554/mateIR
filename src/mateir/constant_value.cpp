@@ -287,7 +287,20 @@ std::vector<const ConstantValue*> ConstantValue::scalarLeaves() const {
     return leaves;
 }
 
+ConstantValue ConstantValue::flattenToBits() const {
+    if (isBits()) return *this;
+    if (!isAggregate() || !type_.isPackedStruct()) {
+        throw CompilerError("Cannot flatten non-packed-struct constant to bits");
+    }
+    std::vector<ConstantValue> flatFields;
+    for (const auto& elem : asAggregate().elements) {
+        flatFields.push_back(elem.flattenToBits());
+    }
+    return concatenate(Type::makeInteger(type_.width, false), flatFields);
+}
+
 std::optional<int64_t> ConstantValue::asInt64() const {
+    if (isAggregate() && type_.isPackedStruct()) return flattenToBits().asInt64();
     if (!isBits()) return std::nullopt;
     const auto& value = std::get<ConstantBitVector>(payload_);
     auto bit = [&](int index) {

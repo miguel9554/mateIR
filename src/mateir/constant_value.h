@@ -63,6 +63,10 @@ public:
     const ConstantValue& element(size_t index) const;
     std::vector<const ConstantValue*> scalarLeaves() const;
 
+    // Recursively flattens a packed-struct aggregate into a ConstantBitVector.
+    // Returns *this unchanged if already bits. Throws for unpacked aggregates.
+    ConstantValue flattenToBits() const;
+
     std::optional<int64_t> asInt64() const;
     int64_t requireInt64(std::string_view context,
                          std::optional<SourceLoc> loc = std::nullopt) const;

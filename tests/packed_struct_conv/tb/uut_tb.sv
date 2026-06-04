@@ -4,6 +4,22 @@ module uut_tb(
     // All synchronous driving via NBA assignments in the clk always block.
     // No checks — verification is custom-sim vs Verilator comparison.
 
+    initial begin
+        _if.clk = 1'b0;
+        forever #5 _if.clk = ~_if.clk;
+    end
+
+    initial begin
+        _if.rst_n = 1'b1;
+        #1  _if.rst_n = 1'b0;
+        #20 _if.rst_n = 1'b1;
+    end
+
+    initial begin
+        repeat (60) @(posedge _if.clk);
+        $finish;
+    end
+
     int cycle;
 
     always @(posedge _if.clk or negedge _if.rst_n) begin

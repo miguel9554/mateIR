@@ -354,11 +354,21 @@ static ExprValue buildValueForTargetType(const slang::syntax::ExpressionSyntax* 
                                          const std::optional<SourceLoc>& loc,
                                          bool allowAggregateScalarBroadcast = false);
 
+static ExprValue buildConditionalExprValueForTarget(
+    const slang::syntax::ConditionalExpressionSyntax& cond,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc,
+    bool allowAggregateScalarBroadcast);
+
 static ExprValue buildBroadcastValueFromScalar(
     const ExprValue& scalarValue,
     const Type& targetType,
     ResolutionContext& ctx,
     const std::optional<SourceLoc>& loc);
+
+static bool expressionNeedsAssignmentPatternContext(
+    const slang::syntax::ExpressionSyntax* expr);
 
 // Build a scalar-only expression. Throws if the expression resolves to an array.
 static DFGNode* buildExprDFG(const slang::syntax::ExpressionSyntax* expr,
@@ -2194,14 +2204,22 @@ static ExprValue exprValueFromConstantParam(const std::string& baseName,
         }
         std::vector<DFGNode*> leaves;
         leaves.reserve(plan.size());
+        std::vector<AggregatePath> leafPaths;
+        leafPaths.reserve(plan.size());
         for (size_t i = 0; i < plan.size(); ++i) {
             auto* n = graph.constant(
                 fieldLeafValues[i]->requireInt64("Parameter field '" + plan[i].name + "'", loc));
             n->type = plan[i].leaf_type;
             if (loc) n->loc = *loc;
             leaves.push_back(n);
+            leafPaths.push_back(plan[i].path);
         }
-        return ExprValue{.type = type, .scalar = nullptr, .leaves = leaves, .leaf_paths = {}};
+        return ExprValue{
+            .type = type,
+            .scalar = nullptr,
+            .leaves = leaves,
+            .leaf_paths = leafPaths,
+        };
     }
     auto* n = graph.constant(cv.requireInt64("DFG parameter '" + baseName + "'", loc));
     n->type = type;
@@ -2855,8 +2873,18 @@ static ExprValue buildConditionalExprValue(const ConditionalExpressionSyntax& co
         mux->loc = loc;
         if (trueValue.leaves[i] && falseValue.leaves[i] &&
             trueValue.leaves[i]->hasType() && falseValue.leaves[i]->hasType()) {
-            ExprValue lhsLeaf{.type = *trueValue.leaves[i]->type, .scalar = trueValue.leaves[i]};
-            ExprValue rhsLeaf{.type = *falseValue.leaves[i]->type, .scalar = falseValue.leaves[i]};
+            ExprValue lhsLeaf{
+                .type = *trueValue.leaves[i]->type,
+                .scalar = trueValue.leaves[i],
+                .leaves = {},
+                .leaf_paths = {},
+            };
+            ExprValue rhsLeaf{
+                .type = *falseValue.leaves[i]->type,
+                .scalar = falseValue.leaves[i],
+                .leaves = {},
+                .leaf_paths = {},
+            };
             Type mergedType = mergeFrontendDataTypes(lhsLeaf, rhsLeaf, loc);
             if (mergedType.isEnum()) mux->type = mergedType;
         }
@@ -2864,6 +2892,72 @@ static ExprValue buildConditionalExprValue(const ConditionalExpressionSyntax& co
     }
     return ExprValue{
         .type = trueValue.type,
+        .scalar = nullptr,
+        .leaves = std::move(leaves),
+        .leaf_paths = trueValue.leaf_paths,
+    };
+}
+
+static ExprValue buildConditionalExprValueForTarget(
+    const ConditionalExpressionSyntax& cond,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc,
+    bool allowAggregateScalarBroadcast) {
+    if (!targetType.isStruct() || !targetType.unpacked_dims.empty()) {
+        throw CompilerError("struct/vector assignment is not supported", loc);
+    }
+    if (cond.predicate->conditions.size() != 1) {
+        throw CompilerError("Only single condition supported in ternary expression", loc);
+    }
+    if (cond.predicate->conditions[0]->matchesClause) {
+        throw CompilerError("matches clause not supported in ternary expression", loc);
+    }
+
+    DFGNode* condNode = buildBooleanConditionNode(cond.predicate->conditions[0]->expr, ctx, loc);
+    ExprValue trueValue = buildValueForTargetType(
+        cond.left, targetType, ctx, loc, allowAggregateScalarBroadcast);
+    ExprValue falseValue = buildValueForTargetType(
+        cond.right, targetType, ctx, loc, allowAggregateScalarBroadcast);
+
+    if (!sameAggregateStructTypedefShape(trueValue.type, falseValue.type)) {
+        throw CompilerError("whole-struct conditional requires matching typedef names", loc);
+    }
+    if (trueValue.leaves.size() != falseValue.leaves.size() ||
+        trueValue.leaf_paths.size() != falseValue.leaf_paths.size()) {
+        throw CompilerError("whole-struct conditional leaf shape mismatch", loc);
+    }
+
+    std::vector<DFGNode*> leaves;
+    leaves.reserve(trueValue.leaves.size());
+    for (size_t i = 0; i < trueValue.leaves.size(); ++i) {
+        if (!aggregatePathEqual(trueValue.leaf_paths[i], falseValue.leaf_paths[i])) {
+            throw CompilerError("whole-struct conditional leaf path mismatch", loc);
+        }
+        auto* mux = ctx.graph.mux(condNode, trueValue.leaves[i], falseValue.leaves[i]);
+        mux->loc = loc;
+        if (trueValue.leaves[i] && falseValue.leaves[i] &&
+            trueValue.leaves[i]->hasType() && falseValue.leaves[i]->hasType()) {
+            ExprValue lhsLeaf{
+                .type = *trueValue.leaves[i]->type,
+                .scalar = trueValue.leaves[i],
+                .leaves = {},
+                .leaf_paths = {},
+            };
+            ExprValue rhsLeaf{
+                .type = *falseValue.leaves[i]->type,
+                .scalar = falseValue.leaves[i],
+                .leaves = {},
+                .leaf_paths = {},
+            };
+            Type mergedType = mergeFrontendDataTypes(lhsLeaf, rhsLeaf, loc);
+            mux->type = mergedType;
+        }
+        leaves.push_back(mux);
+    }
+
+    return ExprValue{
+        .type = targetType,
         .scalar = nullptr,
         .leaves = std::move(leaves),
         .leaf_paths = trueValue.leaf_paths,
@@ -2943,6 +3037,22 @@ static ExprValue coerceAssignmentExprToWidth(ResolutionContext& ctx,
                 "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
                 sourceWidth, targetType->enumInfo().type_name, targetWidth), loc);
         }
+        value.type = *targetType;
+        return value;
+    }
+
+    if (targetType && expr->type->kind != targetType->kind &&
+        expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
+        auto* highNode = ctx.graph.constant(targetWidth - 1);
+        auto* lowNode = ctx.graph.constant(0);
+        if (loc) {
+            highNode->loc = *loc;
+            lowNode->loc = *loc;
+        }
+        auto* retagged = ctx.graph.slice(expr, highNode, lowNode);
+        retagged->type = *targetType;
+        if (loc) retagged->loc = *loc;
+        value.scalar = retagged;
         value.type = *targetType;
         return value;
     }
@@ -3283,6 +3393,54 @@ static ExprValue buildStructLiteralExprValue(const AssignmentPatternExpressionSy
     };
 }
 
+static ExprValue buildAggregateLeavesFromScalar(const ExprValue& scalarValue,
+                                                const Type& targetType,
+                                                ResolutionContext& ctx,
+                                                const std::optional<SourceLoc>& loc) {
+    if (!targetType.isStruct() || !targetType.unpacked_dims.empty()) {
+        throw CompilerError("Struct literal target type is invalid", loc);
+    }
+    if (!scalarValue.scalar) {
+        throw CompilerError("struct/vector assignment is not supported", loc);
+    }
+
+    std::vector<AggregateLeafBinding> plan;
+    collectAggregateLeafPlan(targetType, "", {}, plan);
+
+    int64_t cursor = 0;
+    std::vector<int64_t> lsbOffsets(plan.size());
+    for (int64_t i = static_cast<int64_t>(plan.size()) - 1; i >= 0; --i) {
+        lsbOffsets[i] = cursor;
+        cursor += plan[i].leaf_type.width;
+    }
+
+    std::vector<DFGNode*> leaves;
+    leaves.reserve(plan.size());
+    for (size_t i = 0; i < plan.size(); ++i) {
+        int64_t lo = lsbOffsets[i];
+        int64_t hi = lo + plan[i].leaf_type.width - 1;
+        auto* loNode = ctx.graph.constant(lo);
+        auto* hiNode = ctx.graph.constant(hi);
+        auto* sliceNode = ctx.graph.slice(scalarValue.scalar, hiNode, loNode);
+        sliceNode->type = plan[i].leaf_type;
+        sliceNode->loc = loc;
+        leaves.push_back(sliceNode);
+    }
+
+    std::vector<AggregatePath> leafPaths;
+    leafPaths.reserve(plan.size());
+    for (const auto& leaf : plan) {
+        leafPaths.push_back(leaf.path);
+    }
+
+    return ExprValue{
+        .type = targetType,
+        .scalar = nullptr,
+        .leaves = std::move(leaves),
+        .leaf_paths = std::move(leafPaths),
+    };
+}
+
 static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
                                          const Type& targetType,
                                          ResolutionContext& ctx,
@@ -3292,6 +3450,14 @@ static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
         if (expr->kind == SyntaxKind::AssignmentPatternExpression) {
             return buildAssignmentPatternExprValueForTarget(
                 expr->as<AssignmentPatternExpressionSyntax>(), targetType, ctx, loc);
+        }
+        if (targetType.isStruct() && expr->kind == SyntaxKind::ConditionalExpression) {
+            return buildConditionalExprValueForTarget(
+                expr->as<ConditionalExpressionSyntax>(),
+                targetType,
+                ctx,
+                loc,
+                allowAggregateScalarBroadcast);
         }
         ExprValue value = buildExprValue(expr, ctx);
         if (!sameAggregateStructTypedefShape(value.type, targetType)) {
@@ -3303,6 +3469,9 @@ static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
                 return buildBroadcastValueFromScalar(value, targetType, ctx, loc);
             }
             throw CompilerError("struct/vector assignment is not supported", loc);
+        }
+        if (targetType.isStruct() && value.scalar && value.leaves.empty()) {
+            return buildAggregateLeavesFromScalar(value, targetType, ctx, loc);
         }
         return value;
     }
@@ -3375,6 +3544,24 @@ static ExprValue buildAssignmentPatternExprValueForTarget(
     }
 
     throw CompilerError("Assignment patterns are only supported for whole unpacked arrays or struct literals", loc);
+}
+
+static bool expressionNeedsAssignmentPatternContext(const ExpressionSyntax* expr) {
+    if (!expr) return false;
+    switch (expr->kind) {
+        case SyntaxKind::AssignmentPatternExpression:
+            return true;
+        case SyntaxKind::ParenthesizedExpression:
+            return expressionNeedsAssignmentPatternContext(
+                expr->as<ParenthesizedExpressionSyntax>().expression);
+        case SyntaxKind::ConditionalExpression: {
+            const auto& conditional = expr->as<ConditionalExpressionSyntax>();
+            return expressionNeedsAssignmentPatternContext(conditional.left) ||
+                   expressionNeedsAssignmentPatternContext(conditional.right);
+        }
+        default:
+            return false;
+    }
 }
 
 // Build DFG node directly from slang expression syntax
@@ -4418,12 +4605,14 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
     }
 
-    // Build the expression value of the RHS. Whole-array assignments consume the
-    // array-valued form; scalar paths below use RHSexprNode.
+    // Build the expression value of the RHS. Expressions with untyped assignment
+    // patterns may need the LHS type, so defer them until LHS normalization below.
+    const bool rhsNeedsAssignmentPatternContext =
+        !prebuiltRhs && expressionNeedsAssignmentPatternContext(right);
     ExprValue RHSvalue = prebuiltRhs
         ? ExprValue{.type = prebuiltRhs->type ? *prebuiltRhs->type : Type{},
                     .scalar = prebuiltRhs, .leaves = {}, .leaf_paths = {}}
-        : (right->kind == SyntaxKind::AssignmentPatternExpression)
+        : rhsNeedsAssignmentPatternContext
             ? ExprValue{.type = Type{}, .scalar = nullptr, .leaves = {}, .leaf_paths = {}}
             : buildExprValue(right, ctx);
     DFGNode* RHSexprNode = RHSvalue.scalar;
@@ -4431,6 +4620,10 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     // LHS concatenation: {elem_n, ..., elem_0} = RHS
     // Decompose RHS into slices and assign each to the corresponding element.
     if (left->kind == SyntaxKind::ConcatenationExpression) {
+        if (rhsNeedsAssignmentPatternContext) {
+            RHSvalue = buildExprValue(right, ctx);
+            RHSexprNode = RHSvalue.scalar;
+        }
         auto& lhsConcat = left->as<ConcatenationExpressionSyntax>();
 
         // Collect elements MSB-first, resolving each name and width from the
@@ -4728,19 +4921,23 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     } else if (currentSelectedType) {
         assignmentTargetType = *currentSelectedType;
     }
-    if (right->kind == SyntaxKind::AssignmentPatternExpression) {
+    if (rhsNeedsAssignmentPatternContext) {
         if (!hasRangeSelect && assignmentTargetType &&
             typeContainsStructValue(*assignmentTargetType)) {
-            RHSvalue = buildAssignmentPatternExprValueForTarget(
-                right->as<AssignmentPatternExpressionSyntax>(),
+            RHSvalue = buildValueForTargetType(
+                right,
                 *assignmentTargetType,
                 ctx,
-                assignLoc);
+                assignLoc,
+                false);
             RHSexprNode = RHSvalue.scalar;
-        } else {
+        } else if (right->kind == SyntaxKind::AssignmentPatternExpression) {
             throw CompilerError(
                 "Assignment patterns are only supported for whole unpacked arrays or struct literals",
                 assignLoc);
+        } else {
+            RHSvalue = buildExprValue(right, ctx);
+            RHSexprNode = RHSvalue.scalar;
         }
     }
     if (!hasRangeSelect && assignmentTargetType &&

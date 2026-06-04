@@ -13,15 +13,12 @@ module struct_conditional_expr (
     } item_t;
 
     item_t a;
-    item_t b;
     item_t out_s;
 
     always_comb begin
         a.x = ax;
         a.y = ay;
-        b.x = bx;
-        b.y = by;
-        out_s = sel ? a : b;
+        out_s = sel ? a : '{x: bx, y: by};
         ox = out_s.x;
         oy = out_s.y;
     end

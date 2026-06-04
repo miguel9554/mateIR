@@ -1,0 +1,16 @@
+module_name: packed_struct_conv
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - rgb_in_i
+      - exc_in_i
+      - wide_in_i
+      - smag_in_i
+      - nested_in_i
+      - flag_in_i

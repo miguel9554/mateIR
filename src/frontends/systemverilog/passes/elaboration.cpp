@@ -2176,6 +2176,39 @@ static std::vector<AggregatePath> lookupAggregateLeafPaths(ResolutionContext& ct
     return out;
 }
 
+// Build an ExprValue for a parameter constant. Scalar params become a single
+// constant DFG node. Packed-struct params are decomposed into per-field constant
+// nodes so the result has the same leaf structure as a module struct variable.
+static ExprValue exprValueFromConstantParam(const std::string& baseName,
+                                            const ConstantValue& cv,
+                                            const std::optional<SourceLoc>& loc,
+                                            DFG& graph) {
+    const Type& type = cv.type();
+    if (type.isStruct() && type.unpacked_dims.empty()) {
+        std::vector<AggregateLeafBinding> plan;
+        collectAggregateLeafPlan(type, baseName, {}, plan);
+        const auto fieldLeafValues = cv.scalarLeaves();
+        if (fieldLeafValues.size() != plan.size()) {
+            throw CompilerError(
+                "Struct constant leaf count mismatch for parameter '" + baseName + "'");
+        }
+        std::vector<DFGNode*> leaves;
+        leaves.reserve(plan.size());
+        for (size_t i = 0; i < plan.size(); ++i) {
+            auto* n = graph.constant(
+                fieldLeafValues[i]->requireInt64("Parameter field '" + plan[i].name + "'", loc));
+            n->type = plan[i].leaf_type;
+            if (loc) n->loc = *loc;
+            leaves.push_back(n);
+        }
+        return ExprValue{.type = type, .scalar = nullptr, .leaves = leaves, .leaf_paths = {}};
+    }
+    auto* n = graph.constant(cv.requireInt64("DFG parameter '" + baseName + "'", loc));
+    n->type = type;
+    if (loc) n->loc = *loc;
+    return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
+}
+
 static ExprValue exprValueFromIdentifier(const std::string& baseName,
                                          const std::optional<SourceLoc>& loc,
                                          ResolutionContext& ctx) {
@@ -2214,11 +2247,7 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
         }
         auto paramIt = ctx.params.values.find(baseName);
         if (paramIt != ctx.params.values.end()) {
-                auto* n = ctx.graph.constant(
-                    paramIt->second.requireInt64("DFG parameter '" + baseName + "'", loc));
-                n->type = paramIt->second.type();
-            if (loc) n->loc = *loc;
-            return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
+            return exprValueFromConstantParam(baseName, paramIt->second, loc, ctx.graph);
         }
     }
     if (!node || !node->hasType()) {

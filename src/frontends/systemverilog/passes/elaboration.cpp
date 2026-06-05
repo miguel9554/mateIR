@@ -6894,6 +6894,19 @@ static void collectGenerateNBATargetsFromMember(const MemberSyntax* member,
                 integerConstant(evaluateConstantExpr(loopGen.initialExpr, ctx, sm, loopGen));
 
             while (evaluateConstantExpr(loopGen.stopExpr, iterCtx, sm, loopGen)) {
+                // Inject localparams declared in the loop body before scanning the block.
+                if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
+                    for (const auto* m : loopGen.block->as<GenerateBlockSyntax>().members) {
+                        if (m->kind != SyntaxKind::ParameterDeclarationStatement) continue;
+                        for (const auto& param : extractParameter(
+                                m->as<ParameterDeclarationStatementSyntax>().parameter, {})) {
+                            if (param.defaultValue)
+                                iterCtx.values[param.name] =
+                                    integerConstant(evaluateConstantExpr(
+                                        param.defaultValue, iterCtx, sm, *m));
+                        }
+                    }
+                }
                 collectGenerateNBATargetsFromSelectedBlock(loopGen.block, iterCtx, sm, out);
                 iterCtx.values[genvarName] =
                     integerConstant(evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx));
@@ -7183,6 +7196,26 @@ static void registerGenerateLocalTypedefs(const SyntaxList<MemberSyntax>& member
     }
 }
 
+static void registerGenerateLocalParams(
+        const SyntaxList<MemberSyntax>& members,
+        const ResolutionContext& ctx,
+        ParameterContext& scopeParams) {
+    for (const auto* member : members) {
+        if (member->kind != SyntaxKind::ParameterDeclarationStatement) continue;
+        const auto& statement = member->as<ParameterDeclarationStatementSyntax>();
+        auto unresolved = extractParameter(statement.parameter, {});
+        for (const auto& param : unresolved) {
+            if (!param.defaultValue)
+                throw CompilerError("localparam '" + param.name + "' must have a default value",
+                                    resolveSourceLoc(statement, ctx.sm));
+            int64_t value = evaluateConstantExpr(
+                param.defaultValue, scopeParams, ctx.sm, statement,
+                &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+            scopeParams.values[param.name] = integerConstant(value);
+        }
+    }
+}
+
 // Resolve a list of generate-block members into the current ResolutionContext
 void resolveGenerateMembersInPlace(
         const SyntaxList<MemberSyntax>& members,
@@ -7192,6 +7225,7 @@ void resolveGenerateMembersInPlace(
     EnumMemberMap scopeEnumMemberValues = ctx.enumMemberValues;
     registerGenerateLocalTypedefs(
         members, ctx, scopeParams, scopeNamedTypes, scopeEnumMemberValues);
+    registerGenerateLocalParams(members, ctx, scopeParams);
     ResolutionContext scopeCtx{
         ctx.graph, ctx.thisModule, ctx.flopNames, scopeParams,
         ctx.sm, ctx.is_sequential, ctx.triggers, ctx.domain_facts, ctx.occurrence,
@@ -7449,6 +7483,10 @@ void resolveGenerateMemberInPlace(
 
         case SyntaxKind::GenvarDeclaration:
             // Genvars handled by LoopGenerate via params — nothing to do here
+            break;
+
+        case SyntaxKind::ParameterDeclarationStatement:
+            // Pre-scanned by registerGenerateLocalParams — nothing to do here
             break;
 
         default:

@@ -10,6 +10,7 @@
  * the read instruction.
  */
 
+`include "ibex_test_macros.svh"
 `include "prim_assert.sv"
 `include "dv_fcov_macros.svh"
 

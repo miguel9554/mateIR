@@ -1,0 +1,6 @@
+`ifndef IBEX_TEST_MACROS_SVH
+`define IBEX_TEST_MACROS_SVH
+
+`define SYNTHESIS
+
+`endif

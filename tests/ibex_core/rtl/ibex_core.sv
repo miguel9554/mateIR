@@ -3,11 +3,11 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+`include "ibex_test_macros.svh"
+
 `ifdef RISCV_FORMAL
   `define RVFI
 `endif
-
- `define SYNTHESIS
 
 `include "prim_assert.sv"
 `include "dv_fcov_macros.svh"

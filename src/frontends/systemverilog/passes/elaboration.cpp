@@ -2466,6 +2466,67 @@ static ExprValue selectDynamicUnpacked(const ExprValue& value,
     return ExprValue{.type = childType, .scalar = nullptr, .leaves = std::move(resultLeaves), .leaf_paths = std::move(childPaths)};
 }
 
+static ExprValue selectDynamicPackedSingleBit(const ExprValue& value,
+                                              DFGNode* selectorExprNode,
+                                              ResolutionContext& ctx,
+                                              const std::optional<SourceLoc>& loc) {
+    if (!value.scalar || value.type.packed_dims.empty()) {
+        throw CompilerError("Dynamic packed index on non-packed scalar expression", loc);
+    }
+
+    const auto& dim = value.type.packed_dims.front();
+    int64_t elemWidth = packedSuffixWidth(value.type, 1);
+    if (elemWidth != 1) {
+        throw CompilerError(
+            "Dynamic packed indexing is only supported when selecting a single bit",
+            loc);
+    }
+    if (!selectorExprNode->hasType()) {
+        throw CompilerError("Dynamic packed bit-select requires a typed selector", loc);
+    }
+
+    int selectorWidth = selectorExprNode->type->width;
+    if (selectorWidth <= 0 || selectorWidth >= 63) {
+        throw CompilerError(
+            std::format("Dynamic packed bit-select selector width {} is unsupported", selectorWidth),
+            loc);
+    }
+
+    Type narrowed = value.type;
+    narrowed.width = 1;
+    narrowed.packed_dims.erase(narrowed.packed_dims.begin());
+
+    int64_t totalCodes = int64_t{1} << selectorWidth;
+    std::vector<int64_t> armValues;
+    std::vector<DFGNode*> armData;
+    armValues.reserve(static_cast<size_t>(totalCodes));
+    armData.reserve(static_cast<size_t>(totalCodes));
+
+    auto* xNode = ctx.graph.x(narrowed);
+    if (loc) xNode->loc = *loc;
+
+    int64_t lo = std::min<int64_t>(dim.left, dim.right);
+    int64_t hi = std::max<int64_t>(dim.left, dim.right);
+    for (int64_t selectorValue = 0; selectorValue < totalCodes; ++selectorValue) {
+        armValues.push_back(selectorValue);
+        if (selectorValue < lo || selectorValue > hi) {
+            armData.push_back(xNode);
+            continue;
+        }
+
+        int64_t offset = packedIndexOffsetFromLsb(dim, selectorValue);
+        auto* bit = ctx.graph.slice(value.scalar, ctx.graph.constant(offset), ctx.graph.constant(offset));
+        bit->type = narrowed;
+        if (loc) bit->loc = *loc;
+        armData.push_back(bit);
+    }
+
+    auto* mux = ctx.graph.mux(selectorExprNode, armValues, armData);
+    mux->type = narrowed;
+    if (loc) mux->loc = *loc;
+    return ExprValue{.type = narrowed, .scalar = mux, .leaves = {}, .leaf_paths = {}};
+}
+
 static ExprValue selectStructField(const ExprValue& value,
                                    const std::string& fieldName,
                                    const std::optional<SourceLoc>& loc) {
@@ -2552,6 +2613,10 @@ static ExprValue applySelector(const ExprValue& input,
                 return ExprValue{.type = narrowed, .scalar = sliceNode, .leaves = {}, .leaf_paths = {}};
             }
         } catch (const std::runtime_error&) {
+            if (!value.type.packed_dims.empty()) {
+                auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
+                return selectDynamicPackedSingleBit(value, selectorExprNode, ctx, loc);
+            }
             throw CompilerError("Dynamic bit-select on packed vector is not yet supported", loc);
         }
     } else if (selector.kind == SyntaxKind::SimpleRangeSelect) {
@@ -3867,9 +3932,25 @@ static DFGNode* buildExprScalarImpl(
                                 continue;
                             }
                         } catch (const std::runtime_error&) {
-                            // not constant — emit MUX for unpacked array, throw for packed
+                            // not constant — emit MUX for unpacked array or single-bit packed selects
                         }
                         auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
+                        if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
+                            ExprValue baseValue{
+                                .type = *currentSelectedType,
+                                .scalar = indexedSignalNode,
+                                .leaves = {},
+                                .leaf_paths = {},
+                            };
+                            ExprValue selected = selectDynamicPackedSingleBit(
+                                baseValue,
+                                selectorExprNode,
+                                ctx,
+                                resolveSourceLoc(*expr, ctx.sm));
+                            indexedSignalNode = selected.scalar;
+                            currentSelectedType = selected.type;
+                            continue;
+                        }
                         if (!currentSelectedType || currentSelectedType->unpacked_dims.empty()) {
                             throw CompilerError(
                                 "Dynamic bit-select on packed vector is not yet supported",

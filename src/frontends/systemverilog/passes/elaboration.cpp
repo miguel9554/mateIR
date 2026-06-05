@@ -7004,18 +7004,135 @@ static void resolveGenerateScopeDecls(
     const std::set<std::string>& nbaTargets,
     ResolutionContext& ctx);
 
+static void registerGenerateLocalTypedefs(const SyntaxList<MemberSyntax>& members,
+                                          const ResolutionContext& ctx,
+                                          ParameterContext& scopeParams,
+                                          NamedTypeRegistry& namedTypeRegistry,
+                                          EnumMemberMap& enumMemberValues) {
+    for (const auto* member : members) {
+        if (member->kind != SyntaxKind::TypedefDeclaration) continue;
+        const auto& syntax = member->as<TypedefDeclarationSyntax>();
+        std::string typeName(syntax.name.valueText());
+        if (namedTypeRegistry.contains(typeName)) {
+            throw CompilerError(
+                "Duplicate typedef in generate scope: " + typeName,
+                resolveSourceLoc(syntax, ctx.sm));
+        }
+
+        if (syntax.type->kind == SyntaxKind::EnumType) {
+            const auto& enumSyntax = syntax.type->as<EnumTypeSyntax>();
+            int width = 32;
+            if (enumSyntax.baseType) {
+                Type base = resolveType(
+                    *enumSyntax.baseType, scopeParams, namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
+                width = base.width;
+            }
+
+            std::vector<EnumMember> members;
+            int64_t nextValue = 0;
+            for (const auto* decl : enumSyntax.members) {
+                int64_t value = nextValue;
+                if (decl->initializer) {
+                    value = evaluateConstantExpr(decl->initializer->expr, scopeParams, &ctx.pkgRegistry);
+                }
+                members.push_back({std::string(decl->name.valueText()), value});
+                nextValue = value + 1;
+            }
+
+            Type enumType = Type::makeEnum(typeName, width, members);
+            namedTypeRegistry[typeName] = enumType;
+            for (const auto& enumMember : members) {
+                scopeParams.values[enumMember.name] =
+                    ConstantValue::bits(enumType, enumMember.value);
+                enumMemberValues[enumMember.name] = {enumMember.value, enumType};
+            }
+            continue;
+        }
+
+        if (syntax.type->kind == SyntaxKind::StructType) {
+            const auto& structSyntax = syntax.type->as<StructUnionTypeSyntax>();
+            std::vector<StructField> fields;
+            std::set<std::string> seenNames;
+            for (const auto* fieldMember : structSyntax.members) {
+                if (fieldMember->type->kind == SyntaxKind::StructType ||
+                    fieldMember->type->kind == SyntaxKind::UnionType) {
+                    throw CompilerError("anonymous struct declarations are not supported",
+                                        resolveSourceLoc(*fieldMember, ctx.sm));
+                }
+                Type memberType = resolveType(
+                    *fieldMember->type, scopeParams, namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
+                for (const auto* declarator : fieldMember->declarators) {
+                    if (declarator->initializer) {
+                        throw CompilerError("struct member initializers/defaults are not supported",
+                                            resolveSourceLoc(*declarator, ctx.sm));
+                    }
+                    if (!declarator->dimensions.empty()) {
+                        throw CompilerError("struct fields cannot be unpacked arrays",
+                                            resolveSourceLoc(*declarator, ctx.sm));
+                    }
+                    std::string fieldName(declarator->name.valueText());
+                    if (!seenNames.insert(fieldName).second) {
+                        throw CompilerError(
+                            "duplicate field name in struct typedef '" + typeName + "': " + fieldName,
+                            resolveSourceLoc(*declarator, ctx.sm));
+                    }
+                    fields.push_back({.name = fieldName, .type = std::make_shared<Type>(memberType)});
+                }
+            }
+
+            namedTypeRegistry[typeName] = Type::makeStruct(
+                typeName,
+                std::format("{}::{}", ctx.instance_path.empty() ? ctx.thisModule->name : ctx.instance_path,
+                            typeName),
+                !structSyntax.packed.isMissing(),
+                std::move(fields));
+            continue;
+        }
+
+        throw CompilerError(
+            "Only enum and struct typedefs are supported in generate scope",
+            resolveSourceLoc(syntax, ctx.sm));
+    }
+}
+
 // Resolve a list of generate-block members into the current ResolutionContext
 void resolveGenerateMembersInPlace(
         const SyntaxList<MemberSyntax>& members,
         ResolutionContext& ctx) {
+    ParameterContext scopeParams = ctx.params;
+    NamedTypeRegistry scopeNamedTypes = ctx.namedTypeRegistry;
+    EnumMemberMap scopeEnumMemberValues = ctx.enumMemberValues;
+    registerGenerateLocalTypedefs(
+        members, ctx, scopeParams, scopeNamedTypes, scopeEnumMemberValues);
+    ResolutionContext scopeCtx{
+        ctx.graph, ctx.thisModule, ctx.flopNames, scopeParams,
+        ctx.sm, ctx.is_sequential, ctx.triggers, ctx.domain_facts, ctx.occurrence,
+        ctx.combDrivers, ctx.instance_path, ctx.local_nodes, ctx.local_declared_types,
+        ctx.local_aggregate_bindings, ctx.local_flop_names, scopeNamedTypes,
+        scopeEnumMemberValues, ctx.pkgRegistry, ctx.moduleLookup, ctx.globalImports,
+        ctx.current_write_origin, ctx.partial_drivers, ctx.write_states, ctx.subroutineRegistry,
+        ctx.subroutine_locals, ctx.currently_inlining, ctx.is_subroutine_scope, ctx.current_return_var};
     // Pre-scan: find all flop names (LHS of non-blocking assigns) in this scope
     auto nbaTargets = collectNBATargets(members);
-    ctx.local_flop_names.insert(nbaTargets.begin(), nbaTargets.end());
+    scopeCtx.local_flop_names.insert(nbaTargets.begin(), nbaTargets.end());
     // Pre-populate DFG nodes for all signal/net declarations
-    resolveGenerateScopeDecls(members, nbaTargets, ctx);
+    resolveGenerateScopeDecls(members, nbaTargets, scopeCtx);
     // Process all members
     for (auto* m : members)
-        resolveGenerateMemberInPlace(m, ctx);
+        resolveGenerateMemberInPlace(m, scopeCtx);
+    ctx.combDrivers = std::move(scopeCtx.combDrivers);
+    ctx.local_nodes = std::move(scopeCtx.local_nodes);
+    ctx.local_declared_types = std::move(scopeCtx.local_declared_types);
+    ctx.local_aggregate_bindings = std::move(scopeCtx.local_aggregate_bindings);
+    ctx.local_flop_names = std::move(scopeCtx.local_flop_names);
+    ctx.current_write_origin = std::move(scopeCtx.current_write_origin);
+    ctx.partial_drivers = std::move(scopeCtx.partial_drivers);
+    ctx.write_states = std::move(scopeCtx.write_states);
+    ctx.subroutineRegistry = std::move(scopeCtx.subroutineRegistry);
+    ctx.subroutine_locals = std::move(scopeCtx.subroutine_locals);
+    ctx.currently_inlining = std::move(scopeCtx.currently_inlining);
+    ctx.is_subroutine_scope = scopeCtx.is_subroutine_scope;
+    ctx.current_return_var = std::move(scopeCtx.current_return_var);
 }
 
 void resolveGenerateMemberInPlace(
@@ -7236,6 +7353,10 @@ void resolveGenerateMemberInPlace(
         case SyntaxKind::DataDeclaration:
         case SyntaxKind::NetDeclaration:
             // Pre-populated by resolveGenerateScopeDecls — nothing to do here
+            break;
+
+        case SyntaxKind::TypedefDeclaration:
+            // Pre-populated into the scope-local typedef registry.
             break;
 
         case SyntaxKind::GenvarDeclaration:

@@ -2125,6 +2125,10 @@ const Type* lookupDeclaredType(const std::string& baseName,
     if (localIt != ctx.local_nodes.end() && localIt->second && localIt->second->hasType()) {
         return &(*localIt->second->type);
     }
+    if (auto* exactLeaf = lookupNamedNodeInModule(ctx, baseName);
+        exactLeaf && exactLeaf->hasType()) {
+        return &(*exactLeaf->type);
+    }
 
     if (auto* node = findNode(*ctx.thisModule, baseName)) return &node->type;
     for (const auto& flop : ctx.thisModule->flops) {

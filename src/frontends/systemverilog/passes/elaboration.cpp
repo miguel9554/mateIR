@@ -1809,7 +1809,8 @@ Type resolveType(
     const DataTypeSyntax& syntax,
     const ParameterContext& ctx,
     const NamedTypeRegistry& namedTypeRegistry,
-    const PackageRegistry* pkgRegistry);
+    const PackageRegistry* pkgRegistry,
+    const slang::SourceManager* sm = nullptr);
 
 std::vector<Dimension> ResolveDimensions(
     const SyntaxList<VariableDimensionSyntax>& dimensionsSyntaxList,
@@ -1833,7 +1834,8 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
         : resolveType(
             *param.type.syntax, localCtx,
             namedTypeRegistry ? *namedTypeRegistry : emptyRegistry,
-            pkgRegistry);
+            pkgRegistry,
+            sm);
 
     if (param.dimensions.syntax && !param.dimensions.syntax->empty()) {
         resolved.type.unpacked_dims =
@@ -1979,8 +1981,11 @@ Type resolveType(
     const DataTypeSyntax& syntax,
     const ParameterContext& ctx,
     const NamedTypeRegistry& namedTypeRegistry,
-    const PackageRegistry* pkgRegistry = nullptr)
+    const PackageRegistry* pkgRegistry = nullptr,
+    const slang::SourceManager* sm)
 {
+    const auto typeLoc =
+        sm ? std::optional<SourceLoc>(resolveSourceLoc(syntax, *sm)) : std::nullopt;
     // Enum named type: look up in registry
     if (syntax.kind == SyntaxKind::NamedType) {
         auto& named = syntax.as<NamedTypeSyntax>();
@@ -1990,18 +1995,18 @@ Type resolveType(
             auto& scoped = named.name->as<ScopedNameSyntax>();
             std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
             std::string typeName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
-            if (!pkgRegistry) throw CompilerError("No package registry available for qualified type: " + pkgName + "::" + typeName);
+            if (!pkgRegistry) throw CompilerError("No package registry available for qualified type: " + pkgName + "::" + typeName, typeLoc);
             auto pkgIt = pkgRegistry->find(pkgName);
-            if (pkgIt == pkgRegistry->end()) throw CompilerError("Unknown package: " + pkgName);
+            if (pkgIt == pkgRegistry->end()) throw CompilerError("Unknown package: " + pkgName, typeLoc);
             auto it = pkgIt->second.namedTypes.find(typeName);
-            if (it == pkgIt->second.namedTypes.end()) throw CompilerError("Unknown type: " + pkgName + "::" + typeName);
+            if (it == pkgIt->second.namedTypes.end()) throw CompilerError("Unknown type: " + pkgName + "::" + typeName, typeLoc);
             return it->second;
         }
 
         std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
         auto it = namedTypeRegistry.find(typeName);
         if (it == namedTypeRegistry.end())
-            throw CompilerError("Unknown type: " + typeName);
+            throw CompilerError("Unknown type: " + typeName, typeLoc);
         return it->second;
     }
 
@@ -2014,7 +2019,7 @@ Type resolveType(
         int width = 32;
         if (enumSyntax.baseType) {
             NamedTypeRegistry emptyReg;
-            width = resolveType(*enumSyntax.baseType, ctx, emptyReg).width;
+            width = resolveType(*enumSyntax.baseType, ctx, emptyReg, nullptr, nullptr).width;
         }
         std::vector<EnumMember> members;
         int64_t nextValue = 0;
@@ -5876,7 +5881,8 @@ void resolveSequentialBlockStatementInPlace(
                     resolveSourceLoc(*item, ctx.sm));
             }
             auto& dataDecl = item->as<DataDeclarationSyntax>();
-            Type localType = resolveType(*dataDecl.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
+            Type localType = resolveType(
+                *dataDecl.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
             for (auto* decl : dataDecl.declarators) {
                 Type declaredType = localType;
                 auto unpacked = ResolveDimensions(decl->dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm);
@@ -6115,7 +6121,8 @@ ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterCont
         *signal.type.syntax,
         ctx,
         namedTypeRegistry,
-        pkgRegistry);
+        pkgRegistry,
+        sm);
 
     if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, pkgRegistry, sm);
 
@@ -6872,7 +6879,8 @@ static void resolveGenerateScopeDecls(
                                   const DeclaratorSyntax& decl,
                                   bool isFlop) {
         std::string name(decl.name.valueText());
-        Type type = resolveType(typeSyntax, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
+        Type type = resolveType(
+            typeSyntax, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
 
         // Resolve unpacked dimensions from the declarator
         auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm);

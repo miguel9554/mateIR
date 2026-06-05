@@ -1881,7 +1881,8 @@ std::vector<Dimension> ResolveDimensions(
     const SyntaxList<VariableDimensionSyntax>& dimensionsSyntaxList,
     const ParameterContext& ctx,
     const PackageRegistry* pkgRegistry,
-    const slang::SourceManager* sm);
+    const slang::SourceManager* sm,
+    const NamedTypeRegistry* namedTypeRegistry = nullptr);
 
 // Resolve an UnresolvedParam to Param
 // TODO: Actually evaluate the type syntax and dimension expressions
@@ -1991,8 +1992,9 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
 std::vector<Dimension> ResolveDimensions(
         const SyntaxList<VariableDimensionSyntax>& dimensionsSyntaxList,
         const ParameterContext& ctx,
-        const PackageRegistry* pkgRegistry = nullptr,
-        const slang::SourceManager* sm = nullptr){
+        const PackageRegistry* pkgRegistry,
+        const slang::SourceManager* sm,
+        const NamedTypeRegistry* namedTypeRegistry){
     std::vector<Dimension> resolvedDimensions;
     // Parse dimensionsSyntax from syntax
     if (!dimensionsSyntaxList.empty()) {
@@ -2013,15 +2015,15 @@ std::vector<Dimension> ResolveDimensions(
             if (rangeSpec.selector->kind == SyntaxKind::BitSelect) {
                 // [N] in a declaration means an unpacked array of N elements: [0:N-1]
                 auto& bitSelect = rangeSpec.selector->as<BitSelectSyntax>();
-                int64_t size = evaluateConstantExpr(bitSelect.expr, ctx, pkgRegistry, nullptr, sm);
+                int64_t size = evaluateConstantExpr(bitSelect.expr, ctx, pkgRegistry, namedTypeRegistry, sm);
                 resolvedDimensions.push_back(Dimension{
                     .left = 0,
                     .right = static_cast<int>(size - 1)
                 });
             } else if (rangeSpec.selector->kind == SyntaxKind::SimpleRangeSelect) {
                 auto& rangeSelect = rangeSpec.selector->as<RangeSelectSyntax>();
-                int64_t left = evaluateConstantExpr(rangeSelect.left, ctx, pkgRegistry, nullptr, sm);
-                int64_t right = evaluateConstantExpr(rangeSelect.right, ctx, pkgRegistry, nullptr, sm);
+                int64_t left = evaluateConstantExpr(rangeSelect.left, ctx, pkgRegistry, namedTypeRegistry, sm);
+                int64_t right = evaluateConstantExpr(rangeSelect.right, ctx, pkgRegistry, namedTypeRegistry, sm);
                 resolvedDimensions.push_back(Dimension{
                     .left = static_cast<int>(left),
                     .right = static_cast<int>(right)
@@ -2156,7 +2158,7 @@ Type resolveType(
                 std::string(toString(syntax.kind)));
     }
 
-    const auto packedDimensions = ResolveDimensions(packedDimensionsSyntax, ctx, pkgRegistry, sm);
+    const auto packedDimensions = ResolveDimensions(packedDimensionsSyntax, ctx, pkgRegistry, sm, &namedTypeRegistry);
 
     // Compute total width as product of all dimension sizes
     int width = scalarWidth;
@@ -3298,7 +3300,7 @@ static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
 
 DFGNode* tryBuildConstantExprNode(const ExpressionSyntax* expr, ResolutionContext& ctx) {
     try {
-        auto value = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr);
+        auto value = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr, &ctx.pkgRegistry, &ctx.namedTypeRegistry);
         auto* node = ctx.graph.constant(value);
         node->loc = resolveSourceLoc(*expr, ctx.sm);
         return node;
@@ -4300,7 +4302,8 @@ static DFGNode* buildExprScalarImpl(
         case SyntaxKind::MultipleConcatenationExpression: {
             // {N{expr}} — repeat expr N times, concatenated MSB-first
             auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
-            int64_t N = evaluateConstantExpr(multiConcat.expression, ctx.params, ctx.sm, *expr);
+            int64_t N = evaluateConstantExpr(multiConcat.expression, ctx.params, ctx.sm, *expr,
+                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
             std::vector<DFGNode*> parts;
             parts.reserve(static_cast<size_t>(N) * multiConcat.concatenation->expressions.size());
             for (int64_t i = 0; i < N; i++) {
@@ -5597,7 +5600,7 @@ static DFGNode* inlineSubroutineCall(
                 Type localType = resolveType(*dataDecl.type, sub.params, sub.namedTypeRegistry, &sub.pkgRegistry);
                 for (auto* d : dataDecl.declarators) {
                     Type declaredType = localType;
-                    auto unpacked = ResolveDimensions(d->dimensions, sub.params, &sub.pkgRegistry, &sub.sm);
+                    auto unpacked = ResolveDimensions(d->dimensions, sub.params, &sub.pkgRegistry, &sub.sm, &sub.namedTypeRegistry);
                     if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
                         unpacked.clear();
                     declaredType.unpacked_dims = unpacked;
@@ -5722,7 +5725,8 @@ void resolveConditionalStatementInPlace(
     // only elaborate the reachable branch.
     try {
         int64_t predicateValue =
-            evaluateConstantExpr(predicateExpr, ctx.params, ctx.sm, *conditionalStatement);
+            evaluateConstantExpr(predicateExpr, ctx.params, ctx.sm, *conditionalStatement,
+                                 &ctx.pkgRegistry, &ctx.namedTypeRegistry);
         if (predicateValue) {
             executeConditionalBranch(*conditionalStatement->statement, ctx);
         } else if (conditionalStatement->elseClause) {
@@ -5976,7 +5980,7 @@ void resolveSequentialBlockStatementInPlace(
                 *dataDecl.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
             for (auto* decl : dataDecl.declarators) {
                 Type declaredType = localType;
-                auto unpacked = ResolveDimensions(decl->dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm);
+                auto unpacked = ResolveDimensions(decl->dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm, &ctx.namedTypeRegistry);
                 if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
                     unpacked.clear();
                 declaredType.unpacked_dims = unpacked;
@@ -6215,7 +6219,7 @@ ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterCont
         pkgRegistry,
         sm);
 
-    if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, pkgRegistry, sm);
+    if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, pkgRegistry, sm, &namedTypeRegistry);
 
     // For some reason getting 1 dimension of [0:0]
     if(resolved.type.unpacked_dims.size() == 1 && resolved.type.unpacked_dims[0].left == 0 && resolved.type.unpacked_dims[0].right == 0){
@@ -6987,7 +6991,7 @@ static void resolveGenerateScopeDecls(
             typeSyntax, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
 
         // Resolve unpacked dimensions from the declarator
-        auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm);
+        auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm, &ctx.namedTypeRegistry);
         // ResolveDimensions returns [{0,0}] for empty dims — clear it for scalars
         if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
             unpacked.clear();

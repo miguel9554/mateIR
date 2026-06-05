@@ -394,6 +394,16 @@ static void declareLocalAggregateValue(ResolutionContext& ctx,
 const Type* lookupDeclaredType(const std::string& baseName,
                                        const ResolutionContext& ctx);
 
+static const Type& lookupTargetTypeOrThrow(const std::string& targetName,
+                                           ResolutionContext& ctx,
+                                           const std::optional<SourceLoc>& loc);
+
+int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
+                             const slang::SourceManager& sm,
+                             const slang::syntax::SyntaxNode& contextNode,
+                             const PackageRegistry* pkgRegistry = nullptr,
+                             const NamedTypeRegistry* namedTypeRegistry = nullptr);
+
 // Unwrap a PropertyExprSyntax (as produced by function argument positions) to ExpressionSyntax.
 // For synthesizable RTL, argument expressions are always:
 //   SimplePropertyExpr → SimpleSequenceExpr → ExpressionSyntax
@@ -478,6 +488,11 @@ struct CaseBranch {
     std::vector<int64_t> selectorValues;
     DriverMap modifiedDrivers;
     PartialDriverMap modifiedPartialDrivers;
+};
+
+enum class CaseExpressionKind {
+    Constant,
+    Variable,
 };
 
 struct DriverSnapshot {
@@ -743,6 +758,14 @@ static DFGNode* getRetainedDriver(ResolutionContext& ctx,
     return qNode;
 }
 
+static DFGNode* buildXValueForTarget(ResolutionContext& ctx,
+                                     const std::string& targetName,
+                                     const std::optional<SourceLoc>& loc) {
+    auto* node = ctx.graph.x(lookupTargetTypeOrThrow(targetName, ctx, loc));
+    if (loc) node->loc = *loc;
+    return node;
+}
+
 static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver) {
     PartialTargetState state{type, {}};
     if (!driver || type.width <= 0) {
@@ -808,6 +831,14 @@ static std::optional<PartialTargetState> getRetainedPartialState(
     DFGNode* retained = getRetainedDriver(ctx, targetName, baseline, loc);
     if (!retained) return std::nullopt;
     return makeWholeDriverState(lookupTargetTypeOrThrow(targetName, ctx, loc), retained);
+}
+
+static std::optional<PartialTargetState> buildXPartialState(ResolutionContext& ctx,
+                                                            const std::string& targetName,
+                                                            const std::optional<SourceLoc>& loc) {
+    return makeWholeDriverState(
+        lookupTargetTypeOrThrow(targetName, ctx, loc),
+        buildXValueForTarget(ctx, targetName, loc));
 }
 
 static std::optional<PartialTargetState> branchPartialStateValue(
@@ -1142,7 +1173,9 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                               const std::optional<DriverMap>& fallbackBranch,
                               const std::optional<PartialDriverMap>& fallbackPartialBranch,
                               const DriverSnapshot& baseline,
-                              const std::optional<SourceLoc>& loc) {
+                              const std::optional<SourceLoc>& loc,
+                              const std::vector<int64_t>& xSelectorValues = {},
+                              bool uncoveredToX = false) {
     std::set<std::string> assignedSignals = collectAssignedSignals(
         branches, fallbackBranch, fallbackPartialBranch);
     int64_t numValues = selectorCodeCountOrThrow(selectorNode, loc);
@@ -1170,8 +1203,19 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             auto retained = getRetainedPartialState(ctx, signalName, baseline, loc);
             auto defaultValue = fallbackPartialStateValue(
                 ctx, signalName, fallbackBranch, fallbackPartialBranch, retained, loc);
+            if (!defaultValue && uncoveredToX) {
+                defaultValue = buildXPartialState(ctx, signalName, loc);
+            }
+            auto xState = xSelectorValues.empty()
+                ? std::optional<PartialTargetState>{}
+                : buildXPartialState(ctx, signalName, loc);
             std::vector<std::optional<PartialTargetState>> states(static_cast<size_t>(numValues), defaultValue);
             std::vector<bool> assigned(static_cast<size_t>(numValues), false);
+            for (int64_t selectorValue : xSelectorValues) {
+                size_t index = static_cast<size_t>(selectorValue);
+                states[index] = xState;
+                assigned[index] = true;
+            }
             for (const auto& branch : branches) {
                 auto branchState = branchPartialStateValue(
                     ctx,
@@ -1231,9 +1275,12 @@ static void mergeCaseBranches(ResolutionContext& ctx,
         DFGNode* defaultValue = nullptr;
         if (fallbackBranch) {
             defaultValue = branchValue(signalName, *fallbackBranch, retained);
+        } else if (uncoveredToX) {
+            defaultValue = buildXValueForTarget(ctx, signalName, loc);
         } else {
             defaultValue = retained;
         }
+        DFGNode* xValue = xSelectorValues.empty() ? nullptr : buildXValueForTarget(ctx, signalName, loc);
 
         std::vector<int64_t> selectorValues;
         std::vector<DFGNode*> dataValues;
@@ -1241,11 +1288,15 @@ static void mergeCaseBranches(ResolutionContext& ctx,
         dataValues.reserve(static_cast<size_t>(numValues));
         for (int64_t selectorValue = 0; selectorValue < numValues; ++selectorValue) {
             DFGNode* value = defaultValue;
-            for (const auto& branch : branches) {
-                if (std::find(branch.selectorValues.begin(), branch.selectorValues.end(), selectorValue) !=
-                        branch.selectorValues.end()) {
-                    value = branchValue(signalName, branch.modifiedDrivers, defaultValue);
-                    break;
+            if (std::find(xSelectorValues.begin(), xSelectorValues.end(), selectorValue) != xSelectorValues.end()) {
+                value = xValue;
+            } else {
+                for (const auto& branch : branches) {
+                    if (std::find(branch.selectorValues.begin(), branch.selectorValues.end(), selectorValue) !=
+                            branch.selectorValues.end()) {
+                        value = branchValue(signalName, branch.modifiedDrivers, defaultValue);
+                        break;
+                    }
                 }
             }
             if (!value) {
@@ -1273,6 +1324,37 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             ctx.combDrivers[signalName] = result;
         }
     }
+}
+
+static std::optional<int64_t> tryEvaluateCaseConstantExpr(const ExpressionSyntax* expr,
+                                                          ResolutionContext& ctx) {
+    try {
+        return evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr, &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+    } catch (const CompilerError&) {
+        return std::nullopt;
+    }
+}
+
+static CaseExpressionKind classifyCaseExpr(const ExpressionSyntax* expr, ResolutionContext& ctx) {
+    return tryEvaluateCaseConstantExpr(expr, ctx).has_value()
+        ? CaseExpressionKind::Constant
+        : CaseExpressionKind::Variable;
+}
+
+static DFGNode* normalizeCaseMatchExpr(ResolutionContext& ctx,
+                                       const ExpressionSyntax* expr,
+                                       int64_t selectorValue,
+                                       const std::optional<SourceLoc>& loc) {
+    DFGNode* rawValue = buildExprDFG(expr, ctx);
+    Type rawType = resolveNodeTypeNow(rawValue);
+    if (rawType.width != 1 || !rawType.unpacked_dims.empty()) {
+        throw CompilerError("Constant-expression case items must be scalar 1-bit expressions", loc);
+    }
+    DFGNode* value = lowerTruth(rawValue, ctx, loc);
+    if (selectorValue == 0) {
+        value = lowerLogicalNot(value, ctx, loc);
+    }
+    return value;
 }
 
 
@@ -1518,8 +1600,8 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
                               const slang::SourceManager& sm,
                               const slang::syntax::SyntaxNode& contextNode,
-                              const PackageRegistry* pkgRegistry = nullptr,
-                              const NamedTypeRegistry* namedTypeRegistry = nullptr) {
+                              const PackageRegistry* pkgRegistry,
+                              const NamedTypeRegistry* namedTypeRegistry) {
     if (!expr) {
         throw CompilerError("Cannot evaluate null expression",
                             resolveSourceLoc(contextNode, sm));
@@ -5503,13 +5585,11 @@ void resolveConditionalStatementInPlace(
 void resolveCaseStatementInPlace(
         const CaseStatementSyntax* caseStatement,
         ResolutionContext& ctx) {
-
+    bool uniqueCase = false;
     if (caseStatement->uniqueOrPriority) {
         auto keyword = caseStatement->uniqueOrPriority.kind;
         if (keyword == slang::parsing::TokenKind::UniqueKeyword) {
-            // With no casez/casex support, case item selection is an exact
-            // match over fully-known values, so every supported case is
-            // already unique regardless of the modifier.
+            uniqueCase = true;
         } else if (keyword == slang::parsing::TokenKind::Unique0Keyword) {
             throw CompilerError("unique0 modifiers are not supported on case",
                                 resolveSourceLoc(*caseStatement, ctx.sm));
@@ -5527,16 +5607,24 @@ void resolveCaseStatementInPlace(
                             resolveSourceLoc(*caseStatement, ctx.sm));
     }
 
-    // Build the selector expression node
-    auto selectorNode = buildExprDFG(caseStatement->expr, ctx);
     const auto caseLoc = resolveSourceLoc(*caseStatement, ctx.sm);
     const auto baselineDrivers = snapshotDrivers(ctx);
+    const CaseExpressionKind selectorKind = classifyCaseExpr(caseStatement->expr, ctx);
+    const auto selectorConstValue = selectorKind == CaseExpressionKind::Constant
+        ? tryEvaluateCaseConstantExpr(caseStatement->expr, ctx)
+        : std::optional<int64_t>{};
 
-    // Collect info for each case branch — drivers only contains signals
-    // actually modified in that branch (diff against fallback)
     std::vector<CaseBranch> normalCases;
     std::optional<DriverMap> defaultDrivers;
     std::optional<PartialDriverMap> defaultPartialDrivers;
+    std::vector<int64_t> xSelectorValues;
+
+    struct PendingConstantSelectorBranch {
+        std::vector<DFGNode*> matches;
+        DriverMap modifiedDrivers;
+        PartialDriverMap modifiedPartialDrivers;
+    };
+    std::vector<PendingConstantSelectorBranch> pendingConstantBranches;
 
     for (const auto* item : caseStatement->items) {
         if (item->kind == SyntaxKind::DefaultCaseItem) {
@@ -5553,14 +5641,40 @@ void resolveCaseStatementInPlace(
                                     resolveSourceLoc(caseItem, ctx.sm));
             }
 
+            if (selectorKind == CaseExpressionKind::Constant) {
+                std::vector<DFGNode*> itemMatches;
+                itemMatches.reserve(caseItem.expressions.size());
+                for (const auto* caseExpr : caseItem.expressions) {
+                    if (classifyCaseExpr(caseExpr, ctx) != CaseExpressionKind::Variable) {
+                        throw CompilerError(
+                            "Constant-expression case requires variable case items",
+                            resolveSourceLoc(*caseExpr, ctx.sm));
+                    }
+                    itemMatches.push_back(normalizeCaseMatchExpr(
+                        ctx, caseExpr, *selectorConstValue, resolveSourceLoc(*caseExpr, ctx.sm)));
+                }
+
+                restoreDrivers(ctx, baselineDrivers);
+                executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
+                pendingConstantBranches.push_back({
+                    std::move(itemMatches),
+                    modifiedDriversSince(ctx, baselineDrivers),
+                    modifiedPartialDriversSince(ctx, baselineDrivers)
+                });
+                continue;
+            }
+
             std::vector<int64_t> caseValues;
             caseValues.reserve(caseItem.expressions.size());
             for (const auto* caseExpr : caseItem.expressions) {
-                caseValues.push_back(normalizeSelectorCode(
-                    evaluateConstantExpr(caseExpr, ctx.params, ctx.sm, *caseExpr,
-                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry),
-                    selectorNode,
-                    resolveSourceLoc(*caseExpr, ctx.sm)));
+                if (classifyCaseExpr(caseExpr, ctx) != CaseExpressionKind::Constant) {
+                    throw CompilerError(
+                        "Variable-expression case requires constant case items",
+                        resolveSourceLoc(*caseExpr, ctx.sm));
+                }
+                caseValues.push_back(evaluateConstantExpr(
+                    caseExpr, ctx.params, ctx.sm, *caseExpr,
+                    &ctx.pkgRegistry, &ctx.namedTypeRegistry));
             }
 
             restoreDrivers(ctx, baselineDrivers);
@@ -5577,6 +5691,82 @@ void resolveCaseStatementInPlace(
         }
     }
 
+    DFGNode* selectorNode = nullptr;
+    bool uncoveredToX = uniqueCase && !defaultDrivers.has_value();
+    if (selectorKind == CaseExpressionKind::Constant) {
+        int selectorWidth = constantExprWidth(caseStatement->expr);
+        if (selectorWidth != 1) {
+            throw CompilerError("Constant-expression case selector must be exactly 1 bit wide", caseLoc);
+        }
+        if (*selectorConstValue != 0 && *selectorConstValue != 1) {
+            throw CompilerError("Constant-expression case selector must be 1'b0 or 1'b1", caseLoc);
+        }
+
+        std::vector<DFGNode*> itemSelectorBits;
+        itemSelectorBits.reserve(pendingConstantBranches.size());
+        normalCases.clear();
+        normalCases.reserve(pendingConstantBranches.size());
+        for (auto& branch : pendingConstantBranches) {
+            DFGNode* itemMatch = nullptr;
+            for (DFGNode* match : branch.matches) {
+                itemMatch = itemMatch
+                    ? lowerLogicalBinary(DFGOp::BITWISE_OR, itemMatch, match, ctx, caseLoc)
+                    : match;
+            }
+            if (!itemMatch) {
+                throw CompilerError("Case item must have at least one expression", caseLoc);
+            }
+            itemSelectorBits.push_back(itemMatch);
+            normalCases.push_back({
+                {},
+                std::move(branch.modifiedDrivers),
+                std::move(branch.modifiedPartialDrivers)
+            });
+        }
+
+        if (itemSelectorBits.empty()) {
+            selectorNode = ctx.graph.constant(0);
+            selectorNode->type = Type::makeInteger(1, false);
+            selectorNode->loc = caseLoc;
+        } else if (itemSelectorBits.size() == 1) {
+            selectorNode = itemSelectorBits.front();
+        } else {
+            selectorNode = ctx.graph.concat(itemSelectorBits);
+            selectorNode->loc = caseLoc;
+        }
+
+        int64_t selectorPatterns = selectorCodeCountOrThrow(selectorNode, caseLoc);
+        for (int64_t pattern = 0; pattern < selectorPatterns; ++pattern) {
+            int firstMatch = -1;
+            int matchCount = 0;
+            for (size_t itemIndex = 0; itemIndex < itemSelectorBits.size(); ++itemIndex) {
+                bool matched = ((pattern >> (itemSelectorBits.size() - 1 - itemIndex)) & 1LL) != 0;
+                if (!matched) continue;
+                if (firstMatch < 0) firstMatch = static_cast<int>(itemIndex);
+                ++matchCount;
+            }
+            if (matchCount == 0) continue;
+            if (uniqueCase && matchCount > 1) {
+                xSelectorValues.push_back(pattern);
+                continue;
+            }
+            normalCases[static_cast<size_t>(firstMatch)].selectorValues.push_back(pattern);
+        }
+    } else {
+        selectorNode = buildExprDFG(caseStatement->expr, ctx);
+        std::set<int64_t> seenCaseValues;
+        for (auto& branch : normalCases) {
+            for (int64_t& selectorValue : branch.selectorValues) {
+                selectorValue = normalizeSelectorCode(selectorValue, selectorNode, caseLoc);
+                if (!seenCaseValues.insert(selectorValue).second) {
+                    throw CompilerError(
+                        std::format("Duplicate case item value {}", selectorValue),
+                        caseLoc);
+                }
+            }
+        }
+    }
+
     restoreDrivers(ctx, baselineDrivers);
     mergeCaseBranches(ctx,
                       selectorNode,
@@ -5584,7 +5774,9 @@ void resolveCaseStatementInPlace(
                       defaultDrivers,
                       defaultPartialDrivers,
                       baselineDrivers,
-                      caseLoc);
+                      caseLoc,
+                      xSelectorValues,
+                      uncoveredToX);
 }
 
 void resolveSequentialBlockStatementInPlace(

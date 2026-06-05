@@ -235,6 +235,16 @@ void ModuleInstance::initConsts() {
     }
 }
 
+void ModuleInstance::initXs(std::mt19937_64& rng) {
+    for (const auto& node : module_def.dfg->nodes) {
+        if (node->kind() != DFGOp::X) continue;
+        if (!node->type.has_value()) {
+            throw CompilerError("Simulator: X node has no type", node.get());
+        }
+        values[node.get()] = SimValue::random(node->type->width, node->type->isSigned(), rng);
+    }
+}
+
 // ============================================================================
 // Initialize flop values (recursive)
 // ============================================================================
@@ -283,6 +293,7 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
     switch (node->kind()) {
         case DFGOp::INPUT:
         case DFGOp::CONST:
+        case DFGOp::X:
             return checkedGet(node);
 
         case DFGOp::SIGNAL:
@@ -450,7 +461,7 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
 
 void ModuleInstance::evaluateCombinational() {
     for (const DFGNode* node : topo_order) {
-        if (node->kind() == DFGOp::INPUT || node->kind() == DFGOp::CONST) continue;
+        if (node->kind() == DFGOp::INPUT || node->kind() == DFGOp::CONST || node->kind() == DFGOp::X) continue;
         if (flop_q_nodes.count(node)) continue;
         SimValue val = maskToWidth(evaluateNode(node), node);
         values[node] = val;
@@ -793,6 +804,7 @@ void Simulator::run() {
         }
         std::mt19937_64 rng(rng_seed);
         root_->initFlops(config_.flops_initial, rng);
+        root_->initXs(rng);
     }
 
     // 2. Set async input values from first event in their timeline (must be at time 0)

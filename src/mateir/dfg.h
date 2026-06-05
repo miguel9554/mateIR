@@ -22,6 +22,7 @@ enum class DFGOp {
     OUTPUT,     // Graph sink boundary node (module outputs + flop .d leaves)
     SIGNAL,     // Internal signal (named placeholder)
     CONST,      // Constant value (data: int64_t)
+    X,          // Unspecified value with a fixed simulation choice per node
     // Arithmetic ops
     ADD,
     SUB,
@@ -61,6 +62,7 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::OUTPUT: return "OUTPUT";
         case DFGOp::SIGNAL: return "SIGNAL";
         case DFGOp::CONST: return "CONST";
+        case DFGOp::X: return "X";
         case DFGOp::SLICE: return "SLICE";
         case DFGOp::CONCAT: return "CONCAT";
         case DFGOp::ADD: return "ADD";
@@ -96,6 +98,7 @@ inline int expectedInputs(DFGOp op) {
     switch (op) {
         case DFGOp::INPUT:  return 0;
         case DFGOp::CONST:  return 0;
+        case DFGOp::X:      return 0;
         // OUTPUT: 0 (undriven) or 1 (driven) — validated separately
         case DFGOp::OUTPUT: return -1;
         // SIGNAL: 0 (undriven during construction) or 1 (driven) — validated separately
@@ -165,6 +168,7 @@ struct DFGInputPayload {};
 struct DFGOutputPayload { std::optional<DFGOutput> driver; };
 struct DFGSignalPayload { std::optional<DFGOutput> driver; };
 struct DFGConstPayload { int64_t value; };
+struct DFGXPayload {};
 struct DFGUnaryPayload { DFGOp op; DFGOutput operand; };
 struct DFGBinaryPayload { DFGOp op; DFGOutput lhs; DFGOutput rhs; };
 struct DFGSlicePayload { DFGOutput source; DFGOutput high; DFGOutput low; };
@@ -191,6 +195,7 @@ using DFGPayload = std::variant<
     DFGOutputPayload,
     DFGSignalPayload,
     DFGConstPayload,
+    DFGXPayload,
     DFGUnaryPayload,
     DFGBinaryPayload,
     DFGSlicePayload,
@@ -268,6 +273,7 @@ public:
         if (std::holds_alternative<DFGOutputPayload>(payload_)) return DFGOp::OUTPUT;
         if (std::holds_alternative<DFGSignalPayload>(payload_)) return DFGOp::SIGNAL;
         if (std::holds_alternative<DFGConstPayload>(payload_)) return DFGOp::CONST;
+        if (std::holds_alternative<DFGXPayload>(payload_)) return DFGOp::X;
         if (auto* p = std::get_if<DFGUnaryPayload>(&payload_)) return p->op;
         if (auto* p = std::get_if<DFGBinaryPayload>(&payload_)) return p->op;
         if (std::holds_alternative<DFGSlicePayload>(payload_)) return DFGOp::SLICE;
@@ -649,6 +655,15 @@ public:
         return nodes.back().get();
     }
 
+    DFGNode* x(const Type& type, const std::string& name = "") {
+        auto n = name.empty()
+            ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGXPayload{})
+            : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGXPayload{}, name);
+        n->type = type;
+        nodes.push_back(std::move(n));
+        return nodes.back().get();
+    }
+
     // Create a named signal placeholder (for internal signals, not ports)
     DFGNode* signal(const std::string& instance_path, const std::string& name) {
         nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGSignalPayload{}, name));
@@ -840,6 +855,7 @@ public:
             if (actual == 0) {
                 if (node->kind() != DFGOp::INPUT &&
                     node->kind() != DFGOp::CONST &&
+                    node->kind() != DFGOp::X &&
                     node->kind() != DFGOp::OUTPUT &&
                     node->kind() != DFGOp::SIGNAL) {
                     throw CompilerError(std::format(
@@ -930,7 +946,8 @@ public:
         for (const auto& node : nodes) {
             if (node->rawInputs().empty() &&
                 node->kind() != DFGOp::INPUT &&
-                node->kind() != DFGOp::CONST) {
+                node->kind() != DFGOp::CONST &&
+                node->kind() != DFGOp::X) {
                 throw CompilerError(std::format(
                     "DFG validateStrict: node {} has no inputs but is not INPUT or CONST",
                     node->str()), node.get());

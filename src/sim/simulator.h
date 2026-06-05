@@ -66,6 +66,7 @@ struct ModuleInstance {
     void buildTopology();
     void buildFlopMaps();  // recurses over hierarchyInstantiation
     void initConsts();
+    void initXs(std::mt19937_64& rng);
     void initFlops(FlopsInitial mode, std::mt19937_64& rng);
 
     // Single-pass combinational evaluation (no fixpoint — flat DAG has no cycles)

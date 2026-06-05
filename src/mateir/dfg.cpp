@@ -51,6 +51,10 @@ std::string DFG::renderDot(const std::string& graphName,
                 if (!node->name.empty()) ss << node->name << "\\n";
                 ss << node->constValue();
                 break;
+            case DFGOp::X:
+                ss << "X";
+                if (!node->name.empty()) ss << "\\n" << node->name;
+                break;
             case DFGOp::ADD: ss << "+"; break;
             case DFGOp::SUB: ss << "-"; break;
             case DFGOp::MUL: ss << "*"; break;

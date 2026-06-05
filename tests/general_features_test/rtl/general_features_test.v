@@ -10,10 +10,15 @@ module general_features_test (
     output logic [7:0]  unpacked_dynamic_case_o,
     output logic [7:0]  multi_item_case_o,
     output logic [7:0]  concat_case_o,
-    output logic [7:0]  named_arg_func_o
+    output logic [7:0]  named_arg_func_o,
+    output logic        dynamic_bit_pow2_o,
+    output logic        dynamic_bit_nonpow2_o
 );
 
     logic [1:0] lanes [4];
+    logic [7:0] pow2_bits;
+    logic [5:0] nonpow2_bits;
+    logic [2:0] nonpow2_idx;
 
     function automatic logic [7:0] select_named(input logic [1:0] sel,
                                                 input logic [7:0] if_match,
@@ -29,6 +34,9 @@ module general_features_test (
         lanes[1] = data[3:2];
         lanes[2] = data[5:4];
         lanes[3] = data[7:6];
+        pow2_bits = data[15:8];
+        nonpow2_bits = data[5:0];
+        nonpow2_idx = {1'b0, idx};
 
         unique case (data[1:0])
             2'b00: const_slice_case_o = 8'h10;
@@ -73,6 +81,8 @@ module general_features_test (
         endcase
 
         named_arg_func_o = select_named(.if_other(8'h71), .sel(data[1:0]), .if_match(8'h70));
+        dynamic_bit_pow2_o = pow2_bits[base[2:0]];
+        dynamic_bit_nonpow2_o = nonpow2_bits[nonpow2_idx];
     end
 
 endmodule

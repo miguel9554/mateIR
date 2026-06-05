@@ -1560,6 +1560,68 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                                evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry));
         }
 
+        case SyntaxKind::BinaryOrExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) |
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
+        }
+        case SyntaxKind::BinaryAndExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) &
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
+        }
+        case SyntaxKind::BinaryXorExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) ^
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
+        }
+        case SyntaxKind::BinaryXnorExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return ~(evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) ^
+                     evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry));
+        }
+        case SyntaxKind::UnaryBitwiseNotExpression: {
+            auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
+            return ~evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry);
+        }
+        case SyntaxKind::LogicalShiftLeftExpression:
+        case SyntaxKind::ArithmeticShiftLeftExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            int64_t shift = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
+            if (shift < 0 || shift >= 64) return 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) << shift;
+        }
+        case SyntaxKind::LogicalShiftRightExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            int64_t shift = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
+            if (shift < 0 || shift >= 64) return 0;
+            return static_cast<int64_t>(
+                static_cast<uint64_t>(evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry)) >> shift);
+        }
+        case SyntaxKind::ArithmeticShiftRightExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            int64_t shift = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry);
+            if (shift < 0 || shift >= 64) return 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry) >> shift;
+        }
+        case SyntaxKind::CastExpression: {
+            auto& castExpr = expr->as<CastExpressionSyntax>();
+            int64_t val = evaluateConstantExpr(castExpr.right->expression, ctx, pkgRegistry, namedTypeRegistry);
+            // Width cast: mask to the specified number of bits
+            if (castExpr.left->kind == SyntaxKind::IntegerLiteralExpression) {
+                int64_t width = std::stoll(std::string(
+                    castExpr.left->as<LiteralExpressionSyntax>().literal.rawText()));
+                if (width > 0 && width < 64) {
+                    val = static_cast<int64_t>(static_cast<uint64_t>(val) & ((uint64_t(1) << width) - 1));
+                }
+            }
+            return val;
+        }
+        case SyntaxKind::SignedCastExpression: {
+            auto& castExpr = expr->as<SignedCastExpressionSyntax>();
+            return evaluateConstantExpr(castExpr.inner->expression, ctx, pkgRegistry, namedTypeRegistry);
+        }
+
         case SyntaxKind::InvocationExpression: {
             const auto& invocation = expr->as<InvocationExpressionSyntax>();
             if (invocation.left->kind != SyntaxKind::SystemName) {
@@ -3293,6 +3355,26 @@ static ExprValue buildExprValue(
         return inner;
     }
 
+    if (expr->kind == SyntaxKind::InvocationExpression) {
+        const auto& invocation = expr->as<InvocationExpressionSyntax>();
+        if (invocation.left->kind == SyntaxKind::SystemName) {
+            const std::string sysName(
+                invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText());
+            if (sysName == "$signed" || sysName == "$unsigned") {
+                bool makeSigned = (sysName == "$signed");
+                const auto* arg = singleOrderedSystemFunctionArg(invocation, sysName);
+                ExprValue inner = buildScalarExprValue(arg, ctx);
+                Type newType = Type::makeInteger(inner.type.width, makeSigned,
+                                                inner.type.packed_dims, inner.type.unpacked_dims);
+                if (inner.scalar->kind() == DFGOp::CONST) {
+                    inner.scalar->type = newType;
+                }
+                inner.type = newType;
+                return inner;
+            }
+        }
+    }
+
     if (expr->kind == SyntaxKind::ConditionalExpression) {
         return buildConditionalExprValue(expr->as<ConditionalExpressionSyntax>(), ctx);
     }
@@ -4582,20 +4664,26 @@ static DFGNode* buildExprScalarImpl(
 
         case SyntaxKind::InvocationExpression: {
             const auto& invocation = expr->as<InvocationExpressionSyntax>();
-            if (invocation.left->kind == SyntaxKind::SystemName &&
-                invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText() == "$bits") {
-                const auto* argument = singleOrderedSystemFunctionArg(invocation, "$bits");
-                int64_t width = 0;
-                if (auto staticWidth = staticBitsWidth(
-                        argument, ctx.params, &ctx.pkgRegistry, &ctx.namedTypeRegistry)) {
-                    width = *staticWidth;
-                } else {
-                    width = bitstreamWidth(buildExprValue(argument, ctx).type);
+            if (invocation.left->kind == SyntaxKind::SystemName) {
+                const std::string sysName(
+                    invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText());
+                if (sysName == "$bits") {
+                    const auto* argument = singleOrderedSystemFunctionArg(invocation, "$bits");
+                    int64_t width = 0;
+                    if (auto staticWidth = staticBitsWidth(
+                            argument, ctx.params, &ctx.pkgRegistry, &ctx.namedTypeRegistry)) {
+                        width = *staticWidth;
+                    } else {
+                        width = bitstreamWidth(buildExprValue(argument, ctx).type);
+                    }
+                    auto* node = ctx.graph.constant(width);
+                    node->type = Type::makeInteger(32, true);
+                    node->loc = resolveSourceLoc(*expr, ctx.sm);
+                    return node;
                 }
-                auto* node = ctx.graph.constant(width);
-                node->type = Type::makeInteger(32, true);
-                node->loc = resolveSourceLoc(*expr, ctx.sm);
-                return node;
+                if (sysName == "$signed" || sysName == "$unsigned") {
+                    return buildExprValue(expr, ctx).scalar;
+                }
             }
             return inlineSubroutineCall(expr->as<InvocationExpressionSyntax>(), ctx);
         }

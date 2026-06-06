@@ -14,6 +14,8 @@ import yaml
 class Parameter:
     name: str
     default: str
+    type_str: str = ""       # e.g. "rv32m_e", "int unsigned", "" for implicit
+    unpacked_dims: str = ""  # unpacked dimensions on the declarator, e.g. "[PMP_MAX_REGIONS]"
 
 
 @dataclass
@@ -25,6 +27,7 @@ class Port:
     resolved_dims: str  # e.g. "[16-1:0]" with params substituted
     named_struct_type: str  # preserved named type text for struct ports
     struct_leaves: list[tuple[str, str]]  # [("field.sub", "logic [N:0]"), ...]
+    unpacked_dims: str = ""  # unpacked dimensions on the declarator, e.g. "[IC_NUM_WAYS]"
 
 
 @dataclass
@@ -32,6 +35,7 @@ class ModuleInfo:
     name: str
     parameters: list[Parameter]
     ports: list[Port]
+    imports: list[str]  # e.g. ["import ibex_pkg::*;"]
 
 
 def parse_module(filepath: Path) -> ModuleInfo:
@@ -56,16 +60,40 @@ def parse_module(filepath: Path) -> ModuleInfo:
     header = module.header
     mod_name = header.name.valueText
 
+    # Parse package imports from the module header (e.g. "import ibex_pkg::*;")
+    imports: list[str] = []
+    try:
+        for imp in header.imports:
+            imp_text = str(imp).strip()
+            if imp_text:
+                imports.append(imp_text)
+    except (AttributeError, TypeError):
+        pass
+
     # Parse parameters
     params = []
     if header.parameters is not None:
         for decl in header.parameters.declarations:
             if not hasattr(decl, 'declarators'):
                 continue  # skip comma tokens
+            type_str = ""
+            try:
+                if 'Implicit' not in str(decl.type.kind):
+                    type_str = str(decl.type).strip()
+            except AttributeError:
+                pass
             for d in decl.declarators:
+                unpacked_dims = ""
+                try:
+                    parts = [str(dim).strip() for dim in d.dimensions]
+                    unpacked_dims = ' '.join(parts)
+                except (AttributeError, TypeError):
+                    pass
                 params.append(Parameter(
                     name=d.name.valueText,
                     default=str(d.initializer.expr).strip(),
+                    type_str=type_str,
+                    unpacked_dims=unpacked_dims,
                 ))
 
     # Build param substitution map (sorted by descending name length for correct replacement)
@@ -197,6 +225,13 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 named_struct_type = ""
                 struct_leaves = []
 
+            port_unpacked_dims = ""
+            try:
+                parts = [str(dim).strip() for dim in port.declarator.dimensions]
+                port_unpacked_dims = ' '.join(parts)
+            except (AttributeError, TypeError):
+                pass
+
             ports.append(Port(
                 name=port_name,
                 direction=direction,
@@ -205,9 +240,10 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 resolved_dims=resolved_dims,
                 named_struct_type=named_struct_type,
                 struct_leaves=struct_leaves,
+                unpacked_dims=port_unpacked_dims,
             ))
 
-    return ModuleInfo(name=mod_name, parameters=params, ports=ports)
+    return ModuleInfo(name=mod_name, parameters=params, ports=ports, imports=imports)
 
 
 def port_type_str(port: Port, use_resolved: bool = False) -> str:
@@ -333,16 +369,22 @@ def validate(module: ModuleInfo, domains: DomainConfig):
 def gen_uut_if(module: ModuleInfo) -> str:
     lines = []
 
+    import_clause = ' '.join(module.imports)
+    if import_clause:
+        import_clause = f' {import_clause}'
+
     # Header
     if module.parameters:
-        lines.append('interface uut_if#(')
+        lines.append(f'interface uut_if{import_clause} #(')
         param_lines = []
         for p in module.parameters:
-            param_lines.append(f'    parameter {p.name}')
+            type_part = f' {p.type_str}' if p.type_str else ''
+            dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
+            param_lines.append(f'    parameter{type_part} {p.name}{dim_part}')
         lines.append(',\n'.join(param_lines))
         lines.append(');')
     else:
-        lines.append('interface uut_if;')
+        lines.append(f'interface uut_if{import_clause};')
 
     # Input signals
     inputs = [p for p in module.ports if p.direction == 'input']
@@ -350,12 +392,14 @@ def gen_uut_if(module: ModuleInfo) -> str:
 
     lines.append('    // Inputs')
     for p in inputs:
-        lines.append(f'    {port_type_str(p)} {p.name};')
+        dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
+        lines.append(f'    {port_type_str(p)} {p.name}{dim_part};')
 
     lines.append('')
     lines.append('    // Outputs')
     for p in outputs:
-        lines.append(f'    {port_type_str(p)} {p.name};')
+        dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
+        lines.append(f'    {port_type_str(p)} {p.name}{dim_part};')
 
     # Modports
     lines.append('')
@@ -386,7 +430,11 @@ def gen_tb(module: ModuleInfo) -> str:
 
     lines.append('`timescale 1ns/1ps')
     lines.append('')
-    lines.append('module tb;')
+    import_clause = ' '.join(module.imports)
+    if import_clause:
+        lines.append(f'module tb {import_clause};')
+    else:
+        lines.append('module tb;')
 
     inputs = [p for p in module.ports if p.direction == 'input']
     outputs = [p for p in module.ports if p.direction == 'output']
@@ -395,18 +443,22 @@ def gen_tb(module: ModuleInfo) -> str:
     if has_params:
         lines.append('    // Parameters')
         for p in module.parameters:
-            lines.append(f'    parameter {p.name} = {p.default};')
+            type_part = f' {p.type_str}' if p.type_str else ''
+            dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
+            lines.append(f'    parameter{type_part} {p.name}{dim_part} = {p.default};')
         lines.append('')
 
     # Signal declarations
     lines.append('    // Inputs')
     for p in inputs:
-        lines.append(f'    {port_type_str(p)} {p.name};')
+        dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
+        lines.append(f'    {port_type_str(p)} {p.name}{dim_part};')
     lines.append('')
 
     lines.append('    // Outputs')
     for p in outputs:
-        lines.append(f'    {port_type_str(p)} {p.name};')
+        dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
+        lines.append(f'    {port_type_str(p)} {p.name}{dim_part};')
     lines.append('')
 
     # Interface instantiation
@@ -458,7 +510,8 @@ def gen_tb(module: ModuleInfo) -> str:
 
 def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
     lines = []
-    lines.append('module uut_recorder(')
+    import_clause = (' ' + ' '.join(module.imports)) if module.imports else ''
+    lines.append(f'module uut_recorder{import_clause}(')
     lines.append('    uut_if.slave _if')
     lines.append(');')
     lines.append('    localparam string base_dir = "../custom-sim/stimuli";')
@@ -471,15 +524,16 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
     async_signals = set(all_clocks) | set(all_resets) | set(domains.async_domain)
 
     # Async recorders (clocks first, then resets, then async_domain)
+    # Skip ports with unpacked array dimensions — scalar recorders can't handle them.
     async_ports = []
     for clk in all_clocks:
-        if clk in input_ports:
+        if clk in input_ports and not input_ports[clk].unpacked_dims:
             async_ports.append(clk)
     for rst in all_resets:
-        if rst in input_ports:
+        if rst in input_ports and not input_ports[rst].unpacked_dims:
             async_ports.append(rst)
     for sig in domains.async_domain:
-        if sig in input_ports:
+        if sig in input_ports and not input_ports[sig].unpacked_dims:
             async_ports.append(sig)
 
     if async_ports:
@@ -513,7 +567,7 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
     sync_entries = []
     for clk, sigs in domains.clock_domains.items():
         for sig in sigs:
-            if sig in input_ports:
+            if sig in input_ports and not input_ports[sig].unpacked_dims:
                 sync_entries.append((clk, input_ports[sig]))
 
     if sync_entries:

@@ -4,8 +4,8 @@ ROOT_DIR = ../..
 PROJECT_ROOT = $(ROOT_DIR)/../..
 RTL_DIR = $(ROOT_DIR)/rtl
 MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
-STATIC_BUILD_TARGET ?= sanitized
-STATIC_BUILD_DIR = $(PROJECT_ROOT)/build/sanitized
+STATIC_BUILD_TARGET ?= dev
+STATIC_BUILD_DIR = $(PROJECT_ROOT)/build/$(STATIC_BUILD_TARGET)
 
 RTL_PKGS = $(shell find -L $(RTL_DIR) -type f -name "*_pkg.sv")
 RTL_SRCS = $(RTL_PKGS) $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \) | grep -v "_pkg.sv")
@@ -19,7 +19,10 @@ EMIT_INFERRED_SYNCHRONIZERS_ARG = $(if $(INFER_SYNCHRONIZERS),--emit-inferred-sy
 DOMAINS_ARG = $(if $(INFER_TOP_DOMAINS),,$(if $(wildcard $(DOMAINS_YAML)),--domains $(DOMAINS_YAML),))
 
 STATIC_ANALYZER = $(STATIC_BUILD_DIR)/mate
+SANITIZER_ENV =
+ifeq ($(STATIC_BUILD_TARGET),sanitized)
 SANITIZER_ENV = ASAN_OPTIONS=symbolize=1,detect_leaks=0,abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1,halt_on_error=1
+endif
 
 # Per-test optional args (from static.args file)
 EXTRA_ARGS = $(shell cat static.args 2>/dev/null)

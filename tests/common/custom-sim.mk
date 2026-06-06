@@ -6,14 +6,17 @@ RTL_DIR = $(ROOT_DIR)/rtl
 MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
 STIMULI_DIR = stimuli
 OUTPUT_DIR = output
-SIM_BUILD_TARGET ?= sanitized
-SIMULATOR_BUILD_DIR = $(PROJECT_ROOT)/build/sanitized
+SIM_BUILD_TARGET ?= dev
+SIMULATOR_BUILD_DIR = $(PROJECT_ROOT)/build/$(SIM_BUILD_TARGET)
 
 RTL_SRCS = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
 DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 
 SIMULATOR = $(SIMULATOR_BUILD_DIR)/mate
+SANITIZER_ENV =
+ifeq ($(SIM_BUILD_TARGET),sanitized)
 SANITIZER_ENV = ASAN_OPTIONS=symbolize=1,detect_leaks=0,abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1,halt_on_error=1
+endif
 
 # Per-test optional args (from custom-sim.args file)
 EXTRA_ARGS = $(shell cat custom-sim.args 2>/dev/null)

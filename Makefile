@@ -1,5 +1,7 @@
 .PHONY: all build dev debug sanitized release ensure-debug-slang test regression gdb clean noop
 
+REGRESSION_BUILD_TARGET ?= dev
+
 all: dev
 
 build: dev
@@ -28,8 +30,8 @@ release:
 
 test: regression
 
-regression: sanitized
-	python tests/regression.py
+regression:
+	python tests/regression.py --build $(REGRESSION_BUILD_TARGET)
 
 gdb: debug
 	gdb --args ./build/debug/mate $(source)

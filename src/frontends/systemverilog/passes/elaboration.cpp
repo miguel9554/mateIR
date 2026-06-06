@@ -6702,9 +6702,7 @@ void resolveNamedPortConnection(
         }
     } else if (subOutputNames.contains(portName)) {
         if (!named.expr) {
-            throw CompilerError(
-                "Output port '" + portName + "' requires a connection expression",
-                resolveSourceLoc(named, ctx.sm));
+            return;
         }
         auto* expr = extractPortExpr(*named.expr);
         auto* outputPort = findOutputNode(resolvedSub, portName);

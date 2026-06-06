@@ -19,6 +19,14 @@ initial begin
 end
 
 initial begin
+    _if.ic_scr_key_valid_i = 1'b1;
+    for (int w = 0; w < IC_NUM_WAYS; w++) begin
+        _if.ic_tag_rdata_i[w] = '0;
+        _if.ic_data_rdata_i[w] = '0;
+    end
+end
+
+initial begin
     #50_000ns;
     $finish();
 end
@@ -37,9 +45,6 @@ always @(posedge _if.clk_i) begin
     _if.data_err_i         <= 1'b0;
     _if.irq_nm_i           <= 1'b0;
     _if.debug_req_i        <= 1'b0;
-
-    // Scramble key always valid
-    _if.ic_scr_key_valid_i <= 1'b1;
 
     // ------------------------------------------------------------------
     // Instruction fetch handshake
@@ -60,12 +65,6 @@ always @(posedge _if.clk_i) begin
     // Register file ECC read ports — random data back to core
     _if.rf_rdata_a_ecc_i <= $urandom();
     _if.rf_rdata_b_ecc_i <= $urandom();
-
-    // ICache tag and data read ports — random per way
-    for (int w = 0; w < IC_NUM_WAYS; w++) begin
-        _if.ic_tag_rdata_i[w]  <= $urandom();
-        _if.ic_data_rdata_i[w] <= {$urandom(), $urandom()};
-    end
 
     // Sparse random interrupts to generate output activity
     _if.irq_software_i <= ($urandom_range(0, 999) == 0);

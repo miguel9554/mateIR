@@ -4,6 +4,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
     curl \
+    flex \
+    bison \
     gdb \
     graphviz \
     python3 \

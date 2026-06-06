@@ -1,0 +1,11 @@
+module_name: param_struct_param_vcd_mismatch
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - in_i

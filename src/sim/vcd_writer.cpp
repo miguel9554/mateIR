@@ -116,6 +116,70 @@ vcd_tracer::module& getOrCreateNestedScope(
     return *inserted_it->second;
 }
 
+SimValue constantValueToSimValue(const ConstantValue& value) {
+    if (value.isBits()) {
+        const auto& bits = value.asBits();
+        SimValue out = SimValue::zero(bits.width, bits.is_signed);
+        for (int bit = 0; bit < bits.width; ++bit) {
+            const auto& word = bits.words[static_cast<size_t>(bit / 64)];
+            out.setBit(bit, ((word >> (bit % 64)) & 1ULL) != 0);
+        }
+        return out;
+    }
+
+    if (value.isAggregate()) {
+        std::vector<SimValue> elements;
+        elements.reserve(value.asAggregate().elements.size());
+        for (const auto& element : value.asAggregate().elements)
+            elements.push_back(constantValueToSimValue(element));
+        return SimValue::aggregate(std::move(elements));
+    }
+
+    throw CompilerError("VcdWriter: real-valued parameters are not supported in VCD emission");
+}
+
+void emitRawParamValue(vcd_tracer::module& scope,
+                       std::vector<std::unique_ptr<SimVcdValue>>& storage,
+                       const std::string& name,
+                       const Type& type,
+                       const ConstantValue& value) {
+    if (!type.unpacked_dims.empty()) {
+        Type elem_type = type;
+        const auto dim = elem_type.unpacked_dims.front();
+        elem_type.unpacked_dims.erase(elem_type.unpacked_dims.begin());
+
+        int step = dim.left <= dim.right ? 1 : -1;
+        size_t element_index = 0;
+        for (int i = dim.left; step > 0 ? i <= dim.right : i >= dim.right; i += step) {
+            emitRawParamValue(scope, storage,
+                              std::format("{}[{}]", name, i),
+                              elem_type,
+                              value.element(element_index++));
+        }
+        return;
+    }
+
+    ConstantValue packed = value;
+    if (packed.isAggregate()) {
+        if (!type.isPackedStruct()) {
+            throw CompilerError(std::format(
+                "VcdWriter: unsupported non-packed aggregate parameter '{}'", name));
+        }
+        packed = packed.flattenToBits();
+    }
+
+    if (!packed.isBits()) {
+        throw CompilerError(std::format(
+            "VcdWriter: unsupported non-bit parameter '{}'", name));
+    }
+
+    unsigned int w = type.width > 0 ? static_cast<unsigned int>(type.width) : 1;
+    auto v = std::make_unique<SimVcdValue>(w);
+    v->elaborate(scope.get_add_fn(), name);
+    v->set(constantValueToSimValue(packed));
+    storage.push_back(std::move(v));
+}
+
 }  // namespace
 
 // ============================================================================
@@ -337,16 +401,8 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
 void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
                           const std::unordered_set<const DFGNode*>& alive) {
     for (const auto* params : {&mod.parameters, &mod.localparams}) {
-        for (const auto& param : *params) {
-            auto scalar = param.value.asInt64();
-            if (!scalar) continue;
-            unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
-            auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-            v->set_bit_size(w);
-            v->elaborate(scope.get_add_fn(), param.name);
-            v->set(*scalar);
-            params_.push_back(std::move(v));
-        }
+        for (const auto& param : *params)
+            emitRawParamValue(scope, static_params_, param.name, param.type, param.value);
     }
 
     // Cache of generate-scope vcd_tracer::module objects, keyed by dot-separated

@@ -67,8 +67,10 @@ private:
     std::map<const DFGNode*, std::vector<std::unique_ptr<SimVcdValue>>> values_;
     std::map<std::string, std::vector<std::unique_ptr<SimVcdValue>>> async_values_;
 
-    // Static param values (set once at setup, never updated).
+    // Static scalar param values (set once at setup, never updated).
     std::vector<std::unique_ptr<vcd_tracer::value<int64_t>>> params_;
+    // Static raw-VCD param values that may be wide or aggregate-derived.
+    std::vector<std::unique_ptr<SimVcdValue>> static_params_;
 
     // Recursive setup helpers — both push into values_ / async_values_ / params_.
     void setupGrouped(const Module& mod, vcd_tracer::module& scope,

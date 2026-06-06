@@ -1622,6 +1622,17 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
             return ~evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry, sm);
         }
+        case SyntaxKind::UnbasedUnsizedLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            const auto text = literal.literal.rawText();
+            const char ch = text.size() > 1 ? text[1] : '0';
+            if (ch == '0') return 0;
+            if (ch == '1') return -1;
+            throw CompilerError(
+                "Unsupported unbased unsized literal in integer constant evaluation: " +
+                std::string(text),
+                sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+        }
         case SyntaxKind::LogicalShiftLeftExpression:
         case SyntaxKind::ArithmeticShiftLeftExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();

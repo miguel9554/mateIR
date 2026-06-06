@@ -25,6 +25,8 @@ void printUsage(const char* progName) {
               << "  --infer-synchronizers     Infer CDC synchronizer flops instead of loading .cdc.yaml sidecars\n"
               << "  --emit-inferred-domains <file>\n"
               << "                            Write inferred top-level domains YAML (infer mode only)\n"
+              << "  --emit-inferred-synchronizers <dir>\n"
+              << "                            Write inferred CDC synchronizer YAMLs to dir (infer mode only)\n"
               << "  --analyze                 Run static analysis consumer on mateir\n"
               << "  --simulate                Run cycle-based simulation consumer\n"
               << "  --inputs-dir <dir>        Directory containing input stimuli files\n"
@@ -121,6 +123,7 @@ int main(int argc, char** argv) {
     std::string debugNodePathsStr;
     std::string paramsStr;
     std::string emitInferredDomainsPath;
+    std::string emitInferredSynchronizersDir;
     std::vector<std::string> domainFiles;
     std::vector<std::string> sourceFiles;
     TopDomainMode topDomainMode = TopDomainMode::Yaml;
@@ -147,7 +150,8 @@ int main(int argc, char** argv) {
                    std::strcmp(argv[i], "--debug-node-deps") == 0 ||
                    std::strcmp(argv[i], "--debug-node-paths") == 0 ||
                    std::strcmp(argv[i], "--params") == 0 ||
-                   std::strcmp(argv[i], "--emit-inferred-domains") == 0) {
+                   std::strcmp(argv[i], "--emit-inferred-domains") == 0 ||
+                   std::strcmp(argv[i], "--emit-inferred-synchronizers") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "ERROR: " << argv[i] << " requires an argument\n";
                 printUsage(argv[0]);
@@ -166,6 +170,7 @@ int main(int argc, char** argv) {
             else if (opt == "--debug-node-paths") debugNodePathsStr = value;
             else if (opt == "--params") paramsStr = value;
             else if (opt == "--emit-inferred-domains") emitInferredDomainsPath = value;
+            else if (opt == "--emit-inferred-synchronizers") emitInferredSynchronizersDir = value;
         } else if (std::strcmp(argv[i], "--domains") == 0) {
             while (i + 1 < argc && argv[i + 1][0] != '-') {
                 std::string_view arg(argv[i + 1]);
@@ -205,6 +210,9 @@ int main(int argc, char** argv) {
         if (!emitInferredDomainsPath.empty() && topDomainMode != TopDomainMode::Infer) {
             throw CompilerError("--emit-inferred-domains requires --infer-top-domains");
         }
+        if (!emitInferredSynchronizersDir.empty() && !inferSynchronizers) {
+            throw CompilerError("--emit-inferred-synchronizers requires --infer-synchronizers");
+        }
 
         std::cout << "========================================\n";
         std::cout << "mate\n";
@@ -225,6 +233,9 @@ int main(int argc, char** argv) {
         frontendOptions.top_domain_mode = topDomainMode;
         if (!emitInferredDomainsPath.empty()) {
             frontendOptions.emit_inferred_domains_path = emitInferredDomainsPath;
+        }
+        if (!emitInferredSynchronizersDir.empty()) {
+            frontendOptions.emit_inferred_synchronizers_dir = emitInferredSynchronizersDir;
         }
         frontendOptions.debug_dfg_nodes = parseDebugNodes(debugNodesStr);
         frontendOptions.dump_passes = dumpPasses;

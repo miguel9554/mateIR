@@ -7,6 +7,8 @@
 
 namespace mate {
 
+void writeAtomically(const std::string& outputPath, const std::string& contents);
+
 void emitInferredTopDomainsYaml(const Module& module,
                                 const FrontendDomainFacts& domainFacts,
                                 const std::string& outputPath);

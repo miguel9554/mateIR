@@ -142,6 +142,8 @@ void validateTopInputFactsForEmission(const Module& module,
     }
 }
 
+} // namespace
+
 void writeAtomically(const std::string& outputPath, const std::string& contents) {
     namespace fs = std::filesystem;
 
@@ -180,8 +182,6 @@ void writeAtomically(const std::string& outputPath, const std::string& contents)
             tempPath.string(), finalPath.string(), ec.message()));
     }
 }
-
-} // namespace
 
 void emitInferredTopDomainsYaml(const Module& module,
                                 const FrontendDomainFacts& domainFacts,

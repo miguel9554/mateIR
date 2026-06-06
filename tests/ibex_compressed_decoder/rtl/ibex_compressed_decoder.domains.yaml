@@ -1,0 +1,13 @@
+module_name: ibex_compressed_decoder
+
+resets:
+  rst_ni:
+    polarity: negative
+
+clock_domains:
+  clk_i:
+    polarity: posedge
+    inputs_outputs:
+      - valid_i
+      - id_in_ready_i
+      - instr_i

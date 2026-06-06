@@ -4,7 +4,8 @@ ROOT_DIR = ../..
 PROJECT_ROOT = $(ROOT_DIR)/../..
 RTL_DIR = $(ROOT_DIR)/rtl
 SIM_BUILD_TARGET ?= dev
-SIMULATOR = $(PROJECT_ROOT)/build/$(SIM_BUILD_TARGET)/mate
+SIM_BUILD_PRESET ?= $(if $(filter noop,$(SIM_BUILD_TARGET)),dev,$(SIM_BUILD_TARGET))
+SIMULATOR = $(PROJECT_ROOT)/build/$(SIM_BUILD_PRESET)/mate
 RTL_SRCS = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
 DOMAINS_YAML = $(RTL_DIR)/$(notdir $(realpath $(ROOT_DIR))).domains.yaml
 

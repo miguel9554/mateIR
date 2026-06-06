@@ -7,14 +7,15 @@ MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
 STIMULI_DIR = stimuli
 OUTPUT_DIR = output
 SIM_BUILD_TARGET ?= dev
-SIMULATOR_BUILD_DIR = $(PROJECT_ROOT)/build/$(SIM_BUILD_TARGET)
+SIM_BUILD_PRESET ?= $(if $(filter noop,$(SIM_BUILD_TARGET)),dev,$(SIM_BUILD_TARGET))
+SIMULATOR_BUILD_DIR = $(PROJECT_ROOT)/build/$(SIM_BUILD_PRESET)
 
 RTL_SRCS = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
 DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 
 SIMULATOR = $(SIMULATOR_BUILD_DIR)/mate
 SANITIZER_ENV =
-ifeq ($(SIM_BUILD_TARGET),sanitized)
+ifeq ($(SIM_BUILD_PRESET),sanitized)
 SANITIZER_ENV = ASAN_OPTIONS=symbolize=1,detect_leaks=0,abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1,halt_on_error=1
 endif
 

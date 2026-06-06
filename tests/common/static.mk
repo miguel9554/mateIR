@@ -5,7 +5,8 @@ PROJECT_ROOT = $(ROOT_DIR)/../..
 RTL_DIR = $(ROOT_DIR)/rtl
 MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
 STATIC_BUILD_TARGET ?= dev
-STATIC_BUILD_DIR = $(PROJECT_ROOT)/build/$(STATIC_BUILD_TARGET)
+STATIC_BUILD_PRESET ?= $(if $(filter noop,$(STATIC_BUILD_TARGET)),dev,$(STATIC_BUILD_TARGET))
+STATIC_BUILD_DIR = $(PROJECT_ROOT)/build/$(STATIC_BUILD_PRESET)
 
 RTL_PKGS = $(shell find -L $(RTL_DIR) -type f -name "*_pkg.sv")
 RTL_SRCS = $(RTL_PKGS) $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \) | grep -v "_pkg.sv")
@@ -20,7 +21,7 @@ DOMAINS_ARG = $(if $(INFER_TOP_DOMAINS),,$(if $(wildcard $(DOMAINS_YAML)),--doma
 
 STATIC_ANALYZER = $(STATIC_BUILD_DIR)/mate
 SANITIZER_ENV =
-ifeq ($(STATIC_BUILD_TARGET),sanitized)
+ifeq ($(STATIC_BUILD_PRESET),sanitized)
 SANITIZER_ENV = ASAN_OPTIONS=symbolize=1,detect_leaks=0,abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1,halt_on_error=1
 endif
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -585,50 +586,97 @@ void Simulator::buildTimeline() {
         for (const auto& name : names) sync_input_clock_[name] = id;
     });
 
-        // Parse async input files: "time value" format per line
-    for (const auto& name : async_inputs_) {
-        std::string path = config_.inputs_dir + "/" + name + ".txt";
+    // Parse async input files.
+    // Scalar/struct ports: one file per leaf, format "time 0xVALUE".
+    // Unpacked-array ports: one combined file per port, format "time 0xV0, 0xV1, ...".
+    forEachInputNode(module_, [&](const ModuleNode& input) {
+        auto leaves = moduleNodeLeafRefs(input);
+        if (leaves.empty()) return;
+        if (!async_inputs_.count(leaves[0].leaf_name)) return;
 
-        std::ifstream file(path);
-        if (!file.is_open()) {
-            throw CompilerError(std::format(
-                "Simulator: cannot open async input file '{}'", path));
-        }
+        const bool is_array = !input.type.unpacked_dims.empty();
 
-        std::string line;
-        while (std::getline(file, line)) {
-            if (line.empty() || line[0] == '#') continue;
-            std::istringstream iss(line);
-            std::string time_token;
-            std::string value_token;
-            if (!(iss >> time_token >> value_token)) {
+        auto openFile = [&](const std::string& path) -> std::ifstream {
+            std::ifstream f(path);
+            if (!f.is_open())
                 throw CompilerError(std::format(
-                    "Simulator: bad line in async file '{}': {}", path, line));
-            }
-            SimValue parsedValue;
-            try {
-                auto* input = findInputNode(module_, name);
-                if (!input) {
+                    "Simulator: cannot open async input file '{}'", path));
+            return f;
+        };
+
+        if (is_array) {
+            std::string path = config_.inputs_dir + "/" + input.name + ".txt";
+            std::ifstream file = openFile(path);
+            Type elem_type = unpackedElementType(input.type);
+            if (elem_type.width <= 0)
+                throw CompilerError(std::format(
+                    "Simulator: async array input '{}' element has no type width", input.name));
+
+            std::string line;
+            while (std::getline(file, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                std::istringstream iss(line);
+                std::string time_token;
+                if (!(iss >> time_token))
                     throw CompilerError(std::format(
-                        "Simulator: unknown async input '{}'", name));
+                        "Simulator: bad line in async file '{}': {}", path, line));
+                int64_t time = parseTimeWithUnit(time_token, path, line);
+
+                for (size_t i = 0; i < leaves.size(); ++i) {
+                    std::string hex_token;
+                    if (!(iss >> hex_token))
+                        throw CompilerError(std::format(
+                            "Simulator: async array file '{}' line has fewer values than "
+                            "expected (got {} of {}): {}", path, i, leaves.size(), line));
+                    try {
+                        SimValue val = SimValue::fromHexString(
+                            hex_token, elem_type.width, elem_type.isSigned());
+                        timeline_.push_back({time, leaves[i].leaf_name, std::move(val)});
+                    } catch (const std::invalid_argument&) {
+                        throw CompilerError(std::format(
+                            "Simulator: async array file '{}' bad value token '{}': {}",
+                            path, hex_token, line));
+                    }
+                    // Skip "(decimal)," debug suffix before the next element
+                    char c;
+                    while (iss.get(c) && c != ',') {}
                 }
-                if (input->type.width <= 0)
-                    throw CompilerError(std::format(
-                        "Simulator: async input '{}' has no resolved type width", name));
-                parsedValue = SimValue::fromHexString(
-                    value_token,
-                    input->type.width,
-                    input->type.isSigned());
-            } catch (const std::invalid_argument&) {
-                throw CompilerError(std::format(
-                    "Simulator: async file '{}' has bad value "
-                    "(expected leading token like 0x1a2b, optional trailing debug text): {}",
-                    path, line));
             }
-            int64_t time = parseTimeWithUnit(time_token, path, line);
-            timeline_.push_back({time, name, std::move(parsedValue)});
+        } else {
+            for (const auto& leaf : leaves) {
+                std::string path = config_.inputs_dir + "/" + leaf.leaf_name + ".txt";
+                std::ifstream file = openFile(path);
+                auto* inputNode = findInputNode(module_, leaf.leaf_name);
+                if (!inputNode)
+                    throw CompilerError(std::format(
+                        "Simulator: unknown async input '{}'", leaf.leaf_name));
+                if (inputNode->type.width <= 0)
+                    throw CompilerError(std::format(
+                        "Simulator: async input '{}' has no resolved type width", leaf.leaf_name));
+
+                std::string line;
+                while (std::getline(file, line)) {
+                    if (line.empty() || line[0] == '#') continue;
+                    std::istringstream iss(line);
+                    std::string time_token, value_token;
+                    if (!(iss >> time_token >> value_token))
+                        throw CompilerError(std::format(
+                            "Simulator: bad line in async file '{}': {}", path, line));
+                    try {
+                        SimValue val = SimValue::fromHexString(
+                            value_token, inputNode->type.width, inputNode->type.isSigned());
+                        int64_t time = parseTimeWithUnit(time_token, path, line);
+                        timeline_.push_back({time, leaf.leaf_name, std::move(val)});
+                    } catch (const std::invalid_argument&) {
+                        throw CompilerError(std::format(
+                            "Simulator: async file '{}' has bad value "
+                            "(expected leading token like 0x1a2b, optional trailing debug text): {}",
+                            path, line));
+                    }
+                }
+            }
         }
-    }
+    });
 
     std::stable_sort(timeline_.begin(), timeline_.end(),
         [](const AsyncEvent& a, const AsyncEvent& b) { return a.time < b.time; });
@@ -641,51 +689,93 @@ void Simulator::buildTimeline() {
 void Simulator::loadSyncInputs() {
     forEachInputNode(module_, [&](const ModuleNode& input) {
         if (!std::holds_alternative<SyncSignal>(input.sync_type)) return;
-        for (const auto& leaf : moduleNodeLeafRefs(input)) {
-            const std::string& name = leaf.leaf_name;
-            std::string path = config_.inputs_dir + "/" + name + ".txt";
+        auto leaves = moduleNodeLeafRefs(input);
+        const bool is_array = !input.type.unpacked_dims.empty();
+
+        if (is_array) {
+            // One combined file per port; each line has comma-separated element values.
+            std::string path = config_.inputs_dir + "/" + input.name + ".txt";
             std::ifstream file(path);
-            if (!file.is_open()) {
+            if (!file.is_open())
                 throw CompilerError(std::format(
                     "Simulator: cannot open sync input file '{}'", path));
-            }
+            Type elem_type = unpackedElementType(input.type);
+            if (elem_type.width <= 0)
+                throw CompilerError(std::format(
+                    "Simulator: sync array input '{}' element has no type width", input.name));
 
-            std::vector<SimValue> values;
+            // Collect per-leaf value vectors indexed by leaf index
+            std::vector<std::vector<SimValue>> per_leaf(leaves.size());
             std::string line;
             while (std::getline(file, line)) {
                 if (line.empty() || line[0] == '#') continue;
                 std::istringstream iss(line);
-                std::string hex_text;
-                if (!(iss >> hex_text)) {
-                    throw CompilerError(std::format(
-                        "Simulator: sync file '{}' has unparseable line: {}", path, line));
-                }
-                try {
-                    const Type& leafType = leaf.node && leaf.node->type
-                        ? *leaf.node->type
-                        : input.type;
-                    if (leafType.width <= 0)
+                for (size_t i = 0; i < leaves.size(); ++i) {
+                    std::string hex_token;
+                    if (!(iss >> hex_token))
                         throw CompilerError(std::format(
-                            "Simulator: sync input '{}' has no resolved type width", name));
-                    values.push_back(SimValue::fromHexString(
-                        hex_text,
-                        leafType.width,
-                        leafType.isSigned()));
-                } catch (const std::invalid_argument&) {
-                    throw CompilerError(std::format(
-                        "Simulator: sync file '{}' has bad hex value "
-                        "(expected leading token like 0x1a2b, optional trailing debug text): {}",
-                        path, line));
+                            "Simulator: sync array file '{}' line has fewer values than "
+                            "expected (got {} of {}): {}", path, i, leaves.size(), line));
+                    try {
+                        per_leaf[i].push_back(SimValue::fromHexString(
+                            hex_token, elem_type.width, elem_type.isSigned()));
+                    } catch (const std::invalid_argument&) {
+                        throw CompilerError(std::format(
+                            "Simulator: sync array file '{}' bad value token '{}': {}",
+                            path, hex_token, line));
+                    }
+                    // Skip "(decimal)," debug suffix before the next element
+                    char c;
+                    while (iss.get(c) && c != ',') {}
                 }
             }
-
-            if (values.empty()) {
-                throw CompilerError(std::format(
-                    "Simulator: sync input file '{}' is empty", path));
+            for (size_t i = 0; i < leaves.size(); ++i) {
+                if (per_leaf[i].empty())
+                    throw CompilerError(std::format(
+                        "Simulator: sync input file '{}' is empty", path));
+                sync_input_data_[leaves[i].leaf_name] = std::move(per_leaf[i]);
+                sync_input_pos_[leaves[i].leaf_name] = 0;
             }
+        } else {
+            for (const auto& leaf : leaves) {
+                const std::string& name = leaf.leaf_name;
+                std::string path = config_.inputs_dir + "/" + name + ".txt";
+                std::ifstream file(path);
+                if (!file.is_open())
+                    throw CompilerError(std::format(
+                        "Simulator: cannot open sync input file '{}'", path));
 
-            sync_input_data_[name] = std::move(values);
-            sync_input_pos_[name] = 0;
+                std::vector<SimValue> values;
+                std::string line;
+                while (std::getline(file, line)) {
+                    if (line.empty() || line[0] == '#') continue;
+                    std::istringstream iss(line);
+                    std::string hex_text;
+                    if (!(iss >> hex_text))
+                        throw CompilerError(std::format(
+                            "Simulator: sync file '{}' has unparseable line: {}", path, line));
+                    try {
+                        const Type& leafType = leaf.node && leaf.node->type
+                            ? *leaf.node->type
+                            : input.type;
+                        if (leafType.width <= 0)
+                            throw CompilerError(std::format(
+                                "Simulator: sync input '{}' has no resolved type width", name));
+                        values.push_back(SimValue::fromHexString(
+                            hex_text, leafType.width, leafType.isSigned()));
+                    } catch (const std::invalid_argument&) {
+                        throw CompilerError(std::format(
+                            "Simulator: sync file '{}' has bad hex value "
+                            "(expected leading token like 0x1a2b, optional trailing debug text): {}",
+                            path, line));
+                    }
+                }
+                if (values.empty())
+                    throw CompilerError(std::format(
+                        "Simulator: sync input file '{}' is empty", path));
+                sync_input_data_[name] = std::move(values);
+                sync_input_pos_[name] = 0;
+            }
         }
     });
 }
@@ -866,6 +956,15 @@ void Simulator::run() {
 
     // === Main loop: process timeline in time-batches ===
 
+    const size_t total_events = timeline_.size();
+    const int progress_interval_pct = 10;
+    using Clock = std::chrono::steady_clock;
+    using Sec = std::chrono::duration<double>;
+    auto sim_start     = Clock::now();
+    auto step_start    = Clock::now();
+    size_t step_events = 0;
+    int    last_pct    = 0;
+
     size_t idx = 0;
     while (idx < timeline_.size()) {
         int64_t batch_time = timeline_[idx].time;
@@ -877,17 +976,33 @@ void Simulator::run() {
             idx++;
         }
 
+        step_events += batch.size();
+
+        if (total_events > 0) {
+            int cur_pct = static_cast<int>((idx * 100) / total_events);
+            cur_pct = (cur_pct / progress_interval_pct) * progress_interval_pct;
+            if (cur_pct >= last_pct + progress_interval_pct) {
+                auto now          = Clock::now();
+                double step_secs  = std::chrono::duration_cast<Sec>(now - step_start).count();
+                double total_secs = std::chrono::duration_cast<Sec>(now - sim_start).count();
+                double step_eps   = step_secs  > 0 ? step_events / step_secs  : 0;
+                double avg_eps    = total_secs > 0 ? idx          / total_secs : 0;
+                std::cout << std::format(
+                    "Simulator: {:3d}%  step {:.0f} ev/s  avg {:.0f} ev/s\n",
+                    cur_pct, step_eps, avg_eps);
+                last_pct    = cur_pct;
+                step_start  = now;
+                step_events = 0;
+            }
+        }
+
         // Deduplicate: keep the last event per signal at this timestamp.
         std::map<std::string, SimValue> new_async;
         for (const auto* evt : batch) {
             new_async[evt->signal_name] = evt->value;
         }
 
-        if (batch_time != 0 && batch.size() > 1) {
-            throw CompilerError(std::format(
-                "Simulator: multiple async events share timestamp {} ps; this is unsupported",
-                batch_time));
-        }
+
 
         std::set<ClockId> active_edge_clocks;
         std::set<ResetId> active_edge_resets;
@@ -967,6 +1082,14 @@ void Simulator::run() {
         if (!active_edge_clocks.empty()) {
             recordOutputs();
         }
+    }
+
+    {
+        double total_secs = std::chrono::duration_cast<Sec>(Clock::now() - sim_start).count();
+        double avg_eps    = total_secs > 0 ? total_events / total_secs : 0;
+        std::cout << std::format(
+            "Simulator: 100%  total {:.0f} ev/s avg over {} events\n",
+            avg_eps, total_events);
     }
 
     vcd_->close(timeline_.empty() ? 0 : timeline_.back().time);

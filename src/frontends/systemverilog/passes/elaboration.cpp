@@ -11,6 +11,7 @@
 #include "slang/syntax/SyntaxNode.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
@@ -227,6 +228,141 @@ static int64_t intPowConst(int64_t base, int64_t exp) {
     return result;
 }
 
+size_t constantWordCount(int width) {
+    if (width <= 0) {
+        throw CompilerError("Constant bit vector must have a positive width");
+    }
+    return (static_cast<size_t>(width) + 63) / 64;
+}
+
+void maskConstantHighBits(std::vector<uint64_t>& words, int width) {
+    const int highBits = width % 64;
+    if (highBits != 0) words.back() &= (uint64_t(1) << highBits) - 1;
+}
+
+uint8_t hexDigitValue(char ch) {
+    if (ch >= '0' && ch <= '9') return static_cast<uint8_t>(ch - '0');
+    if (ch >= 'a' && ch <= 'f') return static_cast<uint8_t>(10 + ch - 'a');
+    if (ch >= 'A' && ch <= 'F') return static_cast<uint8_t>(10 + ch - 'A');
+    throw CompilerError("Unsupported hex digit in string literal escape");
+}
+
+void appendDecodedEscape(std::string_view text, size_t& index, std::vector<uint8_t>& bytes) {
+    if (index >= text.size()) {
+        throw CompilerError("Unterminated escape sequence in string literal");
+    }
+
+    const char ch = text[index++];
+    switch (ch) {
+        case 'n': bytes.push_back('\n'); return;
+        case 't': bytes.push_back('\t'); return;
+        case 'r': bytes.push_back('\r'); return;
+        case 'f': bytes.push_back('\f'); return;
+        case 'v': bytes.push_back('\v'); return;
+        case 'a': bytes.push_back('\a'); return;
+        case 'b': bytes.push_back('\b'); return;
+        case '\\': bytes.push_back('\\'); return;
+        case '"': bytes.push_back('"'); return;
+        case '\'': bytes.push_back('\''); return;
+        case 'x': {
+            if (index >= text.size() || !std::isxdigit(static_cast<unsigned char>(text[index]))) {
+                throw CompilerError("Hex string literal escape requires at least one digit");
+            }
+            uint8_t value = 0;
+            int digits = 0;
+            while (index < text.size() &&
+                   std::isxdigit(static_cast<unsigned char>(text[index])) &&
+                   digits < 2) {
+                value = static_cast<uint8_t>((value << 4) | hexDigitValue(text[index]));
+                ++index;
+                ++digits;
+            }
+            bytes.push_back(value);
+            return;
+        }
+        default:
+            break;
+    }
+
+    if (ch >= '0' && ch <= '7') {
+        uint8_t value = static_cast<uint8_t>(ch - '0');
+        int digits = 1;
+        while (index < text.size() &&
+               text[index] >= '0' && text[index] <= '7' &&
+               digits < 3) {
+            value = static_cast<uint8_t>((value << 3) | static_cast<uint8_t>(text[index] - '0'));
+            ++index;
+            ++digits;
+        }
+        bytes.push_back(value);
+        return;
+    }
+
+    throw CompilerError("Unsupported escape sequence in string literal");
+}
+
+std::vector<uint8_t> decodeFrontendStringLiteral(std::string_view text) {
+    if (text.size() >= 6 && text.starts_with("\"\"\"") && text.ends_with("\"\"\"")) {
+        std::vector<uint8_t> bytes;
+        bytes.reserve(text.size() - 6);
+        for (size_t i = 3; i + 3 < text.size(); ++i) {
+            bytes.push_back(static_cast<uint8_t>(text[i]));
+        }
+        return bytes;
+    }
+
+    if (text.size() < 2 || text.front() != '"' || text.back() != '"') {
+        throw CompilerError("Malformed string literal");
+    }
+
+    std::vector<uint8_t> bytes;
+    bytes.reserve(text.size() - 2);
+    for (size_t i = 1; i + 1 < text.size();) {
+        if (text[i] == '\\') {
+            ++i;
+            appendDecodedEscape(text, i, bytes);
+            continue;
+        }
+        bytes.push_back(static_cast<uint8_t>(text[i]));
+        ++i;
+    }
+    return bytes;
+}
+
+std::vector<uint64_t> lowerFrontendStringLiteralToWords(std::string_view text, int width) {
+    std::vector<uint64_t> words(constantWordCount(width), 0);
+    const auto bytes = decodeFrontendStringLiteral(text);
+    const int maxBytes = width / 8;
+    const int copyBytes = std::min<int>(static_cast<int>(bytes.size()), maxBytes);
+    const int start = static_cast<int>(bytes.size()) - copyBytes;
+    for (int i = 0; i < copyBytes; ++i) {
+        const uint8_t value = bytes[static_cast<size_t>(start + i)];
+        const int byteIndex = copyBytes - 1 - i;
+        const int bitOffset = byteIndex * 8;
+        words[bitOffset / 64] |= uint64_t(value) << (bitOffset % 64);
+        if ((bitOffset % 64) > 56) {
+            words[bitOffset / 64 + 1] |= uint64_t(value) >> (64 - (bitOffset % 64));
+        }
+    }
+    maskConstantHighBits(words, width);
+    return words;
+}
+
+ConstantValue lowerStringLiteralConstant(std::string_view text, const Type& expectedType) {
+    if (expectedType.isStruct() || !expectedType.unpacked_dims.empty()) {
+        throw CompilerError("String literal constant requires an integral destination type");
+    }
+    if (expectedType.packed_dims.size() > 1) {
+        throw CompilerError(
+            "String literal constants are not supported for multidimensional packed arrays");
+    }
+    if (expectedType.width <= 0) {
+        throw CompilerError("Integral constant type must have a positive width");
+    }
+    return ConstantValue::bitWords(
+        expectedType, lowerFrontendStringLiteralToWords(text, expectedType.width));
+}
+
 // TODO should be double? or parametrized by type.
 struct IntegerVectorLiteral {
     int64_t value;
@@ -306,6 +442,15 @@ static int constantExprWidth(const ExpressionSyntax* expr,
                 return std::stoi(std::string(literal.size.rawText()));
             }
             return parseIntegerVectorExpression(literal).width;
+        }
+        case SyntaxKind::StringLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            const auto bytes = decodeFrontendStringLiteral(literal.literal.rawText());
+            if (bytes.empty()) return 0;
+            if (bytes.size() > static_cast<size_t>(std::numeric_limits<int>::max() / 8)) {
+                throw CompilerError("String literal width exceeds supported range", loc);
+            }
+            return static_cast<int>(bytes.size() * 8);
         }
         case SyntaxKind::ParenthesizedExpression:
             return constantExprWidth(expr->as<ParenthesizedExpressionSyntax>().expression,
@@ -1417,6 +1562,21 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             // TODO: handle other bases (hex, octal, binary) and sized literals
             return std::stoll(std::string(text));
         }
+        case SyntaxKind::StringLiteralExpression: {
+            auto& literal = expr->as<LiteralExpressionSyntax>();
+            const auto text = literal.literal.rawText();
+            const auto bytes = decodeFrontendStringLiteral(text);
+            if (bytes.empty()) return 0;
+            if (bytes.size() > 8) {
+                throw CompilerError(
+                    "String literal constant does not fit in int64_t",
+                    sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+            }
+            Type stringType = Type::makeInteger(static_cast<int>(bytes.size() * 8), false);
+            return lowerStringLiteralConstant(text, stringType).requireInt64(
+                "String literal constant",
+                sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+        }
 
         case SyntaxKind::IdentifierName: {
             auto& name = expr->as<IdentifierNameSyntax>();
@@ -1786,6 +1946,10 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
         case SyntaxKind::IntegerLiteralExpression: {
             const auto& literal = expr->as<LiteralExpressionSyntax>();
             return ConstantValue::integerLiteral(expectedType, literal.literal.rawText());
+        }
+        case SyntaxKind::StringLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            return lowerStringLiteralConstant(literal.literal.rawText(), expectedType);
         }
         case SyntaxKind::IntegerVectorExpression: {
             const auto& literal = expr->as<IntegerVectorExpressionSyntax>();

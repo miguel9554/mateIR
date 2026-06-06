@@ -364,14 +364,14 @@ static size_t expected_total_width(const ExpectedSignal &signal) {
 static std::vector<std::vector<const StructuredLeafSpec *>> group_structured_leaves(
     const ExpectedSignal &expected) {
     std::vector<std::vector<const StructuredLeafSpec *>> groups;
-    std::map<std::string, size_t> group_index;
+    std::string current_group_name;
     for (const auto &leaf : expected.leaves) {
         std::string group_name = structured_group_name(expected, leaf.name);
-        auto [it, inserted] = group_index.emplace(group_name, groups.size());
-        if (inserted) {
+        if (groups.empty() || group_name != current_group_name) {
             groups.push_back({});
+            current_group_name = group_name;
         }
-        groups[it->second].push_back(&leaf);
+        groups.back().push_back(&leaf);
     }
     return groups;
 }

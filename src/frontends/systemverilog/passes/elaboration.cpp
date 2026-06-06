@@ -1593,7 +1593,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                 for (const auto& branch : branches) {
                     if (std::find(branch.selectorValues.begin(), branch.selectorValues.end(), selectorValue) !=
                             branch.selectorValues.end()) {
-                        value = branchValue(signalName, branch.modifiedDrivers, defaultValue);
+                        value = branchValue(signalName, branch.modifiedDrivers, retained);
                         break;
                     }
                 }

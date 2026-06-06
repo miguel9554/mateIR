@@ -3501,7 +3501,20 @@ static ExprValue buildScalarExprValue(
         ResolutionContext& ctx
 ) {
     ExprValue value = buildExprValue(expr, ctx);
-    if (!value.type.unpacked_dims.empty() || value.type.isStruct()) {
+    if (!value.type.unpacked_dims.empty()) {
+        throw CompilerError("Array-valued expression used where scalar expression is required",
+                            resolveSourceLoc(*expr, ctx.sm));
+    }
+    if (value.type.isPackedStruct() && !value.leaves.empty()) {
+        // Packed struct in scalar context: flatten leaves MSB-first into a single integer.
+        auto* node = value.leaves.size() == 1
+            ? value.leaves[0]
+            : ctx.graph.concat(value.leaves);
+        node->type = Type::makeInteger(value.type.width, false);
+        node->loc = resolveSourceLoc(*expr, ctx.sm);
+        return ExprValue{.type = *node->type, .scalar = node, .leaves = {}, .leaf_paths = {}};
+    }
+    if (value.type.isStruct()) {
         throw CompilerError("Array-valued expression used where scalar expression is required",
                             resolveSourceLoc(*expr, ctx.sm));
     }

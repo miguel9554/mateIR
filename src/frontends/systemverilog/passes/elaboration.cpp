@@ -2876,14 +2876,9 @@ static std::string frontendTypeName(const Type& type) {
     return "integer";
 }
 
-static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
-                                ResolutionContext& ctx,
-                                const std::optional<SourceLoc>& loc) {
-    auto rejectStruct = [&](const Type& type) {
-        if (type.isStruct()) {
-            throw CompilerError("Struct casts are not supported in phase 1", loc);
-        }
-    };
+static Type resolveNamedTypeCast(const CastExpressionSyntax& castExpr,
+                                 ResolutionContext& ctx,
+                                 const std::optional<SourceLoc>& loc) {
     if (castExpr.left->kind == SyntaxKind::NamedType) {
         auto& namedType = castExpr.left->as<NamedTypeSyntax>();
         if (namedType.name->kind == SyntaxKind::ScopedName) {
@@ -2900,7 +2895,6 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
             if (it == pkgIt->second.namedTypes.end()) {
                 throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
             }
-            rejectStruct(it->second);
             return it->second;
         }
 
@@ -2910,7 +2904,6 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
         if (it == ctx.namedTypeRegistry.end()) {
             throw CompilerError("Unknown type in cast: " + typeName, loc);
         }
-        rejectStruct(it->second);
         return it->second;
     }
 
@@ -2921,7 +2914,6 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
         if (it == ctx.namedTypeRegistry.end()) {
             throw CompilerError("Unknown type in cast: " + typeName, loc);
         }
-        rejectStruct(it->second);
         return it->second;
     }
 
@@ -2939,22 +2931,21 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
         if (it == pkgIt->second.namedTypes.end()) {
             throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
         }
-        rejectStruct(it->second);
         return it->second;
     }
 
-    throw CompilerError("Only enum type casts are supported (e.g. state_t'(expr))", loc);
+    throw CompilerError("Only named-type casts are supported (e.g. my_t'(expr))", loc);
 }
 
-static void validateEnumCastWidth(const ExprValue& sourceValue,
-                                  const Type& targetType,
-                                  const std::optional<SourceLoc>& loc) {
+static void validateNamedTypeCastWidth(const ExprValue& sourceValue,
+                                       const Type& targetType,
+                                       const std::optional<SourceLoc>& loc) {
     if (!sourceValue.scalar || !sourceValue.scalar->hasType()) return;
     if (sourceValue.scalar->kind() == DFGOp::CONST) return;
     if (sourceValue.type.width > 0 && sourceValue.type.width != targetType.width) {
         throw CompilerError(std::format(
             "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
-            sourceValue.type.width, targetType.enumInfo().type_name, targetType.width), loc);
+            sourceValue.type.width, frontendTypeName(targetType), targetType.width), loc);
     }
 }
 
@@ -3191,7 +3182,7 @@ static ExprValue retagConstOrReturnValue(ExprValue value,
                                          const Type& targetType,
                                          const std::optional<SourceLoc>& loc) {
     if (!value.scalar) {
-        throw CompilerError("Enum cast requires a scalar expression", loc);
+        throw CompilerError("Named-type cast requires a scalar expression", loc);
     }
     if (value.scalar->kind() == DFGOp::CONST) {
         value.scalar->type = targetType;
@@ -3341,9 +3332,9 @@ static ExprValue buildExprValue(
     if (expr->kind == SyntaxKind::CastExpression) {
         auto loc = resolveSourceLoc(*expr, ctx.sm);
         auto& castExpr = expr->as<CastExpressionSyntax>();
-        Type castType = resolveEnumCastType(castExpr, ctx, loc);
+        Type castType = resolveNamedTypeCast(castExpr, ctx, loc);
         ExprValue inner = buildScalarExprValue(castExpr.right->expression, ctx);
-        validateEnumCastWidth(inner, castType, loc);
+        validateNamedTypeCastWidth(inner, castType, loc);
         return retagConstOrReturnValue(inner, castType, loc);
     }
 

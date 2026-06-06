@@ -224,6 +224,8 @@ struct Module {
     std::string name;           // module type name
     std::string instance_name;  // instance name (empty for the top module)
     std::vector<Param> parameters;
+    // Module-level localparams plus generate-local localparams qualified with
+    // their generate instance path (for example `g_lane[0].Cnt`).
     std::vector<Param> localparams;
     std::map<std::string, Type> named_types;
     std::map<std::string, ModuleNode> nodes;

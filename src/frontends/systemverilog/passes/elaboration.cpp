@@ -7980,7 +7980,8 @@ static void registerGenerateLocalTypedefs(const SyntaxList<MemberSyntax>& member
 static void registerGenerateLocalParams(
         const SyntaxList<MemberSyntax>& members,
         const ResolutionContext& ctx,
-        ParameterContext& scopeParams) {
+        ParameterContext& scopeParams,
+        const NamedTypeRegistry& namedTypeRegistry) {
     for (const auto* member : members) {
         if (member->kind != SyntaxKind::ParameterDeclarationStatement) continue;
         const auto& statement = member->as<ParameterDeclarationStatementSyntax>();
@@ -7989,10 +7990,12 @@ static void registerGenerateLocalParams(
             if (!param.defaultValue)
                 throw CompilerError("localparam '" + param.name + "' must have a default value",
                                     resolveSourceLoc(statement, ctx.sm));
-            int64_t value = evaluateConstantExpr(
-                param.defaultValue, scopeParams, ctx.sm, statement,
-                &ctx.pkgRegistry, &ctx.namedTypeRegistry);
-            scopeParams.values[param.name] = integerConstant(value);
+            Param resolved = resolveParameter(
+                param, ctx.params, scopeParams, true,
+                &namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
+            if (!ctx.instance_path.empty())
+                resolved.name = ctx.instance_path + "." + resolved.name;
+            ctx.thisModule->localparams.push_back(std::move(resolved));
         }
     }
 }
@@ -8006,7 +8009,7 @@ void resolveGenerateMembersInPlace(
     EnumMemberMap scopeEnumMemberValues = ctx.enumMemberValues;
     registerGenerateLocalTypedefs(
         members, ctx, scopeParams, scopeNamedTypes, scopeEnumMemberValues);
-    registerGenerateLocalParams(members, ctx, scopeParams);
+    registerGenerateLocalParams(members, ctx, scopeParams, scopeNamedTypes);
     ResolutionContext scopeCtx{
         ctx.graph, ctx.thisModule, ctx.flopNames, scopeParams,
         ctx.sm, ctx.is_sequential, ctx.triggers, ctx.domain_facts, ctx.occurrence,

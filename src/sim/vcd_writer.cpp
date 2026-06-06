@@ -291,16 +291,7 @@ void VcdWriter::addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
 
 void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
                           const std::unordered_set<const DFGNode*>& alive) {
-    if (!mod.parameters.empty() || !mod.localparams.empty()) {
-        vcd_tracer::module params_mod(scope, "params");
-        for (const auto* params : {&mod.parameters, &mod.localparams}) {
-            for (const auto& param : *params) {
-                emitParamValue(params_mod, static_params_,
-                               param.name, param.type, param.value);
-            }
-        }
-    }
-
+    vcd_tracer::module params_mod(scope, "params");
     vcd_tracer::module inputs_mod(scope, "inputs");
     vcd_tracer::module signals_mod(scope, "signals");
     vcd_tracer::module flops_mod(scope, "flops");
@@ -308,12 +299,17 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
 
     // Cache of generate-scope entries, keyed by dot-separated scope path.
     // Each entry holds the generate scope VCD module plus lazily-created
-    // signals/ and flops/ sub-modules (mirroring the top-level hierarchy).
+    // params/ signals/ and flops/ sub-modules (mirroring the top-level hierarchy).
     struct GenScopeEntry {
         vcd_tracer::module* scope = nullptr;
+        std::unique_ptr<vcd_tracer::module> params_mod;
         std::unique_ptr<vcd_tracer::module> signals_mod;
         std::unique_ptr<vcd_tracer::module> flops_mod;
 
+        vcd_tracer::module& get_or_create_params() {
+            if (!params_mod) params_mod = std::make_unique<vcd_tracer::module>(*scope, "params");
+            return *params_mod;
+        }
         vcd_tracer::module& get_or_create_signals() {
             if (!signals_mod) signals_mod = std::make_unique<vcd_tracer::module>(*scope, "signals");
             return *signals_mod;
@@ -337,6 +333,20 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
         entry.scope = &getOrCreateScope(path);
         return gen_scopes.emplace(path, std::move(entry)).first->second;
     };
+
+    for (const auto* params : {&mod.parameters, &mod.localparams}) {
+        for (const auto& param : *params) {
+            auto dot = param.name.rfind('.');
+            if (dot == std::string::npos) {
+                emitParamValue(params_mod, static_params_,
+                               param.name, param.type, param.value);
+            } else {
+                emitParamValue(getGenScope(param.name.substr(0, dot)).get_or_create_params(),
+                               static_params_,
+                               param.name.substr(dot + 1), param.type, param.value);
+            }
+        }
+    }
 
     forEachInputNode(mod, [&](const ModuleNode& sig) {
         const std::string& name = sig.name;
@@ -394,11 +404,6 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
 
 void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
                       const std::unordered_set<const DFGNode*>& alive) {
-    for (const auto* params : {&mod.parameters, &mod.localparams}) {
-        for (const auto& param : *params)
-            emitParamValue(scope, static_params_, param.name, param.type, param.value);
-    }
-
     // Cache of generate-scope vcd_tracer::module objects, keyed by dot-separated
     // scope path. Created on demand; generate scopes are direct children of `scope`.
     std::map<std::string, std::unique_ptr<vcd_tracer::module>> gen_scopes;
@@ -406,6 +411,18 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
     getGenScope = [&](const std::string& path) -> vcd_tracer::module& {
         return getOrCreateNestedScope(scope, gen_scopes, path);
     };
+
+    for (const auto* params : {&mod.parameters, &mod.localparams}) {
+        for (const auto& param : *params) {
+            auto dot = param.name.rfind('.');
+            if (dot == std::string::npos) {
+                emitParamValue(scope, static_params_, param.name, param.type, param.value);
+            } else {
+                emitParamValue(getGenScope(param.name.substr(0, dot)), static_params_,
+                               param.name.substr(dot + 1), param.type, param.value);
+            }
+        }
+    }
 
     forEachInputNode(mod, [&](const ModuleNode& sig) {
         const std::string& name = sig.name;

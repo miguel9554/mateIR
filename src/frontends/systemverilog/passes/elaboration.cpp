@@ -6944,9 +6944,41 @@ void resolveNamedPortConnection(
     // Check if input
     if (subInputNames.contains(portName)) {
         if (!named.expr) {
-            throw CompilerError(
-                "Input port '" + portName + "' requires a connection expression",
+            if (named.openParen.kind != slang::parsing::TokenKind::Unknown)
+                throw CompilerError(
+                    "Input port '" + portName + "' requires a connection expression",
+                    resolveSourceLoc(named, ctx.sm));
+            // .portName (no parens) = implicit connection to same-named signal
+            auto* port = findInputNode(resolvedSub, portName);
+            if (!port) throw CompilerError("Input port '" + portName + "' not found");
+            if (port->type.isStruct() || !port->type.unpacked_dims.empty())
+                throw CompilerError(
+                    "Implicit port connection for aggregate input port '" + portName + "' not supported",
+                    resolveSourceLoc(named, ctx.sm));
+            auto* driver = lookupNamedNodeInModule(ctx, portName);
+            if (!driver) throw CompilerError(
+                "Cannot find signal '" + portName + "' for implicit port connection",
                 resolveSourceLoc(named, ctx.sm));
+            binding.inputs.push_back(ModuleInstanceInputBinding{
+                .port_name = portName,
+                .leaf_name = portName,
+                .path = {},
+                .driver = DFGOutput(driver),
+            });
+            if (ctx.domain_facts) {
+                auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
+                facts.child_input_connections.push_back(ChildInputConnectionFact{
+                    .child_instance_path = appendInstancePath(
+                        ctx.occurrence.instance_path, binding.instance_name),
+                    .child_module_name = resolvedSub.name,
+                    .child_port = portName,
+                    .expr_kind = ConnectionExprKind::SimpleIdentifier,
+                    .parent_signal_name = portName,
+                    .diagnostic_expr_kind = "ImplicitPortConnection",
+                    .loc = resolveSourceLoc(named, ctx.sm),
+                });
+            }
+            return;
         }
         auto* expr = extractPortExpr(*named.expr);
         auto* port = findInputNode(resolvedSub, portName);
@@ -6986,6 +7018,21 @@ void resolveNamedPortConnection(
         }
     } else if (subOutputNames.contains(portName)) {
         if (!named.expr) {
+            if (named.openParen.kind != slang::parsing::TokenKind::Unknown) return;  // .portName() = explicitly unconnected
+            // .portName (no parens) = implicit connection to same-named signal
+            auto* outputPort = findOutputNode(resolvedSub, portName);
+            if (!outputPort) throw CompilerError("Output port '" + portName + "' not found");
+            auto loc = resolveSourceLoc(named, ctx.sm);
+            if (outputPort->type.isStruct() || !outputPort->type.unpacked_dims.empty()) {
+                connectOutputPortLeaves(graph, binding, *outputPort, portName, ctx, loc);
+                return;
+            }
+            auto* placeholder = getOrCreateOutputPlaceholder(
+                graph, binding, portName, portName, {}, outputPort->type);
+            recordFullWrite(ctx, portName, loc,
+                std::format("module-output:{}:{}", binding.instance_name, portName));
+            if (auto* target = lookupTargetNode(ctx, portName))
+                graph.connectDriver(target, DFGOutput(placeholder));
             return;
         }
         auto* expr = extractPortExpr(*named.expr);

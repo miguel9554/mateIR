@@ -138,11 +138,11 @@ SimValue constantValueToSimValue(const ConstantValue& value) {
     throw CompilerError("VcdWriter: real-valued parameters are not supported in VCD emission");
 }
 
-void emitRawParamValue(vcd_tracer::module& scope,
-                       std::vector<std::unique_ptr<SimVcdValue>>& storage,
-                       const std::string& name,
-                       const Type& type,
-                       const ConstantValue& value) {
+void emitParamValue(vcd_tracer::module& scope,
+                    std::vector<std::unique_ptr<SimVcdValue>>& storage,
+                    const std::string& name,
+                    const Type& type,
+                    const ConstantValue& value) {
     if (!type.unpacked_dims.empty()) {
         Type elem_type = type;
         const auto dim = elem_type.unpacked_dims.front();
@@ -151,10 +151,10 @@ void emitRawParamValue(vcd_tracer::module& scope,
         int step = dim.left <= dim.right ? 1 : -1;
         size_t element_index = 0;
         for (int i = dim.left; step > 0 ? i <= dim.right : i >= dim.right; i += step) {
-            emitRawParamValue(scope, storage,
-                              std::format("{}[{}]", name, i),
-                              elem_type,
-                              value.element(element_index++));
+            emitParamValue(scope, storage,
+                           std::format("{}[{}]", name, i),
+                           elem_type,
+                           value.element(element_index++));
         }
         return;
     }
@@ -295,14 +295,8 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
         vcd_tracer::module params_mod(scope, "params");
         for (const auto* params : {&mod.parameters, &mod.localparams}) {
             for (const auto& param : *params) {
-                auto scalar = param.value.asInt64();
-                if (!scalar) continue;
-                unsigned int w = param.type.width > 0 ? static_cast<unsigned int>(param.type.width) : 32;
-                auto v = std::make_unique<vcd_tracer::value<int64_t>>();
-                v->set_bit_size(w);
-                v->elaborate(params_mod.get_add_fn(), param.name);
-                v->set(*scalar);
-                params_.push_back(std::move(v));
+                emitParamValue(params_mod, static_params_,
+                               param.name, param.type, param.value);
             }
         }
     }
@@ -399,10 +393,10 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
 // ============================================================================
 
 void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
-                          const std::unordered_set<const DFGNode*>& alive) {
+                      const std::unordered_set<const DFGNode*>& alive) {
     for (const auto* params : {&mod.parameters, &mod.localparams}) {
         for (const auto& param : *params)
-            emitRawParamValue(scope, static_params_, param.name, param.type, param.value);
+            emitParamValue(scope, static_params_, param.name, param.type, param.value);
     }
 
     // Cache of generate-scope vcd_tracer::module objects, keyed by dot-separated

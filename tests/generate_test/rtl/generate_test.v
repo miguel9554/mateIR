@@ -15,6 +15,8 @@
 //     (auto-named genblkN by the elaborator)
 //  6. Direct nesting (if-else-if chain) WITH 'generate' keyword
 //     — all 'g_sat' begin-blocks share one name via direct-nesting rules
+//  7. Module-level flop driven inside an if-generate block
+//     — regression: must not lose trigger facts for the module-level flop
 //
 // Parameters:
 //   WIDTH     : data path width (8 or 16)
@@ -34,7 +36,8 @@ module generate_test #(
     output wire [NUM_LANES*WIDTH-1:0] accum,
     output wire [NUM_LANES-1:0]       parity_out,
     output wire [WIDTH-1:0]           any_active,
-    output wire                       any_sat
+    output wire                       any_sat,
+    output wire [WIDTH-1:0]           gen_driven_out
 );
 
     // ---------------------------------------------------------------
@@ -155,6 +158,33 @@ module generate_test #(
     end else begin
         assign sat_any_w = 1'b0;
     end
+
+    // ---------------------------------------------------------------
+    // 7. Module-level flop driven inside an if-generate block.
+    //    Regression: flop is declared at module scope; its always_ff
+    //    NBA assignment lives inside a generate block.  The elaborator
+    //    must keep the module-level trigger facts and not re-classify
+    //    gen_driven_q as a generate-local signal.
+    // ---------------------------------------------------------------
+    reg [WIDTH-1:0] gen_driven_q;
+    generate
+        if (WIDTH >= 4) begin : g_gen_driven
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    gen_driven_q <= {WIDTH{1'b0}};
+                else if (|lane_en)
+                    gen_driven_q <= data_in[WIDTH-1:0];
+            end
+        end else begin : g_gen_driven_tie
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    gen_driven_q <= {WIDTH{1'b0}};
+                else
+                    gen_driven_q <= {WIDTH{1'b0}};
+            end
+        end
+    endgenerate
+    assign gen_driven_out = gen_driven_q;
 
     // ---------------------------------------------------------------
     // 6. DIRECT NESTING (if-else-if chain) WITH 'generate' keyword

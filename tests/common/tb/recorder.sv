@@ -7,6 +7,14 @@ module recorder#(
     input TYPE data
 );
     integer file;
+    TYPE _last;
+
+    function automatic void write();
+        if (IS_SYNC)
+            $fwrite(file, "0x%h (%d)\n", data, data);
+        else
+            $fwrite(file, "%0t 0x%h (%d)\n", $realtime, data, data);
+    endfunction
 
     initial begin
         file = $fopen(filepath, "w");
@@ -14,45 +22,33 @@ module recorder#(
             $display("ERROR: Cannot open file");
             $finish;
         end
+        if (IS_SYNC)
+            $fwrite(file, "# value at each clock\n");
+        else begin
+            $fwrite(file, "# time value followed by value\n");
+            #0 _last = data;
+            write();
+        end
     end
 
     if (IS_SYNC) begin : g_sync
-        TYPE last_data;
-
-        initial begin
-            $fwrite(file, "# value at each clock\n");
-        end
-
         always @(posedge clk) begin
-            $fwrite(file, "0x%h (%d)\n", data, data);
-            last_data <= data;
-        end
-
-        final begin
-            if (last_data !== data) begin
-                $fwrite(file, "0x%h (%d)\n", data, data);
-            end
-            $fclose(file);
+            write();
+            _last <= data;
         end
     end else begin : g_async
-        TYPE old_data;
-
-        initial begin
-            $fwrite(file, "# time value followed by value\n");
-            #0 old_data = data;
-            $fwrite(file, "%0t 0x%h (%d)\n", $realtime, data, data);
-        end
-
         always @(data) begin
-            if (data !== old_data) begin
-                $fwrite(file, "%0t 0x%h (%d)\n", $realtime, data, data);
-                old_data = data;
+            if (data !== _last) begin
+                write();
+                _last = data;
             end
         end
+    end
 
-        final begin
-            $fclose(file);
-        end
+    final begin
+        if (IS_SYNC && _last !== data)
+            write();
+        $fclose(file);
     end
 
 endmodule

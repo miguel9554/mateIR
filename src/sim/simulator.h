@@ -79,6 +79,7 @@ struct ModuleInstance {
     static SimValue maskToWidth(const SimValue& val, const DFGNode* node);
 
     // values.at() with a useful error message naming the missing node
+    const SimValue& checkedGetRef(const DFGNode* node, const DFGNode* context = nullptr) const;
     SimValue checkedGet(const DFGNode* node, const DFGNode* context = nullptr) const;
 };
 

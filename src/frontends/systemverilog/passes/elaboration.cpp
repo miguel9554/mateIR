@@ -5067,6 +5067,11 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         currentSelectedType = *targetDeclaredType;
     }
 
+    bool hasDynamicBitSelect = false;
+    DFGNode* dynamicBitSelectorNode = nullptr;
+    Dimension dynamicBitDim;
+    Type dynamicBitTargetType;
+
     if (!selectors.empty()) {
         for (const auto* elemSelect : selectors) {
             if (!elemSelect->selector) {
@@ -5105,9 +5110,20 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                         }
                     }
                 } catch (const std::runtime_error&) {
-                    throw CompilerError(
-                        "Dynamic index on LHS not supported for: " + baseName,
-                        resolveSourceLoc(assignExpr, ctx.sm));
+                    if (!currentSelectedType || currentSelectedType->packed_dims.empty()) {
+                        throw CompilerError(
+                            "Dynamic index on LHS not supported for: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    if (packedSuffixWidth(*currentSelectedType, 1) != 1) {
+                        throw CompilerError(
+                            "Dynamic index on LHS only supported for single-bit elements: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    hasDynamicBitSelect = true;
+                    dynamicBitSelectorNode = buildExprDFG(selectorExpr, ctx);
+                    dynamicBitDim = currentSelectedType->packed_dims.front();
+                    dynamicBitTargetType = *currentSelectedType;
                 }
             } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect) {
                 const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
@@ -5191,7 +5207,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     }
 
     std::optional<Type> assignmentTargetType;
-    if (hasRangeSelect) {
+    if (hasDynamicBitSelect) {
+        assignmentTargetType = Type::makeInteger(1, false);
+    } else if (hasRangeSelect) {
         if (currentSelectedType) {
             assignmentTargetType = *currentSelectedType;
             assignmentTargetType->width =
@@ -5314,6 +5332,95 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         RHSvalue.scalar = RHSexprNode;
         RHSvalue = coerceAssignmentExprToWidth(ctx, RHSvalue, assignmentTargetType, assignLoc);
         RHSexprNode = RHSvalue.scalar;
+    }
+
+    // Dynamic single-bit LHS select: var[dyn_idx] = rhs
+    // For each bit k in the dimension, emit MUX(dyn_idx == k, rhs, prev_bit_k),
+    // then CONCAT all per-bit results MSB-first to drive the full target.
+    if (hasDynamicBitSelect) {
+        if (!memberSuffix.empty()) {
+            throw CompilerError(
+                "Member access after dynamic bit-select on LHS is not supported",
+                assignLoc);
+        }
+
+        std::string outputName;
+        if (ctx.is_sequential) {
+            if (isFlopName(baseName)) {
+                outputName = baseName + indexSuffix + ".d";
+            } else {
+                throw CompilerError(
+                    std::format("{} NOT a flop and assigned on seq. block", baseName),
+                    resolveSourceLoc(assignExpr, ctx.sm));
+            }
+        } else {
+            outputName = baseName + indexSuffix;
+        }
+
+        if (!ctx.subroutine_locals.count(outputName))
+            recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+
+        // Get the current driver (may come from a whole assignment or a materialized partial state).
+        DFGNode* currentDriver = nullptr;
+        if (auto* node = lookupTargetNode(ctx, outputName)) {
+            if (auto d = maybeDriver(node)) currentDriver = d->node;
+        }
+        if (!currentDriver && ctx.is_sequential) {
+            std::string qName = outputName;
+            if (qName.ends_with(".d")) qName = qName.substr(0, qName.length() - 2) + ".q";
+            if (auto it = ctx.local_nodes.find(qName); it != ctx.local_nodes.end())
+                currentDriver = it->second;
+            else if (auto* qNode = lookupNamedNodeInModule(ctx, qName))
+                currentDriver = qNode;
+        }
+        if (!currentDriver) {
+            throw CompilerError(
+                "Dynamic bit-select on LHS: no prior driver for " + outputName, assignLoc);
+        }
+
+        const int64_t totalWidth = dynamicBitTargetType.width;
+        const int64_t lo = std::min<int64_t>(dynamicBitDim.left, dynamicBitDim.right);
+        const int64_t hi = std::max<int64_t>(dynamicBitDim.left, dynamicBitDim.right);
+        const Type bitType = Type::makeInteger(1, false);
+
+        // Build per-bit MUX nodes indexed by LSB offset.
+        std::vector<DFGNode*> bitDrivers(static_cast<size_t>(totalWidth));
+        for (int64_t k = lo; k <= hi; ++k) {
+            int64_t offset = packedIndexOffsetFromLsb(dynamicBitDim, k);
+
+            auto* condNode = ctx.graph.eq(dynamicBitSelectorNode, ctx.graph.constant(k));
+            condNode->type = Type::makeInteger(1, false);
+            condNode->loc = assignLoc;
+
+            auto* prevBit = ctx.graph.slice(
+                currentDriver, ctx.graph.constant(offset), ctx.graph.constant(offset));
+            prevBit->type = bitType;
+            prevBit->loc = assignLoc;
+
+            auto* newBit = ctx.graph.mux(condNode, RHSexprNode, prevBit);
+            newBit->type = bitType;
+            newBit->loc = assignLoc;
+
+            bitDrivers[static_cast<size_t>(offset)] = newBit;
+        }
+
+        // CONCAT MSB-first to reassemble the full-width value.
+        std::vector<DFGNode*> parts;
+        parts.reserve(static_cast<size_t>(totalWidth));
+        for (int64_t b = totalWidth - 1; b >= 0; --b) {
+            parts.push_back(bitDrivers[static_cast<size_t>(b)]);
+        }
+        DFGNode* result = ctx.graph.concat(parts);
+        result->type = dynamicBitTargetType;
+        result->loc = assignLoc;
+
+        connectNode(outputName, result);
+        if (!ctx.is_sequential) {
+            ctx.combDrivers[outputName] = result;
+        } else {
+            recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
+        }
+        return;
     }
 
     // Range-select on LHS: canonical partial-write update

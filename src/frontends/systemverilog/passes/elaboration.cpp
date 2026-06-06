@@ -4104,6 +4104,13 @@ static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
         return value;
     }
 
+    if (!targetType.packed_dims.empty() && !targetType.isStruct() &&
+        targetType.unpacked_dims.empty() &&
+        expr->kind == SyntaxKind::AssignmentPatternExpression) {
+        return buildAssignmentPatternExprValueForTarget(
+            expr->as<AssignmentPatternExpressionSyntax>(), targetType, ctx, loc);
+    }
+
     ExprValue scalar = buildScalarExprValue(expr, ctx);
     return coerceAssignmentExprToWidth(ctx, std::move(scalar), targetType, loc);
 }
@@ -4155,6 +4162,94 @@ static ExprValue buildBroadcastValueFromScalar(
     return coerceAssignmentExprToWidth(ctx, std::move(scalarCopy), targetType, loc);
 }
 
+static ExprValue buildPackedArrayPatternExprValue(
+    const AssignmentPatternExpressionSyntax& patternExpr,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc) {
+
+    const auto& outerDim = targetType.packed_dims.front();
+    int numElements = outerDim.size();
+
+    Type elemType = targetType;
+    elemType.packed_dims.erase(elemType.packed_dims.begin());
+    elemType.width = targetType.width / numElements;
+
+    // MSB-first index order matches declaration order
+    std::vector<int> indices;
+    if (outerDim.left >= outerDim.right) {
+        for (int i = outerDim.left; i >= outerDim.right; --i)
+            indices.push_back(i);
+    } else {
+        for (int i = outerDim.left; i <= outerDim.right; ++i)
+            indices.push_back(i);
+    }
+
+    std::vector<DFGNode*> elementNodes(numElements, nullptr);
+
+    if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
+        const auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
+        if ((int)pattern.items.size() != numElements) {
+            throw CompilerError(
+                std::format("Assignment pattern requires {} elements but {} were provided",
+                            numElements, pattern.items.size()),
+                loc);
+        }
+        for (int i = 0; i < numElements; ++i) {
+            ExprValue ev = buildValueForTargetType(pattern.items[i], elemType, ctx, loc, false);
+            if (!ev.scalar)
+                throw CompilerError("Packed array pattern element is not scalar", loc);
+            elementNodes[i] = ev.scalar;
+        }
+    } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+        const auto& pattern = patternExpr.pattern->as<StructuredAssignmentPatternSyntax>();
+        std::map<int64_t, const ExpressionSyntax*> keyedExprs;
+        const ExpressionSyntax* defaultExpr = nullptr;
+
+        for (const auto* item : pattern.items) {
+            if (item->key->kind == SyntaxKind::DefaultPatternKeyExpression ||
+                (item->key->kind == SyntaxKind::IdentifierName &&
+                 item->key->as<IdentifierNameSyntax>().identifier.valueText() == "default")) {
+                if (defaultExpr)
+                    throw CompilerError("Assignment pattern has multiple default keys", loc);
+                defaultExpr = item->expr;
+                continue;
+            }
+            int64_t idx = evaluateConstantExpr(item->key, ctx.params, ctx.sm, *item->key,
+                                               &ctx.pkgRegistry);
+            if (keyedExprs.contains(idx)) {
+                throw CompilerError(
+                    std::format("Assignment pattern has multiple keys for index {}", idx), loc);
+            }
+            keyedExprs[idx] = item->expr;
+        }
+
+        for (int i = 0; i < numElements; ++i) {
+            int idx = indices[i];
+            const ExpressionSyntax* expr = nullptr;
+            if (auto it = keyedExprs.find(idx); it != keyedExprs.end()) {
+                expr = it->second;
+            } else if (defaultExpr) {
+                expr = defaultExpr;
+            } else {
+                throw CompilerError(
+                    std::format("Assignment pattern does not cover index {}", idx), loc);
+            }
+            ExprValue ev = buildValueForTargetType(expr, elemType, ctx, loc, false);
+            if (!ev.scalar)
+                throw CompilerError("Packed array pattern element is not scalar", loc);
+            elementNodes[i] = ev.scalar;
+        }
+    } else {
+        throw CompilerError("Replicated assignment patterns are not supported for packed arrays", loc);
+    }
+
+    DFGNode* result = (numElements == 1) ? elementNodes[0] : ctx.graph.concat(elementNodes);
+    result->type = targetType;
+
+    return ExprValue{.type = targetType, .scalar = result, .leaves = {}, .leaf_paths = {}};
+}
+
 static ExprValue buildAssignmentPatternExprValueForTarget(
     const AssignmentPatternExpressionSyntax& patternExpr,
     const Type& targetType,
@@ -4169,6 +4264,10 @@ static ExprValue buildAssignmentPatternExprValueForTarget(
 
     if (targetType.isStruct() && targetType.unpacked_dims.empty()) {
         return buildStructLiteralExprValue(patternExpr, targetType, ctx, loc);
+    }
+
+    if (!targetType.isStruct() && targetType.unpacked_dims.empty() && !targetType.packed_dims.empty()) {
+        return buildPackedArrayPatternExprValue(patternExpr, targetType, ctx, loc);
     }
 
     throw CompilerError("Assignment patterns are only supported for whole unpacked arrays or struct literals", loc);
@@ -5660,8 +5759,13 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         assignmentTargetType = *currentSelectedType;
     }
     if (rhsNeedsAssignmentPatternContext) {
+        auto isPackedArrayTarget = [&]() {
+            return assignmentTargetType && !assignmentTargetType->isStruct() &&
+                   assignmentTargetType->unpacked_dims.empty() &&
+                   !assignmentTargetType->packed_dims.empty();
+        };
         if (!hasRangeSelect && assignmentTargetType &&
-            typeContainsStructValue(*assignmentTargetType)) {
+            (typeContainsStructValue(*assignmentTargetType) || isPackedArrayTarget())) {
             RHSvalue = buildValueForTargetType(
                 right,
                 *assignmentTargetType,

@@ -3529,6 +3529,11 @@ static ExprValue constantValueToExprValue(const ConstantValue& value,
     return ExprValue{.type = value.type(), .scalar = node, .leaves = {}, .leaf_paths = {}};
 }
 
+static ExprValue buildAggregateLeavesFromScalar(const ExprValue& scalarValue,
+                                                const Type& targetType,
+                                                ResolutionContext& ctx,
+                                                const std::optional<SourceLoc>& loc);
+
 static ExprValue buildExprValue(
         const ExpressionSyntax* expr,
         ResolutionContext& ctx
@@ -3548,6 +3553,9 @@ static ExprValue buildExprValue(
         Type castType = resolveNamedTypeCast(castExpr, ctx, loc);
         ExprValue inner = buildScalarExprValue(castExpr.right->expression, ctx);
         validateNamedTypeCastWidth(inner, castType, loc);
+        if (castType.isStruct() && castType.unpacked_dims.empty()) {
+            return buildAggregateLeavesFromScalar(inner, castType, ctx, loc);
+        }
         return retagConstOrReturnValue(inner, castType, loc);
     }
 
@@ -3734,6 +3742,11 @@ static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
                                          ResolutionContext& ctx,
                                          const std::optional<SourceLoc>& loc,
                                          bool allowAggregateScalarBroadcast);
+
+static ExprValue buildAggregateLeavesFromScalar(const ExprValue& scalarValue,
+                                                const Type& targetType,
+                                                ResolutionContext& ctx,
+                                                const std::optional<SourceLoc>& loc);
 
 static ExprValue buildStructLiteralExprValue(const AssignmentPatternExpressionSyntax& patternExpr,
                                              const Type& structType,

@@ -37,6 +37,8 @@ case_constant_expr_const_items_fail FAIL Constant-expression case requires varia
 case_variable_expr_variable_items_fail FAIL Variable-expression case requires constant case items
 case_variable_expr_duplicate_items_fail FAIL Duplicate case item value 1
 generate_test PASS
+generate_struct_vcd_compare PASS
+generate_localparam_vcd_compare PASS
 global_domains_chained_clock_alias PASS
 global_domains_clock_alias PASS
 global_domains_const_clock_alias_fail FAIL parent signal 'clk_const' is not a resolved clock input alias

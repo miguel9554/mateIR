@@ -13,7 +13,8 @@ module case_constant_expression (
     output logic [7:0] unique_default_o,
     output logic [7:0] variable_unique_o,
     output logic [7:0] retained_o,
-    output logic [7:0] partial_unique_o
+    output logic [7:0] partial_unique_o,
+    output logic       unique_default_carry_o
 );
 
 always_comb begin
@@ -67,6 +68,18 @@ always_comb begin
     unique case (1'b1)
         a: partial_unique_o[7:4] = 4'hC;
         b: partial_unique_o[3:0] = 4'h3;
+    endcase
+
+    // unique case: all 4 values covered explicitly; sel=00 and sel=11 arms don't
+    // assign, so they must carry through the initialized value (0), not the
+    // default clause value (1). The default is unreachable.
+    unique_default_carry_o = 1'b0;
+    unique case (sel)
+        2'b00: ;
+        2'b01: unique_default_carry_o = 1'b1;
+        2'b10: unique_default_carry_o = 1'b1;
+        2'b11: ;
+        default: unique_default_carry_o = 1'b1;
     endcase
 end
 

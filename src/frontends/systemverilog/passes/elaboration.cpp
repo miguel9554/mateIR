@@ -6447,7 +6447,8 @@ ParameterContext parseParameterValueAssignment(
         const ParameterValueAssignmentSyntax& paramAssign,
         const ParameterContext& evalCtx,
         const PackageRegistry& pkgRegistry,
-        const slang::SourceManager& sm) {
+        const slang::SourceManager& sm,
+        const NamedTypeRegistry* namedTypeRegistry = nullptr) {
     ParameterContext result;
     for (const auto* param : paramAssign.parameters) {
         if (param->kind == SyntaxKind::OrderedParamAssignment) {
@@ -6486,7 +6487,7 @@ ParameterContext parseParameterValueAssignment(
                 result.values[paramName] = constantIt->second;
             } else {
                 result.values[paramName] =
-                    integerConstant(evaluateConstantExpr(named.expr, evalCtx, &pkgRegistry, nullptr, &sm));
+                    integerConstant(evaluateConstantExpr(named.expr, evalCtx, &pkgRegistry, namedTypeRegistry, &sm));
             }
         } else {
             throw CompilerError(
@@ -7572,7 +7573,7 @@ void resolveGenerateMemberInPlace(
             ParameterContext instCtx;
             if (moduleInst.parameters)
                 instCtx = parseParameterValueAssignment(
-                    *moduleInst.parameters, ctx.params, ctx.pkgRegistry, ctx.sm);
+                    *moduleInst.parameters, ctx.params, ctx.pkgRegistry, ctx.sm, &ctx.namedTypeRegistry);
 
             for (const auto* inst : moduleInst.instances) {
                 std::string baseName;
@@ -8089,7 +8090,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         ParameterContext instCtx;
         if (moduleInst->parameters) {
             instCtx = parseParameterValueAssignment(
-                *moduleInst->parameters, *mergedCtx, pkgRegistry, sourceManager);
+                *moduleInst->parameters, *mergedCtx, pkgRegistry, sourceManager, &namedTypeRegistry);
         }
 
         // Process each instance: resolve the submodule fresh per instance so

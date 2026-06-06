@@ -90,14 +90,18 @@ static Type widenTypes(const Type& a, const Type& b) {
 // Throws on mismatch.
 static Type mergeDataTypes(const Type& a, const Type& b,
                                    std::optional<SourceLoc> loc = {}) {
-    if (a.isEnum() || b.isEnum()) {
-        if (!a.isEnum() || !b.isEnum() ||
-            a.enumInfo().type_name != b.enumInfo().type_name)
-            throw CompilerError(
-                std::format("Type error: MUX branches have incompatible types '{}' and '{}'",
-                    a.isEnum() ? a.enumInfo().type_name : "integer",
-                    b.isEnum() ? b.enumInfo().type_name : "integer"), loc);
-        return a;  // same enum type
+    bool aEnum = a.isEnum();
+    bool bEnum = b.isEnum();
+    if (aEnum || bEnum) {
+        if (aEnum && bEnum) {
+            if (a.enumInfo().type_name != b.enumInfo().type_name) {
+                throw CompilerError(
+                    std::format("Type error: MUX branches have incompatible types '{}' and '{}'",
+                        a.enumInfo().type_name, b.enumInfo().type_name), loc);
+            }
+            return a;  // same enum type
+        }
+        return widenTypes(a, b);
     }
     return widenTypes(a, b);
 }

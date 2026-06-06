@@ -3181,14 +3181,19 @@ static void validateEnumEquality(const ExprValue& lhs,
 static Type mergeFrontendDataTypes(const ExprValue& lhs,
                                    const ExprValue& rhs,
                                    const std::optional<SourceLoc>& loc) {
-    if (lhs.type.isEnum() || rhs.type.isEnum()) {
-        if (!lhs.type.isEnum() || !rhs.type.isEnum() ||
-            lhs.type.enumInfo().type_name != rhs.type.enumInfo().type_name) {
-            throw CompilerError(std::format(
-                "Type error: MUX branches have incompatible types '{}' and '{}'",
-                frontendTypeName(lhs.type), frontendTypeName(rhs.type)), loc);
+    bool lhsEnum = lhs.type.isEnum();
+    bool rhsEnum = rhs.type.isEnum();
+    if (lhsEnum || rhsEnum) {
+        if (lhsEnum && rhsEnum) {
+            if (lhs.type.enumInfo().type_name != rhs.type.enumInfo().type_name) {
+                throw CompilerError(std::format(
+                    "Type error: MUX branches have incompatible types '{}' and '{}'",
+                    frontendTypeName(lhs.type), frontendTypeName(rhs.type)), loc);
+            }
+            return lhs.type;
         }
-        return lhs.type;
+        return Type::makeInteger(std::max(lhs.type.width, rhs.type.width),
+                                 lhs.type.isSigned() && rhs.type.isSigned());
     }
     return Type::makeInteger(std::max(lhs.type.width, rhs.type.width),
                              lhs.type.isSigned() && rhs.type.isSigned());
@@ -3393,12 +3398,26 @@ static ExprValue buildConditionalExprValueForTarget(
 
 static ExprValue retagConstOrReturnValue(ExprValue value,
                                          const Type& targetType,
+                                         ResolutionContext& ctx,
                                          const std::optional<SourceLoc>& loc) {
     if (!value.scalar) {
         throw CompilerError("Named-type cast requires a scalar expression", loc);
     }
     if (value.scalar->kind() == DFGOp::CONST) {
         value.scalar->type = targetType;
+    } else if (value.scalar->hasType() &&
+               value.scalar->type->width == targetType.width &&
+               value.scalar->type->kind != targetType.kind) {
+        auto* highNode = ctx.graph.constant(targetType.width - 1);
+        auto* lowNode = ctx.graph.constant(0);
+        if (loc) {
+            highNode->loc = *loc;
+            lowNode->loc = *loc;
+        }
+        auto* retagged = ctx.graph.slice(value.scalar, highNode, lowNode);
+        retagged->type = targetType;
+        if (loc) retagged->loc = *loc;
+        value.scalar = retagged;
     }
     value.type = targetType;
     return value;
@@ -3424,6 +3443,14 @@ static ExprValue coerceAssignmentExprToWidth(ResolutionContext& ctx,
     if (!expr || targetWidth <= 0) return value;
 
     if (expr->kind() == DFGOp::CONST) {
+        if (targetType && targetType->isEnum()) {
+            if (!expr->hasType() || !expr->type->isEnum() ||
+                expr->type->enumInfo().type_name != targetType->enumInfo().type_name) {
+                throw CompilerError(std::format(
+                    "Type error: cannot assign integer to enum type '{}' without cast",
+                    targetType->enumInfo().type_name), loc);
+            }
+        }
         expr->type = targetType ? *targetType : Type::makeInteger(targetWidth, targetSigned);
         value.type = *expr->type;
         return value;
@@ -3463,6 +3490,12 @@ static ExprValue coerceAssignmentExprToWidth(ResolutionContext& ctx,
             throw CompilerError(std::format(
                 "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
                 sourceWidth, targetType->enumInfo().type_name, targetWidth), loc);
+        }
+        if (!expr->type->isEnum() ||
+            expr->type->enumInfo().type_name != targetType->enumInfo().type_name) {
+            throw CompilerError(std::format(
+                "Type error: cannot assign integer to enum type '{}' without cast",
+                targetType->enumInfo().type_name), loc);
         }
         value.type = *targetType;
         return value;
@@ -3556,7 +3589,7 @@ static ExprValue buildExprValue(
         if (castType.isStruct() && castType.unpacked_dims.empty()) {
             return buildAggregateLeavesFromScalar(inner, castType, ctx, loc);
         }
-        return retagConstOrReturnValue(inner, castType, loc);
+        return retagConstOrReturnValue(inner, castType, ctx, loc);
     }
 
     if (expr->kind == SyntaxKind::SignedCastExpression) {

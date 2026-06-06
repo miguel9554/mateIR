@@ -7689,9 +7689,19 @@ void resolveGenerateMembersInPlace(
         scopeEnumMemberValues, ctx.pkgRegistry, ctx.moduleLookup, ctx.globalImports,
         ctx.current_write_origin, ctx.partial_drivers, ctx.write_states, ctx.subroutineRegistry,
         ctx.subroutine_locals, ctx.currently_inlining, ctx.is_subroutine_scope, ctx.current_return_var};
-    // Pre-scan: find all flop names (LHS of non-blocking assigns) in this scope
+    // Pre-scan NBA targets in this scope, then intersect with local declarations.
+    // Only locally-declared signals that have NBA assignments are generate-local flops.
+    // Module-level flops assigned inside a generate block must NOT be added here —
+    // they already have module-level trigger keys and shadowing them causes missing facts.
     auto nbaTargets = collectNBATargets(members);
-    scopeCtx.local_flop_names.insert(nbaTargets.begin(), nbaTargets.end());
+    for (const auto* m : members) {
+        if (m->kind != SyntaxKind::DataDeclaration) continue;
+        for (const auto* decl : m->as<DataDeclarationSyntax>().declarators) {
+            std::string name(decl->name.valueText());
+            if (nbaTargets.count(name))
+                scopeCtx.local_flop_names.insert(name);
+        }
+    }
     // Pre-populate DFG nodes for all signal/net declarations
     resolveGenerateScopeDecls(members, nbaTargets, scopeCtx);
     // Process all members

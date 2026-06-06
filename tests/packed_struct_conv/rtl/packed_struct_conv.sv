@@ -63,7 +63,32 @@ module packed_struct_conv (
     output logic [6:0]  exc_reg_o,
     output logic [15:0] wide_reg_o,
     output logic [23:0] nested_reg_o,
-    output logic [7:0]  smag_reg_o
+    output logic [7:0]  smag_reg_o,
+
+    // --- Packed struct as integer operand in expressions ---
+    // Bitwise binary
+    output logic [7:0]  expr_and_o,
+    output logic [7:0]  expr_or_o,
+    output logic [7:0]  expr_xor_o,
+    // Bitwise unary
+    output logic [7:0]  expr_not_o,
+    // Arithmetic: struct on LHS and RHS
+    output logic [7:0]  expr_add_o,
+    output logic [7:0]  expr_sub_lhs_o,
+    output logic [7:0]  expr_sub_rhs_o,
+    // Comparisons (struct on both sides, struct vs constant, constant vs struct)
+    output logic        expr_eq_o,
+    output logic        expr_ne_o,
+    output logic        expr_lt_o,
+    output logic        expr_gt_o,
+    // Shifts
+    output logic [7:0]  expr_shr_o,
+    output logic [7:0]  expr_shl_o,
+    // Concatenation: struct + scalar, two structs
+    output logic [8:0]  expr_cat_scalar_o,
+    output logic [14:0] expr_cat_struct_o,
+    // Replication of a struct
+    output logic [15:0] expr_rep_o
 );
 
     // ----------------------------------------------------------------
@@ -171,5 +196,41 @@ module packed_struct_conv (
         else        smag_reg <= smag;
     end
     assign smag_reg_o = smag_reg;
+
+    // ----------------------------------------------------------------
+    // Packed struct as integer operand in expressions
+    // All use already-declared struct vars (rgb, exc, smag) so no new
+    // integer-to-struct conversion is needed on the input side.
+    // ----------------------------------------------------------------
+
+    // Bitwise binary: struct on each side of the operator
+    assign expr_and_o      = rgb & 8'hF0;        // mask off lower nibble
+    assign expr_or_o       = rgb | RGB_BLUE;      // OR with a constant struct
+    assign expr_xor_o      = rgb ^ 8'hAA;         // alternating-bit flip
+
+    // Bitwise unary
+    assign expr_not_o      = ~rgb;
+
+    // Arithmetic: struct as LHS operand, struct as RHS operand
+    assign expr_add_o      = rgb + 8'h01;         // struct + scalar
+    assign expr_sub_lhs_o  = rgb - 8'h10;         // struct - scalar (struct on left)
+    assign expr_sub_rhs_o  = 8'hFF - rgb;         // scalar - struct (struct on right)
+
+    // Comparisons
+    assign expr_eq_o       = (rgb == RGB_BLACK);  // struct == constant struct
+    assign expr_ne_o       = (rgb != RGB_WHITE);  // struct != constant struct
+    assign expr_lt_o       = (exc < EXC_IRQ_SOFT);// struct < constant struct
+    assign expr_gt_o       = (exc > EXC_ALL_ZERO);// struct > constant struct
+
+    // Shifts
+    assign expr_shr_o      = rgb >> 2;
+    assign expr_shl_o      = rgb << 1;
+
+    // Concatenation: struct packed next to a scalar, then two structs
+    assign expr_cat_scalar_o = {flag_in_i, rgb};  // 1-bit scalar + 8-bit struct → 9 bits
+    assign expr_cat_struct_o = {exc, rgb};         // 7-bit struct + 8-bit struct → 15 bits
+
+    // Replication: struct as the replicated element
+    assign expr_rep_o      = {2{rgb}};             // 8-bit struct × 2 → 16 bits
 
 endmodule

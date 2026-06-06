@@ -27,7 +27,7 @@ initial begin
 end
 
 initial begin
-    #50_000ns;
+    #500ns;
     $finish();
 end
 

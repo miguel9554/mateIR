@@ -523,17 +523,42 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
     all_resets = list(domains.resets)
     async_signals = set(all_clocks) | set(all_resets) | set(domains.async_domain)
 
+    def recorder_inst(inst_name, filepath_expr, type_str, is_sync, length_expr, clk_expr, data_expr):
+        sync_val = '1' if is_sync else '0'
+        clk_conn = f"_if.{clk_expr}" if is_sync else "'0"
+        lines.append(f'    recorder#(')
+        lines.append(f'        .filepath({filepath_expr}),')
+        lines.append(f'        .TYPE({type_str}),')
+        lines.append(f'        .IS_SYNC({sync_val}),')
+        lines.append(f'        .LENGTH({length_expr})')
+        lines.append(f'    ) {inst_name}(')
+        lines.append(f'        .clk({clk_conn}),')
+        lines.append(f'        .data({data_expr})')
+        lines.append(f'    );')
+
+    def length_and_data(port, signal_expr):
+        """Return (length_expr, data_expr) for a scalar or single-dim unpacked port."""
+        if port.unpacked_dims and port.unpacked_dims.count('[') == 1:
+            length_expr = port.unpacked_dims[1:-1]
+            return length_expr, signal_expr
+        return '1', f"'{{ {signal_expr} }}"
+
     # Async recorders (clocks first, then resets, then async_domain)
-    # Skip ports with unpacked array dimensions — scalar recorders can't handle them.
+    # Skip ports with struct leaves + unpacked dims or multi-dim unpacked arrays.
+    def recordable(port):
+        if not port.unpacked_dims:
+            return True
+        return port.unpacked_dims.count('[') == 1 and not port.struct_leaves
+
     async_ports = []
     for clk in all_clocks:
-        if clk in input_ports and not input_ports[clk].unpacked_dims:
+        if clk in input_ports and recordable(input_ports[clk]):
             async_ports.append(clk)
     for rst in all_resets:
-        if rst in input_ports and not input_ports[rst].unpacked_dims:
+        if rst in input_ports and recordable(input_ports[rst]):
             async_ports.append(rst)
     for sig in domains.async_domain:
-        if sig in input_ports and not input_ports[sig].unpacked_dims:
+        if sig in input_ports and recordable(input_ports[sig]):
             async_ports.append(sig)
 
     if async_ports:
@@ -548,32 +573,21 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
             if port.struct_leaves:
                 for leaf_name, leaf_type in port.struct_leaves:
                     leaf_suffix = leaf_name.replace('.', '_')
-                    lines.append(f'    recorder#(')
-                    lines.append(f'        .filepath(path("{sig}.{leaf_name}.txt")),')
-                    lines.append(f'        .TYPE({leaf_type}),')
-                    lines.append(f'        .IS_SYNC(0),')
-                    lines.append(f'        .LENGTH(1)')
-                    lines.append(f'    ) {inst_name}_{leaf_suffix}(')
-                    lines.append(f'        .clk(\'0),')
-                    lines.append(f'        .data(\'{{_if.{sig}.{leaf_name}}})')
-                    lines.append(f'    );')
+                    length_expr, data_expr = length_and_data(port, f'_if.{sig}.{leaf_name}')
+                    recorder_inst(f'{inst_name}_{leaf_suffix}',
+                                  f'path("{sig}.{leaf_name}.txt")',
+                                  leaf_type, False, length_expr, None, data_expr)
             else:
                 type_str = port_type_str(port, use_resolved=True)
-                lines.append(f'    recorder#(')
-                lines.append(f'        .filepath(path("{sig}.txt")),')
-                lines.append(f'        .TYPE({type_str}),')
-                lines.append(f'        .IS_SYNC(0),')
-                lines.append(f'        .LENGTH(1)')
-                lines.append(f'    ) {inst_name}(')
-                lines.append(f'        .clk(\'0),')
-                lines.append(f'        .data(\'{{_if.{sig}}})')
-                lines.append(f'    );')
+                length_expr, data_expr = length_and_data(port, f'_if.{sig}')
+                recorder_inst(inst_name, f'path("{sig}.txt")',
+                              type_str, False, length_expr, None, data_expr)
 
     # Sync recorders - only for input signals in clock domains
     sync_entries = []
     for clk, sigs in domains.clock_domains.items():
         for sig in sigs:
-            if sig in input_ports and not input_ports[sig].unpacked_dims:
+            if sig in input_ports and recordable(input_ports[sig]):
                 sync_entries.append((clk, input_ports[sig]))
 
     if sync_entries:
@@ -583,26 +597,16 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
             if port.struct_leaves:
                 for leaf_name, leaf_type in port.struct_leaves:
                     leaf_suffix = leaf_name.replace('.', '_')
-                    lines.append(f'    recorder#(')
-                    lines.append(f'        .filepath(path("{port.name}.{leaf_name}.txt")),')
-                    lines.append(f'        .TYPE({leaf_type}),')
-                    lines.append(f'        .IS_SYNC(1),')
-                    lines.append(f'        .LENGTH(1)')
-                    lines.append(f'    ) u_{port.name}_{leaf_suffix}_recorder(')
-                    lines.append(f'        .clk(_if.{clk}),')
-                    lines.append(f'        .data(\'{{_if.{port.name}.{leaf_name}}})')
-                    lines.append(f'    );')
+                    length_expr, data_expr = length_and_data(port, f'_if.{port.name}.{leaf_name}')
+                    recorder_inst(f'u_{port.name}_{leaf_suffix}_recorder',
+                                  f'path("{port.name}.{leaf_name}.txt")',
+                                  leaf_type, True, length_expr, clk, data_expr)
             else:
                 type_str = port_type_str(port, use_resolved=True)
-                lines.append(f'    recorder#(')
-                lines.append(f'        .filepath(path("{port.name}.txt")),')
-                lines.append(f'        .TYPE({type_str}),')
-                lines.append(f'        .IS_SYNC(1),')
-                lines.append(f'        .LENGTH(1)')
-                lines.append(f'    ) u_{port.name}_recorder(')
-                lines.append(f'        .clk(_if.{clk}),')
-                lines.append(f'        .data(\'{{_if.{port.name}}})')
-                lines.append(f'    );')
+                length_expr, data_expr = length_and_data(port, f'_if.{port.name}')
+                recorder_inst(f'u_{port.name}_recorder',
+                              f'path("{port.name}.txt")',
+                              type_str, True, length_expr, clk, data_expr)
 
     lines.append('')
     lines.append('endmodule')

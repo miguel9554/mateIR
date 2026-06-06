@@ -1,0 +1,22 @@
+FROM mate-slang:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    autoconf \
+    help2man \
+    perl \
+    flex \
+    bison \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CC=clang-18
+ENV CXX=clang++-18
+
+RUN git clone --depth 1 --branch v5.026 https://github.com/verilator/verilator.git /tmp/verilator-src && \
+    cd /tmp/verilator-src && \
+    autoconf && \
+    ./configure --prefix=/usr/local CXXFLAGS="-std=c++20" && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/verilator-src

@@ -1,13 +1,9 @@
-FROM mate-slang:latest
+FROM mate-verilator:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
     curl \
-    verilator \
-    perl \
-    flex \
-    bison \
     gdb \
     graphviz \
     python3 \

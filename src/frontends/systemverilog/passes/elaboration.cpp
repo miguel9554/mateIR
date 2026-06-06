@@ -1694,7 +1694,8 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
         default:
             throw CompilerError(
                 "Unsupported expression kind in constant evaluation: " +
-                std::string(toString(expr->kind)));
+                std::string(toString(expr->kind)),
+                sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
     }
 }
 

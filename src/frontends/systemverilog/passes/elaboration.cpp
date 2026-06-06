@@ -5239,13 +5239,15 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         std::string lhsBase = baseName + indexSuffix;
         collectAggregateLeafPlan(*assignmentTargetType, lhsBase, {}, lhsPlan);
 
-        if (!sameAggregateStructTypedefShape(*assignmentTargetType, RHSvalue.type)) {
-            if (typeContainsStructValue(RHSvalue.type)) {
+        if (!sameAggregateStructTypedefShape(*assignmentTargetType, RHSvalue.type) ||
+                RHSvalue.leaves.empty()) {
+            if (typeContainsStructValue(RHSvalue.type) &&
+                    !sameAggregateStructTypedefShape(*assignmentTargetType, RHSvalue.type)) {
                 throw CompilerError(
                     "whole-struct assignment requires matching typedef names",
                     assignLoc);
             }
-            // RHS is a scalar integer bit-compatible with a packed struct LHS.
+            // RHS is a scalar (integer or struct cast) bit-compatible with a packed struct LHS.
             // Slice it into per-field SLICE nodes, MSB-first (declaration order).
             if (!RHSvalue.scalar) {
                 throw CompilerError("struct/vector assignment is not supported", assignLoc);

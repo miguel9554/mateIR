@@ -288,9 +288,15 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
     return {value, width, is_signed};
 }
 
+static int64_t bitstreamWidth(const Type& type);
+
 static int constantExprWidth(const ExpressionSyntax* expr,
-                             const slang::SourceManager* sm = nullptr) {
+                             const slang::SourceManager* sm = nullptr,
+                             const ParameterContext* paramCtx = nullptr,
+                             const NamedTypeRegistry* namedTypeRegistry = nullptr,
+                             const PackageRegistry* pkgRegistry = nullptr) {
     if (!expr) throw CompilerError("Cannot determine width of null constant expression");
+    auto loc = sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt;
     switch (expr->kind) {
         case SyntaxKind::IntegerLiteralExpression:
             return 32;
@@ -302,11 +308,13 @@ static int constantExprWidth(const ExpressionSyntax* expr,
             return parseIntegerVectorExpression(literal).width;
         }
         case SyntaxKind::ParenthesizedExpression:
-            return constantExprWidth(expr->as<ParenthesizedExpressionSyntax>().expression, sm);
+            return constantExprWidth(expr->as<ParenthesizedExpressionSyntax>().expression,
+                                     sm, paramCtx, namedTypeRegistry, pkgRegistry);
         case SyntaxKind::ConcatenationExpression: {
             int width = 0;
             for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
-                const int itemWidth = constantExprWidth(item, sm);
+                const int itemWidth = constantExprWidth(item, sm, paramCtx,
+                                                        namedTypeRegistry, pkgRegistry);
                 if (itemWidth > std::numeric_limits<int>::max() - width) {
                     throw CompilerError("Constant concatenation width exceeds supported range");
                 }
@@ -314,12 +322,39 @@ static int constantExprWidth(const ExpressionSyntax* expr,
             }
             return width;
         }
-        default:
+        case SyntaxKind::IdentifierName: {
+            std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            if (namedTypeRegistry) {
+                auto it = namedTypeRegistry->find(name);
+                if (it != namedTypeRegistry->end()) return bitstreamWidth(it->second);
+            }
+            if (paramCtx) {
+                auto it = paramCtx->values.find(name);
+                if (it != paramCtx->values.end()) return bitstreamWidth(it->second.type());
+            }
             throw CompilerError(
-                "Cannot determine width of constant expression: " +
-                std::string(toString(expr->kind)),
-                sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+                "Cannot determine width of constant expression: " + name, loc);
+        }
+        case SyntaxKind::ScopedName: {
+            if (!pkgRegistry) break;
+            const auto& scoped = expr->as<ScopedNameSyntax>();
+            if (scoped.separator.rawText() != "::") break;
+            std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            auto pkgIt = pkgRegistry->find(pkgName);
+            if (pkgIt == pkgRegistry->end()) break;
+            auto typeIt = pkgIt->second.namedTypes.find(itemName);
+            if (typeIt != pkgIt->second.namedTypes.end()) return bitstreamWidth(typeIt->second);
+            auto constIt = pkgIt->second.constants.find(itemName);
+            if (constIt != pkgIt->second.constants.end()) return bitstreamWidth(constIt->second.type());
+            break;
+        }
+        default:
+            break;
     }
+    throw CompilerError(
+        "Cannot determine width of constant expression: " +
+        std::string(toString(expr->kind)), loc);
 }
 
 // Exception thrown by return statements during function inlining
@@ -1462,7 +1497,7 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             uint64_t result = 0;
             int resultWidth = 0;
             for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
-                const int itemWidth = constantExprWidth(item, sm);
+                const int itemWidth = constantExprWidth(item, sm, &ctx, namedTypeRegistry, pkgRegistry);
                 if (itemWidth > 64 || resultWidth > 64 - itemWidth) {
                     throw CompilerError("Constant concatenation does not fit in int64_t");
                 }
@@ -1749,7 +1784,7 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
             std::vector<ConstantValue> values;
             for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
                 values.push_back(evaluateConstantValue(
-                    item, Type::makeInteger(constantExprWidth(item, &sm), false),
+                    item, Type::makeInteger(constantExprWidth(item, &sm, &ctx, namedTypeRegistry, &pkgRegistry), false),
                     ctx, pkgRegistry, namedTypeRegistry, sm));
             }
             return ConstantValue::concatenate(expectedType, values);
@@ -5994,7 +6029,8 @@ void resolveCaseStatementInPlace(
     DFGNode* selectorNode = nullptr;
     bool uncoveredToX = uniqueCase && !defaultDrivers.has_value();
     if (selectorKind == CaseExpressionKind::Constant) {
-        int selectorWidth = constantExprWidth(caseStatement->expr, &ctx.sm);
+        int selectorWidth = constantExprWidth(caseStatement->expr, &ctx.sm, &ctx.params,
+                                              &ctx.namedTypeRegistry, &ctx.pkgRegistry);
         if (selectorWidth != 1) {
             throw CompilerError("Constant-expression case selector must be exactly 1 bit wide", caseLoc);
         }

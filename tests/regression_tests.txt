@@ -133,4 +133,7 @@ inside_operator PASS
 unique_if_fail FAIL unique/unique0 modifiers are not supported on if
 unique0_if_fail FAIL unique/unique0 modifiers are not supported on if
 unique0_case_fail FAIL unique0 modifiers are not supported on case
+casez_variable_expr PASS
+casez_constant_expr_fail FAIL casez is not supported with a constant-expression selector
+casez_unique0_fail FAIL unique0 modifiers are not supported on case
 packed_struct_conv PASS

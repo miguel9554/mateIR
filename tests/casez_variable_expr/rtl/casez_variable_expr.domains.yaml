@@ -1,0 +1,14 @@
+module_name: casez_variable_expr
+resets:
+  rst_n:
+    polarity: negative
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - sel
+    - sel_u
+    - a
+    - b
+    - c
+    - d

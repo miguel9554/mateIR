@@ -48,7 +48,7 @@ $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv: $(RTL_SRCS) $(
 # Compile the TB and RTL
 $(OUT): $(SRCS) $(GEN_DIR)/tb.sv
 	rm -rf obj_dir
-	verilator $(VERILATOR_OPTS) $(VERILATOR_WARNS) --top $(TOP_MODULE) $(SRCS)
+	verilator $(VERILATOR_OPTS) $(VERILATOR_WARNS) --top $(TOP_MODULE) -I$(RTL_DIR) $(SRCS)
 
 # Generate waves database
 $(WAVES): $(OUT) force

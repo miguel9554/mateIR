@@ -10,8 +10,12 @@ STATIC_BUILD_DIR = $(PROJECT_ROOT)/build/sanitized
 RTL_PKGS = $(shell find -L $(RTL_DIR) -type f -name "*_pkg.sv")
 RTL_SRCS = $(RTL_PKGS) $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \) | grep -v "_pkg.sv")
 DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
+INFERRED_DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).inferred.domains.yaml
 INFER_TOP_DOMAINS_ARG = $(if $(INFER_TOP_DOMAINS),--infer-top-domains,)
+EMIT_INFERRED_DOMAINS_ARG = $(if $(INFER_TOP_DOMAINS),--emit-inferred-domains $(INFERRED_DOMAINS_YAML),)
+INFERRED_CDC_DIR = $(RTL_DIR)
 INFER_SYNCHRONIZERS_ARG = $(if $(INFER_SYNCHRONIZERS),--infer-synchronizers,)
+EMIT_INFERRED_SYNCHRONIZERS_ARG = $(if $(INFER_SYNCHRONIZERS),--emit-inferred-synchronizers $(INFERRED_CDC_DIR),)
 DOMAINS_ARG = $(if $(INFER_TOP_DOMAINS),,$(if $(wildcard $(DOMAINS_YAML)),--domains $(DOMAINS_YAML),))
 
 STATIC_ANALYZER = $(STATIC_BUILD_DIR)/mate
@@ -30,7 +34,9 @@ analyze:
 	rm -rf debug_output
 	$(SANITIZER_ENV) $(STATIC_ANALYZER) --analyze --top $(MODULE_NAME) \
 		$(INFER_TOP_DOMAINS_ARG) \
+		$(EMIT_INFERRED_DOMAINS_ARG) \
 		$(INFER_SYNCHRONIZERS_ARG) \
+		$(EMIT_INFERRED_SYNCHRONIZERS_ARG) \
 		$(DOMAINS_ARG) \
 		$(DEBUG_NODES_ARG) \
 		$(DEBUG_NODE_DEPS_ARG) \

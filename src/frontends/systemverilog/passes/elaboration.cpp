@@ -424,6 +424,77 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
     return {value, width, is_signed};
 }
 
+struct CasezItemPattern {
+    int64_t value;
+    int64_t wildcard_mask;
+    int     width;
+};
+
+static CasezItemPattern parseCasezItemPattern(
+    const std::string& valueText, int base,
+    const std::optional<int>& explicitWidth,
+    const std::optional<SourceLoc>& loc)
+{
+    int64_t value = 0;
+    int64_t wildcard_mask = 0;
+
+    if (base == 2) {
+        int bit = 0;
+        for (int i = static_cast<int>(valueText.size()) - 1; i >= 0; --i) {
+            char c = valueText[i];
+            if (bit >= 64)
+                throw CompilerError("casez binary pattern exceeds 63 bits", loc);
+            if (c == '1') {
+                value |= (1LL << bit);
+            } else if (c == '0') {
+                // nothing
+            } else if (c == '?' || c == 'z' || c == 'Z') {
+                wildcard_mask |= (1LL << bit);
+            } else if (c == 'x' || c == 'X') {
+                throw CompilerError(
+                    "'x' bits are not supported in casez items; use '?' for don't-care", loc);
+            } else {
+                throw CompilerError(
+                    std::format("Invalid character '{}' in casez binary literal", c), loc);
+            }
+            ++bit;
+        }
+    } else if (base == 16) {
+        int bit = 0;
+        for (int i = static_cast<int>(valueText.size()) - 1; i >= 0; --i) {
+            char c = valueText[i];
+            if (bit >= 64)
+                throw CompilerError("casez hex pattern exceeds 63 bits", loc);
+            if (c == '?' || c == 'z' || c == 'Z') {
+                wildcard_mask |= (0xFLL << bit);
+            } else if (c == 'x' || c == 'X') {
+                throw CompilerError(
+                    "'x' bits are not supported in casez items; use '?' for don't-care", loc);
+            } else {
+                int digit = 0;
+                if (c >= '0' && c <= '9') digit = c - '0';
+                else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+                else throw CompilerError(
+                    std::format("Invalid character '{}' in casez hex literal", c), loc);
+                value |= (static_cast<int64_t>(digit) << bit);
+            }
+            bit += 4;
+        }
+    } else {
+        throw CompilerError(
+            "casez wildcard patterns are only supported in binary or hex literals", loc);
+    }
+
+    int width = explicitWidth.value_or(0);
+    if (width > 0 && width < 64) {
+        int64_t mask = (1LL << width) - 1;
+        value &= mask;
+        wildcard_mask &= mask;
+    }
+    return {value, wildcard_mask, width};
+}
+
 static int64_t bitstreamWidth(const Type& type);
 
 static int constantExprWidth(const ExpressionSyntax* expr,
@@ -590,6 +661,52 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 // For synthesizable RTL, argument expressions are always:
 //   SimplePropertyExpr → SimpleSequenceExpr → ExpressionSyntax
 const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr);
+
+static CasezItemPattern evaluateCasezPattern(
+    const ExpressionSyntax* expr,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc)
+{
+    if (expr->kind == SyntaxKind::IntegerVectorExpression) {
+        const auto& vecExpr = expr->as<IntegerVectorExpressionSyntax>();
+        std::string sizeText(vecExpr.size.rawText());
+        std::string baseText(vecExpr.base.rawText());
+        std::string valueText(vecExpr.value.rawText());
+        valueText.erase(std::remove(valueText.begin(), valueText.end(), '_'), valueText.end());
+
+        int base = 10;
+        if (baseText.find('h') != std::string::npos || baseText.find('H') != std::string::npos)
+            base = 16;
+        else if (baseText.find('b') != std::string::npos || baseText.find('B') != std::string::npos)
+            base = 2;
+        else if (baseText.find('o') != std::string::npos || baseText.find('O') != std::string::npos)
+            base = 8;
+        else if (baseText.find('d') != std::string::npos || baseText.find('D') != std::string::npos)
+            base = 10;
+
+        bool hasNonNumeric = false;
+        for (char c : valueText) {
+            if (c == '?' || c == 'z' || c == 'Z' || c == 'x' || c == 'X') {
+                hasNonNumeric = true;
+                break;
+            }
+        }
+
+        std::optional<int> explicitWidth;
+        if (!sizeText.empty()) explicitWidth = std::stoi(sizeText);
+
+        if (hasNonNumeric)
+            return parseCasezItemPattern(valueText, base, explicitWidth, loc);
+
+        int64_t v = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr,
+                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+        return {v, 0, explicitWidth.value_or(0)};
+    }
+
+    int64_t v = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr,
+                                     &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+    return {v, 0, 0};
+}
 
 static int64_t bitstreamWidth(const Type& type) {
     int64_t width = 0;
@@ -6227,12 +6344,8 @@ void resolveCaseStatementInPlace(
         }
     }
 
-    // Only support basic 'case', not casez/casex
     auto caseKeyword = caseStatement->caseKeyword.kind;
-    if (caseKeyword == slang::parsing::TokenKind::CaseZKeyword) {
-        throw CompilerError("casez not supported",
-                            resolveSourceLoc(*caseStatement, ctx.sm));
-    }
+    bool isCasez = (caseKeyword == slang::parsing::TokenKind::CaseZKeyword);
     if (caseKeyword == slang::parsing::TokenKind::CaseXKeyword) {
         throw CompilerError("casex not supported",
                             resolveSourceLoc(*caseStatement, ctx.sm));
@@ -6244,6 +6357,11 @@ void resolveCaseStatementInPlace(
     const auto selectorConstValue = selectorKind == CaseExpressionKind::Constant
         ? tryEvaluateCaseConstantExpr(caseStatement->expr, ctx)
         : std::optional<int64_t>{};
+
+    if (isCasez && selectorKind == CaseExpressionKind::Constant) {
+        throw CompilerError(
+            "casez is not supported with a constant-expression selector", caseLoc);
+    }
 
     std::vector<CaseBranch> normalCases;
     std::optional<DriverMap> defaultDrivers;
@@ -6296,16 +6414,42 @@ void resolveCaseStatementInPlace(
             }
 
             std::vector<int64_t> caseValues;
-            caseValues.reserve(caseItem.expressions.size());
-            for (const auto* caseExpr : caseItem.expressions) {
-                if (classifyCaseExpr(caseExpr, ctx) != CaseExpressionKind::Constant) {
-                    throw CompilerError(
-                        "Variable-expression case requires constant case items",
-                        resolveSourceLoc(*caseExpr, ctx.sm));
+            if (isCasez) {
+                for (const auto* caseExpr : caseItem.expressions) {
+                    auto pat = evaluateCasezPattern(
+                        caseExpr, ctx, resolveSourceLoc(*caseExpr, ctx.sm));
+                    if (pat.wildcard_mask == 0) {
+                        caseValues.push_back(pat.value);
+                    } else {
+                        int numWildcards = __builtin_popcountll(
+                            static_cast<uint64_t>(pat.wildcard_mask));
+                        int64_t numCombinations = 1LL << numWildcards;
+                        for (int64_t combo = 0; combo < numCombinations; ++combo) {
+                            int64_t concrete = pat.value;
+                            int64_t remaining = pat.wildcard_mask;
+                            int comboIdx = 0;
+                            while (remaining) {
+                                int bit = __builtin_ctzll(static_cast<uint64_t>(remaining));
+                                if ((combo >> comboIdx) & 1) concrete |= (1LL << bit);
+                                remaining &= remaining - 1;
+                                ++comboIdx;
+                            }
+                            caseValues.push_back(concrete);
+                        }
+                    }
                 }
-                caseValues.push_back(evaluateConstantExpr(
-                    caseExpr, ctx.params, ctx.sm, *caseExpr,
-                    &ctx.pkgRegistry, &ctx.namedTypeRegistry));
+            } else {
+                caseValues.reserve(caseItem.expressions.size());
+                for (const auto* caseExpr : caseItem.expressions) {
+                    if (classifyCaseExpr(caseExpr, ctx) != CaseExpressionKind::Constant) {
+                        throw CompilerError(
+                            "Variable-expression case requires constant case items",
+                            resolveSourceLoc(*caseExpr, ctx.sm));
+                    }
+                    caseValues.push_back(evaluateConstantExpr(
+                        caseExpr, ctx.params, ctx.sm, *caseExpr,
+                        &ctx.pkgRegistry, &ctx.namedTypeRegistry));
+                }
             }
 
             restoreDrivers(ctx, baselineDrivers);
@@ -6386,15 +6530,46 @@ void resolveCaseStatementInPlace(
         }
     } else {
         selectorNode = buildExprDFG(caseStatement->expr, ctx);
-        std::set<int64_t> seenCaseValues;
-        for (auto& branch : normalCases) {
-            for (int64_t& selectorValue : branch.selectorValues) {
-                selectorValue = normalizeSelectorCode(selectorValue, selectorNode, caseLoc);
-                if (!seenCaseValues.insert(selectorValue).second) {
-                    throw CompilerError(
-                        std::format("Duplicate case item value {}", selectorValue),
-                        caseLoc);
+
+        if (isCasez && uniqueCase) {
+            // unique casez: values claimed by multiple branches → X; others → first branch
+            std::map<int64_t, size_t> firstClaim;
+            std::set<int64_t> conflicted;
+            for (size_t i = 0; i < normalCases.size(); ++i) {
+                for (int64_t sv : normalCases[i].selectorValues) {
+                    int64_t normalized = normalizeSelectorCode(sv, selectorNode, caseLoc);
+                    auto [it, inserted] = firstClaim.emplace(normalized, i);
+                    if (!inserted && it->second != i)
+                        conflicted.insert(normalized);
                 }
+            }
+            for (auto& branch : normalCases) {
+                std::vector<int64_t> kept;
+                for (int64_t sv : branch.selectorValues) {
+                    int64_t normalized = normalizeSelectorCode(sv, selectorNode, caseLoc);
+                    if (!conflicted.count(normalized)) kept.push_back(normalized);
+                }
+                branch.selectorValues = std::move(kept);
+            }
+            for (int64_t sv : conflicted) xSelectorValues.push_back(sv);
+        } else {
+            std::set<int64_t> seenCaseValues;
+            for (auto& branch : normalCases) {
+                std::vector<int64_t> kept;
+                for (int64_t sv : branch.selectorValues) {
+                    int64_t normalized = normalizeSelectorCode(sv, selectorNode, caseLoc);
+                    if (!seenCaseValues.insert(normalized).second) {
+                        if (!isCasez) {
+                            throw CompilerError(
+                                std::format("Duplicate case item value {}", normalized),
+                                caseLoc);
+                        }
+                        // casez priority: first match wins, skip later claims
+                    } else {
+                        kept.push_back(normalized);
+                    }
+                }
+                branch.selectorValues = std::move(kept);
             }
         }
     }

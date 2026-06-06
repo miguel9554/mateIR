@@ -1,0 +1,14 @@
+module_name: dynamic_lhs_bitselect
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - idx_a
+      - idx_b
+      - en_a
+      - en_b

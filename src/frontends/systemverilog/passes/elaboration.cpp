@@ -2565,13 +2565,13 @@ static ExprValue exprValueFromConstantParam(const std::string& baseName,
                                             const std::optional<SourceLoc>& loc,
                                             DFG& graph) {
     const Type& type = cv.type();
-    if (type.isStruct() && type.unpacked_dims.empty()) {
+    if (type.isStruct() || !type.unpacked_dims.empty()) {
         std::vector<AggregateLeafBinding> plan;
         collectAggregateLeafPlan(type, baseName, {}, plan);
         const auto fieldLeafValues = cv.scalarLeaves();
         if (fieldLeafValues.size() != plan.size()) {
             throw CompilerError(
-                "Struct constant leaf count mismatch for parameter '" + baseName + "'");
+                "Aggregate constant leaf count mismatch for parameter '" + baseName + "'");
         }
         std::vector<DFGNode*> leaves;
         leaves.reserve(plan.size());
@@ -2601,6 +2601,10 @@ static ExprValue exprValueFromConstantParam(const std::string& baseName,
 static ExprValue exprValueFromIdentifier(const std::string& baseName,
                                          const std::optional<SourceLoc>& loc,
                                          ResolutionContext& ctx) {
+    if (auto paramIt = ctx.params.values.find(baseName); paramIt != ctx.params.values.end()) {
+        return exprValueFromConstantParam(baseName, paramIt->second, loc, ctx.graph);
+    }
+
     const auto* declaredType = lookupDeclaredType(baseName, ctx);
     if (declaredType && (declaredType->isStruct() || !declaredType->unpacked_dims.empty())) {
         return ExprValue{
@@ -2633,10 +2637,6 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
             n->type = eit->second.second;
             if (loc) n->loc = *loc;
             return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
-        }
-        auto paramIt = ctx.params.values.find(baseName);
-        if (paramIt != ctx.params.values.end()) {
-            return exprValueFromConstantParam(baseName, paramIt->second, loc, ctx.graph);
         }
     }
     if (!node || !node->hasType()) {
@@ -3438,6 +3438,11 @@ static ExprValue coerceAssignmentExprToWidth(ResolutionContext& ctx,
                                              const std::optional<Type>& targetType,
                                              const std::optional<SourceLoc>& loc) {
     DFGNode* expr = value.scalar;
+    if (targetType && (targetType->isStruct() || !targetType->unpacked_dims.empty())) {
+        throw CompilerError(
+            "[BUG] scalar coercion used for aggregate assignment target",
+            loc);
+    }
     int targetWidth = targetType ? targetType->width : 0;
     bool targetSigned = targetType ? targetType->isSigned() : false;
     if (!expr || targetWidth <= 0) return value;
@@ -4140,11 +4145,27 @@ static DFGNode* buildExprScalarImpl(
                 auto paramIt = ctx.params.values.find(baseName);
                 if (paramIt != ctx.params.values.end()) {
                     auto exprLoc = resolveSourceLoc(*expr, ctx.sm);
-                    auto* n = ctx.graph.constant(
-                        paramIt->second.requireInt64("DFG parameter '" + baseName + "'", exprLoc));
-                    n->type = paramIt->second.type();
-                    n->loc = exprLoc;
-                    return n;
+                    ExprValue value = exprValueFromConstantParam(
+                        baseName, paramIt->second, exprLoc, ctx.graph);
+                    if (value.type.isPackedStruct() && !value.leaves.empty()) {
+                        auto* n = value.leaves.size() == 1
+                            ? value.leaves[0]
+                            : ctx.graph.concat(value.leaves);
+                        n->type = Type::makeInteger(value.type.width, false);
+                        n->loc = exprLoc;
+                        return n;
+                    }
+                    if (value.type.isStruct() || !value.type.unpacked_dims.empty()) {
+                        throw CompilerError(
+                            "Array-valued expression used where scalar expression is required",
+                            exprLoc);
+                    }
+                    if (!value.scalar) {
+                        throw CompilerError(
+                            "Expression did not produce a scalar DFG node",
+                            exprLoc);
+                    }
+                    return value.scalar;
                 }
             }
             const auto node = resolveIdentifier(
@@ -4195,6 +4216,9 @@ static DFGNode* buildExprScalarImpl(
         case SyntaxKind::IdentifierSelectName: {
             auto& name = expr->as<IdentifierSelectNameSyntax>();
             std::string baseName(name.identifier.valueText());
+            if (ctx.params.values.contains(baseName)) {
+                return buildScalarExprValue(expr, ctx).scalar;
+            }
             DFGNode* node = nullptr;
             if (!ctx.is_sequential) {
                 auto it = ctx.combDrivers.find(baseName);
@@ -5295,13 +5319,63 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
     if (selectors.empty()) {
         if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
-            declaredType && !declaredType->unpacked_dims.empty() &&
-                !typeContainsStructValue(*declaredType)) {
+            declaredType && !declaredType->unpacked_dims.empty()) {
             if (RHSvalue.type.unpacked_dims != declaredType->unpacked_dims ||
                     RHSvalue.leaves.size() != aggregateValueLeafCount(*declaredType)) {
                 throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
             }
-            connectWholeUnpackedArray(baseName, *declaredType, RHSvalue.leaves);
+
+            if (!typeContainsStructValue(*declaredType)) {
+                connectWholeUnpackedArray(baseName, *declaredType, RHSvalue.leaves);
+                return;
+            }
+
+            Type elementType = *declaredType;
+            elementType.unpacked_dims.clear();
+            const auto suffixes = unpackedIndexSuffixes(*declaredType);
+            std::vector<AggregateLeafBinding> elementPlan;
+            collectAggregateLeafPlan(elementType, "", {}, elementPlan);
+            const size_t leavesPerElement = elementPlan.size();
+            if (leavesPerElement == 0 ||
+                RHSvalue.leaves.size() != suffixes.size() * leavesPerElement) {
+                throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+            }
+
+            for (size_t i = 0; i < suffixes.size(); ++i) {
+                std::string lhsBase = baseName + suffixes[i];
+                std::vector<AggregateLeafBinding> lhsPlan;
+                collectAggregateLeafPlan(elementType, lhsBase, {}, lhsPlan);
+                if (lhsPlan.size() != leavesPerElement) {
+                    throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+                }
+
+                for (size_t j = 0; j < leavesPerElement; ++j) {
+                    const size_t rhsIndex = i * leavesPerElement + j;
+                    ExprValue rhsLeafValue{
+                        .type = lhsPlan[j].leaf_type,
+                        .scalar = RHSvalue.leaves[rhsIndex],
+                        .leaves = {},
+                        .leaf_paths = {},
+                    };
+                    DFGNode* rhsLeaf = coerceAssignmentExprToWidth(
+                        ctx, rhsLeafValue, lhsPlan[j].leaf_type, assignLoc).scalar;
+
+                    std::string outputName = lhsPlan[j].name;
+                    if (ctx.is_sequential) outputName += ".d";
+
+                    if (!ctx.subroutine_locals.count(outputName)) {
+                        recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+                    }
+                    connectNode(outputName, rhsLeaf);
+                    if (!ctx.is_sequential) {
+                        ctx.combDrivers[outputName] = rhsLeaf;
+                    }
+                }
+            }
+
+            if (ctx.is_sequential) {
+                recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
+            }
             return;
         }
     }
@@ -8272,6 +8346,9 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
     // Pre-populate module PARAMETERS
     for (auto& parameter : resolved.parameters) {
+        if ((parameter.type.isStruct() || !parameter.type.unpacked_dims.empty())) {
+            continue;
+        }
         if (auto scalar = parameter.value.asInt64()) {
             parameter.dfg_node = graph.named_constant(*scalar, "", parameter.name);
             parameter.dfg_node->type = parameter.type;
@@ -8282,6 +8359,9 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // For enum-typed localparams, fix the node type and inject into enumMemberValues
     // so that buildExprDFG returns properly-typed CONST nodes for them.
     for (auto& parameter : resolved.localparams) {
+        if (parameter.type.isStruct() || !parameter.type.unpacked_dims.empty()) {
+            continue;
+        }
         auto scalar = parameter.value.asInt64();
         if (!scalar) continue;
         auto* node = graph.named_constant(*scalar, "", parameter.name);

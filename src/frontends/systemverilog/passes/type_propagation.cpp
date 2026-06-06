@@ -30,9 +30,9 @@ static void postOrderVisit(DFGNode* node,
 static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
     std::unordered_set<DFGNode*> visited;
     std::vector<DFGNode*> order;
-    graph.forEachGraphOutput([&](const auto&, DFGNode* node) {
-        postOrderVisit(node, visited, order);
-    });
+    for (const auto& node : graph.nodes) {
+        postOrderVisit(node.get(), visited, order);
+    }
     return order;
 }
 
@@ -113,8 +113,8 @@ static Type mergeDataTypes(const Type& a, const Type& b,
 bool inferNodeType(DFGNode* node) {
     if (node->hasType() && node->type->isStruct()) {
         throw CompilerError(std::format(
-            "Invariant violation: struct type '{}' cannot reach type propagation",
-            node->type->structInfo().type_name), node->loc);
+            "Invariant violation: struct type '{}' cannot reach type propagation (node: {})",
+            node->type->structInfo().type_name, node->str()), node->loc);
     }
     if (node->hasType()) return false;
 

@@ -670,6 +670,7 @@ void collectModule(const Module& module, StaticAnalysisSummary& summary) {
     forEachOutputNode(module, [&](const ModuleNode&) { summary.outputs++; });
     forEachInternalNode(module, [&](const ModuleNode&) { summary.signals++; });
     summary.flops += module.flops.size();
+    for (const auto& flop : module.flops) summary.flop_bits += static_cast<size_t>(flop.type.width);
     if (module.dfg) summary.dfg_nodes += module.dfg->nodes.size();
     validateNoCombLoops(module);
     for (const auto& sub : module.hierarchyInstantiation)
@@ -775,6 +776,7 @@ void StaticAnalysisConsumer::consume(const MateIR& ir) {
     out_ << "  outputs: " << summary.outputs << "\n";
     out_ << "  signals: " << summary.signals << "\n";
     out_ << "  flops: " << summary.flops << "\n";
+    out_ << "  flop_bits: " << summary.flop_bits << "\n";
     out_ << "  dfg_nodes: "              << summary.dfg_nodes     << "\n";
     printDomainRegistry(ir, out_);
     out_ << "  domain_usage:\n";

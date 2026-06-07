@@ -116,6 +116,22 @@ vcd_tracer::module& getOrCreateNestedScope(
     return *inserted_it->second;
 }
 
+void collectFlopBackedAggregateRoots(const Module& mod,
+                                     std::unordered_set<std::string>& out) {
+    for (const auto& flop : mod.flops) {
+        std::string prefix = flop.name;
+        while (true) {
+            auto dot = prefix.rfind('.');
+            if (dot == std::string::npos) {
+                out.insert(prefix);
+                break;
+            }
+            prefix.resize(dot);
+            out.insert(prefix);
+        }
+    }
+}
+
 SimValue constantValueToSimValue(const ConstantValue& value) {
     if (value.isBits()) {
         const auto& bits = value.asBits();
@@ -292,11 +308,7 @@ void VcdWriter::addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
 void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
                           const std::unordered_set<const DFGNode*>& alive) {
     std::unordered_set<std::string> flopOutputPorts;
-    for (const auto& flop : mod.flops) {
-        auto dot = flop.name.rfind('.');
-        flopOutputPorts.insert(dot == std::string::npos
-            ? flop.name : flop.name.substr(0, dot));
-    }
+    collectFlopBackedAggregateRoots(mod, flopOutputPorts);
 
     vcd_tracer::module params_mod(scope, "params");
     vcd_tracer::module inputs_mod(scope, "inputs");
@@ -415,11 +427,7 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
     // Output ports that are also flops are fully emitted by the flop section.
     // Skip them here to avoid duplicate (and incorrectly-named) VCD entries.
     std::unordered_set<std::string> flopOutputPorts;
-    for (const auto& flop : mod.flops) {
-        auto dot = flop.name.rfind('.');
-        flopOutputPorts.insert(dot == std::string::npos
-            ? flop.name : flop.name.substr(0, dot));
-    }
+    collectFlopBackedAggregateRoots(mod, flopOutputPorts);
 
     // Cache of generate-scope vcd_tracer::module objects, keyed by dot-separated
     // scope path. Created on demand; generate scopes are direct children of `scope`.

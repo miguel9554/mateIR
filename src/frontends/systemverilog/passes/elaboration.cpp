@@ -8098,6 +8098,7 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(selectedBlock, childCtx);
                 }
+                ctx.partial_drivers = childCtx.partial_drivers;
                 ctx.write_states = childCtx.write_states;
             } else {
                 // Unnamed block: process without new scope
@@ -8146,6 +8147,7 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(loopGen.block, iterResCtx);
                 }
+                ctx.partial_drivers = iterResCtx.partial_drivers;
                 ctx.write_states = iterResCtx.write_states;
 
                 iterCtx.values[genvarName] =
@@ -8202,6 +8204,7 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(selectedBlock, childCtx);
                 }
+                ctx.partial_drivers = childCtx.partial_drivers;
                 ctx.write_states = childCtx.write_states;
             } else {
                 resolveGenerateMemberInPlace(selectedBlock, ctx);

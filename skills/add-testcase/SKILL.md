@@ -28,6 +28,12 @@ When a handwritten testbench is needed, follow these rules:
 - no timing delays are allowed inside synchronous driver blocks
 - synchronous driving should use NBA assignments
 
+Testcase RTL requirements:
+- the top RTL under test must not be purely combinational
+- it must contain flops, including flops that register all outputs
+- it must contain at least one flop with async reset and at least one flop without async reset
+- if needed, duplicate the flop structure and vary only the presence or absence of async reset so both cases are exercised cleanly
+
 **Async reset driving rule**: Verilator does not fire the async-reset sensitivity until it observes a proper unasserted→asserted edge. If the reset starts asserted at time 0 (no prior transition), Verilator never triggers the always_ff and the flop stays at its Verilator-initial value (0) instead of the reset value — causing a mismatch against the custom-sim, which evaluates correctly from time 0.
 
 Always drive async resets with an explicit unasserted→asserted transition:

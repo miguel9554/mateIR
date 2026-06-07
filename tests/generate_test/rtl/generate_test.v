@@ -37,7 +37,8 @@ module generate_test #(
     output wire [NUM_LANES-1:0]       parity_out,
     output wire [WIDTH-1:0]           any_active,
     output wire                       any_sat,
-    output wire [WIDTH-1:0]           gen_driven_out
+    output wire [WIDTH-1:0]           gen_driven_out,
+    output wire [2:0]                 gen_loop_out
 );
 
     // ---------------------------------------------------------------
@@ -185,6 +186,17 @@ module generate_test #(
         end
     endgenerate
     assign gen_driven_out = gen_driven_q;
+
+    // ---------------------------------------------------------------
+    // 8. gen_loop_partial instantiation — exercises the ibex_fetch_fifo
+    //    generate loop partial-assign pattern (regression for DFG CONCAT bug).
+    // ---------------------------------------------------------------
+    gen_loop_partial #(.DEPTH(3)) u_gen_loop (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .push_mask(data_in[2:0]),
+        .ptr_out  (gen_loop_out)
+    );
 
     // ---------------------------------------------------------------
     // 6. DIRECT NESTING (if-else-if chain) WITH 'generate' keyword

@@ -12,9 +12,11 @@ end
 
 // Reset: assert active-low for ~12 cycles, then release
 initial begin
+    _if.rst_ni = 1'b1;
+    #1ns;
     _if.rst_ni = 1'b0;
     #130ns;
-    @(posedge _if.clk_i);
+    @(negedge _if.clk_i);
     _if.rst_ni = 1'b1;
 end
 

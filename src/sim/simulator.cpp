@@ -72,8 +72,21 @@ void copyFlopDToQLeaves(ModuleInstance& root, const FlopInfo& flop) {
     }
 }
 
-SimValue widenForArithmetic(const SimValue& value, const DFGNode* result_node) {
-    return value.resized(nodeWidth(result_node), value.isSigned());
+// SV LRM 11.6.1: if either operand is unsigned, the expression is unsigned
+// and both operands are zero-extended regardless of their individual types.
+// We pass the other operand so we can enforce that rule.
+SimValue widenForArithmetic(const SimValue& value,
+                            const DFGNode* operand_node,
+                            const DFGNode* other_node,
+                            const DFGNode* result_node) {
+    bool self_signed = (operand_node && operand_node->hasType())
+                       ? operand_node->type->isSigned()
+                       : value.isSigned();
+    bool other_signed = (other_node && other_node->hasType())
+                        ? other_node->type->isSigned()
+                        : true;
+    bool is_signed = self_signed && other_signed;
+    return value.resized(nodeWidth(result_node), is_signed);
 }
 
 bool useSignedCompare(const DFGNode* lhs, const DFGNode* rhs) {
@@ -306,24 +319,24 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             auto inputs = node->binaryInputs();
             const SimValue& lhsRaw = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhsRaw = checkedGetRef(inputs.rhs.node, node);
-            SimValue lhs = widenForArithmetic(lhsRaw, node);
-            SimValue rhs = widenForArithmetic(rhsRaw, node);
+            SimValue lhs = widenForArithmetic(lhsRaw, inputs.lhs.node, inputs.rhs.node, node);
+            SimValue rhs = widenForArithmetic(rhsRaw, inputs.rhs.node, inputs.lhs.node, node);
             return maskToWidth(lhs.add(rhs), node);
         }
         case DFGOp::SUB: {
             auto inputs = node->binaryInputs();
             const SimValue& lhsRaw = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhsRaw = checkedGetRef(inputs.rhs.node, node);
-            SimValue lhs = widenForArithmetic(lhsRaw, node);
-            SimValue rhs = widenForArithmetic(rhsRaw, node);
+            SimValue lhs = widenForArithmetic(lhsRaw, inputs.lhs.node, inputs.rhs.node, node);
+            SimValue rhs = widenForArithmetic(rhsRaw, inputs.rhs.node, inputs.lhs.node, node);
             return maskToWidth(lhs.sub(rhs), node);
         }
         case DFGOp::MUL: {
             auto inputs = node->binaryInputs();
             const SimValue& lhsRaw = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhsRaw = checkedGetRef(inputs.rhs.node, node);
-            SimValue lhs = widenForArithmetic(lhsRaw, node);
-            SimValue rhs = widenForArithmetic(rhsRaw, node);
+            SimValue lhs = widenForArithmetic(lhsRaw, inputs.lhs.node, inputs.rhs.node, node);
+            SimValue rhs = widenForArithmetic(rhsRaw, inputs.rhs.node, inputs.lhs.node, node);
             return maskToWidth(lhs.mul(rhs), node);
         }
 

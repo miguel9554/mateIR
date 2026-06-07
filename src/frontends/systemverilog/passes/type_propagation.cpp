@@ -398,6 +398,20 @@ bool propagateTypes(DFG& graph) {
                     }
                 });
             }
+            // Propagate context width down through arithmetic chains.
+            // A widened arith op must also widen its arith-op inputs.
+            for (const auto& node : graph.nodes) {
+                if (!isArithOp(node->kind()) || !node->hasType()) continue;
+                int contextWidth = node->type->width;
+                DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& edge) {
+                    DFGNode* src = edge.node;
+                    if (src->hasType() && isArithOp(src->kind()) && src->type->width < contextWidth) {
+                        src->type = Type::makeInteger(contextWidth, src->type->isSigned());
+                        backwardChanged = true;
+                        anyChanged = true;
+                    }
+                });
+            }
         } while (backwardChanged);
     }
 

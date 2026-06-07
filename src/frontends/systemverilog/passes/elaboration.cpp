@@ -3714,14 +3714,56 @@ static ExprValue buildExprValue(
         return retagConstOrReturnValue(inner, castType, ctx, loc);
     }
 
+    // Compute the bit-width of a DFG node when it may not be typed yet.
+    // Returns 0 if width cannot be determined without running type_propagation.
+    static const auto computeKnownWidth = [](auto& self, const DFGNode* node) -> int {
+        if (node->hasType()) return node->type->width;
+        if (node->kind() == DFGOp::CONCAT) {
+            int total = 0;
+            for (const auto& part : node->concatParts()) {
+                int w = self(self, part.node);
+                if (w <= 0) return 0;
+                total += w;
+            }
+            return total;
+        }
+        if (node->kind() == DFGOp::ADD || node->kind() == DFGOp::SUB ||
+            node->kind() == DFGOp::MUL) {
+            auto inputs = node->binaryInputs();
+            int lw = self(self, inputs.lhs.node);
+            int rw = self(self, inputs.rhs.node);
+            if (lw <= 0 || rw <= 0) return 0;
+            return std::max(lw, rw);
+        }
+        if (node->kind() == DFGOp::SIGNAL) {
+            auto drv = node->driver();
+            if (drv) return self(self, drv->node);
+        }
+        return 0;
+    };
+
     if (expr->kind == SyntaxKind::SignedCastExpression) {
         auto& castExpr = expr->as<SignedCastExpressionSyntax>();
         bool makeSigned = castExpr.signing.valueText() == "signed";
         ExprValue inner = buildScalarExprValue(castExpr.inner->expression, ctx);
+        int knownWidth = computeKnownWidth(computeKnownWidth, inner.scalar);
         Type newType = Type::makeInteger(inner.type.width, makeSigned,
                                         inner.type.packed_dims, inner.type.unpacked_dims);
         if (inner.scalar->kind() == DFGOp::CONST) {
             inner.scalar->type = newType;
+        } else if (knownWidth > 0) {
+            // Create a placeholder SIGNAL carrying the signedness override so
+            // the simulator can sign- or zero-extend this node correctly when
+            // widening for arithmetic. Only possible when width is known now;
+            // for arith-op outputs (typed by type_propagation) the consuming
+            // context's own type handles the extension.
+            Type castType = Type::makeInteger(knownWidth, makeSigned,
+                                             inner.type.packed_dims, inner.type.unpacked_dims);
+            auto* cast = ctx.graph.placeholderSignal(inner.scalar->instance_path);
+            cast->type = castType;
+            if (inner.scalar->loc) cast->loc = inner.scalar->loc;
+            ctx.graph.connectDriver(cast, DFGOutput{inner.scalar, 0});
+            inner.scalar = cast;
         }
         inner.type = newType;
         return inner;
@@ -3736,10 +3778,19 @@ static ExprValue buildExprValue(
                 bool makeSigned = (sysName == "$signed");
                 const auto* arg = singleOrderedSystemFunctionArg(invocation, sysName);
                 ExprValue inner = buildScalarExprValue(arg, ctx);
+                int knownWidth = computeKnownWidth(computeKnownWidth, inner.scalar);
                 Type newType = Type::makeInteger(inner.type.width, makeSigned,
                                                 inner.type.packed_dims, inner.type.unpacked_dims);
                 if (inner.scalar->kind() == DFGOp::CONST) {
                     inner.scalar->type = newType;
+                } else if (knownWidth > 0) {
+                    Type castType = Type::makeInteger(knownWidth, makeSigned,
+                                                     inner.type.packed_dims, inner.type.unpacked_dims);
+                    auto* cast = ctx.graph.placeholderSignal(inner.scalar->instance_path);
+                    cast->type = castType;
+                    if (inner.scalar->loc) cast->loc = inner.scalar->loc;
+                    ctx.graph.connectDriver(cast, DFGOutput{inner.scalar, 0});
+                    inner.scalar = cast;
                 }
                 inner.type = newType;
                 return inner;

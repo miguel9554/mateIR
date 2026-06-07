@@ -103,10 +103,7 @@ struct_case_branch_merge PASS
 struct_conditional_typedef_mismatch_fail FAIL whole-struct conditional requires matching typedef names
 struct_if_struct_condition_fail FAIL whole struct cannot be used as a boolean condition
 struct_ternary_struct_condition_fail FAIL whole struct cannot be used as a boolean condition
-struct_literal_positional PASS
-struct_literal_named_members PASS
-struct_literal_default PASS
-struct_literal_typed_prefix_expr PASS
+struct_literal_collection PASS
 struct_literal_duplicate_field_fail FAIL Struct literal has duplicate field
 struct_literal_unknown_field_fail FAIL Unknown field 'bad' on struct type
 struct_literal_missing_field_fail FAIL does not cover field

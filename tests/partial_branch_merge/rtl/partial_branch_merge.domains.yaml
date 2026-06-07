@@ -1,6 +1,12 @@
 module_name: partial_branch_merge
-async_domain:
-- sel
-- base
-- lo
-- hi
+resets:
+  rst_n:
+    polarity: negative
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - sel
+    - base
+    - lo
+    - hi

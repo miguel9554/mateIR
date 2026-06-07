@@ -7,4 +7,7 @@ resets:
 clock_domains:
   clk:
     polarity: posedge
-    inputs_outputs: []
+    inputs_outputs:
+      - plain_in
+      - packed_in
+      - nested_in

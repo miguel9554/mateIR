@@ -1,4 +1,16 @@
 module_name: same_origin_partial_overwrite
-async_domain:
-- a
-- b
+resets:
+  rst_n:
+    polarity: negative
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - a
+    - b
+    - sel_if
+    - sel_case
+    - outer_sel
+    - inner_sel
+    - outer_case_sel
+    - inner_case_sel

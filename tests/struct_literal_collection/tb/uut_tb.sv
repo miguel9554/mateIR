@@ -16,22 +16,16 @@ module uut_tb(
 
     initial begin
         cycle = 8'h00;
-        repeat (48) @(posedge _if.clk);
+        repeat (32) @(posedge _if.clk);
         $finish;
     end
 
     always @(posedge _if.clk) begin
         if (!_if.rst_n) begin
-            _if.in0_d <= 4'h0;
-            _if.in0_v <= 1'b0;
-            _if.in1_d <= 4'h0;
-            _if.in1_v <= 1'b0;
+            _if.sel <= 1'b0;
             cycle <= 8'h00;
         end else begin
-            _if.in0_d <= cycle[3:0];
-            _if.in0_v <= cycle[0];
-            _if.in1_d <= cycle[3:0] + 4'h5;
-            _if.in1_v <= cycle[1];
+            _if.sel <= cycle[0];
             cycle <= cycle + 8'h01;
         end
     end

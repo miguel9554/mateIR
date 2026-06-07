@@ -1,48 +1,32 @@
-typedef struct packed {
-    logic a;
-    logic b;
-    logic [3:0] c;
-} plain_s_t;
-
-typedef struct packed {
-    logic [7:0] data;
-    plain_s_t nested;
-} packed_s_t;
-
-typedef struct packed {
-    plain_s_t left;
-    plain_s_t right;
-} nested_again_t;
-
 module struct_typedef_collection (
-    input  logic          clk,
-    input  logic          rst_n,
-    input  plain_s_t      plain_in,
-    input  packed_s_t     packed_in,
-    input  nested_again_t nested_in,
-    output logic          out_bit_arst,
-    output logic          out_bit_norst,
-    output plain_s_t      plain_out_arst,
-    output plain_s_t      plain_out_norst,
-    output packed_s_t     packed_out_arst,
-    output packed_s_t     packed_out_norst,
-    output nested_again_t nested_out_arst,
-    output nested_again_t nested_out_norst
+    input  logic                                     clk,
+    input  logic                                     rst_n,
+    input  struct_typedef_collection_pkg::plain_s_t  plain_in,
+    input  struct_typedef_collection_pkg::packed_s_t packed_in,
+    input  struct_typedef_collection_pkg::nested_again_t nested_in,
+    output logic                                     out_bit_arst,
+    output logic                                     out_bit_norst,
+    output struct_typedef_collection_pkg::plain_s_t  plain_out_arst,
+    output struct_typedef_collection_pkg::plain_s_t  plain_out_norst,
+    output struct_typedef_collection_pkg::packed_s_t packed_out_arst,
+    output struct_typedef_collection_pkg::packed_s_t packed_out_norst,
+    output struct_typedef_collection_pkg::nested_again_t nested_out_arst,
+    output struct_typedef_collection_pkg::nested_again_t nested_out_norst
 );
-    logic          out_bit_base;
-    plain_s_t      plain_out_base;
-    packed_s_t     packed_out_base;
-    nested_again_t nested_out_base;
+    logic                                     out_bit_base;
+    struct_typedef_collection_pkg::plain_s_t  plain_out_base;
+    struct_typedef_collection_pkg::packed_s_t packed_out_base;
+    struct_typedef_collection_pkg::nested_again_t nested_out_base;
 
-    logic          out_bit_g1;
-    plain_s_t      plain_out_g1;
-    packed_s_t     packed_out_g1;
-    nested_again_t nested_out_g1;
+    logic                                     out_bit_g1;
+    struct_typedef_collection_pkg::plain_s_t  plain_out_g1;
+    struct_typedef_collection_pkg::packed_s_t packed_out_g1;
+    struct_typedef_collection_pkg::nested_again_t nested_out_g1;
 
-    logic          out_bit_g2;
-    plain_s_t      plain_out_g2;
-    packed_s_t     packed_out_g2;
-    nested_again_t nested_out_g2;
+    logic                                     out_bit_g2;
+    struct_typedef_collection_pkg::plain_s_t  plain_out_g2;
+    struct_typedef_collection_pkg::packed_s_t packed_out_g2;
+    struct_typedef_collection_pkg::nested_again_t nested_out_g2;
 
     always_comb begin
         plain_out_base.a = plain_in.a ^ packed_in.nested.a;

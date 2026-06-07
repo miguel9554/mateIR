@@ -46,7 +46,7 @@ gdb:
 		$(EXTRA_ARGS) $(RTL_SRCS)
 
 svg:
-	find debug_output -name '*.dot' -exec sh -c 'dot -Tsvg -o "$${1%.dot}.svg" "$$1"' _ {} \;
+	#find debug_output -name '*.dot' -exec sh -c 'dot -Tsvg -o "$${1%.dot}.svg" "$$1"' _ {} \;
 
 clean:
 	rm -rf $(OUTPUT_DIR) debug_output

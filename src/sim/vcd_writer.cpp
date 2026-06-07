@@ -291,6 +291,13 @@ void VcdWriter::addFlopEntries(vcd_tracer::module& scope, const FlopInfo& flop,
 
 void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
                           const std::unordered_set<const DFGNode*>& alive) {
+    std::unordered_set<std::string> flopOutputPorts;
+    for (const auto& flop : mod.flops) {
+        auto dot = flop.name.rfind('.');
+        flopOutputPorts.insert(dot == std::string::npos
+            ? flop.name : flop.name.substr(0, dot));
+    }
+
     vcd_tracer::module params_mod(scope, "params");
     vcd_tracer::module inputs_mod(scope, "inputs");
     vcd_tracer::module signals_mod(scope, "signals");
@@ -385,6 +392,7 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
     forEachOutputNode(mod, [&](const ModuleNode& sig) {
         const std::string& name = sig.name;
         if (name.ends_with(".d")) return;  // flop inputs, not module outputs
+        if (flopOutputPorts.count(name)) return;
         addSignalEntries(outputs_mod, name, sig, alive);
     });
 
@@ -404,6 +412,15 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
 
 void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
                       const std::unordered_set<const DFGNode*>& alive) {
+    // Output ports that are also flops are fully emitted by the flop section.
+    // Skip them here to avoid duplicate (and incorrectly-named) VCD entries.
+    std::unordered_set<std::string> flopOutputPorts;
+    for (const auto& flop : mod.flops) {
+        auto dot = flop.name.rfind('.');
+        flopOutputPorts.insert(dot == std::string::npos
+            ? flop.name : flop.name.substr(0, dot));
+    }
+
     // Cache of generate-scope vcd_tracer::module objects, keyed by dot-separated
     // scope path. Created on demand; generate scopes are direct children of `scope`.
     std::map<std::string, std::unique_ptr<vcd_tracer::module>> gen_scopes;
@@ -463,6 +480,7 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
     forEachOutputNode(mod, [&](const ModuleNode& sig) {
         const std::string& name = sig.name;
         if (name.ends_with(".d")) return;
+        if (flopOutputPorts.count(name)) return;
         addSignalEntries(scope, name, sig, alive);
     });
 

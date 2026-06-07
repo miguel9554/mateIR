@@ -140,3 +140,4 @@ casez_constant_expr_fail FAIL casez is not supported with a constant-expression 
 casez_unique0_fail FAIL unique0 modifiers are not supported on case
 packed_struct_conv PASS
 ibex_compressed_decoder PASS
+arithmetic_ops PASS

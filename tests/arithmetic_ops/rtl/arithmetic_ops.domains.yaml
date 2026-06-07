@@ -1,0 +1,19 @@
+module_name: arithmetic_ops
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - a8
+    - b8
+    - a16
+    - b16
+    - c16
+    - d16
+    - sa
+    - sb
+    - acc

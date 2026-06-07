@@ -435,9 +435,16 @@ static void resolveFlopsForModule(Module& resolved,
         const std::string& outName = output.name;
         if (!privateFacts.flop_triggers.contains(outName)) return;
         if (output.type.unpacked_dims.empty()) {
-            DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + ".q");
-            if (qNode) {
-                graph.connectDriver(scalarModuleNode(output), {qNode, 0});
+            if (output.type.isStruct()) {
+                for (DFGNode* outLeaf : moduleNodeLeaves(output)) {
+                    DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outLeaf->name + ".q");
+                    if (qNode) graph.connectDriver(outLeaf, {qNode, 0});
+                }
+            } else {
+                DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + ".q");
+                if (qNode) {
+                    graph.connectDriver(scalarModuleNode(output), {qNode, 0});
+                }
             }
         } else {
             auto suffixes = unpackedIndexSuffixes(output.type);

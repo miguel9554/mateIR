@@ -28,6 +28,19 @@ When a handwritten testbench is needed, follow these rules:
 - no timing delays are allowed inside synchronous driver blocks
 - synchronous driving should use NBA assignments
 
+**Async reset driving rule**: Verilator does not fire the async-reset sensitivity until it observes a proper unasserted→asserted edge. If the reset starts asserted at time 0 (no prior transition), Verilator never triggers the always_ff and the flop stays at its Verilator-initial value (0) instead of the reset value — causing a mismatch against the custom-sim, which evaluates correctly from time 0.
+
+Always drive async resets with an explicit unasserted→asserted transition:
+```
+// negative-polarity reset example
+initial begin
+    _if.rst_n = 1'b1;   // start UNASSERTED
+    #1 _if.rst_n = 1'b0; // assert after 1 ns — Verilator sees the 1→0 edge
+    #12 _if.rst_n = 1'b1;
+end
+```
+For positive-polarity resets, start at `1'b0` and transition to `1'b1`. The leading unasserted hold time should be small (1 ns is canonical) but must be non-zero.
+
 Typical workflow:
 1. Scaffold with `tools/new_test.py`.
 2. Add or update RTL under `tests/<name>/rtl/`.

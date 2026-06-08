@@ -8158,6 +8158,10 @@ void resolveGenerateMemberInPlace(
                 childCtx.combDrivers = {};
                 childCtx.generate_scope_names = {};
                 resolveGenerateMembersInPlace(block.members, childCtx);
+                ctx.local_nodes = childCtx.local_nodes;
+                ctx.combDrivers = childCtx.combDrivers;
+                ctx.local_flop_names = childCtx.local_flop_names;
+                ctx.local_aggregate_bindings = childCtx.local_aggregate_bindings;
                 ctx.partial_drivers = childCtx.partial_drivers;
                 ctx.write_states = childCtx.write_states;
             } else {
@@ -8196,6 +8200,10 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(selectedBlock, childCtx);
                 }
+                ctx.local_nodes = childCtx.local_nodes;
+                ctx.combDrivers = childCtx.combDrivers;
+                ctx.local_flop_names = childCtx.local_flop_names;
+                ctx.local_aggregate_bindings = childCtx.local_aggregate_bindings;
                 ctx.partial_drivers = childCtx.partial_drivers;
                 ctx.write_states = childCtx.write_states;
             } else {
@@ -8302,6 +8310,10 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(selectedBlock, childCtx);
                 }
+                ctx.local_nodes = childCtx.local_nodes;
+                ctx.combDrivers = childCtx.combDrivers;
+                ctx.local_flop_names = childCtx.local_flop_names;
+                ctx.local_aggregate_bindings = childCtx.local_aggregate_bindings;
                 ctx.partial_drivers = childCtx.partial_drivers;
                 ctx.write_states = childCtx.write_states;
             } else {

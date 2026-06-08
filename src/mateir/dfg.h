@@ -1021,9 +1021,7 @@ public:
                         node->str()), node.get());
                 }
                 if (!slice.source.node->hasType()) {
-                    throw CompilerError(std::format(
-                        "DFG validate: SLICE {} source has no type",
-                        node->str()), node.get());
+                    continue;  // type not yet propagated; bounds check deferred
                 }
                 if (slice.source.node->type->width <= 0) {
                     throw CompilerError(std::format(
@@ -1063,6 +1061,14 @@ public:
                 throw CompilerError(std::format(
                     "DFG validateStrict: node {} still carries unpacked_dims",
                     node->str()), node.get());
+            }
+            if (node->kind() == DFGOp::SLICE) {
+                auto slice = node->sliceInputs();
+                if (!slice.source.node->hasType()) {
+                    throw CompilerError(std::format(
+                        "DFG validateStrict: SLICE {} source has no type",
+                        node->str()), node.get());
+                }
             }
         }
     }

@@ -46,8 +46,8 @@ analyze:
 		$(DEBUG_NODE_DEPS_ARG) \
 		$(DEBUG_NODE_PATHS_ARG) \
 		$(EXTRA_ARGS) $(RTL_SRCS)
-	@find debug_output -type f -name '*.dot' -print0 | \
-		xargs -0 -P$$(nproc) -I{} sh -c 'echo "Generating $${1%.dot}.svg"; dot -Tsvg "$$1" -o "$${1%.dot}.svg"' _ {}
+	#@find debug_output -type f -name '*.dot' -print0 | \
+		#xargs -0 -P$$(nproc) -I{} sh -c 'echo "Generating $${1%.dot}.svg"; dot -Tsvg "$$1" -o "$${1%.dot}.svg"' _ {}
 
 clean:
 	rm -rf debug_output

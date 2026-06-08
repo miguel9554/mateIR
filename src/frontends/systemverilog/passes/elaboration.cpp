@@ -3034,6 +3034,11 @@ static ExprValue applySelector(const ExprValue& input,
                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
         int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right,
                                              &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+        if (!value.type.packed_dims.empty() && value.type.packed_dims.front().right != 0) {
+            const auto& dim = value.type.packed_dims.front();
+            left = packedIndexOffsetFromLsb(dim, left);
+            right = packedIndexOffsetFromLsb(dim, right);
+        }
         auto* leftNode = ctx.graph.constant(left);
         auto* rightNode = ctx.graph.constant(right);
         auto* sliceNode = ctx.graph.slice(value.scalar, leftNode, rightNode);
@@ -3057,6 +3062,10 @@ static ExprValue applySelector(const ExprValue& input,
         try {
             int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left,
                                                 &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+            if (!value.type.packed_dims.empty() && value.type.packed_dims.front().right != 0) {
+                const auto& dim = value.type.packed_dims.front();
+                base = packedIndexOffsetFromLsb(dim, base);
+            }
             int64_t high = isAscending ? base + width - 1 : base;
             int64_t low = isAscending ? base : base - width + 1;
             sliceNode = ctx.graph.slice(value.scalar, ctx.graph.constant(high), ctx.graph.constant(low));
@@ -3067,7 +3076,17 @@ static ExprValue applySelector(const ExprValue& input,
             while ((1LL << selBits) < sourceWidth) ++selBits;
             if (selBits == 0) selBits = 1;
 
-            auto* truncSel = ctx.graph.slice(baseNode, ctx.graph.constant(selBits - 1), ctx.graph.constant(0));
+            DFGNode* adjustedBase = baseNode;
+            if (!value.type.packed_dims.empty() && value.type.packed_dims.front().right != 0) {
+                const auto& dim = value.type.packed_dims.front();
+                if (dim.left >= dim.right) {
+                    adjustedBase = ctx.graph.sub(baseNode, ctx.graph.constant(dim.right));
+                } else {
+                    adjustedBase = ctx.graph.sub(ctx.graph.constant(dim.right), baseNode);
+                }
+                adjustedBase->loc = loc;
+            }
+            auto* truncSel = ctx.graph.slice(adjustedBase, ctx.graph.constant(selBits - 1), ctx.graph.constant(0));
             truncSel->loc = loc;
 
             std::vector<int64_t> armValues;
@@ -4087,6 +4106,18 @@ static ExprValue buildAggregateLeavesFromScalar(const ExprValue& scalarValue,
         throw CompilerError("struct/vector assignment is not supported", loc);
     }
 
+    // For CONST sources, validateNamedTypeCastWidth skips the width check, so the
+    // CONST may be narrower than the target struct. Zero-extend to struct width so
+    // all field SLICEs are in-bounds (matches SV zero-extension semantics for casts).
+    DFGNode* sourceScalar = scalarValue.scalar;
+    if (sourceScalar->kind() == DFGOp::CONST &&
+        scalarValue.type.width > 0 && scalarValue.type.width < targetType.width) {
+        auto* wider = ctx.graph.constant(sourceScalar->constValue());
+        wider->type = Type::makeInteger(targetType.width, false);
+        wider->loc = loc;
+        sourceScalar = wider;
+    }
+
     std::vector<AggregateLeafBinding> plan;
     collectAggregateLeafPlan(targetType, "", {}, plan);
 
@@ -4104,7 +4135,7 @@ static ExprValue buildAggregateLeavesFromScalar(const ExprValue& scalarValue,
         int64_t hi = lo + plan[i].leaf_type.width - 1;
         auto* loNode = ctx.graph.constant(lo);
         auto* hiNode = ctx.graph.constant(hi);
-        auto* sliceNode = ctx.graph.slice(scalarValue.scalar, hiNode, loNode);
+        auto* sliceNode = ctx.graph.slice(sourceScalar, hiNode, loNode);
         sliceNode->type = plan[i].leaf_type;
         sliceNode->loc = loc;
         leaves.push_back(sliceNode);
@@ -4696,6 +4727,12 @@ static DFGNode* buildExprScalarImpl(
                         int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params,
                                                              ctx.sm, *rangeSelect.right,
                                                              &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                        if (!currentSelectedType->packed_dims.empty() &&
+                                currentSelectedType->packed_dims.front().right != 0) {
+                            const auto& dim = currentSelectedType->packed_dims.front();
+                            left = packedIndexOffsetFromLsb(dim, left);
+                            right = packedIndexOffsetFromLsb(dim, right);
+                        }
                         auto* leftNode = ctx.graph.constant(left);
                         auto* rightNode = ctx.graph.constant(right);
                         indexedSignalNode = ctx.graph.slice(indexedSignalNode, leftNode, rightNode);
@@ -4717,6 +4754,11 @@ static DFGNode* buildExprScalarImpl(
                             int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
                                                                 ctx.sm, *rangeSelect.left,
                                                                 &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                            if (currentSelectedType && !currentSelectedType->packed_dims.empty() &&
+                                    currentSelectedType->packed_dims.front().right != 0) {
+                                const auto& dim = currentSelectedType->packed_dims.front();
+                                base = packedIndexOffsetFromLsb(dim, base);
+                            }
                             auto* high = ctx.graph.constant(base + width - 1);
                             auto* low  = ctx.graph.constant(base);
                             indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
@@ -4734,8 +4776,19 @@ static DFGNode* buildExprScalarImpl(
                             while ((1LL << selBits) < sourceWidth) ++selBits;
                             if (selBits == 0) selBits = 1;
 
+                            DFGNode* adjustedBase = baseNode;
+                            if (!currentSelectedType->packed_dims.empty() &&
+                                    currentSelectedType->packed_dims.front().right != 0) {
+                                const auto& dim = currentSelectedType->packed_dims.front();
+                                if (dim.left >= dim.right) {
+                                    adjustedBase = ctx.graph.sub(baseNode, ctx.graph.constant(dim.right));
+                                } else {
+                                    adjustedBase = ctx.graph.sub(ctx.graph.constant(dim.right), baseNode);
+                                }
+                                adjustedBase->loc = resolveSourceLoc(*expr, ctx.sm);
+                            }
                             auto* truncSel = ctx.graph.slice(
-                                baseNode,
+                                adjustedBase,
                                 ctx.graph.constant(selBits - 1),
                                 ctx.graph.constant(0));
                             truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
@@ -4779,6 +4832,11 @@ static DFGNode* buildExprScalarImpl(
                             int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
                                                                 ctx.sm, *rangeSelect.left,
                                                                 &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                            if (currentSelectedType && !currentSelectedType->packed_dims.empty() &&
+                                    currentSelectedType->packed_dims.front().right != 0) {
+                                const auto& dim = currentSelectedType->packed_dims.front();
+                                base = packedIndexOffsetFromLsb(dim, base);
+                            }
                             auto* high = ctx.graph.constant(base);
                             auto* low  = ctx.graph.constant(base - width + 1);
                             indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
@@ -4795,8 +4853,19 @@ static DFGNode* buildExprScalarImpl(
                             while ((1LL << selBits) < sourceWidth) ++selBits;
                             if (selBits == 0) selBits = 1;
 
+                            DFGNode* adjustedBase = baseNode;
+                            if (!currentSelectedType->packed_dims.empty() &&
+                                    currentSelectedType->packed_dims.front().right != 0) {
+                                const auto& dim = currentSelectedType->packed_dims.front();
+                                if (dim.left >= dim.right) {
+                                    adjustedBase = ctx.graph.sub(baseNode, ctx.graph.constant(dim.right));
+                                } else {
+                                    adjustedBase = ctx.graph.sub(ctx.graph.constant(dim.right), baseNode);
+                                }
+                                adjustedBase->loc = resolveSourceLoc(*expr, ctx.sm);
+                            }
                             auto* truncSel = ctx.graph.slice(
-                                baseNode,
+                                adjustedBase,
                                 ctx.graph.constant(selBits - 1),
                                 ctx.graph.constant(0));
                             truncSel->loc = resolveSourceLoc(*expr, ctx.sm);

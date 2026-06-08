@@ -526,9 +526,10 @@ struct DFGSliceResolvedRange {
     int64_t width = 0;
     int64_t internal_low = 0;
     int64_t internal_high = 0;
-    bool used_packed_dims = false;
 };
 
+// SLICE indices are always internal-space (0-based from LSB). Elaboration is
+// responsible for converting source-space indices before storing them.
 inline DFGSliceResolvedRange resolveSliceRange(const DFGNode& source_node,
                                                int64_t high,
                                                int64_t low) {
@@ -537,27 +538,13 @@ inline DFGSliceResolvedRange resolveSliceRange(const DFGNode& source_node,
             "resolveSliceRange: invalid range high={} low={}", high, low), &source_node);
     }
 
-    DFGSliceResolvedRange range{
+    return DFGSliceResolvedRange{
         .source_high = high,
         .source_low = low,
         .width = high - low + 1,
         .internal_low = low,
         .internal_high = high,
-        .used_packed_dims = false,
     };
-
-    if (source_node.type.has_value() && !source_node.type->packed_dims.empty()) {
-        const auto& dim = source_node.type->packed_dims.front();
-        range.used_packed_dims = true;
-        if (dim.left >= dim.right) {
-            range.internal_low = low - dim.right;
-        } else {
-            range.internal_low = dim.right - high;
-        }
-        range.internal_high = range.internal_low + range.width - 1;
-    }
-
-    return range;
 }
 
 struct DFGTraversal {

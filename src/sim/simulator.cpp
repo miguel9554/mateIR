@@ -639,8 +639,7 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
                  {"low", checkedGetRef(slice.low.node, node)}},
                 result,
                 std::format(
-                    "\"index_mode\":\"{}\",\"internal_low\":{},\"internal_high\":{},\"width\":{}",
-                    resolved.used_packed_dims ? "packed" : "flat",
+                    "\"internal_low\":{},\"internal_high\":{},\"width\":{}",
                     resolved.internal_low, resolved.internal_high, resolved.width));
             return result;
         }

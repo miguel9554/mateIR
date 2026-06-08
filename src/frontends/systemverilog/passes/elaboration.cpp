@@ -7376,13 +7376,37 @@ void resolveNamedPortConnection(
             return;
         } else if (expr->kind == SyntaxKind::IdentifierName) {
             connectName = std::string(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            auto eloc = resolveSourceLoc(*expr, ctx.sm);
             auto* placeholder = getOrCreateOutputPlaceholder(
                 graph, binding, portName, portName, {}, outputPort->type);
-            recordFullWrite(
-                ctx, connectName, resolveSourceLoc(*expr, ctx.sm),
-                std::format("module-output:{}:{}", binding.instance_name, portName));
-            if (auto* target = lookupTargetNode(ctx, connectName)) {
-                graph.connectDriver(target, DFGOutput(placeholder));
+            placeholder->loc = eloc;
+
+            // When the parent variable is a packed struct but the port is a plain
+            // logic vector, reinterpret the scalar port output into individual struct
+            // field signals via SLICE nodes — mirroring buildAggregateLeavesFromScalar
+            // on the input side. Without this, field signals remain at their CONST 0
+            // defaults because lookupTargetNode on the aggregate name finds nothing.
+            const Type* parentType = lookupDeclaredType(connectName, ctx);
+            if (parentType && parentType->isPackedStruct()) {
+                ExprValue aggrValue = buildAggregateLeavesFromScalar(
+                    ExprValue{.type = outputPort->type, .scalar = placeholder,
+                              .leaves = {}, .leaf_paths = {}},
+                    *parentType, ctx, eloc);
+                std::vector<AggregateLeafBinding> plan;
+                collectAggregateLeafPlan(*parentType, connectName, {}, plan);
+                for (size_t i = 0; i < plan.size(); ++i) {
+                    recordFullWrite(ctx, plan[i].name, eloc,
+                                   std::format("module-output:{}:{}", binding.instance_name, portName));
+                    if (auto* target = lookupTargetNode(ctx, plan[i].name)) {
+                        graph.connectDriver(target, DFGOutput(aggrValue.leaves[i]));
+                    }
+                }
+            } else {
+                recordFullWrite(ctx, connectName, eloc,
+                                std::format("module-output:{}:{}", binding.instance_name, portName));
+                if (auto* target = lookupTargetNode(ctx, connectName)) {
+                    graph.connectDriver(target, DFGOutput(placeholder));
+                }
             }
             return;
         } else if (expr->kind == SyntaxKind::IdentifierSelectName) {

@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <optional>
 #include <queue>
 #include <random>
 #include <set>
@@ -110,6 +113,68 @@ const DFGNode* topInputLeafNode(const Module& module, const std::string& leafNam
     return module.dfg ? module.dfg->getGraphInput("", leafName) : nullptr;
 }
 
+std::string jsonEscape(std::string_view text) {
+    std::ostringstream ss;
+    for (char c : text) {
+        switch (c) {
+            case '\\': ss << "\\\\"; break;
+            case '"': ss << "\\\""; break;
+            case '\n': ss << "\\n"; break;
+            case '\r': ss << "\\r"; break;
+            case '\t': ss << "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    ss << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                       << static_cast<int>(static_cast<unsigned char>(c))
+                       << std::dec << std::setfill(' ');
+                } else {
+                    ss << c;
+                }
+                break;
+        }
+    }
+    return ss.str();
+}
+
+std::string nodeTraceName(const DFGNode* node) {
+    const std::string full = node->debugName();
+    return full.empty() ? node->str() : full;
+}
+
+std::string simValueJson(const SimValue& value) {
+    return "\"" + jsonEscape(value.toBinaryString()) + "\"";
+}
+
+std::string formatTypeJson(const std::optional<Type>& type) {
+    if (!type.has_value()) return "null";
+    std::ostringstream ss;
+    ss << "{"
+       << "\"kind\":\"" << (type->kind == TypeKind::Enum ? "enum" :
+                             type->kind == TypeKind::Struct ? "struct" : "integer") << "\","
+       << "\"width\":" << type->width << ","
+       << "\"signed\":" << (type->isSigned() ? "true" : "false");
+    if (!type->packed_dims.empty()) {
+        ss << ",\"packed_dims\":[";
+        for (size_t i = 0; i < type->packed_dims.size(); ++i) {
+            if (i) ss << ",";
+            ss << "{\"left\":" << type->packed_dims[i].left
+               << ",\"right\":" << type->packed_dims[i].right << "}";
+        }
+        ss << "]";
+    }
+    if (!type->unpacked_dims.empty()) {
+        ss << ",\"unpacked_dims\":[";
+        for (size_t i = 0; i < type->unpacked_dims.size(); ++i) {
+            if (i) ss << ",";
+            ss << "{\"left\":" << type->unpacked_dims[i].left
+               << ",\"right\":" << type->unpacked_dims[i].right << "}";
+        }
+        ss << "]";
+    }
+    ss << "}";
+    return ss.str();
+}
+
 } // namespace
 
 // ============================================================================
@@ -144,6 +209,10 @@ SimValue ModuleInstance::maskToWidth(const SimValue& val, const DFGNode* node) {
 
 void ModuleInstance::buildTopology() {
     const auto& nodes = module_def.dfg->nodes;
+    node_indices.clear();
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        node_indices[nodes[i].get()] = i;
+    }
 
     std::map<const DFGNode*, int> in_degree;
     std::map<const DFGNode*, std::vector<const DFGNode*>> successors;
@@ -303,6 +372,13 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
     auto getUnaryVal = [&]() -> const SimValue& {
         return checkedGetRef(node->unaryInputs().operand.node, node);
     };
+    auto emitTrace = [&](const std::vector<std::pair<std::string, SimValue>>& inputs,
+                         const SimValue& result,
+                         const std::string& decisions_json = "") {
+        if (trace_sink) {
+            trace_sink(current_time_ns, node, inputs, result, decisions_json);
+        }
+    };
 
     switch (node->kind()) {
         case DFGOp::INPUT:
@@ -312,7 +388,11 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
 
         case DFGOp::SIGNAL:
         case DFGOp::OUTPUT:
-            if (auto driver = node->driver()) return checkedGetRef(driver->node, node);
+            if (auto driver = node->driver()) {
+                SimValue result = checkedGetRef(driver->node, node);
+                emitTrace({{"driver", result}}, result);
+                return result;
+            }
             return checkedGetRef(node);
 
         case DFGOp::ADD: {
@@ -321,7 +401,13 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             const SimValue& rhsRaw = checkedGetRef(inputs.rhs.node, node);
             SimValue lhs = widenForArithmetic(lhsRaw, inputs.lhs.node, inputs.rhs.node, node);
             SimValue rhs = widenForArithmetic(rhsRaw, inputs.rhs.node, inputs.lhs.node, node);
-            return maskToWidth(lhs.add(rhs), node);
+            SimValue result = maskToWidth(lhs.add(rhs), node);
+            emitTrace({{"lhs", lhsRaw}, {"rhs", rhsRaw}}, result,
+                      std::format(
+                          "\"signed\":{},\"lhs_extended_width\":{},\"rhs_extended_width\":{}",
+                          (nodeSigned(inputs.lhs.node) && nodeSigned(inputs.rhs.node)) ? "true" : "false",
+                          lhs.width(), rhs.width()));
+            return result;
         }
         case DFGOp::SUB: {
             auto inputs = node->binaryInputs();
@@ -329,7 +415,13 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             const SimValue& rhsRaw = checkedGetRef(inputs.rhs.node, node);
             SimValue lhs = widenForArithmetic(lhsRaw, inputs.lhs.node, inputs.rhs.node, node);
             SimValue rhs = widenForArithmetic(rhsRaw, inputs.rhs.node, inputs.lhs.node, node);
-            return maskToWidth(lhs.sub(rhs), node);
+            SimValue result = maskToWidth(lhs.sub(rhs), node);
+            emitTrace({{"lhs", lhsRaw}, {"rhs", rhsRaw}}, result,
+                      std::format(
+                          "\"signed\":{},\"lhs_extended_width\":{},\"rhs_extended_width\":{}",
+                          (nodeSigned(inputs.lhs.node) && nodeSigned(inputs.rhs.node)) ? "true" : "false",
+                          lhs.width(), rhs.width()));
+            return result;
         }
         case DFGOp::MUL: {
             auto inputs = node->binaryInputs();
@@ -337,61 +429,89 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
             const SimValue& rhsRaw = checkedGetRef(inputs.rhs.node, node);
             SimValue lhs = widenForArithmetic(lhsRaw, inputs.lhs.node, inputs.rhs.node, node);
             SimValue rhs = widenForArithmetic(rhsRaw, inputs.rhs.node, inputs.lhs.node, node);
-            return maskToWidth(lhs.mul(rhs), node);
+            SimValue result = maskToWidth(lhs.mul(rhs), node);
+            emitTrace({{"lhs", lhsRaw}, {"rhs", rhsRaw}}, result,
+                      std::format(
+                          "\"signed\":{},\"lhs_extended_width\":{},\"rhs_extended_width\":{}",
+                          (nodeSigned(inputs.lhs.node) && nodeSigned(inputs.rhs.node)) ? "true" : "false",
+                          lhs.width(), rhs.width()));
+            return result;
         }
 
         case DFGOp::EQ: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            return boolValue(lhs.eq(rhs));
+            SimValue result = boolValue(lhs.eq(rhs));
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
+            return result;
         }
         case DFGOp::LT: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            return boolValue(useSignedCompare(inputs.lhs.node, inputs.rhs.node)
+            const bool is_signed = useSignedCompare(inputs.lhs.node, inputs.rhs.node);
+            SimValue result = boolValue(is_signed
                 ? lhs.signedLt(rhs)
                 : lhs.unsignedLt(rhs));
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result,
+                      std::format("\"signed\":{}", is_signed ? "true" : "false"));
+            return result;
         }
         case DFGOp::LE: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            bool lt = useSignedCompare(inputs.lhs.node, inputs.rhs.node)
+            bool is_signed = useSignedCompare(inputs.lhs.node, inputs.rhs.node);
+            bool lt = is_signed
                 ? lhs.signedLt(rhs)
                 : lhs.unsignedLt(rhs);
-            return boolValue(lt || lhs.eq(rhs));
+            SimValue result = boolValue(lt || lhs.eq(rhs));
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result,
+                      std::format("\"signed\":{}", is_signed ? "true" : "false"));
+            return result;
         }
         case DFGOp::GT: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            return boolValue(useSignedCompare(inputs.lhs.node, inputs.rhs.node)
+            const bool is_signed = useSignedCompare(inputs.lhs.node, inputs.rhs.node);
+            SimValue result = boolValue(is_signed
                 ? rhs.signedLt(lhs)
                 : rhs.unsignedLt(lhs));
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result,
+                      std::format("\"signed\":{}", is_signed ? "true" : "false"));
+            return result;
         }
         case DFGOp::GE: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            bool lt = useSignedCompare(inputs.lhs.node, inputs.rhs.node)
+            bool is_signed = useSignedCompare(inputs.lhs.node, inputs.rhs.node);
+            bool lt = is_signed
                 ? lhs.signedLt(rhs)
                 : lhs.unsignedLt(rhs);
-            return boolValue(!lt);
+            SimValue result = boolValue(!lt);
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result,
+                      std::format("\"signed\":{}", is_signed ? "true" : "false"));
+            return result;
         }
 
         case DFGOp::SHL: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            return lhs.shl(rhs.lowU64());
+            SimValue result = lhs.shl(rhs.lowU64());
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
+            return result;
         }
         case DFGOp::ASR: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            return lhs.shr(rhs.lowU64(), true);
+            SimValue result = lhs.shr(rhs.lowU64(), true);
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
+            return result;
         }
 
         case DFGOp::MUX:
@@ -404,48 +524,102 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
                         node->str(), selectorValue),
                     node);
             }
-            return checkedGetRef(node->muxArmData(static_cast<size_t>(armIndex)).node, node);
+            SimValue result = checkedGetRef(node->muxArmData(static_cast<size_t>(armIndex)).node, node);
+            emitTrace({{"selector", checkedGetRef(node->muxSelector().node, node)}}, result,
+                      std::format(
+                          "\"selected_arm_index\":{},\"selected_arm_value\":{},\"selected_arm_debug_id\":{}",
+                          armIndex, node->muxArmValue(static_cast<size_t>(armIndex)),
+                          node->muxArmData(static_cast<size_t>(armIndex)).node->debug_id));
+            return result;
         }
 
-        case DFGOp::UNARY_NEGATE:  return getUnaryVal().negated();
-        case DFGOp::BITWISE_NOT:   return getUnaryVal().bitwiseNot();
+        case DFGOp::UNARY_NEGATE:  {
+            SimValue operand = getUnaryVal();
+            SimValue result = operand.negated();
+            emitTrace({{"operand", operand}}, result);
+            return result;
+        }
+        case DFGOp::BITWISE_NOT:   {
+            SimValue operand = getUnaryVal();
+            SimValue result = operand.bitwiseNot();
+            emitTrace({{"operand", operand}}, result);
+            return result;
+        }
         case DFGOp::BITWISE_AND: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            return lhs.bitwiseAnd(rhs);
+            SimValue result = lhs.bitwiseAnd(rhs);
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
+            return result;
         }
         case DFGOp::BITWISE_OR: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            return lhs.bitwiseOr(rhs);
+            SimValue result = lhs.bitwiseOr(rhs);
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
+            return result;
         }
         case DFGOp::BITWISE_XOR: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            return lhs.bitwiseXor(rhs);
+            SimValue result = lhs.bitwiseXor(rhs);
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
+            return result;
         }
         case DFGOp::BITWISE_XNOR: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            return lhs.bitwiseXnor(rhs);
+            SimValue result = lhs.bitwiseXnor(rhs);
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
+            return result;
         }
 
         case DFGOp::REDUCTION_AND:
-            return boolValue(getUnaryVal().reductionAnd());
+        {
+            SimValue operand = getUnaryVal();
+            SimValue result = boolValue(operand.reductionAnd());
+            emitTrace({{"operand", operand}}, result);
+            return result;
+        }
         case DFGOp::REDUCTION_NAND:
-            return boolValue(!getUnaryVal().reductionAnd());
+        {
+            SimValue operand = getUnaryVal();
+            SimValue result = boolValue(!operand.reductionAnd());
+            emitTrace({{"operand", operand}}, result);
+            return result;
+        }
         case DFGOp::REDUCTION_OR:
-            return boolValue(getUnaryVal().reductionOr());
+        {
+            SimValue operand = getUnaryVal();
+            SimValue result = boolValue(operand.reductionOr());
+            emitTrace({{"operand", operand}}, result);
+            return result;
+        }
         case DFGOp::REDUCTION_NOR:
-            return boolValue(!getUnaryVal().reductionOr());
+        {
+            SimValue operand = getUnaryVal();
+            SimValue result = boolValue(!operand.reductionOr());
+            emitTrace({{"operand", operand}}, result);
+            return result;
+        }
         case DFGOp::REDUCTION_XOR:
-            return boolValue(getUnaryVal().reductionXor());
+        {
+            SimValue operand = getUnaryVal();
+            SimValue result = boolValue(operand.reductionXor());
+            emitTrace({{"operand", operand}}, result);
+            return result;
+        }
         case DFGOp::REDUCTION_XNOR:
-            return boolValue(!getUnaryVal().reductionXor());
+        {
+            SimValue operand = getUnaryVal();
+            SimValue result = boolValue(!operand.reductionXor());
+            emitTrace({{"operand", operand}}, result);
+            return result;
+        }
 
         case DFGOp::SLICE: {
             // SLICE has CONST high/low. Dynamic indexing is lowered to MUX during elaboration.
@@ -456,33 +630,34 @@ SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
 
             int64_t high = static_cast<int64_t>(checkedGetRef(slice.high.node, node).lowU64());
             int64_t low = static_cast<int64_t>(checkedGetRef(slice.low.node, node).lowU64());
-            int64_t width = high - low + 1;
-
-            int64_t bit_pos;
-            if (source_node->type.has_value() && !source_node->type->packed_dims.empty()) {
-                const auto& dim = source_node->type->packed_dims[0];
-                if (dim.left >= dim.right) {
-                    bit_pos = low - dim.right;
-                } else {
-                    bit_pos = dim.right - high;
-                }
-            } else {
-                // Source is a flat bit-vector (no packed_dims): 0-indexed, bit_pos = low.
-                // This is correct — CONCAT results and range-select SLICE results
-                // are intentionally flat, with no explicit dimension descriptor.
-                bit_pos = low;
-            }
-
-            return checkedGetRef(slice.source.node, node).slice(static_cast<int>(bit_pos + width - 1), static_cast<int>(bit_pos));
+            auto resolved = resolveSliceRange(*source_node, high, low);
+            SimValue result = checkedGetRef(slice.source.node, node).slice(
+                static_cast<int>(resolved.internal_high), static_cast<int>(resolved.internal_low));
+            emitTrace(
+                {{"source", checkedGetRef(slice.source.node, node)},
+                 {"high", checkedGetRef(slice.high.node, node)},
+                 {"low", checkedGetRef(slice.low.node, node)}},
+                result,
+                std::format(
+                    "\"index_mode\":\"{}\",\"internal_low\":{},\"internal_high\":{},\"width\":{}",
+                    resolved.used_packed_dims ? "packed" : "flat",
+                    resolved.internal_low, resolved.internal_high, resolved.width));
+            return result;
         }
 
         case DFGOp::CONCAT: {
             std::vector<SimValue> parts;
             parts.reserve(node->concatParts().size());
+            std::vector<std::pair<std::string, SimValue>> inputs;
+            inputs.reserve(node->concatParts().size());
             for (const auto& part : node->concatParts()) {
-                parts.push_back(checkedGetRef(part.node, node));
+                SimValue value = checkedGetRef(part.node, node);
+                parts.push_back(value);
+                inputs.push_back({dfgInputRole(*node, inputs.size()), value});
             }
-            return SimValue::concat(parts);
+            SimValue result = SimValue::concat(parts);
+            emitTrace(inputs, result);
+            return result;
         }
     }
 
@@ -902,9 +1077,140 @@ Simulator::Simulator(const MateIR& ir, const SimConfig& config)
 
     // Create the root module instance (recursively creates children)
     root_ = std::make_unique<ModuleInstance>(module_.name, module_, ir_);
+    initTraceConfiguration();
+    root_->trace_sink = [this](int64_t time_ns,
+                               const DFGNode* node,
+                               const std::vector<std::pair<std::string, SimValue>>& inputs,
+                               const SimValue& result,
+                               const std::string& decisions_json) {
+        emitTraceEvent(time_ns, node, inputs, result, decisions_json);
+    };
 
     buildTimeline();
     loadSyncInputs();
+}
+
+void Simulator::initTraceConfiguration() {
+    auto resolveNodeSpec = [&](const std::string& spec) -> const DFGNode* {
+        const auto& nodes = module_.dfg->nodes;
+        std::vector<const DFGNode*> matches;
+        bool numeric = !spec.empty() &&
+            std::all_of(spec.begin(), spec.end(), [](unsigned char c) { return std::isdigit(c); });
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            const DFGNode* node = nodes[i].get();
+            if (numeric) {
+                uint64_t value = std::stoull(spec);
+                if (i == value || node->debug_id == value) matches.push_back(node);
+                continue;
+            }
+            if (node->name == spec || node->debugName() == spec) {
+                matches.push_back(node);
+            }
+        }
+        if (matches.empty()) {
+            throw CompilerError(std::format(
+                "Simulator: trace node '{}' not found in live DFG", spec));
+        }
+        if (matches.size() > 1) {
+            throw CompilerError(std::format(
+                "Simulator: trace node '{}' is ambiguous ({} matches)", spec, matches.size()));
+        }
+        return matches.front();
+    };
+
+    for (const auto& op : config_.trace_dfg_ops) {
+        std::string upper = op;
+        std::transform(upper.begin(), upper.end(), upper.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        traced_ops_.insert(std::move(upper));
+    }
+
+    for (const auto& spec : config_.trace_dfg_nodes) {
+        traced_nodes_.insert(resolveNodeSpec(spec));
+    }
+
+    for (const auto& spec : config_.trace_dfg_cones) {
+        const DFGNode* root = resolveNodeSpec(spec);
+        std::queue<const DFGNode*> q;
+        traced_nodes_.insert(root);
+        q.push(root);
+        while (!q.empty()) {
+            const DFGNode* curr = q.front();
+            q.pop();
+            DFGTraversal::forEachInput(curr, [&](size_t, const DFGOutput& input) {
+                if (traced_nodes_.insert(input.node).second) q.push(input.node);
+            });
+        }
+    }
+
+    if (!traced_nodes_.empty() || !traced_ops_.empty()) {
+        std::filesystem::create_directories(config_.output_dir);
+        dfg_trace_path_ = config_.output_dir + "/dfg_trace.jsonl";
+        dfg_trace_out_ = std::make_unique<std::ofstream>(*dfg_trace_path_);
+        if (!dfg_trace_out_->is_open()) {
+            throw CompilerError(std::format(
+                "Simulator: cannot open DFG trace output '{}'", *dfg_trace_path_));
+        }
+    }
+}
+
+bool Simulator::shouldTraceNode(const DFGNode* node) const {
+    if (!node) return false;
+    if (traced_nodes_.contains(node)) return true;
+    return traced_ops_.contains(std::string(to_string(node->kind())));
+}
+
+void Simulator::emitPassiveTraceEvents(int64_t time_ns) {
+    if (!dfg_trace_out_) return;
+    for (const auto& owned : module_.dfg->nodes) {
+        const DFGNode* node = owned.get();
+        if (!shouldTraceNode(node)) continue;
+        if (node->kind() != DFGOp::INPUT &&
+            node->kind() != DFGOp::CONST &&
+            node->kind() != DFGOp::X &&
+            !root_->flop_q_nodes.contains(node)) {
+            continue;
+        }
+        auto it = root_->values.find(node);
+        if (it == root_->values.end()) continue;
+        emitTraceEvent(time_ns, node, {}, it->second, "\"source\":\"state\"");
+    }
+}
+
+void Simulator::emitTraceEvent(int64_t time_ns,
+                               const DFGNode* node,
+                               const std::vector<std::pair<std::string, SimValue>>& inputs,
+                               const SimValue& result,
+                               const std::string& decisions_json) {
+    if (!dfg_trace_out_ || !shouldTraceNode(node)) return;
+
+    auto node_index_it = root_->node_indices.find(node);
+    if (node_index_it == root_->node_indices.end()) {
+        throw CompilerError(std::format(
+            "Simulator: traced node {} has no live node index", node->str()), node);
+    }
+
+    *dfg_trace_out_ << "{"
+                    << "\"time\":" << time_ns
+                    << ",\"id\":" << node_index_it->second
+                    << ",\"debug_id\":" << node->debug_id
+                    << ",\"op\":\"" << to_string(node->kind()) << "\""
+                    << ",\"name\":\"" << jsonEscape(nodeTraceName(node)) << "\""
+                    << ",\"type\":" << formatTypeJson(node->type);
+    if (node->loc) {
+        *dfg_trace_out_ << ",\"loc\":\"" << jsonEscape(node->loc->str()) << "\"";
+    }
+    *dfg_trace_out_ << ",\"inputs\":{";
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        if (i) *dfg_trace_out_ << ",";
+        *dfg_trace_out_ << "\"" << jsonEscape(inputs[i].first) << "\":" << simValueJson(inputs[i].second);
+    }
+    *dfg_trace_out_ << "}"
+                    << ",\"result\":" << simValueJson(result);
+    if (!decisions_json.empty()) {
+        *dfg_trace_out_ << ",\"decisions\":{" << decisions_json << "}";
+    }
+    *dfg_trace_out_ << "}\n";
 }
 
 // ============================================================================
@@ -977,7 +1283,9 @@ void Simulator::run() {
     }
 
     // 5. Evaluate all combinational logic (with fixpoint for hierarchy)
+    root_->current_time_ns = 0;
     root_->evaluateCombinational();
+    emitPassiveTraceEvents(0);
 
     // VCD: trace initial state at time 0
     vcd_->update(*root_, 0);
@@ -1106,7 +1414,9 @@ void Simulator::run() {
         }
 
         // Re-evaluate combinational logic (with fixpoint for hierarchy)
+        root_->current_time_ns = batch_time;
         root_->evaluateCombinational();
+        emitPassiveTraceEvents(batch_time);
 
         // VCD: trace all values at every time step
         vcd_->update(*root_, batch_time);
@@ -1126,6 +1436,9 @@ void Simulator::run() {
     }
 
     vcd_->close(timeline_.empty() ? 0 : timeline_.back().time);
+    if (dfg_trace_out_) {
+        dfg_trace_out_->flush();
+    }
 
     writeOutputFiles();
 
@@ -1138,6 +1451,9 @@ void Simulator::run() {
     std::cout << "Simulator: output written to '" << config_.output_dir << "/'" << std::endl;
     std::cout << "Simulator: grouped VCD trace written to '" << vcd_->grouped_path() << "'" << std::endl;
     std::cout << "Simulator: raw VCD trace written to '" << vcd_->raw_path() << "'" << std::endl;
+    if (dfg_trace_path_) {
+        std::cout << "Simulator: DFG trace written to '" << *dfg_trace_path_ << "'" << std::endl;
+    }
 }
 
 } // namespace mate

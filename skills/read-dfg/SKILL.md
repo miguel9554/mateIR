@@ -31,15 +31,22 @@ Also emitted:
 
 Useful commands:
 - `python3 tools/dfg_inspect.py <file> driver <name>`
-- `python3 tools/dfg_inspect.py <file> cone <name>`
+- `python3 tools/dfg_inspect.py <file> cone <name> [--depth N]`
 - `python3 tools/dfg_inspect.py <file> mux <name>`
+- `python3 tools/dfg_inspect.py <file> mux-case <id> <case_val>` — look up one arm of a multi-way MUX by selector value (hex ok: `0x7C4`)
 - `python3 tools/dfg_inspect.py <file> diff <older.json>`
 - `python3 tools/dfg_inspect.py <file> op MUX`
 - `python3 tools/dfg_inspect.py <file> node <name_or_id>`
+- `python3 tools/dfg_inspect.py <file> const_driven 0` — list all SIGNAL/OUTPUT nodes driven by a given CONST value
+- `python3 tools/dfg_inspect.py <file> group <prefix>` — compact table of all signals whose name starts with prefix (useful for struct fields split into per-signal nodes)
+- `python3 tools/dfg_inspect.py <file> search <pattern>` — substring match when exact name is unknown
 
 When debugging:
-1. Find the latest pass snapshot for the failing signal.
-2. Check `driver`.
-3. Check `cone` or `mux`.
-4. Compare against the previous pass with `diff`.
-5. If the issue is around a flop or domain tag, inspect `06_flop_resolve_flops.txt` and later pass outputs.
+1. If symptoms suggest a whole struct is zeroed, run `const_driven 0` first — it surfaces all CONST-driven signals in one shot.
+2. Use `group <struct_prefix>` to see all fields of a split struct and their drivers together.
+3. Use `search <partial>` when the exact dot-notation name is unknown.
+4. For a large MUX (e.g. CSR address decode), use `mux-case <id> <val>` instead of reading the full node output.
+5. Use `cone <name> --depth N` to prune large cones to a readable depth.
+6. Check `driver`, then `cone` or `mux` for the full picture.
+7. Compare against the previous pass with `diff`.
+8. If the issue is around a flop or domain tag, inspect `06_flop_resolve_flops.txt` and later pass outputs.

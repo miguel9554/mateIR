@@ -6,18 +6,22 @@ Usage:
   dfg_inspect.py <json_file> <command> [args...]
 
 Commands:
-  driver  <name>      Show what drives a named signal/output (one level)
-  cone    <name>      Show the full backward cone (all transitive drivers)
-  node    <id>        Show details of a node by numeric ID
-  op      <opname>    List all nodes with a given op (e.g. MUX, INDEX, CONCAT)
-  fanout  <id>        Show all nodes that consume node <id>
-  mux     <name>      Show the MUX tree rooted at the driver of <name>
-  inputs              List all INPUT nodes with types
-  outputs             List all OUTPUT nodes and their drivers
-  signals             List all SIGNAL nodes and their drivers
-  undriven            Find all signals/outputs with no driver
-  diff    <json2>     Compare two DFGs: show driver changes for each signal
-  path    <id1> <id2> Check if there is a path from node id1 to node id2
+  driver       <name>            Show what drives a named signal/output (one level)
+  cone         <name> [--depth N] Show the backward cone (default depth 30)
+  node         <id>              Show details of a node by numeric ID
+  op           <opname>          List all nodes with a given op (e.g. MUX, INDEX, CONCAT)
+  fanout       <id>              Show all nodes that consume node <id>
+  mux          <name>            Show the MUX tree rooted at the driver of <name>
+  mux-case     <id> <case_val>   Show the data arm of a multi-way MUX for one case value
+  inputs                         List all INPUT nodes with types
+  outputs                        List all OUTPUT nodes and their drivers
+  signals                        List all SIGNAL nodes and their drivers
+  undriven                       Find all signals/outputs with no driver
+  const_driven [value]           List SIGNAL/OUTPUT nodes driven by CONST (optionally filter by value)
+  group        <prefix>          Show all signals/outputs whose name starts with <prefix>
+  search       <pattern>         Substring search for signal names
+  diff         <json2>           Compare two DFGs: show driver changes for each signal
+  path         <id1> <id2>       Check if there is a path from node id1 to node id2
 """
 
 import json
@@ -129,8 +133,19 @@ def _cone(nid, nodes, visited, depth, max_depth):
 
 
 def cmd_cone(nodes, by_name, consumers, args):
-    nid = resolve_name(args[0], nodes, by_name)
-    max_depth = int(args[1]) if len(args) > 1 else 30
+    # Support both: cone <name> <N>  and  cone <name> --depth N
+    rest = list(args)
+    max_depth = 30
+    if "--depth" in rest:
+        idx = rest.index("--depth")
+        if idx + 1 >= len(rest):
+            sys.exit("--depth requires a value")
+        max_depth = int(rest[idx + 1])
+        rest = rest[:idx] + rest[idx + 2:]
+    elif len(rest) > 1:
+        max_depth = int(rest[1])
+        rest = rest[:1]
+    nid = resolve_name(rest[0], nodes, by_name)
     _cone(nid, nodes, set(), 0, max_depth)
 
 
@@ -293,21 +308,129 @@ def cmd_path(nodes, by_name, consumers, args):
     print(f"No path from {src} to {dst}")
 
 
+def cmd_const_driven(nodes, by_name, consumers, args):
+    filter_val = None
+    if args:
+        try:
+            filter_val = int(args[0])
+        except ValueError:
+            sys.exit(f"const_driven: expected integer value, got '{args[0]}'")
+    found = False
+    for n in nodes.values():
+        if n["op"] not in ("SIGNAL", "OUTPUT"):
+            continue
+        inps = n.get("inputs", [])
+        if len(inps) != 1:
+            continue
+        driver = nodes[inps[0]]
+        if driver["op"] != "CONST":
+            continue
+        val = driver.get("value")
+        if filter_val is not None and val != filter_val:
+            continue
+        print(f"{fmt_node(n)}")
+        print(f"    <- {fmt_node(driver)}")
+        found = True
+    if not found:
+        msg = f"No SIGNAL/OUTPUT nodes driven by CONST {filter_val}" if filter_val is not None else "No SIGNAL/OUTPUT nodes driven by CONST"
+        print(msg)
+
+
+def cmd_group(nodes, by_name, consumers, args):
+    if not args:
+        sys.exit("group requires a prefix argument")
+    prefix = args[0]
+    matches = []
+    for n in nodes.values():
+        name = n.get("name", "")
+        if name.startswith(prefix) and n["op"] in ("SIGNAL", "OUTPUT", "INPUT"):
+            matches.append(n)
+    if not matches:
+        print(f"No signals/outputs/inputs with prefix '{prefix}'")
+        return
+    matches.sort(key=lambda n: n.get("name", ""))
+    name_w = max(len(n.get("name", "")) for n in matches)
+    op_w   = max(len(n["op"]) for n in matches)
+    for n in matches:
+        inps = n.get("inputs", [])
+        if not inps:
+            driver_str = "(undriven)"
+        else:
+            driver_str = fmt_node(nodes[inps[0]])
+        name = n.get("name", "")
+        print(f"  {name:<{name_w}}  {n['op']:<{op_w}}  <- {driver_str}")
+
+
+def cmd_mux_case(nodes, by_name, consumers, args):
+    if len(args) < 2:
+        sys.exit("mux-case requires <node_id> <case_value>")
+    nid = resolve_name(args[0], nodes, by_name)
+    try:
+        target = int(args[1], 0)  # 0-base accepts 0x hex
+    except ValueError:
+        sys.exit(f"mux-case: invalid case value '{args[1]}'")
+    n = nodes[nid]
+    if n["op"] != "MUX":
+        sys.exit(f"Node {nid} is {n['op']}, not MUX")
+    selector_values = n.get("mux_selector_values", [])
+    inps = n.get("inputs", [])
+    if not selector_values:
+        sys.exit(f"MUX [{nid}] has no mux_selector_values (binary MUX — use 'node' instead)")
+    if len(inps) < len(selector_values) + 1:
+        sys.exit(f"MUX [{nid}]: inputs/selector_values length mismatch")
+    for i, sv in enumerate(selector_values):
+        if sv == target:
+            arm = nodes[inps[i + 1]]
+            print(f"MUX [{nid}]  case {target} (0x{target:x}):")
+            print(f"  sel:  {fmt_node(nodes[inps[0]])}")
+            print(f"  arm:  {fmt_node(arm)}")
+            return
+    print(f"MUX [{nid}]: case {target} (0x{target:x}) not found.")
+    print(f"  {len(selector_values)} cases: {selector_values[:8]}{'...' if len(selector_values) > 8 else ''}")
+
+
+def cmd_search(nodes, by_name, consumers, args):
+    if not args:
+        sys.exit("search requires a pattern argument")
+    pattern = args[0].lower()
+    matches = []
+    seen = set()
+    for n in nodes.values():
+        name = n.get("name", "")
+        if pattern in name.lower() and n["op"] in ("SIGNAL", "OUTPUT", "INPUT"):
+            if n["id"] not in seen:
+                matches.append(n)
+                seen.add(n["id"])
+    if not matches:
+        print(f"No nodes matching '{pattern}'")
+        return
+    matches.sort(key=lambda n: n.get("name", ""))
+    for n in matches:
+        inps = n.get("inputs", [])
+        driver_str = fmt_node(nodes[inps[0]]) if inps else "(undriven)"
+        print(f"{fmt_node(n)}")
+        print(f"    <- {driver_str}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 COMMANDS = {
-    "driver":   cmd_driver,
-    "cone":     cmd_cone,
-    "node":     cmd_node,
-    "op":       cmd_op,
-    "fanout":   cmd_fanout,
-    "mux":      cmd_mux,
-    "inputs":   cmd_inputs,
-    "outputs":  cmd_outputs,
-    "signals":  cmd_signals,
-    "undriven": cmd_undriven,
-    "diff":     cmd_diff,
-    "path":     cmd_path,
+    "driver":       cmd_driver,
+    "cone":         cmd_cone,
+    "node":         cmd_node,
+    "op":           cmd_op,
+    "fanout":       cmd_fanout,
+    "mux":          cmd_mux,
+    "mux-case":     cmd_mux_case,
+    "inputs":       cmd_inputs,
+    "outputs":      cmd_outputs,
+    "signals":      cmd_signals,
+    "undriven":     cmd_undriven,
+    "const_driven": cmd_const_driven,
+    "group":        cmd_group,
+    "search":       cmd_search,
+    "diff":         cmd_diff,
+    "path":         cmd_path,
 }
 
 if __name__ == "__main__":

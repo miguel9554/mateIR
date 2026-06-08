@@ -34,6 +34,13 @@ Testcase RTL requirements:
 - it must contain at least one flop with async reset and at least one flop without async reset
 - if needed, duplicate the flop structure and vary only the presence or absence of async reset so both cases are exercised cleanly
 
+When a testcase intentionally uses `unique`-qualified `case`, enforce the `unique` contract in RTL instead of relying on TB stimulus to honor it:
+- derive sanitized internal signals before the `unique case` so uncovered and overlapping top-level input patterns are collapsed into legal ones
+- for `unique case (1'b1)` style constructs, ensure at most one sanitized item can be true at a time
+- for `unique case (sel)` style constructs, ensure the sanitized selector is always mapped into the covered value set
+- do not rely on handwritten TB constraints to keep `unique` inputs legal; moving forward, the testcase RTL itself should enforce that property
+- only drive illegal `unique` scenarios directly if the testcase is explicitly about undefined-behavior handling, and document that intent clearly
+
 **Async reset driving rule**: Verilator does not fire the async-reset sensitivity until it observes a proper unasserted→asserted edge. If the reset starts asserted at time 0 (no prior transition), Verilator never triggers the always_ff and the flop stays at its Verilator-initial value (0) instead of the reset value — causing a mismatch against the custom-sim, which evaluates correctly from time 0.
 
 Always drive async resets with an explicit unasserted→asserted transition:

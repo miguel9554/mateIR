@@ -1,0 +1,1 @@
+../../ibex_core/rtl/ibex_pkg.sv

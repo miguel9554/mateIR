@@ -1,0 +1,1 @@
+../../ibex_core/rtl/ibex_ex_block.sv

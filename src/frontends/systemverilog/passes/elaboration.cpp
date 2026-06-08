@@ -97,6 +97,10 @@ struct ResolutionContext {
     std::map<std::string, ModuleNodeBinding> local_aggregate_bindings;
     // local_flop_names: base names of flops declared in this generate scope
     std::set<std::string> local_flop_names;
+    // generate_scope_names: base names declared in the current named generate block.
+    // canonicalTargetKey prefixes only these names, leaving inherited module-level
+    // names unqualified even when instance_path is non-empty.
+    std::set<std::string> generate_scope_names;
 
     // Enum type registry and member map (populated in resolveModule before elaboration)
     const NamedTypeRegistry&   namedTypeRegistry;
@@ -164,7 +168,7 @@ InstancePath appendInstancePath(InstancePath path, const std::string& instanceNa
 }
 
 std::string canonicalTargetKey(const ResolutionContext& ctx, const std::string& targetName) {
-    if (ctx.local_nodes.contains(targetName) && !ctx.instance_path.empty()) {
+    if (ctx.generate_scope_names.contains(targetName) && !ctx.instance_path.empty()) {
         return ctx.instance_path + "." + targetName;
     }
     return targetName;
@@ -6181,6 +6185,7 @@ static DFGNode* inlineSubroutineCall(
     sub.combDrivers.clear();
     sub.local_nodes.clear();
     sub.local_flop_names.clear();
+    sub.generate_scope_names.clear();
     sub.write_states.clear();
     sub.subroutine_locals.clear();
     sub.triggers = {};
@@ -6817,6 +6822,7 @@ void resolveForLoopStatementInPlace(
             ctx.domain_facts, ctx.occurrence,
             ctx.combDrivers,
             ctx.instance_path, ctx.local_nodes, ctx.local_declared_types, ctx.local_aggregate_bindings, ctx.local_flop_names,
+            ctx.generate_scope_names,
             ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
             ctx.moduleLookup, ctx.globalImports,
             ctx.current_write_origin, ctx.partial_drivers, ctx.write_states,
@@ -7870,9 +7876,12 @@ static void resolveGenerateScopeDecls(
                 const std::string& localLeafName = localLeafPlan[i].name;
                 ctx.local_nodes[localLeafName + ".d"] = flop.binding.d_leaves[i];
                 ctx.local_nodes[localLeafName + ".q"] = flop.binding.q_leaves[i];
+                ctx.generate_scope_names.insert(localLeafName + ".d");
+                ctx.generate_scope_names.insert(localLeafName + ".q");
             }
             if (flop.binding.aggregate_leaves.size() == 1) {
                 ctx.local_nodes[name] = flop.binding.q_leaves.front();
+                ctx.generate_scope_names.insert(name);
             }
             ctx.local_declared_types[name] = type;
             ctx.local_aggregate_bindings[name] = ModuleNodeBinding{
@@ -7898,6 +7907,7 @@ static void resolveGenerateScopeDecls(
             ctx.local_aggregate_bindings[name] = std::move(binding);
             for (const auto& leaf : localLeafPlan) {
                 ctx.local_nodes[leaf.name] = leaf.leaf;
+                ctx.generate_scope_names.insert(leaf.name);
             }
 
             if (!ctx.instance_path.empty()) {
@@ -8089,7 +8099,7 @@ void resolveGenerateMembersInPlace(
         ctx.graph, ctx.thisModule, ctx.flopNames, scopeParams,
         ctx.sm, ctx.is_sequential, ctx.triggers, ctx.domain_facts, ctx.occurrence,
         ctx.combDrivers, ctx.instance_path, ctx.local_nodes, ctx.local_declared_types,
-        ctx.local_aggregate_bindings, ctx.local_flop_names, scopeNamedTypes,
+        ctx.local_aggregate_bindings, ctx.local_flop_names, ctx.generate_scope_names, scopeNamedTypes,
         scopeEnumMemberValues, ctx.pkgRegistry, ctx.moduleLookup, ctx.globalImports,
         ctx.current_write_origin, ctx.partial_drivers, ctx.write_states, ctx.subroutineRegistry,
         ctx.subroutine_locals, ctx.currently_inlining, ctx.is_subroutine_scope, ctx.current_return_var};
@@ -8139,7 +8149,20 @@ void resolveGenerateMemberInPlace(
 
         case SyntaxKind::GenerateBlock: {
             auto& block = member->as<GenerateBlockSyntax>();
-            resolveGenerateMembersInPlace(block.members, ctx);
+            if (block.beginName) {
+                std::string blockName = std::string(block.beginName->name.valueText());
+                std::string childPath = (ctx.instance_path.empty() ? "" : ctx.instance_path + ".")
+                                        + blockName;
+                ResolutionContext childCtx = ctx;
+                childCtx.instance_path = childPath;
+                childCtx.combDrivers = {};
+                childCtx.generate_scope_names = {};
+                resolveGenerateMembersInPlace(block.members, childCtx);
+                ctx.partial_drivers = childCtx.partial_drivers;
+                ctx.write_states = childCtx.write_states;
+            } else {
+                resolveGenerateMembersInPlace(block.members, ctx);
+            }
             break;
         }
 
@@ -8211,7 +8234,7 @@ void resolveGenerateMemberInPlace(
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
                     ctx.sm, false, {}, ctx.domain_facts, ctx.occurrence, {},
                     childPath, ctx.local_nodes,
-                    ctx.local_declared_types, ctx.local_aggregate_bindings, {},
+                    ctx.local_declared_types, ctx.local_aggregate_bindings, {}, {},
                     ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
                     ctx.moduleLookup, ctx.globalImports,
                     ctx.current_write_origin, ctx.partial_drivers, ctx.write_states};
@@ -8814,7 +8837,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     ResolutionContext resCtx{
         graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {},
         domainFacts, occurrence, {},
-        "", {}, {}, {}, {}, namedTypeRegistry, enumMemberValues, pkgRegistry,
+        "", {}, {}, {}, {}, {}, namedTypeRegistry, enumMemberValues, pkgRegistry,
         moduleLookup, globalImports, "", {}, {}, subroutineRegistry
     };
 

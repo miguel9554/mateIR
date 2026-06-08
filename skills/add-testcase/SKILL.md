@@ -1,10 +1,10 @@
 ---
 name: add-testcase
-description: Add or update a compiler testcase in tests/. Use this when creating new test scaffolding, deciding whether a handwritten testbench is needed, or validating that a testbench follows the repo's driving rules.
+description: Scaffold a new compiler testcase in tests/. Use this when creating new test scaffolding from scratch. For RTL and TB coding rules, see testcase-rules.
 ---
 
 Use `tools/new_test.py` to scaffold a new testcase:
-- `python3 tools/new_test.py <test_name>`
+- `poetry run python tools/new_test.py <test_name>`
 
 Generated structure:
 - `tests/<name>/rtl/`
@@ -21,39 +21,6 @@ The scaffold also creates:
 - shared Makefile symlinks
 - generated TB helper files via `tools/gen_tb.py`
 
-When a handwritten testbench is needed, follow these rules:
-- each async signal is driven from its own `initial` block
-- timing delays are only allowed in those async-driving `initial` blocks
-- for each clock domain, all synchronous driving belongs in that domain's `always @(posedge clk)` block
-- no timing delays are allowed inside synchronous driver blocks
-- synchronous driving should use NBA assignments
-
-Testcase RTL requirements:
-- the top RTL under test must not be purely combinational
-- it must contain flops, including flops that register all outputs
-- it must contain at least one flop with async reset and at least one flop without async reset
-- if needed, duplicate the flop structure and vary only the presence or absence of async reset so both cases are exercised cleanly
-
-When a testcase intentionally uses `unique`-qualified `case`, enforce the `unique` contract in RTL instead of relying on TB stimulus to honor it:
-- derive sanitized internal signals before the `unique case` so uncovered and overlapping top-level input patterns are collapsed into legal ones
-- for `unique case (1'b1)` style constructs, ensure at most one sanitized item can be true at a time
-- for `unique case (sel)` style constructs, ensure the sanitized selector is always mapped into the covered value set
-- do not rely on handwritten TB constraints to keep `unique` inputs legal; moving forward, the testcase RTL itself should enforce that property
-- only drive illegal `unique` scenarios directly if the testcase is explicitly about undefined-behavior handling, and document that intent clearly
-
-**Async reset driving rule**: Verilator does not fire the async-reset sensitivity until it observes a proper unasserted→asserted edge. If the reset starts asserted at time 0 (no prior transition), Verilator never triggers the always_ff and the flop stays at its Verilator-initial value (0) instead of the reset value — causing a mismatch against the custom-sim, which evaluates correctly from time 0.
-
-Always drive async resets with an explicit unasserted→asserted transition:
-```
-// negative-polarity reset example
-initial begin
-    _if.rst_n = 1'b1;   // start UNASSERTED
-    #1 _if.rst_n = 1'b0; // assert after 1 ns — Verilator sees the 1→0 edge
-    #12 _if.rst_n = 1'b1;
-end
-```
-For positive-polarity resets, start at `1'b0` and transition to `1'b1`. The leading unasserted hold time should be small (1 ns is canonical) but must be non-zero.
-
 Typical workflow:
 1. Scaffold with `tools/new_test.py`.
 2. Add or update RTL under `tests/<name>/rtl/`.
@@ -65,3 +32,5 @@ If you need extra simulator flags, use:
 - `tests/<name>/custom-sim.args`
 - `tests/<name>/work/custom-sim/custom-sim.args`
 - `tests/<name>/work/static/static.args`
+
+For RTL and TB coding requirements, consult the `testcase-rules` skill.

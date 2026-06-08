@@ -21,7 +21,13 @@ module general_features_test (
     output logic        dynamic_bit_pow2_arst,
     output logic        dynamic_bit_pow2_norst,
     output logic        dynamic_bit_nonpow2_arst,
-    output logic        dynamic_bit_nonpow2_norst
+    output logic        dynamic_bit_nonpow2_norst,
+
+    // Non-zero lower-bound range-select outputs
+    output logic [13:0] nzb_range_arst,    // nzb_data[15:2] — full range, lower=2 (arst)
+    output logic [7:0]  nzb_lower_arst,    // nzb_data[9:2]  — lower 8 bits (arst)
+    output logic [7:0]  nzb_upper_norst,   // nzb_data[15:8] — upper 8 bits (norst)
+    output logic [13:0] nzb_arith_norst    // nzb_data[15:2] + 14'd1 — arithmetic (norst)
 );
 
     logic [7:0] const_slice_base;
@@ -79,6 +85,23 @@ module general_features_test (
             default: select_named = if_other;
         endcase
     endfunction
+
+    // Non-zero lower-bound signal: [15:2] (14 bits, lower bound = 2).
+    // Loaded from data[15:2] each cycle; read via range selects to test
+    // SimpleRangeSelect index adjustment.
+    logic [15:2] nzb_data;
+
+    logic [13:0] nzb_range_c;   // nzb_data[15:2] — full range (identity)
+    logic [7:0]  nzb_lower_c;   // nzb_data[9:2]  — lower sub-range
+    logic [7:0]  nzb_upper_c;   // nzb_data[15:8] — upper sub-range
+    logic [13:0] nzb_arith_c;   // nzb_data[15:2] + 14'd1
+
+    always_comb begin
+        nzb_range_c = nzb_data[15:2];           // full range on [15:2]
+        nzb_lower_c = nzb_data[9:2];            // lower 8 of [15:2]
+        nzb_upper_c = nzb_data[15:8];           // upper 8 of [15:2]
+        nzb_arith_c = nzb_data[15:2] + 14'd1;  // arithmetic on full range
+    end
 
     always_comb begin
         lanes_base[0] = data[1:0];
@@ -267,6 +290,9 @@ module general_features_test (
             named_arg_func_arst <= 8'h00;
             dynamic_bit_pow2_arst <= 1'b0;
             dynamic_bit_nonpow2_arst <= 1'b0;
+            nzb_data <= '0;
+            nzb_range_arst <= '0;
+            nzb_lower_arst <= '0;
         end else begin
             const_slice_case_arst <= const_slice_g1;
             dynamic_part_case_arst <= dynamic_part_g1;
@@ -277,6 +303,9 @@ module general_features_test (
             named_arg_func_arst <= named_arg_g1;
             dynamic_bit_pow2_arst <= dynamic_bit_pow2_g1;
             dynamic_bit_nonpow2_arst <= dynamic_bit_nonpow2_g1;
+            nzb_data <= data[15:2];   // load from zero-based input slice
+            nzb_range_arst <= nzb_range_c;
+            nzb_lower_arst <= nzb_lower_c;
         end
     end
 
@@ -290,6 +319,8 @@ module general_features_test (
         named_arg_func_norst <= named_arg_g2;
         dynamic_bit_pow2_norst <= dynamic_bit_pow2_g2;
         dynamic_bit_nonpow2_norst <= dynamic_bit_nonpow2_g2;
+        nzb_upper_norst <= nzb_upper_c;
+        nzb_arith_norst <= nzb_arith_c;
     end
 
 endmodule

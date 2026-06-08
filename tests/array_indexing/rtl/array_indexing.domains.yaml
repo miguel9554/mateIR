@@ -10,3 +10,5 @@ clock_domains:
     - packed_sel
     - unpacked_sel
     - slice_base
+    - nzb_dyn_idx
+    - nzb_dyn_base

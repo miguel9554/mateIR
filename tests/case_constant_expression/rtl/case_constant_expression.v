@@ -40,6 +40,8 @@ module case_constant_expression (
     logic       c_unique_base;
     logic       d_unique_base;
     logic [1:0] sel_unique_base;
+    logic       a_overlap_unique_base;
+    logic       b_overlap_unique_base;
 
     logic [7:0] overlap_g1;
     logic [7:0] zero_case_g1;
@@ -55,6 +57,8 @@ module case_constant_expression (
     logic       c_unique_g1;
     logic       d_unique_g1;
     logic [1:0] sel_unique_g1;
+    logic       a_overlap_unique_g1;
+    logic       b_overlap_unique_g1;
 
     logic [7:0] overlap_g2;
     logic [7:0] zero_case_g2;
@@ -70,6 +74,8 @@ module case_constant_expression (
     logic       c_unique_g2;
     logic       d_unique_g2;
     logic [1:0] sel_unique_g2;
+    logic       a_overlap_unique_g2;
+    logic       b_overlap_unique_g2;
 
     always_comb begin
         overlap_base = 8'h0F;
@@ -87,10 +93,12 @@ module case_constant_expression (
         endcase
 
         b_unique_base = b;
-        a_unique_base = a | ~b;
+        a_unique_base = a & ~b;
         c_unique_base = (a_unique_base | b_unique_base) ? 1'b0 : c;
         d_unique_base = c ? 1'b0 : d;
         sel_unique_base = sel[0] ? 2'b01 : 2'b00;
+        a_overlap_unique_base = ~b;
+        b_overlap_unique_base = b;
 
         grouped_unique_base = 8'h50;
         unique case (1'b1)
@@ -101,8 +109,8 @@ module case_constant_expression (
 
         unique_overlap_base = 8'h60;
         unique case (1'b1)
-            a_unique_base: unique_overlap_base = 8'h61;
-            b_unique_base: unique_overlap_base = 8'h62;
+            a_overlap_unique_base: unique_overlap_base = 8'h61;
+            b_overlap_unique_base: unique_overlap_base = 8'h62;
         endcase
 
         unique_default_base = 8'h70;
@@ -126,8 +134,8 @@ module case_constant_expression (
 
         partial_unique_base = 8'hA5;
         unique case (1'b1)
-            a_unique_base: partial_unique_base[7:4] = 4'hC;
-            b_unique_base: partial_unique_base[3:0] = 4'h3;
+            a_overlap_unique_base: partial_unique_base[7:4] = 4'hC;
+            b_overlap_unique_base: partial_unique_base[3:0] = 4'h3;
         endcase
 
         unique_default_carry_base = 1'b0;
@@ -158,10 +166,12 @@ module case_constant_expression (
                 endcase
 
                 b_unique_g1 = b;
-                a_unique_g1 = a | ~b;
+                a_unique_g1 = a & ~b;
                 c_unique_g1 = (a_unique_g1 | b_unique_g1) ? 1'b0 : c;
                 d_unique_g1 = c ? 1'b0 : d;
                 sel_unique_g1 = sel[0] ? 2'b01 : 2'b00;
+                a_overlap_unique_g1 = ~b;
+                b_overlap_unique_g1 = b;
 
                 grouped_unique_g1 = 8'h50;
                 unique case (1'b1)
@@ -172,8 +182,8 @@ module case_constant_expression (
 
                 unique_overlap_g1 = 8'h60;
                 unique case (1'b1)
-                    a_unique_g1: unique_overlap_g1 = 8'h61;
-                    b_unique_g1: unique_overlap_g1 = 8'h62;
+                    a_overlap_unique_g1: unique_overlap_g1 = 8'h61;
+                    b_overlap_unique_g1: unique_overlap_g1 = 8'h62;
                 endcase
 
                 unique_default_g1 = 8'h70;
@@ -197,8 +207,8 @@ module case_constant_expression (
 
                 partial_unique_g1 = 8'hA5;
                 unique case (1'b1)
-                    a_unique_g1: partial_unique_g1[7:4] = 4'hC;
-                    b_unique_g1: partial_unique_g1[3:0] = 4'h3;
+                    a_overlap_unique_g1: partial_unique_g1[7:4] = 4'hC;
+                    b_overlap_unique_g1: partial_unique_g1[3:0] = 4'h3;
                 endcase
 
                 unique_default_carry_g1 = 1'b0;
@@ -230,10 +240,12 @@ module case_constant_expression (
                     endcase
 
                     b_unique_g2 = b;
-                    a_unique_g2 = a | ~b;
+                    a_unique_g2 = a & ~b;
                     c_unique_g2 = (a_unique_g2 | b_unique_g2) ? 1'b0 : c;
                     d_unique_g2 = c ? 1'b0 : d;
                     sel_unique_g2 = sel[0] ? 2'b01 : 2'b00;
+                    a_overlap_unique_g2 = ~b;
+                    b_overlap_unique_g2 = b;
 
                     grouped_unique_g2 = 8'h50;
                     unique case (1'b1)
@@ -244,8 +256,8 @@ module case_constant_expression (
 
                     unique_overlap_g2 = 8'h60;
                     unique case (1'b1)
-                        a_unique_g2: unique_overlap_g2 = 8'h61;
-                        b_unique_g2: unique_overlap_g2 = 8'h62;
+                        a_overlap_unique_g2: unique_overlap_g2 = 8'h61;
+                        b_overlap_unique_g2: unique_overlap_g2 = 8'h62;
                     endcase
 
                     unique_default_g2 = 8'h70;
@@ -269,8 +281,8 @@ module case_constant_expression (
 
                     partial_unique_g2 = 8'hA5;
                     unique case (1'b1)
-                        a_unique_g2: partial_unique_g2[7:4] = 4'hC;
-                        b_unique_g2: partial_unique_g2[3:0] = 4'h3;
+                        a_overlap_unique_g2: partial_unique_g2[7:4] = 4'hC;
+                        b_overlap_unique_g2: partial_unique_g2[3:0] = 4'h3;
                     endcase
 
                     unique_default_carry_g2 = 1'b0;

@@ -6136,8 +6136,13 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             outputName = baseName + indexSuffix;
         }
 
-        bool usePartialAggregate = ctx.partial_drivers.contains(outputName) &&
-                                   isPackedAggregateTarget(baseName, indexSuffix, ctx);
+        // If this target has a live partial state, a whole write must replace that
+        // state — not just call connectNode, which would leave a stale partial that
+        // restoreDrivers re-materialises (overwriting the correct driver).  The
+        // isPackedAggregateTarget check was too narrow: it rejected array-element
+        // targets (non-empty indexSuffix) even though they can also accumulate
+        // partial state from bit-select writes.
+        bool usePartialAggregate = ctx.partial_drivers.contains(outputName);
         if (!ctx.subroutine_locals.count(outputName))
             recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
 

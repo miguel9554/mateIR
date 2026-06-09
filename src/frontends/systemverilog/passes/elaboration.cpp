@@ -1,6 +1,9 @@
 #include "frontends/systemverilog/passes/elaboration.h"
+#include "mateir/constant_value.h"
+#include "frontends/systemverilog/syntax_helpers.h"
 #include "mateir/dfg.h"
 #include "mateir/module.h"
+#include "frontends/systemverilog/passes/type_propagation.h"
 #include "frontends/systemverilog/unresolved.h"
 #include "util/source_loc_resolve.h"
 #include "slang/syntax/AllSyntax.h"
@@ -8,11 +11,13 @@
 #include "slang/syntax/SyntaxNode.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <source_location>
 #include <map>
 #include <memory>
@@ -52,6 +57,7 @@ using PartialDriverMap = std::unordered_map<std::string, PartialTargetState>;
 struct PackageEntry {
     NamedTypeRegistry  namedTypes;
     EnumMemberMap enumMembers;
+    std::map<std::string, ConstantValue> constants;
     std::map<std::string, const FunctionDeclarationSyntax*> functions;
 };
 using PackageRegistry = std::map<std::string, PackageEntry>;
@@ -91,6 +97,10 @@ struct ResolutionContext {
     std::map<std::string, ModuleNodeBinding> local_aggregate_bindings;
     // local_flop_names: base names of flops declared in this generate scope
     std::set<std::string> local_flop_names;
+    // generate_scope_names: base names declared in the current named generate block.
+    // canonicalTargetKey prefixes only these names, leaving inherited module-level
+    // names unqualified even when instance_path is non-empty.
+    std::set<std::string> generate_scope_names;
 
     // Enum type registry and member map (populated in resolveModule before elaboration)
     const NamedTypeRegistry&   namedTypeRegistry;
@@ -144,6 +154,10 @@ static Module resolveModule(const UnresolvedModule& unresolved,
 
 namespace {
 
+ConstantValue integerConstant(int64_t value) {
+    return ConstantValue::bits(Type::makeInteger(64, true), value);
+}
+
 std::string formatLocOrUnknown(const std::optional<SourceLoc>& loc) {
     return loc ? loc->str() : std::string("<unknown>");
 }
@@ -154,7 +168,7 @@ InstancePath appendInstancePath(InstancePath path, const std::string& instanceNa
 }
 
 std::string canonicalTargetKey(const ResolutionContext& ctx, const std::string& targetName) {
-    if (ctx.local_nodes.contains(targetName) && !ctx.instance_path.empty()) {
+    if (ctx.generate_scope_names.contains(targetName) && !ctx.instance_path.empty()) {
         return ctx.instance_path + "." + targetName;
     }
     return targetName;
@@ -218,6 +232,141 @@ static int64_t intPowConst(int64_t base, int64_t exp) {
     return result;
 }
 
+size_t constantWordCount(int width) {
+    if (width <= 0) {
+        throw CompilerError("Constant bit vector must have a positive width");
+    }
+    return (static_cast<size_t>(width) + 63) / 64;
+}
+
+void maskConstantHighBits(std::vector<uint64_t>& words, int width) {
+    const int highBits = width % 64;
+    if (highBits != 0) words.back() &= (uint64_t(1) << highBits) - 1;
+}
+
+uint8_t hexDigitValue(char ch) {
+    if (ch >= '0' && ch <= '9') return static_cast<uint8_t>(ch - '0');
+    if (ch >= 'a' && ch <= 'f') return static_cast<uint8_t>(10 + ch - 'a');
+    if (ch >= 'A' && ch <= 'F') return static_cast<uint8_t>(10 + ch - 'A');
+    throw CompilerError("Unsupported hex digit in string literal escape");
+}
+
+void appendDecodedEscape(std::string_view text, size_t& index, std::vector<uint8_t>& bytes) {
+    if (index >= text.size()) {
+        throw CompilerError("Unterminated escape sequence in string literal");
+    }
+
+    const char ch = text[index++];
+    switch (ch) {
+        case 'n': bytes.push_back('\n'); return;
+        case 't': bytes.push_back('\t'); return;
+        case 'r': bytes.push_back('\r'); return;
+        case 'f': bytes.push_back('\f'); return;
+        case 'v': bytes.push_back('\v'); return;
+        case 'a': bytes.push_back('\a'); return;
+        case 'b': bytes.push_back('\b'); return;
+        case '\\': bytes.push_back('\\'); return;
+        case '"': bytes.push_back('"'); return;
+        case '\'': bytes.push_back('\''); return;
+        case 'x': {
+            if (index >= text.size() || !std::isxdigit(static_cast<unsigned char>(text[index]))) {
+                throw CompilerError("Hex string literal escape requires at least one digit");
+            }
+            uint8_t value = 0;
+            int digits = 0;
+            while (index < text.size() &&
+                   std::isxdigit(static_cast<unsigned char>(text[index])) &&
+                   digits < 2) {
+                value = static_cast<uint8_t>((value << 4) | hexDigitValue(text[index]));
+                ++index;
+                ++digits;
+            }
+            bytes.push_back(value);
+            return;
+        }
+        default:
+            break;
+    }
+
+    if (ch >= '0' && ch <= '7') {
+        uint8_t value = static_cast<uint8_t>(ch - '0');
+        int digits = 1;
+        while (index < text.size() &&
+               text[index] >= '0' && text[index] <= '7' &&
+               digits < 3) {
+            value = static_cast<uint8_t>((value << 3) | static_cast<uint8_t>(text[index] - '0'));
+            ++index;
+            ++digits;
+        }
+        bytes.push_back(value);
+        return;
+    }
+
+    throw CompilerError("Unsupported escape sequence in string literal");
+}
+
+std::vector<uint8_t> decodeFrontendStringLiteral(std::string_view text) {
+    if (text.size() >= 6 && text.starts_with("\"\"\"") && text.ends_with("\"\"\"")) {
+        std::vector<uint8_t> bytes;
+        bytes.reserve(text.size() - 6);
+        for (size_t i = 3; i + 3 < text.size(); ++i) {
+            bytes.push_back(static_cast<uint8_t>(text[i]));
+        }
+        return bytes;
+    }
+
+    if (text.size() < 2 || text.front() != '"' || text.back() != '"') {
+        throw CompilerError("Malformed string literal");
+    }
+
+    std::vector<uint8_t> bytes;
+    bytes.reserve(text.size() - 2);
+    for (size_t i = 1; i + 1 < text.size();) {
+        if (text[i] == '\\') {
+            ++i;
+            appendDecodedEscape(text, i, bytes);
+            continue;
+        }
+        bytes.push_back(static_cast<uint8_t>(text[i]));
+        ++i;
+    }
+    return bytes;
+}
+
+std::vector<uint64_t> lowerFrontendStringLiteralToWords(std::string_view text, int width) {
+    std::vector<uint64_t> words(constantWordCount(width), 0);
+    const auto bytes = decodeFrontendStringLiteral(text);
+    const int maxBytes = width / 8;
+    const int copyBytes = std::min<int>(static_cast<int>(bytes.size()), maxBytes);
+    const int start = static_cast<int>(bytes.size()) - copyBytes;
+    for (int i = 0; i < copyBytes; ++i) {
+        const uint8_t value = bytes[static_cast<size_t>(start + i)];
+        const int byteIndex = copyBytes - 1 - i;
+        const int bitOffset = byteIndex * 8;
+        words[bitOffset / 64] |= uint64_t(value) << (bitOffset % 64);
+        if ((bitOffset % 64) > 56) {
+            words[bitOffset / 64 + 1] |= uint64_t(value) >> (64 - (bitOffset % 64));
+        }
+    }
+    maskConstantHighBits(words, width);
+    return words;
+}
+
+ConstantValue lowerStringLiteralConstant(std::string_view text, const Type& expectedType) {
+    if (expectedType.isStruct() || !expectedType.unpacked_dims.empty()) {
+        throw CompilerError("String literal constant requires an integral destination type");
+    }
+    if (expectedType.packed_dims.size() > 1) {
+        throw CompilerError(
+            "String literal constants are not supported for multidimensional packed arrays");
+    }
+    if (expectedType.width <= 0) {
+        throw CompilerError("Integral constant type must have a positive width");
+    }
+    return ConstantValue::bitWords(
+        expectedType, lowerFrontendStringLiteralToWords(text, expectedType.width));
+}
+
 // TODO should be double? or parametrized by type.
 struct IntegerVectorLiteral {
     int64_t value;
@@ -279,6 +428,155 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
     return {value, width, is_signed};
 }
 
+struct CasezItemPattern {
+    int64_t value;
+    int64_t wildcard_mask;
+    int     width;
+};
+
+static CasezItemPattern parseCasezItemPattern(
+    const std::string& valueText, int base,
+    const std::optional<int>& explicitWidth,
+    const std::optional<SourceLoc>& loc)
+{
+    int64_t value = 0;
+    int64_t wildcard_mask = 0;
+
+    if (base == 2) {
+        int bit = 0;
+        for (int i = static_cast<int>(valueText.size()) - 1; i >= 0; --i) {
+            char c = valueText[i];
+            if (bit >= 64)
+                throw CompilerError("casez binary pattern exceeds 63 bits", loc);
+            if (c == '1') {
+                value |= (1LL << bit);
+            } else if (c == '0') {
+                // nothing
+            } else if (c == '?' || c == 'z' || c == 'Z') {
+                wildcard_mask |= (1LL << bit);
+            } else if (c == 'x' || c == 'X') {
+                throw CompilerError(
+                    "'x' bits are not supported in casez items; use '?' for don't-care", loc);
+            } else {
+                throw CompilerError(
+                    std::format("Invalid character '{}' in casez binary literal", c), loc);
+            }
+            ++bit;
+        }
+    } else if (base == 16) {
+        int bit = 0;
+        for (int i = static_cast<int>(valueText.size()) - 1; i >= 0; --i) {
+            char c = valueText[i];
+            if (bit >= 64)
+                throw CompilerError("casez hex pattern exceeds 63 bits", loc);
+            if (c == '?' || c == 'z' || c == 'Z') {
+                wildcard_mask |= (0xFLL << bit);
+            } else if (c == 'x' || c == 'X') {
+                throw CompilerError(
+                    "'x' bits are not supported in casez items; use '?' for don't-care", loc);
+            } else {
+                int digit = 0;
+                if (c >= '0' && c <= '9') digit = c - '0';
+                else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+                else throw CompilerError(
+                    std::format("Invalid character '{}' in casez hex literal", c), loc);
+                value |= (static_cast<int64_t>(digit) << bit);
+            }
+            bit += 4;
+        }
+    } else {
+        throw CompilerError(
+            "casez wildcard patterns are only supported in binary or hex literals", loc);
+    }
+
+    int width = explicitWidth.value_or(0);
+    if (width > 0 && width < 64) {
+        int64_t mask = (1LL << width) - 1;
+        value &= mask;
+        wildcard_mask &= mask;
+    }
+    return {value, wildcard_mask, width};
+}
+
+static int64_t bitstreamWidth(const Type& type);
+
+static int constantExprWidth(const ExpressionSyntax* expr,
+                             const slang::SourceManager* sm = nullptr,
+                             const ParameterContext* paramCtx = nullptr,
+                             const NamedTypeRegistry* namedTypeRegistry = nullptr,
+                             const PackageRegistry* pkgRegistry = nullptr) {
+    if (!expr) throw CompilerError("Cannot determine width of null constant expression");
+    auto loc = sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt;
+    switch (expr->kind) {
+        case SyntaxKind::IntegerLiteralExpression:
+            return 32;
+        case SyntaxKind::IntegerVectorExpression: {
+            const auto& literal = expr->as<IntegerVectorExpressionSyntax>();
+            if (!literal.size.rawText().empty()) {
+                return std::stoi(std::string(literal.size.rawText()));
+            }
+            return parseIntegerVectorExpression(literal).width;
+        }
+        case SyntaxKind::StringLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            const auto bytes = decodeFrontendStringLiteral(literal.literal.rawText());
+            if (bytes.empty()) return 0;
+            if (bytes.size() > static_cast<size_t>(std::numeric_limits<int>::max() / 8)) {
+                throw CompilerError("String literal width exceeds supported range", loc);
+            }
+            return static_cast<int>(bytes.size() * 8);
+        }
+        case SyntaxKind::ParenthesizedExpression:
+            return constantExprWidth(expr->as<ParenthesizedExpressionSyntax>().expression,
+                                     sm, paramCtx, namedTypeRegistry, pkgRegistry);
+        case SyntaxKind::ConcatenationExpression: {
+            int width = 0;
+            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
+                const int itemWidth = constantExprWidth(item, sm, paramCtx,
+                                                        namedTypeRegistry, pkgRegistry);
+                if (itemWidth > std::numeric_limits<int>::max() - width) {
+                    throw CompilerError("Constant concatenation width exceeds supported range");
+                }
+                width += itemWidth;
+            }
+            return width;
+        }
+        case SyntaxKind::IdentifierName: {
+            std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            if (namedTypeRegistry) {
+                auto it = namedTypeRegistry->find(name);
+                if (it != namedTypeRegistry->end()) return bitstreamWidth(it->second);
+            }
+            if (paramCtx) {
+                auto it = paramCtx->values.find(name);
+                if (it != paramCtx->values.end()) return bitstreamWidth(it->second.type());
+            }
+            throw CompilerError(
+                "Cannot determine width of constant expression: " + name, loc);
+        }
+        case SyntaxKind::ScopedName: {
+            if (!pkgRegistry) break;
+            const auto& scoped = expr->as<ScopedNameSyntax>();
+            if (scoped.separator.rawText() != "::") break;
+            std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            auto pkgIt = pkgRegistry->find(pkgName);
+            if (pkgIt == pkgRegistry->end()) break;
+            auto typeIt = pkgIt->second.namedTypes.find(itemName);
+            if (typeIt != pkgIt->second.namedTypes.end()) return bitstreamWidth(typeIt->second);
+            auto constIt = pkgIt->second.constants.find(itemName);
+            if (constIt != pkgIt->second.constants.end()) return bitstreamWidth(constIt->second.type());
+            break;
+        }
+        default:
+            break;
+    }
+    throw CompilerError(
+        "Cannot determine width of constant expression: " +
+        std::string(toString(expr->kind)), loc);
+}
+
 // Exception thrown by return statements during function inlining
 struct ReturnValue {
     DFGNode* value; // nullptr for void return
@@ -313,11 +611,21 @@ static ExprValue buildValueForTargetType(const slang::syntax::ExpressionSyntax* 
                                          const std::optional<SourceLoc>& loc,
                                          bool allowAggregateScalarBroadcast = false);
 
+static ExprValue buildConditionalExprValueForTarget(
+    const slang::syntax::ConditionalExpressionSyntax& cond,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc,
+    bool allowAggregateScalarBroadcast);
+
 static ExprValue buildBroadcastValueFromScalar(
     const ExprValue& scalarValue,
     const Type& targetType,
     ResolutionContext& ctx,
     const std::optional<SourceLoc>& loc);
+
+static bool expressionNeedsAssignmentPatternContext(
+    const slang::syntax::ExpressionSyntax* expr);
 
 // Build a scalar-only expression. Throws if the expression resolves to an array.
 static DFGNode* buildExprDFG(const slang::syntax::ExpressionSyntax* expr,
@@ -343,10 +651,133 @@ static void declareLocalAggregateValue(ResolutionContext& ctx,
 const Type* lookupDeclaredType(const std::string& baseName,
                                        const ResolutionContext& ctx);
 
+static const Type& lookupTargetTypeOrThrow(const std::string& targetName,
+                                           ResolutionContext& ctx,
+                                           const std::optional<SourceLoc>& loc);
+
+int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
+                             const slang::SourceManager& sm,
+                             const slang::syntax::SyntaxNode& contextNode,
+                             const PackageRegistry* pkgRegistry = nullptr,
+                             const NamedTypeRegistry* namedTypeRegistry = nullptr);
+
 // Unwrap a PropertyExprSyntax (as produced by function argument positions) to ExpressionSyntax.
 // For synthesizable RTL, argument expressions are always:
 //   SimplePropertyExpr → SimpleSequenceExpr → ExpressionSyntax
 const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr);
+
+static CasezItemPattern evaluateCasezPattern(
+    const ExpressionSyntax* expr,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc)
+{
+    if (expr->kind == SyntaxKind::IntegerVectorExpression) {
+        const auto& vecExpr = expr->as<IntegerVectorExpressionSyntax>();
+        std::string sizeText(vecExpr.size.rawText());
+        std::string baseText(vecExpr.base.rawText());
+        std::string valueText(vecExpr.value.rawText());
+        valueText.erase(std::remove(valueText.begin(), valueText.end(), '_'), valueText.end());
+
+        int base = 10;
+        if (baseText.find('h') != std::string::npos || baseText.find('H') != std::string::npos)
+            base = 16;
+        else if (baseText.find('b') != std::string::npos || baseText.find('B') != std::string::npos)
+            base = 2;
+        else if (baseText.find('o') != std::string::npos || baseText.find('O') != std::string::npos)
+            base = 8;
+        else if (baseText.find('d') != std::string::npos || baseText.find('D') != std::string::npos)
+            base = 10;
+
+        bool hasNonNumeric = false;
+        for (char c : valueText) {
+            if (c == '?' || c == 'z' || c == 'Z' || c == 'x' || c == 'X') {
+                hasNonNumeric = true;
+                break;
+            }
+        }
+
+        std::optional<int> explicitWidth;
+        if (!sizeText.empty()) explicitWidth = std::stoi(sizeText);
+
+        if (hasNonNumeric)
+            return parseCasezItemPattern(valueText, base, explicitWidth, loc);
+
+        int64_t v = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr,
+                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+        return {v, 0, explicitWidth.value_or(0)};
+    }
+
+    int64_t v = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr,
+                                     &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+    return {v, 0, 0};
+}
+
+static int64_t bitstreamWidth(const Type& type) {
+    int64_t width = 0;
+    if (type.isStruct()) {
+        for (const auto& field : type.structInfo().fields) {
+            width += bitstreamWidth(*field.type);
+        }
+    } else {
+        width = type.width;
+    }
+    if (width <= 0) {
+        throw CompilerError("Cannot determine bit-stream width for type");
+    }
+    for (const auto& dim : type.unpacked_dims) {
+        width *= static_cast<int64_t>(dim.size());
+    }
+    return width;
+}
+
+static const ExpressionSyntax* singleOrderedSystemFunctionArg(
+    const InvocationExpressionSyntax& invocation,
+    std::string_view functionName) {
+    if (!invocation.arguments || invocation.arguments->parameters.size() != 1 ||
+        invocation.arguments->parameters[0]->kind != SyntaxKind::OrderedArgument) {
+        throw CompilerError(std::string(functionName) + " requires exactly one ordered argument");
+    }
+    return extractPortExpr(
+        *invocation.arguments->parameters[0]->as<OrderedArgumentSyntax>().expr);
+}
+
+static std::optional<int64_t> staticBitsWidth(
+    const ExpressionSyntax* expr,
+    const ParameterContext& ctx,
+    const PackageRegistry* pkgRegistry,
+    const NamedTypeRegistry* namedTypeRegistry) {
+    if (!expr) throw CompilerError("$bits argument cannot be null");
+    if (expr->kind == SyntaxKind::IdentifierName) {
+        std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
+        if (namedTypeRegistry) {
+            auto typeIt = namedTypeRegistry->find(name);
+            if (typeIt != namedTypeRegistry->end()) return bitstreamWidth(typeIt->second);
+        }
+        auto valueIt = ctx.values.find(name);
+        if (valueIt != ctx.values.end()) return bitstreamWidth(valueIt->second.type());
+        return std::nullopt;
+    }
+    if (expr->kind == SyntaxKind::ScopedName) {
+        const auto& scoped = expr->as<ScopedNameSyntax>();
+        if (scoped.separator.rawText() != "::") return std::nullopt;
+        if (!pkgRegistry) return std::nullopt;
+        std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+        std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+        auto pkgIt = pkgRegistry->find(pkgName);
+        if (pkgIt == pkgRegistry->end()) return std::nullopt;
+        auto typeIt = pkgIt->second.namedTypes.find(itemName);
+        if (typeIt != pkgIt->second.namedTypes.end()) return bitstreamWidth(typeIt->second);
+        auto constantIt = pkgIt->second.constants.find(itemName);
+        if (constantIt != pkgIt->second.constants.end()) return bitstreamWidth(constantIt->second.type());
+        auto enumIt = pkgIt->second.enumMembers.find(itemName);
+        if (enumIt != pkgIt->second.enumMembers.end()) return bitstreamWidth(enumIt->second.second);
+    }
+    return std::nullopt;
+}
+
+static bool isPackageScopedName(const ScopedNameSyntax& scoped) {
+    return scoped.separator.rawText() == "::";
+}
 
 using DriverMap = std::unordered_map<std::string, DFGNode*>;
 
@@ -360,6 +791,11 @@ struct CaseBranch {
     std::vector<int64_t> selectorValues;
     DriverMap modifiedDrivers;
     PartialDriverMap modifiedPartialDrivers;
+};
+
+enum class CaseExpressionKind {
+    Constant,
+    Variable,
 };
 
 struct DriverSnapshot {
@@ -625,6 +1061,14 @@ static DFGNode* getRetainedDriver(ResolutionContext& ctx,
     return qNode;
 }
 
+static DFGNode* buildXValueForTarget(ResolutionContext& ctx,
+                                     const std::string& targetName,
+                                     const std::optional<SourceLoc>& loc) {
+    auto* node = ctx.graph.x(lookupTargetTypeOrThrow(targetName, ctx, loc));
+    if (loc) node->loc = *loc;
+    return node;
+}
+
 static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver) {
     PartialTargetState state{type, {}};
     if (!driver || type.width <= 0) {
@@ -690,6 +1134,14 @@ static std::optional<PartialTargetState> getRetainedPartialState(
     DFGNode* retained = getRetainedDriver(ctx, targetName, baseline, loc);
     if (!retained) return std::nullopt;
     return makeWholeDriverState(lookupTargetTypeOrThrow(targetName, ctx, loc), retained);
+}
+
+static std::optional<PartialTargetState> buildXPartialState(ResolutionContext& ctx,
+                                                            const std::string& targetName,
+                                                            const std::optional<SourceLoc>& loc) {
+    return makeWholeDriverState(
+        lookupTargetTypeOrThrow(targetName, ctx, loc),
+        buildXValueForTarget(ctx, targetName, loc));
 }
 
 static std::optional<PartialTargetState> branchPartialStateValue(
@@ -848,7 +1300,7 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
         if (selected == result) continue;
         auto* mux = ctx.graph.mux(it->condition, selected, result);
         mux->loc = loc;
-        if (targetType && targetType->isEnum()) {
+        if (targetType) {
             mux->type = *targetType;
         }
         result = mux;
@@ -908,10 +1360,8 @@ static std::set<std::string> collectAssignedSignals(const std::vector<CaseBranch
 
 static int64_t selectorCodeCountOrThrow(DFGNode* selectorNode,
                                         const std::optional<SourceLoc>& loc) {
-    if (!selectorNode || !selectorNode->hasType()) {
-        throw CompilerError("Case selector must have a known type during elaboration", loc);
-    }
-    int width = selectorNode->type->width;
+    Type selectorType = resolveNodeTypeNow(selectorNode);
+    int width = selectorType.width;
     if (width <= 0 || width >= 63) {
         throw CompilerError(
             "Case selector width " + std::to_string(width) + " is unsupported for mux lowering",
@@ -1026,7 +1476,9 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                               const std::optional<DriverMap>& fallbackBranch,
                               const std::optional<PartialDriverMap>& fallbackPartialBranch,
                               const DriverSnapshot& baseline,
-                              const std::optional<SourceLoc>& loc) {
+                              const std::optional<SourceLoc>& loc,
+                              const std::vector<int64_t>& xSelectorValues = {},
+                              bool uncoveredToX = false) {
     std::set<std::string> assignedSignals = collectAssignedSignals(
         branches, fallbackBranch, fallbackPartialBranch);
     int64_t numValues = selectorCodeCountOrThrow(selectorNode, loc);
@@ -1054,8 +1506,19 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             auto retained = getRetainedPartialState(ctx, signalName, baseline, loc);
             auto defaultValue = fallbackPartialStateValue(
                 ctx, signalName, fallbackBranch, fallbackPartialBranch, retained, loc);
+            if (!defaultValue && uncoveredToX) {
+                defaultValue = buildXPartialState(ctx, signalName, loc);
+            }
+            auto xState = xSelectorValues.empty()
+                ? std::optional<PartialTargetState>{}
+                : buildXPartialState(ctx, signalName, loc);
             std::vector<std::optional<PartialTargetState>> states(static_cast<size_t>(numValues), defaultValue);
             std::vector<bool> assigned(static_cast<size_t>(numValues), false);
+            for (int64_t selectorValue : xSelectorValues) {
+                size_t index = static_cast<size_t>(selectorValue);
+                states[index] = xState;
+                assigned[index] = true;
+            }
             for (const auto& branch : branches) {
                 auto branchState = branchPartialStateValue(
                     ctx,
@@ -1115,9 +1578,12 @@ static void mergeCaseBranches(ResolutionContext& ctx,
         DFGNode* defaultValue = nullptr;
         if (fallbackBranch) {
             defaultValue = branchValue(signalName, *fallbackBranch, retained);
+        } else if (uncoveredToX) {
+            defaultValue = buildXValueForTarget(ctx, signalName, loc);
         } else {
             defaultValue = retained;
         }
+        DFGNode* xValue = xSelectorValues.empty() ? nullptr : buildXValueForTarget(ctx, signalName, loc);
 
         std::vector<int64_t> selectorValues;
         std::vector<DFGNode*> dataValues;
@@ -1125,11 +1591,15 @@ static void mergeCaseBranches(ResolutionContext& ctx,
         dataValues.reserve(static_cast<size_t>(numValues));
         for (int64_t selectorValue = 0; selectorValue < numValues; ++selectorValue) {
             DFGNode* value = defaultValue;
-            for (const auto& branch : branches) {
-                if (std::find(branch.selectorValues.begin(), branch.selectorValues.end(), selectorValue) !=
-                        branch.selectorValues.end()) {
-                    value = branchValue(signalName, branch.modifiedDrivers, defaultValue);
-                    break;
+            if (std::find(xSelectorValues.begin(), xSelectorValues.end(), selectorValue) != xSelectorValues.end()) {
+                value = xValue;
+            } else {
+                for (const auto& branch : branches) {
+                    if (std::find(branch.selectorValues.begin(), branch.selectorValues.end(), selectorValue) !=
+                            branch.selectorValues.end()) {
+                        value = branchValue(signalName, branch.modifiedDrivers, retained);
+                        break;
+                    }
                 }
             }
             if (!value) {
@@ -1159,11 +1629,44 @@ static void mergeCaseBranches(ResolutionContext& ctx,
     }
 }
 
+static std::optional<int64_t> tryEvaluateCaseConstantExpr(const ExpressionSyntax* expr,
+                                                          ResolutionContext& ctx) {
+    try {
+        return evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr, &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+    } catch (const CompilerError&) {
+        return std::nullopt;
+    }
+}
+
+static CaseExpressionKind classifyCaseExpr(const ExpressionSyntax* expr, ResolutionContext& ctx) {
+    return tryEvaluateCaseConstantExpr(expr, ctx).has_value()
+        ? CaseExpressionKind::Constant
+        : CaseExpressionKind::Variable;
+}
+
+static DFGNode* normalizeCaseMatchExpr(ResolutionContext& ctx,
+                                       const ExpressionSyntax* expr,
+                                       int64_t selectorValue,
+                                       const std::optional<SourceLoc>& loc) {
+    DFGNode* rawValue = buildExprDFG(expr, ctx);
+    Type rawType = resolveNodeTypeNow(rawValue);
+    if (rawType.width != 1 || !rawType.unpacked_dims.empty()) {
+        throw CompilerError("Constant-expression case items must be scalar 1-bit expressions", loc);
+    }
+    DFGNode* value = lowerTruth(rawValue, ctx, loc);
+    if (selectorValue == 0) {
+        value = lowerLogicalNot(value, ctx, loc);
+    }
+    return value;
+}
+
 
 // Evaluate a constant expression given a parameter context
 // Throws if a referenced parameter is not in the context
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
                               const PackageRegistry* pkgRegistry = nullptr,
+                              const NamedTypeRegistry* namedTypeRegistry = nullptr,
+                              const slang::SourceManager* sm = nullptr,
                               std::source_location caller = std::source_location::current()) {
     if (!expr) {
         throw CompilerError(
@@ -1180,67 +1683,90 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             // TODO: handle other bases (hex, octal, binary) and sized literals
             return std::stoll(std::string(text));
         }
+        case SyntaxKind::StringLiteralExpression: {
+            auto& literal = expr->as<LiteralExpressionSyntax>();
+            const auto text = literal.literal.rawText();
+            const auto bytes = decodeFrontendStringLiteral(text);
+            if (bytes.empty()) return 0;
+            if (bytes.size() > 8) {
+                throw CompilerError(
+                    "String literal constant does not fit in int64_t",
+                    sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+            }
+            Type stringType = Type::makeInteger(static_cast<int>(bytes.size() * 8), false);
+            return lowerStringLiteralConstant(text, stringType).requireInt64(
+                "String literal constant",
+                sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+        }
 
         case SyntaxKind::IdentifierName: {
             auto& name = expr->as<IdentifierNameSyntax>();
             std::string paramName(name.identifier.valueText());
+            if (namedTypeRegistry && namedTypeRegistry->contains(paramName)) {
+                throw CompilerError("Type name '" + paramName + "' cannot be used as an integer constant");
+            }
             auto it = ctx.values.find(paramName);
             if (it == ctx.values.end()) {
                 throw CompilerError(
                     "Parameter '" + paramName + "' not found in context");
             }
-            return it->second;
+            return it->second.requireInt64("Parameter '" + paramName + "'");
         }
 
         case SyntaxKind::ParenthesizedExpression: {
             auto& paren = expr->as<ParenthesizedExpressionSyntax>();
-            return evaluateConstantExpr(paren.expression, ctx, pkgRegistry);
+            return evaluateConstantExpr(paren.expression, ctx, pkgRegistry, namedTypeRegistry, sm);
         }
 
         case SyntaxKind::UnaryPlusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            return evaluateConstantExpr(unary.operand, ctx, pkgRegistry);
+            return evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry, sm);
         }
 
         case SyntaxKind::UnaryMinusExpression: {
             auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
-            return -evaluateConstantExpr(unary.operand, ctx, pkgRegistry);
+            return -evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry, sm);
+        }
+
+        case SyntaxKind::UnaryLogicalNotExpression: {
+            auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
+            return evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry, sm) == 0 ? 1 : 0;
         }
 
         case SyntaxKind::AddExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) +
-                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) +
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
         }
 
         case SyntaxKind::SubtractExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) -
-                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) -
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
         }
 
         case SyntaxKind::MultiplyExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) *
-                   evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) *
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
         }
 
         case SyntaxKind::DivideExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
             if (divisor == 0) {
                 throw CompilerError("Division by zero in constant expression");
             }
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) / divisor;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) / divisor;
         }
 
         case SyntaxKind::ModExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry);
+            auto divisor = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
             if (divisor == 0) {
                 throw CompilerError("Modulo by zero in constant expression");
             }
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) % divisor;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) % divisor;
         }
 
         case SyntaxKind::IntegerVectorExpression: {
@@ -1248,11 +1774,44 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             return parseIntegerVectorExpression(vecExpr).value;
         }
 
+        case SyntaxKind::ConcatenationExpression: {
+            uint64_t result = 0;
+            int resultWidth = 0;
+            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
+                const int itemWidth = constantExprWidth(item, sm, &ctx, namedTypeRegistry, pkgRegistry);
+                if (itemWidth > 64 || resultWidth > 64 - itemWidth) {
+                    throw CompilerError("Constant concatenation does not fit in int64_t");
+                }
+                const uint64_t itemValue = static_cast<uint64_t>(
+                    evaluateConstantExpr(item, ctx, pkgRegistry, namedTypeRegistry, sm));
+                const uint64_t mask = itemWidth == 64
+                    ? UINT64_MAX
+                    : (uint64_t(1) << itemWidth) - 1;
+                result = itemWidth == 64
+                    ? itemValue
+                    : (result << itemWidth) | (itemValue & mask);
+                resultWidth += itemWidth;
+            }
+            return static_cast<int64_t>(result);
+        }
+
         case SyntaxKind::ScopedName: {
+            const auto& scoped = expr->as<ScopedNameSyntax>();
+            if (!isPackageScopedName(scoped)) {
+                if (scoped.left->kind == SyntaxKind::IdentifierName &&
+                    scoped.right->kind == SyntaxKind::IdentifierName) {
+                    std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                    std::string fieldName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                    auto valueIt = ctx.values.find(baseName);
+                    if (valueIt != ctx.values.end()) {
+                        return valueIt->second.field(fieldName).requireInt64(baseName + "." + fieldName);
+                    }
+                }
+                throw CompilerError("Unsupported constant field selection");
+            }
             if (!pkgRegistry) {
                 throw CompilerError("Package-qualified constant requires package registry");
             }
-            auto& scoped = expr->as<ScopedNameSyntax>();
             std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
             std::string itemName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
             auto pkgIt = pkgRegistry->find(pkgName);
@@ -1260,55 +1819,175 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                 throw CompilerError("Unknown package: " + pkgName);
             }
             auto memberIt = pkgIt->second.enumMembers.find(itemName);
-            if (memberIt == pkgIt->second.enumMembers.end()) {
-                throw CompilerError("Unknown package member: " + pkgName + "::" + itemName);
-            }
-            return memberIt->second.first;
+            if (memberIt != pkgIt->second.enumMembers.end()) return memberIt->second.first;
+            auto constantIt = pkgIt->second.constants.find(itemName);
+            if (constantIt != pkgIt->second.constants.end())
+                return constantIt->second.requireInt64("Package constant " + pkgName + "::" + itemName);
+            throw CompilerError("Unknown package member: " + pkgName + "::" + itemName);
         }
 
         case SyntaxKind::EqualityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) == evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) == evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm) ? 1 : 0;
         }
         case SyntaxKind::InequalityExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) != evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) != evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm) ? 1 : 0;
         }
         case SyntaxKind::LessThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) < evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) < evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm) ? 1 : 0;
         }
         case SyntaxKind::LessThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) <= evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) <= evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm) ? 1 : 0;
         }
         case SyntaxKind::GreaterThanExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) > evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) > evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm) ? 1 : 0;
         }
         case SyntaxKind::GreaterThanEqualExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return evaluateConstantExpr(binary.left, ctx, pkgRegistry) >= evaluateConstantExpr(binary.right, ctx, pkgRegistry) ? 1 : 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) >= evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm) ? 1 : 0;
         }
         case SyntaxKind::LogicalAndExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry) && evaluateConstantExpr(binary.right, ctx, pkgRegistry)) ? 1 : 0;
+            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) && evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm)) ? 1 : 0;
         }
         case SyntaxKind::LogicalOrExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry) || evaluateConstantExpr(binary.right, ctx, pkgRegistry)) ? 1 : 0;
+            return (evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) || evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm)) ? 1 : 0;
+        }
+        case SyntaxKind::ConditionalExpression: {
+            const auto& conditional = expr->as<ConditionalExpressionSyntax>();
+            if (conditional.predicate->conditions.size() != 1) {
+                throw CompilerError("Only single condition supported in constant ternary expression");
+            }
+            if (conditional.predicate->conditions[0]->matchesClause) {
+                throw CompilerError("Matches clause not supported in constant ternary expression");
+            }
+            return evaluateConstantExpr(
+                evaluateConstantExpr(conditional.predicate->conditions[0]->expr, ctx, pkgRegistry, namedTypeRegistry, sm)
+                    ? conditional.left
+                    : conditional.right,
+                ctx, pkgRegistry, namedTypeRegistry);
         }
 
         case SyntaxKind::PowerExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
-            return intPowConst(evaluateConstantExpr(binary.left, ctx, pkgRegistry),
-                               evaluateConstantExpr(binary.right, ctx, pkgRegistry));
+            return intPowConst(evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm),
+                               evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm));
+        }
+
+        case SyntaxKind::BinaryOrExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) |
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
+        }
+        case SyntaxKind::BinaryAndExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) &
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
+        }
+        case SyntaxKind::BinaryXorExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) ^
+                   evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
+        }
+        case SyntaxKind::BinaryXnorExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            return ~(evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) ^
+                     evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm));
+        }
+        case SyntaxKind::UnaryBitwiseNotExpression: {
+            auto& unary = expr->as<PrefixUnaryExpressionSyntax>();
+            return ~evaluateConstantExpr(unary.operand, ctx, pkgRegistry, namedTypeRegistry, sm);
+        }
+        case SyntaxKind::UnbasedUnsizedLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            const auto text = literal.literal.rawText();
+            const char ch = text.size() > 1 ? text[1] : '0';
+            if (ch == '0') return 0;
+            if (ch == '1') return -1;
+            throw CompilerError(
+                "Unsupported unbased unsized literal in integer constant evaluation: " +
+                std::string(text),
+                sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+        }
+        case SyntaxKind::LogicalShiftLeftExpression:
+        case SyntaxKind::ArithmeticShiftLeftExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            int64_t shift = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
+            if (shift < 0 || shift >= 64) return 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) << shift;
+        }
+        case SyntaxKind::LogicalShiftRightExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            int64_t shift = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
+            if (shift < 0 || shift >= 64) return 0;
+            return static_cast<int64_t>(
+                static_cast<uint64_t>(evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm)) >> shift);
+        }
+        case SyntaxKind::ArithmeticShiftRightExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            int64_t shift = evaluateConstantExpr(binary.right, ctx, pkgRegistry, namedTypeRegistry, sm);
+            if (shift < 0 || shift >= 64) return 0;
+            return evaluateConstantExpr(binary.left, ctx, pkgRegistry, namedTypeRegistry, sm) >> shift;
+        }
+        case SyntaxKind::CastExpression: {
+            auto& castExpr = expr->as<CastExpressionSyntax>();
+            int64_t val = evaluateConstantExpr(castExpr.right->expression, ctx, pkgRegistry, namedTypeRegistry, sm);
+            // Width cast: mask to the specified number of bits
+            if (castExpr.left->kind == SyntaxKind::IntegerLiteralExpression) {
+                int64_t width = std::stoll(std::string(
+                    castExpr.left->as<LiteralExpressionSyntax>().literal.rawText()));
+                if (width > 0 && width < 64) {
+                    val = static_cast<int64_t>(static_cast<uint64_t>(val) & ((uint64_t(1) << width) - 1));
+                }
+            }
+            return val;
+        }
+        case SyntaxKind::SignedCastExpression: {
+            auto& castExpr = expr->as<SignedCastExpressionSyntax>();
+            return evaluateConstantExpr(castExpr.inner->expression, ctx, pkgRegistry, namedTypeRegistry, sm);
+        }
+
+        case SyntaxKind::InvocationExpression: {
+            const auto& invocation = expr->as<InvocationExpressionSyntax>();
+            if (invocation.left->kind != SyntaxKind::SystemName) {
+                throw CompilerError("Only $clog2 is supported in constant system-function calls");
+            }
+            const std::string systemName(invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText());
+            if (systemName == "$bits") {
+                const auto* argument = singleOrderedSystemFunctionArg(invocation, "$bits");
+                if (auto width = staticBitsWidth(argument, ctx, pkgRegistry, namedTypeRegistry)) {
+                    return *width;
+                }
+                throw CompilerError("$bits argument is not a known type or constant expression",
+                                    sm ? std::optional<SourceLoc>(resolveSourceLoc(invocation, *sm))
+                                       : std::nullopt);
+            }
+            if (systemName != "$clog2") {
+                throw CompilerError("Only $clog2 and $bits are supported in constant system-function calls");
+            }
+            const auto* argument = singleOrderedSystemFunctionArg(invocation, "$clog2");
+            int64_t value = evaluateConstantExpr(argument, ctx, pkgRegistry, namedTypeRegistry, sm);
+            if (value < 0) {
+                throw CompilerError("$clog2 argument must not be negative");
+            }
+            int64_t result = 0;
+            for (int64_t remaining = value > 0 ? value - 1 : 0;
+                 remaining > 0; remaining >>= 1) {
+                ++result;
+            }
+            return result;
         }
 
         default:
             throw CompilerError(
                 "Unsupported expression kind in constant evaluation: " +
-                std::string(toString(expr->kind)));
+                std::string(toString(expr->kind)),
+                sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
     }
 }
 
@@ -1316,12 +1995,204 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
                               const slang::SourceManager& sm,
                               const slang::syntax::SyntaxNode& contextNode,
-                              const PackageRegistry* pkgRegistry = nullptr) {
+                              const PackageRegistry* pkgRegistry,
+                              const NamedTypeRegistry* namedTypeRegistry) {
     if (!expr) {
         throw CompilerError("Cannot evaluate null expression",
                             resolveSourceLoc(contextNode, sm));
     }
-    return evaluateConstantExpr(expr, ctx, pkgRegistry);
+    try {
+        return evaluateConstantExpr(expr, ctx, pkgRegistry, namedTypeRegistry, &sm);
+    } catch (const CompilerError& error) {
+        if (error.loc) throw;
+        throw CompilerError(error.what(), resolveSourceLoc(*expr, sm));
+    }
+}
+
+static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
+                                           const Type& expectedType,
+                                           const ParameterContext& ctx,
+                                           const PackageRegistry& pkgRegistry,
+                                           const NamedTypeRegistry* namedTypeRegistry,
+                                           const slang::SourceManager& sm) {
+    if (!expr) throw CompilerError("Cannot evaluate null constant expression");
+    switch (expr->kind) {
+        case SyntaxKind::IdentifierName: {
+            std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            auto it = ctx.values.find(name);
+            if (it == ctx.values.end()) {
+                throw CompilerError(
+                    "Parameter '" + name + "' not found in context",
+                    resolveSourceLoc(*expr, sm));
+            }
+            return it->second;
+        }
+        case SyntaxKind::ScopedName: {
+            const auto& scoped = expr->as<ScopedNameSyntax>();
+            if (!isPackageScopedName(scoped)) {
+                if (scoped.left->kind == SyntaxKind::IdentifierName &&
+                    scoped.right->kind == SyntaxKind::IdentifierName) {
+                    std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                    std::string fieldName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                    auto valueIt = ctx.values.find(baseName);
+                    if (valueIt != ctx.values.end()) {
+                        return valueIt->second.field(fieldName);
+                    }
+                }
+                throw CompilerError(
+                    "Unsupported aggregate constant field selection",
+                    resolveSourceLoc(*expr, sm));
+            }
+            std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+            std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            auto pkgIt = pkgRegistry.find(pkgName);
+            if (pkgIt == pkgRegistry.end()) {
+                throw CompilerError("Unknown package: " + pkgName, resolveSourceLoc(*expr, sm));
+            }
+            auto constantIt = pkgIt->second.constants.find(itemName);
+            if (constantIt != pkgIt->second.constants.end()) return constantIt->second;
+            auto enumIt = pkgIt->second.enumMembers.find(itemName);
+            if (enumIt != pkgIt->second.enumMembers.end()) {
+                return ConstantValue::bits(enumIt->second.second, enumIt->second.first);
+            }
+            throw CompilerError(
+                "Unknown package member: " + pkgName + "::" + itemName,
+                resolveSourceLoc(*expr, sm));
+        }
+        case SyntaxKind::UnbasedUnsizedLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            const auto text = literal.literal.rawText();
+            return ConstantValue::fill(expectedType, text.size() > 1 && text[1] == '1');
+        }
+        case SyntaxKind::IntegerLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            return ConstantValue::integerLiteral(expectedType, literal.literal.rawText());
+        }
+        case SyntaxKind::StringLiteralExpression: {
+            const auto& literal = expr->as<LiteralExpressionSyntax>();
+            return lowerStringLiteralConstant(literal.literal.rawText(), expectedType);
+        }
+        case SyntaxKind::IntegerVectorExpression: {
+            const auto& literal = expr->as<IntegerVectorExpressionSyntax>();
+            return ConstantValue::vectorLiteral(expectedType, literal.size.rawText(),
+                                                literal.base.rawText(), literal.value.rawText());
+        }
+        case SyntaxKind::ConcatenationExpression: {
+            std::vector<ConstantValue> values;
+            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
+                values.push_back(evaluateConstantValue(
+                    item, Type::makeInteger(constantExprWidth(item, &sm, &ctx, namedTypeRegistry, &pkgRegistry), false),
+                    ctx, pkgRegistry, namedTypeRegistry, sm));
+            }
+            return ConstantValue::concatenate(expectedType, values);
+        }
+        case SyntaxKind::AssignmentPatternExpression: {
+            const auto& assignment = expr->as<AssignmentPatternExpressionSyntax>();
+            if (!expectedType.unpacked_dims.empty()) {
+                if (assignment.pattern->kind != SyntaxKind::SimpleAssignmentPattern) {
+                    throw CompilerError(
+                        "Only ordered array assignment patterns are supported for package constants",
+                        resolveSourceLoc(*expr, sm));
+                }
+                const auto& pattern = assignment.pattern->as<SimpleAssignmentPatternSyntax>();
+                Type elementType = expectedType;
+                elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+                std::vector<ConstantValue> values;
+                values.reserve(pattern.items.size());
+                for (const auto* item : pattern.items) {
+                    values.push_back(evaluateConstantValue(
+                        item, elementType, ctx, pkgRegistry, namedTypeRegistry, sm));
+                }
+                return ConstantValue::array(expectedType, std::move(values));
+            }
+            if (!expectedType.isStruct()) {
+                throw CompilerError(
+                    "Assignment pattern requires an aggregate package constant type",
+                    resolveSourceLoc(*expr, sm));
+            }
+            if (assignment.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
+                const auto& pattern = assignment.pattern->as<SimpleAssignmentPatternSyntax>();
+                const auto& fields = expectedType.structInfo().fields;
+                if (pattern.items.size() != fields.size()) {
+                    throw CompilerError(
+                        "Struct assignment pattern field count does not match its declared type",
+                        resolveSourceLoc(*expr, sm));
+                }
+                std::vector<ConstantValue> values;
+                values.reserve(fields.size());
+                for (size_t i = 0; i < fields.size(); ++i) {
+                    values.push_back(evaluateConstantValue(
+                        pattern.items[i], *fields[i].type, ctx, pkgRegistry, namedTypeRegistry, sm));
+                }
+                return ConstantValue::orderedStruct(expectedType, std::move(values));
+            }
+            if (assignment.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+                const auto& pattern = assignment.pattern->as<StructuredAssignmentPatternSyntax>();
+                std::map<std::string, const ExpressionSyntax*> expressions;
+                const ExpressionSyntax* defaultExpr = nullptr;
+                for (const auto* item : pattern.items) {
+                    if (item->key->kind == SyntaxKind::DefaultPatternKeyExpression ||
+                        (item->key->kind == SyntaxKind::IdentifierName &&
+                         item->key->as<IdentifierNameSyntax>().identifier.valueText() == "default")) {
+                        if (defaultExpr) {
+                            throw CompilerError(
+                                "Struct assignment pattern has multiple default keys",
+                                resolveSourceLoc(*item, sm));
+                        }
+                        defaultExpr = item->expr;
+                        continue;
+                    }
+                    if (item->key->kind != SyntaxKind::IdentifierName) {
+                        throw CompilerError(
+                            "Only named fields are supported in struct assignment patterns",
+                            resolveSourceLoc(*item->key, sm));
+                    }
+                    std::string name(item->key->as<IdentifierNameSyntax>().identifier.valueText());
+                    if (!expressions.emplace(name, item->expr).second) {
+                        throw CompilerError(
+                            "Duplicate field in struct assignment pattern: " + name,
+                            resolveSourceLoc(*item->key, sm));
+                    }
+                }
+                std::map<std::string, ConstantValue> values;
+                for (const auto& field : expectedType.structInfo().fields) {
+                    auto it = expressions.find(field.name);
+                    const ExpressionSyntax* fieldExpr =
+                        it != expressions.end() ? it->second : defaultExpr;
+                    if (!fieldExpr) {
+                        throw CompilerError(
+                            "Struct assignment pattern is missing field: " + field.name,
+                            resolveSourceLoc(*expr, sm));
+                    }
+                    values.emplace(
+                        field.name,
+                        evaluateConstantValue(fieldExpr, *field.type, ctx, pkgRegistry, namedTypeRegistry, sm));
+                    if (it != expressions.end()) expressions.erase(it);
+                }
+                if (!expressions.empty()) {
+                    throw CompilerError(
+                        "Unknown field in struct assignment pattern: " + expressions.begin()->first,
+                        resolveSourceLoc(*expr, sm));
+                }
+                return ConstantValue::namedStruct(expectedType, std::move(values));
+            }
+            throw CompilerError(
+                "Replicated struct assignment patterns are not supported",
+                resolveSourceLoc(*expr, sm));
+        }
+        case SyntaxKind::ParenthesizedExpression:
+            return evaluateConstantValue(
+                expr->as<ParenthesizedExpressionSyntax>().expression, expectedType, ctx, pkgRegistry, namedTypeRegistry, sm);
+        default:
+            break;
+    }
+    if (expectedType.isAggregate()) {
+        throw CompilerError(
+            "Unsupported aggregate package constant expression: " +
+            std::string(toString(expr->kind)),
+            resolveSourceLoc(*expr, sm));
+    }
+    return ConstantValue::bits(expectedType, evaluateConstantExpr(expr, ctx, &pkgRegistry, namedTypeRegistry));
 }
 
 // IntegerType
@@ -1333,30 +2204,42 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
 // VirtualInterfaceType
 // ImplicitType
 
+Type resolveType(
+    const DataTypeSyntax& syntax,
+    const ParameterContext& ctx,
+    const NamedTypeRegistry& namedTypeRegistry,
+    const PackageRegistry* pkgRegistry,
+    const slang::SourceManager* sm = nullptr);
+
+std::vector<Dimension> ResolveDimensions(
+    const SyntaxList<VariableDimensionSyntax>& dimensionsSyntaxList,
+    const ParameterContext& ctx,
+    const PackageRegistry* pkgRegistry,
+    const slang::SourceManager* sm,
+    const NamedTypeRegistry* namedTypeRegistry = nullptr);
+
 // Resolve an UnresolvedParam to Param
 // TODO: Actually evaluate the type syntax and dimension expressions
 Param resolveParameter(const UnresolvedParam& param, const ParameterContext& topCtx,
                                ParameterContext& localCtx, bool isLocal = false,
-                               const NamedTypeRegistry* namedTypeRegistry = nullptr) {
+                               const NamedTypeRegistry* namedTypeRegistry = nullptr,
+                               const PackageRegistry* pkgRegistry = nullptr,
+                               const slang::SourceManager* sm = nullptr) {
     Param resolved;
     resolved.name = param.name;
 
-    if (param.type.syntax->kind == SyntaxKind::ImplicitType) {
-        resolved.type = Type::makeInteger(32, false);
-    } else if (param.type.syntax->kind == SyntaxKind::NamedType && namedTypeRegistry) {
-        auto& named = param.type.syntax->as<NamedTypeSyntax>();
-        std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
-        auto it = namedTypeRegistry->find(typeName);
-        if (it == namedTypeRegistry->end())
-            throw CompilerError("Unknown type for localparam: " + typeName);
-        resolved.type = it->second;
-    } else {
-        throw CompilerError("Only implicit param type supported");
-    }
+    const NamedTypeRegistry emptyRegistry;
+    resolved.type = param.type.syntax->kind == SyntaxKind::ImplicitType
+        ? Type::makeInteger(32, false)
+        : resolveType(
+            *param.type.syntax, localCtx,
+            namedTypeRegistry ? *namedTypeRegistry : emptyRegistry,
+            pkgRegistry,
+            sm);
 
-    // TODO only support for scalar params
-    if (param.dimensions.syntax) {
-        throw CompilerError("Param with dimensions not supported.");
+    if (param.dimensions.syntax && !param.dimensions.syntax->empty()) {
+        resolved.type.unpacked_dims =
+            ResolveDimensions(*param.dimensions.syntax, localCtx, pkgRegistry, sm);
     }
 
     // Localparams cannot be overridden by instantiation context
@@ -1369,7 +2252,16 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
         for (const auto& [k, v] : localCtx.values) {
             mergedCtx.values[k] = v;
         }
-        resolved.value = evaluateConstantExpr(param.defaultValue, mergedCtx);
+        if (!pkgRegistry || !sm) {
+            throw CompilerError("Typed localparam evaluation requires package registry and source manager");
+        }
+        try {
+            resolved.value = evaluateConstantValue(
+                param.defaultValue, resolved.type, mergedCtx, *pkgRegistry, namedTypeRegistry, *sm);
+        } catch (const CompilerError& error) {
+            if (error.loc) throw;
+            throw CompilerError(error.what(), resolveSourceLoc(*param.defaultValue, *sm));
+        }
         localCtx.values[param.name] = resolved.value;
         return resolved;
     }
@@ -1389,7 +2281,16 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
             mergedCtx.values[k] = v;
         }
 
-        resolved.value = evaluateConstantExpr(param.defaultValue, mergedCtx);
+        if (!pkgRegistry || !sm) {
+            throw CompilerError("Typed parameter evaluation requires package registry and source manager");
+        }
+        try {
+            resolved.value = evaluateConstantValue(
+                param.defaultValue, resolved.type, mergedCtx, *pkgRegistry, namedTypeRegistry, *sm);
+        } catch (const CompilerError& error) {
+            if (error.loc) throw;
+            throw CompilerError(error.what(), resolveSourceLoc(*param.defaultValue, *sm));
+        }
         localCtx.values[param.name] = resolved.value;
     } else {
         std::ostringstream oss;
@@ -1399,12 +2300,12 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
 
         oss << "Top context values:\n";
         for (const auto& [k, v] : topCtx.values) {
-            oss << "  '" << k << "' -> '" << v << "'\n";
+            oss << "  '" << k << "' -> '" << v.debugString() << "'\n";
         }
 
         oss << "\nLocal context values:\n";
         for (const auto& [k, v] : localCtx.values) {
-            oss << "  '" << k << "' -> '" << v << "'\n";
+            oss << "  '" << k << "' -> '" << v.debugString() << "'\n";
         }
 
         throw CompilerError(oss.str());
@@ -1425,7 +2326,9 @@ Param resolveParameter(const UnresolvedParam& param, const ParameterContext& top
 std::vector<Dimension> ResolveDimensions(
         const SyntaxList<VariableDimensionSyntax>& dimensionsSyntaxList,
         const ParameterContext& ctx,
-        const slang::SourceManager* sm = nullptr){
+        const PackageRegistry* pkgRegistry,
+        const slang::SourceManager* sm,
+        const NamedTypeRegistry* namedTypeRegistry){
     std::vector<Dimension> resolvedDimensions;
     // Parse dimensionsSyntax from syntax
     if (!dimensionsSyntaxList.empty()) {
@@ -1446,15 +2349,15 @@ std::vector<Dimension> ResolveDimensions(
             if (rangeSpec.selector->kind == SyntaxKind::BitSelect) {
                 // [N] in a declaration means an unpacked array of N elements: [0:N-1]
                 auto& bitSelect = rangeSpec.selector->as<BitSelectSyntax>();
-                int64_t size = evaluateConstantExpr(bitSelect.expr, ctx);
+                int64_t size = evaluateConstantExpr(bitSelect.expr, ctx, pkgRegistry, namedTypeRegistry, sm);
                 resolvedDimensions.push_back(Dimension{
                     .left = 0,
                     .right = static_cast<int>(size - 1)
                 });
             } else if (rangeSpec.selector->kind == SyntaxKind::SimpleRangeSelect) {
                 auto& rangeSelect = rangeSpec.selector->as<RangeSelectSyntax>();
-                int64_t left = evaluateConstantExpr(rangeSelect.left, ctx);
-                int64_t right = evaluateConstantExpr(rangeSelect.right, ctx);
+                int64_t left = evaluateConstantExpr(rangeSelect.left, ctx, pkgRegistry, namedTypeRegistry, sm);
+                int64_t right = evaluateConstantExpr(rangeSelect.right, ctx, pkgRegistry, namedTypeRegistry, sm);
                 resolvedDimensions.push_back(Dimension{
                     .left = static_cast<int>(left),
                     .right = static_cast<int>(right)
@@ -1479,8 +2382,11 @@ Type resolveType(
     const DataTypeSyntax& syntax,
     const ParameterContext& ctx,
     const NamedTypeRegistry& namedTypeRegistry,
-    const PackageRegistry* pkgRegistry = nullptr)
+    const PackageRegistry* pkgRegistry = nullptr,
+    const slang::SourceManager* sm)
 {
+    const auto typeLoc =
+        sm ? std::optional<SourceLoc>(resolveSourceLoc(syntax, *sm)) : std::nullopt;
     // Enum named type: look up in registry
     if (syntax.kind == SyntaxKind::NamedType) {
         auto& named = syntax.as<NamedTypeSyntax>();
@@ -1490,18 +2396,18 @@ Type resolveType(
             auto& scoped = named.name->as<ScopedNameSyntax>();
             std::string pkgName  = std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
             std::string typeName = std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
-            if (!pkgRegistry) throw CompilerError("No package registry available for qualified type: " + pkgName + "::" + typeName);
+            if (!pkgRegistry) throw CompilerError("No package registry available for qualified type: " + pkgName + "::" + typeName, typeLoc);
             auto pkgIt = pkgRegistry->find(pkgName);
-            if (pkgIt == pkgRegistry->end()) throw CompilerError("Unknown package: " + pkgName);
+            if (pkgIt == pkgRegistry->end()) throw CompilerError("Unknown package: " + pkgName, typeLoc);
             auto it = pkgIt->second.namedTypes.find(typeName);
-            if (it == pkgIt->second.namedTypes.end()) throw CompilerError("Unknown type: " + pkgName + "::" + typeName);
+            if (it == pkgIt->second.namedTypes.end()) throw CompilerError("Unknown type: " + pkgName + "::" + typeName, typeLoc);
             return it->second;
         }
 
         std::string typeName(named.name->as<IdentifierNameSyntax>().identifier.valueText());
         auto it = namedTypeRegistry.find(typeName);
         if (it == namedTypeRegistry.end())
-            throw CompilerError("Unknown type: " + typeName);
+            throw CompilerError("Unknown type: " + typeName, typeLoc);
         return it->second;
     }
 
@@ -1514,7 +2420,7 @@ Type resolveType(
         int width = 32;
         if (enumSyntax.baseType) {
             NamedTypeRegistry emptyReg;
-            width = resolveType(*enumSyntax.baseType, ctx, emptyReg).width;
+            width = resolveType(*enumSyntax.baseType, ctx, emptyReg, nullptr, nullptr).width;
         }
         std::vector<EnumMember> members;
         int64_t nextValue = 0;
@@ -1539,6 +2445,7 @@ Type resolveType(
     SyntaxList<VariableDimensionSyntax> packedDimensionsSyntax = nullptr;
 
     bool is_signed;
+    int scalarWidth = 1;
 
     switch (syntax.kind){
         case SyntaxKind::ImplicitType: {
@@ -1551,21 +2458,44 @@ Type resolveType(
             is_signed = (syntax.as<IntegerTypeSyntax>()).signing.rawText() == "signed";
             break;
         }
+        case SyntaxKind::BitType: {
+            packedDimensionsSyntax = (syntax.as<IntegerTypeSyntax>()).dimensions;
+            is_signed = (syntax.as<IntegerTypeSyntax>()).signing.rawText() == "signed";
+            break;
+        }
         case SyntaxKind::RegType: {
             packedDimensionsSyntax = (syntax.as<IntegerTypeSyntax>()).dimensions;
             is_signed = (syntax.as<IntegerTypeSyntax>()).signing.rawText() == "signed";
             break;
         }
+        case SyntaxKind::ByteType:
+            scalarWidth = 8;
+            is_signed = syntax.as<IntegerTypeSyntax>().signing.rawText() != "unsigned";
+            break;
+        case SyntaxKind::ShortIntType:
+            scalarWidth = 16;
+            is_signed = syntax.as<IntegerTypeSyntax>().signing.rawText() != "unsigned";
+            break;
+        case SyntaxKind::IntType:
+        case SyntaxKind::IntegerType:
+            scalarWidth = 32;
+            is_signed = syntax.as<IntegerTypeSyntax>().signing.rawText() != "unsigned";
+            break;
+        case SyntaxKind::LongIntType:
+        case SyntaxKind::TimeType:
+            scalarWidth = 64;
+            is_signed = syntax.as<IntegerTypeSyntax>().signing.rawText() != "unsigned";
+            break;
         default:
             throw CompilerError(
                 "Unsupported type: " +
                 std::string(toString(syntax.kind)));
     }
 
-    const auto packedDimensions = ResolveDimensions(packedDimensionsSyntax, ctx);
+    const auto packedDimensions = ResolveDimensions(packedDimensionsSyntax, ctx, pkgRegistry, sm, &namedTypeRegistry);
 
     // Compute total width as product of all dimension sizes
-    int width = 1;
+    int width = scalarWidth;
     for (const auto& dim : packedDimensions) {
         width *= dim.size();
     }
@@ -1600,6 +2530,10 @@ const Type* lookupDeclaredType(const std::string& baseName,
     auto localIt = ctx.local_nodes.find(baseName);
     if (localIt != ctx.local_nodes.end() && localIt->second && localIt->second->hasType()) {
         return &(*localIt->second->type);
+    }
+    if (auto* exactLeaf = lookupNamedNodeInModule(ctx, baseName);
+        exactLeaf && exactLeaf->hasType()) {
+        return &(*exactLeaf->type);
     }
 
     if (auto* node = findNode(*ctx.thisModule, baseName)) return &node->type;
@@ -1744,9 +2678,54 @@ static std::vector<AggregatePath> lookupAggregateLeafPaths(ResolutionContext& ct
     return out;
 }
 
+// Build an ExprValue for a parameter constant. Scalar params become a single
+// constant DFG node. Packed-struct params are decomposed into per-field constant
+// nodes so the result has the same leaf structure as a module struct variable.
+static ExprValue exprValueFromConstantParam(const std::string& baseName,
+                                            const ConstantValue& cv,
+                                            const std::optional<SourceLoc>& loc,
+                                            DFG& graph) {
+    const Type& type = cv.type();
+    if (type.isStruct() || !type.unpacked_dims.empty()) {
+        std::vector<AggregateLeafBinding> plan;
+        collectAggregateLeafPlan(type, baseName, {}, plan);
+        const auto fieldLeafValues = cv.scalarLeaves();
+        if (fieldLeafValues.size() != plan.size()) {
+            throw CompilerError(
+                "Aggregate constant leaf count mismatch for parameter '" + baseName + "'");
+        }
+        std::vector<DFGNode*> leaves;
+        leaves.reserve(plan.size());
+        std::vector<AggregatePath> leafPaths;
+        leafPaths.reserve(plan.size());
+        for (size_t i = 0; i < plan.size(); ++i) {
+            auto* n = graph.constant(
+                fieldLeafValues[i]->requireInt64("Parameter field '" + plan[i].name + "'", loc));
+            n->type = plan[i].leaf_type;
+            if (loc) n->loc = *loc;
+            leaves.push_back(n);
+            leafPaths.push_back(plan[i].path);
+        }
+        return ExprValue{
+            .type = type,
+            .scalar = nullptr,
+            .leaves = leaves,
+            .leaf_paths = leafPaths,
+        };
+    }
+    auto* n = graph.constant(cv.requireInt64("DFG parameter '" + baseName + "'", loc));
+    n->type = type;
+    if (loc) n->loc = *loc;
+    return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
+}
+
 static ExprValue exprValueFromIdentifier(const std::string& baseName,
                                          const std::optional<SourceLoc>& loc,
                                          ResolutionContext& ctx) {
+    if (auto paramIt = ctx.params.values.find(baseName); paramIt != ctx.params.values.end()) {
+        return exprValueFromConstantParam(baseName, paramIt->second, loc, ctx.graph);
+    }
+
     const auto* declaredType = lookupDeclaredType(baseName, ctx);
     if (declaredType && (declaredType->isStruct() || !declaredType->unpacked_dims.empty())) {
         return ExprValue{
@@ -1777,12 +2756,6 @@ static ExprValue exprValueFromIdentifier(const std::string& baseName,
         if (eit != ctx.enumMemberValues.end()) {
             auto* n = ctx.graph.constant(eit->second.first);
             n->type = eit->second.second;
-            if (loc) n->loc = *loc;
-            return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
-        }
-        auto paramIt = ctx.params.values.find(baseName);
-        if (paramIt != ctx.params.values.end()) {
-            auto* n = ctx.graph.constant(paramIt->second);
             if (loc) n->loc = *loc;
             return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
         }
@@ -1899,6 +2872,67 @@ static ExprValue selectDynamicUnpacked(const ExprValue& value,
     return ExprValue{.type = childType, .scalar = nullptr, .leaves = std::move(resultLeaves), .leaf_paths = std::move(childPaths)};
 }
 
+static ExprValue selectDynamicPackedSingleBit(const ExprValue& value,
+                                              DFGNode* selectorExprNode,
+                                              ResolutionContext& ctx,
+                                              const std::optional<SourceLoc>& loc) {
+    if (!value.scalar || value.type.packed_dims.empty()) {
+        throw CompilerError("Dynamic packed index on non-packed scalar expression", loc);
+    }
+
+    const auto& dim = value.type.packed_dims.front();
+    int64_t elemWidth = packedSuffixWidth(value.type, 1);
+    if (elemWidth != 1) {
+        throw CompilerError(
+            "Dynamic packed indexing is only supported when selecting a single bit",
+            loc);
+    }
+    if (!selectorExprNode->hasType()) {
+        throw CompilerError("Dynamic packed bit-select requires a typed selector", loc);
+    }
+
+    int selectorWidth = selectorExprNode->type->width;
+    if (selectorWidth <= 0 || selectorWidth >= 63) {
+        throw CompilerError(
+            std::format("Dynamic packed bit-select selector width {} is unsupported", selectorWidth),
+            loc);
+    }
+
+    Type narrowed = value.type;
+    narrowed.width = 1;
+    narrowed.packed_dims.erase(narrowed.packed_dims.begin());
+
+    int64_t totalCodes = int64_t{1} << selectorWidth;
+    std::vector<int64_t> armValues;
+    std::vector<DFGNode*> armData;
+    armValues.reserve(static_cast<size_t>(totalCodes));
+    armData.reserve(static_cast<size_t>(totalCodes));
+
+    auto* xNode = ctx.graph.x(narrowed);
+    if (loc) xNode->loc = *loc;
+
+    int64_t lo = std::min<int64_t>(dim.left, dim.right);
+    int64_t hi = std::max<int64_t>(dim.left, dim.right);
+    for (int64_t selectorValue = 0; selectorValue < totalCodes; ++selectorValue) {
+        armValues.push_back(selectorValue);
+        if (selectorValue < lo || selectorValue > hi) {
+            armData.push_back(xNode);
+            continue;
+        }
+
+        int64_t offset = packedIndexOffsetFromLsb(dim, selectorValue);
+        auto* bit = ctx.graph.slice(value.scalar, ctx.graph.constant(offset), ctx.graph.constant(offset));
+        bit->type = narrowed;
+        if (loc) bit->loc = *loc;
+        armData.push_back(bit);
+    }
+
+    auto* mux = ctx.graph.mux(selectorExprNode, armValues, armData);
+    mux->type = narrowed;
+    if (loc) mux->loc = *loc;
+    return ExprValue{.type = narrowed, .scalar = mux, .leaves = {}, .leaf_paths = {}};
+}
+
 static ExprValue selectStructField(const ExprValue& value,
                                    const std::string& fieldName,
                                    const std::optional<SourceLoc>& loc) {
@@ -1985,6 +3019,10 @@ static ExprValue applySelector(const ExprValue& input,
                 return ExprValue{.type = narrowed, .scalar = sliceNode, .leaves = {}, .leaf_paths = {}};
             }
         } catch (const std::runtime_error&) {
+            if (!value.type.packed_dims.empty()) {
+                auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
+                return selectDynamicPackedSingleBit(value, selectorExprNode, ctx, loc);
+            }
             throw CompilerError("Dynamic bit-select on packed vector is not yet supported", loc);
         }
     } else if (selector.kind == SyntaxKind::SimpleRangeSelect) {
@@ -1992,11 +3030,24 @@ static ExprValue applySelector(const ExprValue& input,
             throw CompilerError("Range-select on unpacked array is not supported", loc);
         }
         const auto& rangeSelect = selector.as<RangeSelectSyntax>();
-        auto* leftNode = buildExprDFG(rangeSelect.left, ctx);
-        auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
+        int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left,
+                                            &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+        int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right,
+                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+        if (!value.type.packed_dims.empty() && value.type.packed_dims.front().right != 0) {
+            const auto& dim = value.type.packed_dims.front();
+            left = packedIndexOffsetFromLsb(dim, left);
+            right = packedIndexOffsetFromLsb(dim, right);
+        }
+        auto* leftNode = ctx.graph.constant(left);
+        auto* rightNode = ctx.graph.constant(right);
         auto* sliceNode = ctx.graph.slice(value.scalar, leftNode, rightNode);
         sliceNode->loc = loc;
-        return ExprValue{.type = sliceNode->type.value_or(Type{}), .scalar = sliceNode, .leaves = {}, .leaf_paths = {}};
+        Type sliceType = Type::makeInteger(
+            static_cast<int>(std::llabs(left - right) + 1),
+            value.type.isSigned());
+        sliceNode->type = sliceType;
+        return ExprValue{.type = sliceType, .scalar = sliceNode, .leaves = {}, .leaf_paths = {}};
     } else if (selector.kind == SyntaxKind::AscendingRangeSelect ||
                selector.kind == SyntaxKind::DescendingRangeSelect) {
         if (!value.scalar || !value.type.unpacked_dims.empty() || value.type.isStruct()) {
@@ -2004,11 +3055,17 @@ static ExprValue applySelector(const ExprValue& input,
         }
         const auto& rangeSelect = selector.as<RangeSelectSyntax>();
         auto* baseNode = buildExprDFG(rangeSelect.left, ctx);
-        int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right);
+        int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params, ctx.sm, *rangeSelect.right,
+                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
         DFGNode* sliceNode = nullptr;
         bool isAscending = selector.kind == SyntaxKind::AscendingRangeSelect;
         try {
-            int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left);
+            int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params, ctx.sm, *rangeSelect.left,
+                                                &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+            if (!value.type.packed_dims.empty() && value.type.packed_dims.front().right != 0) {
+                const auto& dim = value.type.packed_dims.front();
+                base = packedIndexOffsetFromLsb(dim, base);
+            }
             int64_t high = isAscending ? base + width - 1 : base;
             int64_t low = isAscending ? base : base - width + 1;
             sliceNode = ctx.graph.slice(value.scalar, ctx.graph.constant(high), ctx.graph.constant(low));
@@ -2019,7 +3076,17 @@ static ExprValue applySelector(const ExprValue& input,
             while ((1LL << selBits) < sourceWidth) ++selBits;
             if (selBits == 0) selBits = 1;
 
-            auto* truncSel = ctx.graph.slice(baseNode, ctx.graph.constant(selBits - 1), ctx.graph.constant(0));
+            DFGNode* adjustedBase = baseNode;
+            if (!value.type.packed_dims.empty() && value.type.packed_dims.front().right != 0) {
+                const auto& dim = value.type.packed_dims.front();
+                if (dim.left >= dim.right) {
+                    adjustedBase = ctx.graph.sub(baseNode, ctx.graph.constant(dim.right));
+                } else {
+                    adjustedBase = ctx.graph.sub(ctx.graph.constant(dim.right), baseNode);
+                }
+                adjustedBase->loc = loc;
+            }
+            auto* truncSel = ctx.graph.slice(adjustedBase, ctx.graph.constant(selBits - 1), ctx.graph.constant(0));
             truncSel->loc = loc;
 
             std::vector<int64_t> armValues;
@@ -2036,6 +3103,7 @@ static ExprValue applySelector(const ExprValue& input,
                     int64_t low = isAscending ? v : v - width + 1;
                     auto* slice = ctx.graph.slice(value.scalar, ctx.graph.constant(high), ctx.graph.constant(low));
                     slice->loc = loc;
+                    slice->type = Type::makeInteger(static_cast<int>(width), value.type.isSigned());
                     armData.push_back(slice);
                 } else {
                     armData.push_back(zeroNode);
@@ -2161,14 +3229,9 @@ static std::string frontendTypeName(const Type& type) {
     return "integer";
 }
 
-static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
-                                ResolutionContext& ctx,
-                                const std::optional<SourceLoc>& loc) {
-    auto rejectStruct = [&](const Type& type) {
-        if (type.isStruct()) {
-            throw CompilerError("Struct casts are not supported in phase 1", loc);
-        }
-    };
+static Type resolveNamedTypeCast(const CastExpressionSyntax& castExpr,
+                                 ResolutionContext& ctx,
+                                 const std::optional<SourceLoc>& loc) {
     if (castExpr.left->kind == SyntaxKind::NamedType) {
         auto& namedType = castExpr.left->as<NamedTypeSyntax>();
         if (namedType.name->kind == SyntaxKind::ScopedName) {
@@ -2185,7 +3248,6 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
             if (it == pkgIt->second.namedTypes.end()) {
                 throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
             }
-            rejectStruct(it->second);
             return it->second;
         }
 
@@ -2195,7 +3257,6 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
         if (it == ctx.namedTypeRegistry.end()) {
             throw CompilerError("Unknown type in cast: " + typeName, loc);
         }
-        rejectStruct(it->second);
         return it->second;
     }
 
@@ -2206,7 +3267,6 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
         if (it == ctx.namedTypeRegistry.end()) {
             throw CompilerError("Unknown type in cast: " + typeName, loc);
         }
-        rejectStruct(it->second);
         return it->second;
     }
 
@@ -2224,22 +3284,21 @@ static Type resolveEnumCastType(const CastExpressionSyntax& castExpr,
         if (it == pkgIt->second.namedTypes.end()) {
             throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
         }
-        rejectStruct(it->second);
         return it->second;
     }
 
-    throw CompilerError("Only enum type casts are supported (e.g. state_t'(expr))", loc);
+    throw CompilerError("Only named-type casts are supported (e.g. my_t'(expr))", loc);
 }
 
-static void validateEnumCastWidth(const ExprValue& sourceValue,
-                                  const Type& targetType,
-                                  const std::optional<SourceLoc>& loc) {
+static void validateNamedTypeCastWidth(const ExprValue& sourceValue,
+                                       const Type& targetType,
+                                       const std::optional<SourceLoc>& loc) {
     if (!sourceValue.scalar || !sourceValue.scalar->hasType()) return;
     if (sourceValue.scalar->kind() == DFGOp::CONST) return;
     if (sourceValue.type.width > 0 && sourceValue.type.width != targetType.width) {
         throw CompilerError(std::format(
             "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
-            sourceValue.type.width, targetType.enumInfo().type_name, targetType.width), loc);
+            sourceValue.type.width, frontendTypeName(targetType), targetType.width), loc);
     }
 }
 
@@ -2262,14 +3321,19 @@ static void validateEnumEquality(const ExprValue& lhs,
 static Type mergeFrontendDataTypes(const ExprValue& lhs,
                                    const ExprValue& rhs,
                                    const std::optional<SourceLoc>& loc) {
-    if (lhs.type.isEnum() || rhs.type.isEnum()) {
-        if (!lhs.type.isEnum() || !rhs.type.isEnum() ||
-            lhs.type.enumInfo().type_name != rhs.type.enumInfo().type_name) {
-            throw CompilerError(std::format(
-                "Type error: MUX branches have incompatible types '{}' and '{}'",
-                frontendTypeName(lhs.type), frontendTypeName(rhs.type)), loc);
+    bool lhsEnum = lhs.type.isEnum();
+    bool rhsEnum = rhs.type.isEnum();
+    if (lhsEnum || rhsEnum) {
+        if (lhsEnum && rhsEnum) {
+            if (lhs.type.enumInfo().type_name != rhs.type.enumInfo().type_name) {
+                throw CompilerError(std::format(
+                    "Type error: MUX branches have incompatible types '{}' and '{}'",
+                    frontendTypeName(lhs.type), frontendTypeName(rhs.type)), loc);
+            }
+            return lhs.type;
         }
-        return lhs.type;
+        return Type::makeInteger(std::max(lhs.type.width, rhs.type.width),
+                                 lhs.type.isSigned() && rhs.type.isSigned());
     }
     return Type::makeInteger(std::max(lhs.type.width, rhs.type.width),
                              lhs.type.isSigned() && rhs.type.isSigned());
@@ -2381,8 +3445,18 @@ static ExprValue buildConditionalExprValue(const ConditionalExpressionSyntax& co
         mux->loc = loc;
         if (trueValue.leaves[i] && falseValue.leaves[i] &&
             trueValue.leaves[i]->hasType() && falseValue.leaves[i]->hasType()) {
-            ExprValue lhsLeaf{.type = *trueValue.leaves[i]->type, .scalar = trueValue.leaves[i]};
-            ExprValue rhsLeaf{.type = *falseValue.leaves[i]->type, .scalar = falseValue.leaves[i]};
+            ExprValue lhsLeaf{
+                .type = *trueValue.leaves[i]->type,
+                .scalar = trueValue.leaves[i],
+                .leaves = {},
+                .leaf_paths = {},
+            };
+            ExprValue rhsLeaf{
+                .type = *falseValue.leaves[i]->type,
+                .scalar = falseValue.leaves[i],
+                .leaves = {},
+                .leaf_paths = {},
+            };
             Type mergedType = mergeFrontendDataTypes(lhsLeaf, rhsLeaf, loc);
             if (mergedType.isEnum()) mux->type = mergedType;
         }
@@ -2396,14 +3470,94 @@ static ExprValue buildConditionalExprValue(const ConditionalExpressionSyntax& co
     };
 }
 
+static ExprValue buildConditionalExprValueForTarget(
+    const ConditionalExpressionSyntax& cond,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc,
+    bool allowAggregateScalarBroadcast) {
+    if (!targetType.isStruct() || !targetType.unpacked_dims.empty()) {
+        throw CompilerError("struct/vector assignment is not supported", loc);
+    }
+    if (cond.predicate->conditions.size() != 1) {
+        throw CompilerError("Only single condition supported in ternary expression", loc);
+    }
+    if (cond.predicate->conditions[0]->matchesClause) {
+        throw CompilerError("matches clause not supported in ternary expression", loc);
+    }
+
+    DFGNode* condNode = buildBooleanConditionNode(cond.predicate->conditions[0]->expr, ctx, loc);
+    ExprValue trueValue = buildValueForTargetType(
+        cond.left, targetType, ctx, loc, allowAggregateScalarBroadcast);
+    ExprValue falseValue = buildValueForTargetType(
+        cond.right, targetType, ctx, loc, allowAggregateScalarBroadcast);
+
+    if (!sameAggregateStructTypedefShape(trueValue.type, falseValue.type)) {
+        throw CompilerError("whole-struct conditional requires matching typedef names", loc);
+    }
+    if (trueValue.leaves.size() != falseValue.leaves.size() ||
+        trueValue.leaf_paths.size() != falseValue.leaf_paths.size()) {
+        throw CompilerError("whole-struct conditional leaf shape mismatch", loc);
+    }
+
+    std::vector<DFGNode*> leaves;
+    leaves.reserve(trueValue.leaves.size());
+    for (size_t i = 0; i < trueValue.leaves.size(); ++i) {
+        if (!aggregatePathEqual(trueValue.leaf_paths[i], falseValue.leaf_paths[i])) {
+            throw CompilerError("whole-struct conditional leaf path mismatch", loc);
+        }
+        auto* mux = ctx.graph.mux(condNode, trueValue.leaves[i], falseValue.leaves[i]);
+        mux->loc = loc;
+        if (trueValue.leaves[i] && falseValue.leaves[i] &&
+            trueValue.leaves[i]->hasType() && falseValue.leaves[i]->hasType()) {
+            ExprValue lhsLeaf{
+                .type = *trueValue.leaves[i]->type,
+                .scalar = trueValue.leaves[i],
+                .leaves = {},
+                .leaf_paths = {},
+            };
+            ExprValue rhsLeaf{
+                .type = *falseValue.leaves[i]->type,
+                .scalar = falseValue.leaves[i],
+                .leaves = {},
+                .leaf_paths = {},
+            };
+            Type mergedType = mergeFrontendDataTypes(lhsLeaf, rhsLeaf, loc);
+            mux->type = mergedType;
+        }
+        leaves.push_back(mux);
+    }
+
+    return ExprValue{
+        .type = targetType,
+        .scalar = nullptr,
+        .leaves = std::move(leaves),
+        .leaf_paths = trueValue.leaf_paths,
+    };
+}
+
 static ExprValue retagConstOrReturnValue(ExprValue value,
                                          const Type& targetType,
+                                         ResolutionContext& ctx,
                                          const std::optional<SourceLoc>& loc) {
     if (!value.scalar) {
-        throw CompilerError("Enum cast requires a scalar expression", loc);
+        throw CompilerError("Named-type cast requires a scalar expression", loc);
     }
     if (value.scalar->kind() == DFGOp::CONST) {
         value.scalar->type = targetType;
+    } else if (value.scalar->hasType() &&
+               value.scalar->type->width == targetType.width &&
+               value.scalar->type->kind != targetType.kind) {
+        auto* highNode = ctx.graph.constant(targetType.width - 1);
+        auto* lowNode = ctx.graph.constant(0);
+        if (loc) {
+            highNode->loc = *loc;
+            lowNode->loc = *loc;
+        }
+        auto* retagged = ctx.graph.slice(value.scalar, highNode, lowNode);
+        retagged->type = targetType;
+        if (loc) retagged->loc = *loc;
+        value.scalar = retagged;
     }
     value.type = targetType;
     return value;
@@ -2424,17 +3578,36 @@ static ExprValue coerceAssignmentExprToWidth(ResolutionContext& ctx,
                                              const std::optional<Type>& targetType,
                                              const std::optional<SourceLoc>& loc) {
     DFGNode* expr = value.scalar;
+    if (targetType && (targetType->isStruct() || !targetType->unpacked_dims.empty())) {
+        throw CompilerError(
+            "[BUG] scalar coercion used for aggregate assignment target",
+            loc);
+    }
     int targetWidth = targetType ? targetType->width : 0;
     bool targetSigned = targetType ? targetType->isSigned() : false;
     if (!expr || targetWidth <= 0) return value;
 
     if (expr->kind() == DFGOp::CONST) {
+        if (targetType && targetType->isEnum()) {
+            if (!expr->hasType() || !expr->type->isEnum() ||
+                expr->type->enumInfo().type_name != targetType->enumInfo().type_name) {
+                throw CompilerError(std::format(
+                    "Type error: cannot assign integer to enum type '{}' without cast",
+                    targetType->enumInfo().type_name), loc);
+            }
+        }
         expr->type = targetType ? *targetType : Type::makeInteger(targetWidth, targetSigned);
         value.type = *expr->type;
         return value;
     }
 
-    if (!expr->hasType()) return value;
+    if (!expr->hasType()) {
+        if (targetType) {
+            expr->type = *targetType;
+            value.type = *targetType;
+        }
+        return value;
+    }
     if (targetType && expr->type->kind == targetType->kind &&
         expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
         value.type = *targetType;
@@ -2463,6 +3636,28 @@ static ExprValue coerceAssignmentExprToWidth(ResolutionContext& ctx,
                 "Type error: cast width mismatch: source is {} bits, target '{}' is {} bits",
                 sourceWidth, targetType->enumInfo().type_name, targetWidth), loc);
         }
+        if (!expr->type->isEnum() ||
+            expr->type->enumInfo().type_name != targetType->enumInfo().type_name) {
+            throw CompilerError(std::format(
+                "Type error: cannot assign integer to enum type '{}' without cast",
+                targetType->enumInfo().type_name), loc);
+        }
+        value.type = *targetType;
+        return value;
+    }
+
+    if (targetType && expr->type->kind != targetType->kind &&
+        expr->type->width == targetWidth && expr->type->isSigned() == targetSigned) {
+        auto* highNode = ctx.graph.constant(targetWidth - 1);
+        auto* lowNode = ctx.graph.constant(0);
+        if (loc) {
+            highNode->loc = *loc;
+            lowNode->loc = *loc;
+        }
+        auto* retagged = ctx.graph.slice(expr, highNode, lowNode);
+        retagged->type = *targetType;
+        if (loc) retagged->loc = *loc;
+        value.scalar = retagged;
         value.type = *targetType;
         return value;
     }
@@ -2487,7 +3682,7 @@ static DFGNode* coerceAssignmentExprToWidth(ResolutionContext& ctx,
 
 DFGNode* tryBuildConstantExprNode(const ExpressionSyntax* expr, ResolutionContext& ctx) {
     try {
-        auto value = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr);
+        auto value = evaluateConstantExpr(expr, ctx.params, ctx.sm, *expr, &ctx.pkgRegistry, &ctx.namedTypeRegistry);
         auto* node = ctx.graph.constant(value);
         node->loc = resolveSourceLoc(*expr, ctx.sm);
         return node;
@@ -2495,6 +3690,27 @@ DFGNode* tryBuildConstantExprNode(const ExpressionSyntax* expr, ResolutionContex
         return nullptr;
     }
 }
+
+static ExprValue constantValueToExprValue(const ConstantValue& value,
+                                          ResolutionContext& ctx,
+                                          const SourceLoc& loc,
+                                          std::string_view name) {
+    auto scalar = value.asInt64();
+    if (!scalar) {
+        throw CompilerError(
+            "Aggregate constant field is not scalar: " + std::string(name),
+            loc);
+    }
+    auto* node = ctx.graph.constant(*scalar);
+    node->type = value.type();
+    node->loc = loc;
+    return ExprValue{.type = value.type(), .scalar = node, .leaves = {}, .leaf_paths = {}};
+}
+
+static ExprValue buildAggregateLeavesFromScalar(const ExprValue& scalarValue,
+                                                const Type& targetType,
+                                                ResolutionContext& ctx,
+                                                const std::optional<SourceLoc>& loc);
 
 static ExprValue buildExprValue(
         const ExpressionSyntax* expr,
@@ -2512,10 +3728,97 @@ static ExprValue buildExprValue(
     if (expr->kind == SyntaxKind::CastExpression) {
         auto loc = resolveSourceLoc(*expr, ctx.sm);
         auto& castExpr = expr->as<CastExpressionSyntax>();
-        Type castType = resolveEnumCastType(castExpr, ctx, loc);
+        Type castType = resolveNamedTypeCast(castExpr, ctx, loc);
         ExprValue inner = buildScalarExprValue(castExpr.right->expression, ctx);
-        validateEnumCastWidth(inner, castType, loc);
-        return retagConstOrReturnValue(inner, castType, loc);
+        validateNamedTypeCastWidth(inner, castType, loc);
+        if (castType.isStruct() && castType.unpacked_dims.empty()) {
+            return buildAggregateLeavesFromScalar(inner, castType, ctx, loc);
+        }
+        return retagConstOrReturnValue(inner, castType, ctx, loc);
+    }
+
+    // Compute the bit-width of a DFG node when it may not be typed yet.
+    // Returns 0 if width cannot be determined without running type_propagation.
+    static const auto computeKnownWidth = [](auto& self, const DFGNode* node) -> int {
+        if (node->hasType()) return node->type->width;
+        if (node->kind() == DFGOp::CONCAT) {
+            int total = 0;
+            for (const auto& part : node->concatParts()) {
+                int w = self(self, part.node);
+                if (w <= 0) return 0;
+                total += w;
+            }
+            return total;
+        }
+        if (node->kind() == DFGOp::ADD || node->kind() == DFGOp::SUB ||
+            node->kind() == DFGOp::MUL) {
+            auto inputs = node->binaryInputs();
+            int lw = self(self, inputs.lhs.node);
+            int rw = self(self, inputs.rhs.node);
+            if (lw <= 0 || rw <= 0) return 0;
+            return std::max(lw, rw);
+        }
+        if (node->kind() == DFGOp::SIGNAL) {
+            auto drv = node->driver();
+            if (drv) return self(self, drv->node);
+        }
+        return 0;
+    };
+
+    if (expr->kind == SyntaxKind::SignedCastExpression) {
+        auto& castExpr = expr->as<SignedCastExpressionSyntax>();
+        bool makeSigned = castExpr.signing.valueText() == "signed";
+        ExprValue inner = buildScalarExprValue(castExpr.inner->expression, ctx);
+        int knownWidth = computeKnownWidth(computeKnownWidth, inner.scalar);
+        Type newType = Type::makeInteger(inner.type.width, makeSigned,
+                                        inner.type.packed_dims, inner.type.unpacked_dims);
+        if (inner.scalar->kind() == DFGOp::CONST) {
+            inner.scalar->type = newType;
+        } else if (knownWidth > 0) {
+            // Create a placeholder SIGNAL carrying the signedness override so
+            // the simulator can sign- or zero-extend this node correctly when
+            // widening for arithmetic. Only possible when width is known now;
+            // for arith-op outputs (typed by type_propagation) the consuming
+            // context's own type handles the extension.
+            Type castType = Type::makeInteger(knownWidth, makeSigned,
+                                             inner.type.packed_dims, inner.type.unpacked_dims);
+            auto* cast = ctx.graph.placeholderSignal(inner.scalar->instance_path);
+            cast->type = castType;
+            if (inner.scalar->loc) cast->loc = inner.scalar->loc;
+            ctx.graph.connectDriver(cast, DFGOutput{inner.scalar, 0});
+            inner.scalar = cast;
+        }
+        inner.type = newType;
+        return inner;
+    }
+
+    if (expr->kind == SyntaxKind::InvocationExpression) {
+        const auto& invocation = expr->as<InvocationExpressionSyntax>();
+        if (invocation.left->kind == SyntaxKind::SystemName) {
+            const std::string sysName(
+                invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText());
+            if (sysName == "$signed" || sysName == "$unsigned") {
+                bool makeSigned = (sysName == "$signed");
+                const auto* arg = singleOrderedSystemFunctionArg(invocation, sysName);
+                ExprValue inner = buildScalarExprValue(arg, ctx);
+                int knownWidth = computeKnownWidth(computeKnownWidth, inner.scalar);
+                Type newType = Type::makeInteger(inner.type.width, makeSigned,
+                                                inner.type.packed_dims, inner.type.unpacked_dims);
+                if (inner.scalar->kind() == DFGOp::CONST) {
+                    inner.scalar->type = newType;
+                } else if (knownWidth > 0) {
+                    Type castType = Type::makeInteger(knownWidth, makeSigned,
+                                                     inner.type.packed_dims, inner.type.unpacked_dims);
+                    auto* cast = ctx.graph.placeholderSignal(inner.scalar->instance_path);
+                    cast->type = castType;
+                    if (inner.scalar->loc) cast->loc = inner.scalar->loc;
+                    ctx.graph.connectDriver(cast, DFGOutput{inner.scalar, 0});
+                    inner.scalar = cast;
+                }
+                inner.type = newType;
+                return inner;
+            }
+        }
     }
 
     if (expr->kind == SyntaxKind::ConditionalExpression) {
@@ -2575,12 +3878,26 @@ static ExprValue buildExprValue(
 
     if (expr->kind == SyntaxKind::ScopedName) {
         const auto& scoped = expr->as<ScopedNameSyntax>();
-        bool treatAsFieldAccess = scoped.left->kind != SyntaxKind::IdentifierName;
+        bool treatAsFieldAccess = !isPackageScopedName(scoped) ||
+                                  scoped.left->kind != SyntaxKind::IdentifierName;
         if (!treatAsFieldAccess && scoped.left->kind == SyntaxKind::IdentifierName) {
             std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
             treatAsFieldAccess = lookupDeclaredType(baseName, ctx) != nullptr;
         }
         if (treatAsFieldAccess) {
+            if (scoped.left->kind == SyntaxKind::IdentifierName &&
+                scoped.right->kind == SyntaxKind::IdentifierName) {
+                std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                std::string fieldName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                auto valueIt = ctx.params.values.find(baseName);
+                if (valueIt != ctx.params.values.end()) {
+                    return constantValueToExprValue(
+                        valueIt->second.field(fieldName),
+                        ctx,
+                        resolveSourceLoc(*expr, ctx.sm),
+                        baseName + "." + fieldName);
+                }
+            }
             ExprValue base = buildExprValue(&scoped.left->as<ExpressionSyntax>(), ctx);
             if (scoped.right->kind == SyntaxKind::IdentifierName) {
                 return selectStructField(
@@ -2625,7 +3942,20 @@ static ExprValue buildScalarExprValue(
         ResolutionContext& ctx
 ) {
     ExprValue value = buildExprValue(expr, ctx);
-    if (!value.type.unpacked_dims.empty() || value.type.isStruct()) {
+    if (!value.type.unpacked_dims.empty()) {
+        throw CompilerError("Array-valued expression used where scalar expression is required",
+                            resolveSourceLoc(*expr, ctx.sm));
+    }
+    if (value.type.isPackedStruct() && !value.leaves.empty()) {
+        // Packed struct in scalar context: flatten leaves MSB-first into a single integer.
+        auto* node = value.leaves.size() == 1
+            ? value.leaves[0]
+            : ctx.graph.concat(value.leaves);
+        node->type = Type::makeInteger(value.type.width, false);
+        node->loc = resolveSourceLoc(*expr, ctx.sm);
+        return ExprValue{.type = *node->type, .scalar = node, .leaves = {}, .leaf_paths = {}};
+    }
+    if (value.type.isStruct()) {
         throw CompilerError("Array-valued expression used where scalar expression is required",
                             resolveSourceLoc(*expr, ctx.sm));
     }
@@ -2641,6 +3971,11 @@ static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
                                          ResolutionContext& ctx,
                                          const std::optional<SourceLoc>& loc,
                                          bool allowAggregateScalarBroadcast);
+
+static ExprValue buildAggregateLeavesFromScalar(const ExprValue& scalarValue,
+                                                const Type& targetType,
+                                                ResolutionContext& ctx,
+                                                const std::optional<SourceLoc>& loc);
 
 static ExprValue buildStructLiteralExprValue(const AssignmentPatternExpressionSyntax& patternExpr,
                                              const Type& structType,
@@ -2760,6 +4095,66 @@ static ExprValue buildStructLiteralExprValue(const AssignmentPatternExpressionSy
     };
 }
 
+static ExprValue buildAggregateLeavesFromScalar(const ExprValue& scalarValue,
+                                                const Type& targetType,
+                                                ResolutionContext& ctx,
+                                                const std::optional<SourceLoc>& loc) {
+    if (!targetType.isStruct() || !targetType.unpacked_dims.empty()) {
+        throw CompilerError("Struct literal target type is invalid", loc);
+    }
+    if (!scalarValue.scalar) {
+        throw CompilerError("struct/vector assignment is not supported", loc);
+    }
+
+    // For CONST sources, validateNamedTypeCastWidth skips the width check, so the
+    // CONST may be narrower than the target struct. Zero-extend to struct width so
+    // all field SLICEs are in-bounds (matches SV zero-extension semantics for casts).
+    DFGNode* sourceScalar = scalarValue.scalar;
+    if (sourceScalar->kind() == DFGOp::CONST &&
+        scalarValue.type.width > 0 && scalarValue.type.width < targetType.width) {
+        auto* wider = ctx.graph.constant(sourceScalar->constValue());
+        wider->type = Type::makeInteger(targetType.width, false);
+        wider->loc = loc;
+        sourceScalar = wider;
+    }
+
+    std::vector<AggregateLeafBinding> plan;
+    collectAggregateLeafPlan(targetType, "", {}, plan);
+
+    int64_t cursor = 0;
+    std::vector<int64_t> lsbOffsets(plan.size());
+    for (int64_t i = static_cast<int64_t>(plan.size()) - 1; i >= 0; --i) {
+        lsbOffsets[i] = cursor;
+        cursor += plan[i].leaf_type.width;
+    }
+
+    std::vector<DFGNode*> leaves;
+    leaves.reserve(plan.size());
+    for (size_t i = 0; i < plan.size(); ++i) {
+        int64_t lo = lsbOffsets[i];
+        int64_t hi = lo + plan[i].leaf_type.width - 1;
+        auto* loNode = ctx.graph.constant(lo);
+        auto* hiNode = ctx.graph.constant(hi);
+        auto* sliceNode = ctx.graph.slice(sourceScalar, hiNode, loNode);
+        sliceNode->type = plan[i].leaf_type;
+        sliceNode->loc = loc;
+        leaves.push_back(sliceNode);
+    }
+
+    std::vector<AggregatePath> leafPaths;
+    leafPaths.reserve(plan.size());
+    for (const auto& leaf : plan) {
+        leafPaths.push_back(leaf.path);
+    }
+
+    return ExprValue{
+        .type = targetType,
+        .scalar = nullptr,
+        .leaves = std::move(leaves),
+        .leaf_paths = std::move(leafPaths),
+    };
+}
+
 static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
                                          const Type& targetType,
                                          ResolutionContext& ctx,
@@ -2769,6 +4164,14 @@ static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
         if (expr->kind == SyntaxKind::AssignmentPatternExpression) {
             return buildAssignmentPatternExprValueForTarget(
                 expr->as<AssignmentPatternExpressionSyntax>(), targetType, ctx, loc);
+        }
+        if (targetType.isStruct() && expr->kind == SyntaxKind::ConditionalExpression) {
+            return buildConditionalExprValueForTarget(
+                expr->as<ConditionalExpressionSyntax>(),
+                targetType,
+                ctx,
+                loc,
+                allowAggregateScalarBroadcast);
         }
         ExprValue value = buildExprValue(expr, ctx);
         if (!sameAggregateStructTypedefShape(value.type, targetType)) {
@@ -2781,7 +4184,17 @@ static ExprValue buildValueForTargetType(const ExpressionSyntax* expr,
             }
             throw CompilerError("struct/vector assignment is not supported", loc);
         }
+        if (targetType.isStruct() && value.scalar && value.leaves.empty()) {
+            return buildAggregateLeavesFromScalar(value, targetType, ctx, loc);
+        }
         return value;
+    }
+
+    if (!targetType.packed_dims.empty() && !targetType.isStruct() &&
+        targetType.unpacked_dims.empty() &&
+        expr->kind == SyntaxKind::AssignmentPatternExpression) {
+        return buildAssignmentPatternExprValueForTarget(
+            expr->as<AssignmentPatternExpressionSyntax>(), targetType, ctx, loc);
     }
 
     ExprValue scalar = buildScalarExprValue(expr, ctx);
@@ -2835,6 +4248,94 @@ static ExprValue buildBroadcastValueFromScalar(
     return coerceAssignmentExprToWidth(ctx, std::move(scalarCopy), targetType, loc);
 }
 
+static ExprValue buildPackedArrayPatternExprValue(
+    const AssignmentPatternExpressionSyntax& patternExpr,
+    const Type& targetType,
+    ResolutionContext& ctx,
+    const std::optional<SourceLoc>& loc) {
+
+    const auto& outerDim = targetType.packed_dims.front();
+    int numElements = outerDim.size();
+
+    Type elemType = targetType;
+    elemType.packed_dims.erase(elemType.packed_dims.begin());
+    elemType.width = targetType.width / numElements;
+
+    // MSB-first index order matches declaration order
+    std::vector<int> indices;
+    if (outerDim.left >= outerDim.right) {
+        for (int i = outerDim.left; i >= outerDim.right; --i)
+            indices.push_back(i);
+    } else {
+        for (int i = outerDim.left; i <= outerDim.right; ++i)
+            indices.push_back(i);
+    }
+
+    std::vector<DFGNode*> elementNodes(numElements, nullptr);
+
+    if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
+        const auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
+        if ((int)pattern.items.size() != numElements) {
+            throw CompilerError(
+                std::format("Assignment pattern requires {} elements but {} were provided",
+                            numElements, pattern.items.size()),
+                loc);
+        }
+        for (int i = 0; i < numElements; ++i) {
+            ExprValue ev = buildValueForTargetType(pattern.items[i], elemType, ctx, loc, false);
+            if (!ev.scalar)
+                throw CompilerError("Packed array pattern element is not scalar", loc);
+            elementNodes[i] = ev.scalar;
+        }
+    } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+        const auto& pattern = patternExpr.pattern->as<StructuredAssignmentPatternSyntax>();
+        std::map<int64_t, const ExpressionSyntax*> keyedExprs;
+        const ExpressionSyntax* defaultExpr = nullptr;
+
+        for (const auto* item : pattern.items) {
+            if (item->key->kind == SyntaxKind::DefaultPatternKeyExpression ||
+                (item->key->kind == SyntaxKind::IdentifierName &&
+                 item->key->as<IdentifierNameSyntax>().identifier.valueText() == "default")) {
+                if (defaultExpr)
+                    throw CompilerError("Assignment pattern has multiple default keys", loc);
+                defaultExpr = item->expr;
+                continue;
+            }
+            int64_t idx = evaluateConstantExpr(item->key, ctx.params, ctx.sm, *item->key,
+                                               &ctx.pkgRegistry);
+            if (keyedExprs.contains(idx)) {
+                throw CompilerError(
+                    std::format("Assignment pattern has multiple keys for index {}", idx), loc);
+            }
+            keyedExprs[idx] = item->expr;
+        }
+
+        for (int i = 0; i < numElements; ++i) {
+            int idx = indices[i];
+            const ExpressionSyntax* expr = nullptr;
+            if (auto it = keyedExprs.find(idx); it != keyedExprs.end()) {
+                expr = it->second;
+            } else if (defaultExpr) {
+                expr = defaultExpr;
+            } else {
+                throw CompilerError(
+                    std::format("Assignment pattern does not cover index {}", idx), loc);
+            }
+            ExprValue ev = buildValueForTargetType(expr, elemType, ctx, loc, false);
+            if (!ev.scalar)
+                throw CompilerError("Packed array pattern element is not scalar", loc);
+            elementNodes[i] = ev.scalar;
+        }
+    } else {
+        throw CompilerError("Replicated assignment patterns are not supported for packed arrays", loc);
+    }
+
+    DFGNode* result = (numElements == 1) ? elementNodes[0] : ctx.graph.concat(elementNodes);
+    result->type = targetType;
+
+    return ExprValue{.type = targetType, .scalar = result, .leaves = {}, .leaf_paths = {}};
+}
+
 static ExprValue buildAssignmentPatternExprValueForTarget(
     const AssignmentPatternExpressionSyntax& patternExpr,
     const Type& targetType,
@@ -2851,7 +4352,29 @@ static ExprValue buildAssignmentPatternExprValueForTarget(
         return buildStructLiteralExprValue(patternExpr, targetType, ctx, loc);
     }
 
+    if (!targetType.isStruct() && targetType.unpacked_dims.empty() && !targetType.packed_dims.empty()) {
+        return buildPackedArrayPatternExprValue(patternExpr, targetType, ctx, loc);
+    }
+
     throw CompilerError("Assignment patterns are only supported for whole unpacked arrays or struct literals", loc);
+}
+
+static bool expressionNeedsAssignmentPatternContext(const ExpressionSyntax* expr) {
+    if (!expr) return false;
+    switch (expr->kind) {
+        case SyntaxKind::AssignmentPatternExpression:
+            return true;
+        case SyntaxKind::ParenthesizedExpression:
+            return expressionNeedsAssignmentPatternContext(
+                expr->as<ParenthesizedExpressionSyntax>().expression);
+        case SyntaxKind::ConditionalExpression: {
+            const auto& conditional = expr->as<ConditionalExpressionSyntax>();
+            return expressionNeedsAssignmentPatternContext(conditional.left) ||
+                   expressionNeedsAssignmentPatternContext(conditional.right);
+        }
+        default:
+            return false;
+    }
 }
 
 // Build DFG node directly from slang expression syntax
@@ -2923,9 +4446,28 @@ static DFGNode* buildExprScalarImpl(
                 }
                 auto paramIt = ctx.params.values.find(baseName);
                 if (paramIt != ctx.params.values.end()) {
-                    auto* n = ctx.graph.constant(paramIt->second);
-                    n->loc = resolveSourceLoc(*expr, ctx.sm);
-                    return n;
+                    auto exprLoc = resolveSourceLoc(*expr, ctx.sm);
+                    ExprValue value = exprValueFromConstantParam(
+                        baseName, paramIt->second, exprLoc, ctx.graph);
+                    if (value.type.isPackedStruct() && !value.leaves.empty()) {
+                        auto* n = value.leaves.size() == 1
+                            ? value.leaves[0]
+                            : ctx.graph.concat(value.leaves);
+                        n->type = Type::makeInteger(value.type.width, false);
+                        n->loc = exprLoc;
+                        return n;
+                    }
+                    if (value.type.isStruct() || !value.type.unpacked_dims.empty()) {
+                        throw CompilerError(
+                            "Array-valued expression used where scalar expression is required",
+                            exprLoc);
+                    }
+                    if (!value.scalar) {
+                        throw CompilerError(
+                            "Expression did not produce a scalar DFG node",
+                            exprLoc);
+                    }
+                    return value.scalar;
                 }
             }
             const auto node = resolveIdentifier(
@@ -2940,7 +4482,8 @@ static DFGNode* buildExprScalarImpl(
         case SyntaxKind::ScopedName: {
             // Struct-like scoped access on declared objects (e.g. s.a)
             auto& scoped = expr->as<ScopedNameSyntax>();
-            bool treatAsFieldAccess = scoped.left->kind != SyntaxKind::IdentifierName;
+            bool treatAsFieldAccess = !isPackageScopedName(scoped) ||
+                                      scoped.left->kind != SyntaxKind::IdentifierName;
             if (!treatAsFieldAccess && scoped.left->kind == SyntaxKind::IdentifierName) {
                 std::string baseName = std::string(
                     scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
@@ -2956,8 +4499,16 @@ static DFGNode* buildExprScalarImpl(
             if (pkgIt == ctx.pkgRegistry.end())
                 throw CompilerError("Unknown package: " + pkgName, resolveSourceLoc(*expr, ctx.sm));
             auto mit = pkgIt->second.enumMembers.find(itemName);
-            if (mit == pkgIt->second.enumMembers.end())
+            auto cit = pkgIt->second.constants.find(itemName);
+            if (mit == pkgIt->second.enumMembers.end() && cit == pkgIt->second.constants.end())
                 throw CompilerError("Unknown package member: " + pkgName + "::" + itemName, resolveSourceLoc(*expr, ctx.sm));
+            if (mit == pkgIt->second.enumMembers.end()) {
+                auto* n = ctx.graph.constant(cit->second.requireInt64(
+                    "DFG package constant " + pkgName + "::" + itemName));
+                n->type = cit->second.type();
+                n->loc  = resolveSourceLoc(*expr, ctx.sm);
+                return n;
+            }
             auto* n = ctx.graph.constant(mit->second.first);
             n->type = mit->second.second;
             n->loc  = resolveSourceLoc(*expr, ctx.sm);
@@ -2967,6 +4518,9 @@ static DFGNode* buildExprScalarImpl(
         case SyntaxKind::IdentifierSelectName: {
             auto& name = expr->as<IdentifierSelectNameSyntax>();
             std::string baseName(name.identifier.valueText());
+            if (ctx.params.values.contains(baseName)) {
+                return buildScalarExprValue(expr, ctx).scalar;
+            }
             DFGNode* node = nullptr;
             if (!ctx.is_sequential) {
                 auto it = ctx.combDrivers.find(baseName);
@@ -3018,6 +4572,7 @@ static DFGNode* buildExprScalarImpl(
                                     } else {
                                         Type narrowed = *currentSelectedType;
                                         narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                                        indexedSignalNode->type = narrowed;
                                         currentSelectedType = narrowed;
                                     }
                                     baseName = elemKey;
@@ -3030,6 +4585,7 @@ static DFGNode* buildExprScalarImpl(
                                     } else {
                                         Type narrowed = *currentSelectedType;
                                         narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                                        indexedSignalNode->type = narrowed;
                                         currentSelectedType = narrowed;
                                     }
                                     baseName = elemKey;
@@ -3052,13 +4608,30 @@ static DFGNode* buildExprScalarImpl(
                                 Type narrowed = *currentSelectedType;
                                 narrowed.width = static_cast<int>(elemWidth);
                                 narrowed.packed_dims.erase(narrowed.packed_dims.begin());
+                                indexedSignalNode->type = narrowed;
                                 currentSelectedType = narrowed;
                                 continue;
                             }
                         } catch (const std::runtime_error&) {
-                            // not constant — emit MUX for unpacked array, throw for packed
+                            // not constant — emit MUX for unpacked array or single-bit packed selects
                         }
                         auto* selectorExprNode = buildExprDFG(bitSelect.expr, ctx);
+                        if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
+                            ExprValue baseValue{
+                                .type = *currentSelectedType,
+                                .scalar = indexedSignalNode,
+                                .leaves = {},
+                                .leaf_paths = {},
+                            };
+                            ExprValue selected = selectDynamicPackedSingleBit(
+                                baseValue,
+                                selectorExprNode,
+                                ctx,
+                                resolveSourceLoc(*expr, ctx.sm));
+                            indexedSignalNode = selected.scalar;
+                            currentSelectedType = selected.type;
+                            continue;
+                        }
                         if (!currentSelectedType || currentSelectedType->unpacked_dims.empty()) {
                             throw CompilerError(
                                 "Dynamic bit-select on packed vector is not yet supported",
@@ -3081,6 +4654,7 @@ static DFGNode* buildExprScalarImpl(
                             std::string elemKey = baseName + "[" + std::to_string(lo) + "]";
                             if (auto* elemNode = lookupLeafNode(ctx, elemKey)) {
                                 indexedSignalNode = elemNode;
+                                indexedSignalNode->type = narrowed;
                             } else {
                                 throw CompilerError(
                                     "Internal error: unpacked array leaf not found for " + elemKey,
@@ -3132,30 +4706,59 @@ static DFGNode* buildExprScalarImpl(
                             }
 
                             indexedSignalNode = ctx.graph.mux(truncSel, armValues, armData);
+                            indexedSignalNode->type = armType;
                         }
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        currentSelectedType->unpacked_dims.erase(
-                            currentSelectedType->unpacked_dims.begin());
+                        Type narrowed = *currentSelectedType;
+                        narrowed.unpacked_dims.erase(narrowed.unpacked_dims.begin());
+                        indexedSignalNode->type = narrowed;
+                        currentSelectedType = narrowed;
                     } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect){
-                        // Per SV spec, both bounds must be constant expressions.
-                        // If non-constant bounds somehow reach here, type_propagation
-                        // will reject the SLICE with a [BUG] message.
+                        if (!currentSelectedType || !currentSelectedType->unpacked_dims.empty() ||
+                                currentSelectedType->isStruct()) {
+                            throw CompilerError(
+                                "Range-select requires a packed source with known type",
+                                resolveSourceLoc(*expr, ctx.sm));
+                        }
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
-                        auto* leftNode = buildExprDFG(rangeSelect.left, ctx);
-                        auto* rightNode = buildExprDFG(rangeSelect.right, ctx);
+                        int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                            ctx.sm, *rangeSelect.left,
+                                                            &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                        int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                             ctx.sm, *rangeSelect.right,
+                                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                        if (!currentSelectedType->packed_dims.empty() &&
+                                currentSelectedType->packed_dims.front().right != 0) {
+                            const auto& dim = currentSelectedType->packed_dims.front();
+                            left = packedIndexOffsetFromLsb(dim, left);
+                            right = packedIndexOffsetFromLsb(dim, right);
+                        }
+                        auto* leftNode = ctx.graph.constant(left);
+                        auto* rightNode = ctx.graph.constant(right);
                         indexedSignalNode = ctx.graph.slice(indexedSignalNode, leftNode, rightNode);
                         indexedSignalNode->loc = resolveSourceLoc(*expr, ctx.sm);
-                        currentSelectedType.reset();
+                        Type narrowed = Type::makeInteger(
+                            static_cast<int>(std::llabs(left - right) + 1),
+                            currentSelectedType->isSigned());
+                        indexedSignalNode->type = narrowed;
+                        currentSelectedType = narrowed;
                     } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
                         // [base +: width] → [base+width-1 : base]
                         // Per SV spec, width must be constant; base may be dynamic.
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
                         int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
-                                                             ctx.sm, *rangeSelect.right);
+                                                             ctx.sm, *rangeSelect.right,
+                                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                         try {
                             int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
-                                                                ctx.sm, *rangeSelect.left);
+                                                                ctx.sm, *rangeSelect.left,
+                                                                &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                            if (currentSelectedType && !currentSelectedType->packed_dims.empty() &&
+                                    currentSelectedType->packed_dims.front().right != 0) {
+                                const auto& dim = currentSelectedType->packed_dims.front();
+                                base = packedIndexOffsetFromLsb(dim, base);
+                            }
                             auto* high = ctx.graph.constant(base + width - 1);
                             auto* low  = ctx.graph.constant(base);
                             indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
@@ -3173,8 +4776,19 @@ static DFGNode* buildExprScalarImpl(
                             while ((1LL << selBits) < sourceWidth) ++selBits;
                             if (selBits == 0) selBits = 1;
 
+                            DFGNode* adjustedBase = baseNode;
+                            if (!currentSelectedType->packed_dims.empty() &&
+                                    currentSelectedType->packed_dims.front().right != 0) {
+                                const auto& dim = currentSelectedType->packed_dims.front();
+                                if (dim.left >= dim.right) {
+                                    adjustedBase = ctx.graph.sub(baseNode, ctx.graph.constant(dim.right));
+                                } else {
+                                    adjustedBase = ctx.graph.sub(ctx.graph.constant(dim.right), baseNode);
+                                }
+                                adjustedBase->loc = resolveSourceLoc(*expr, ctx.sm);
+                            }
                             auto* truncSel = ctx.graph.slice(
-                                baseNode,
+                                adjustedBase,
                                 ctx.graph.constant(selBits - 1),
                                 ctx.graph.constant(0));
                             truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
@@ -3192,6 +4806,8 @@ static DFGNode* buildExprScalarImpl(
                                     auto* low  = ctx.graph.constant(v);
                                     auto* slice = ctx.graph.slice(indexedSignalNode, high, low);
                                     slice->loc = resolveSourceLoc(*expr, ctx.sm);
+                                    slice->type = Type::makeInteger(
+                                        static_cast<int>(width), currentSelectedType->isSigned());
                                     armData.push_back(slice);
                                 } else {
                                     armData.push_back(zeroNode);
@@ -3204,15 +4820,23 @@ static DFGNode* buildExprScalarImpl(
                         currentSelectedType = Type::makeInteger(
                             static_cast<int>(width),
                             currentSelectedType ? currentSelectedType->isSigned() : false);
+                        indexedSignalNode->type = *currentSelectedType;
                     } else if (elemSelect->selector->kind == SyntaxKind::DescendingRangeSelect) {
                         // [base -: width] → [base : base-width+1]
                         const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                         auto* baseNode  = buildExprDFG(rangeSelect.left,  ctx);
                         int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
-                                                             ctx.sm, *rangeSelect.right);
+                                                             ctx.sm, *rangeSelect.right,
+                                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                         try {
                             int64_t base = evaluateConstantExpr(rangeSelect.left, ctx.params,
-                                                                ctx.sm, *rangeSelect.left);
+                                                                ctx.sm, *rangeSelect.left,
+                                                                &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                            if (currentSelectedType && !currentSelectedType->packed_dims.empty() &&
+                                    currentSelectedType->packed_dims.front().right != 0) {
+                                const auto& dim = currentSelectedType->packed_dims.front();
+                                base = packedIndexOffsetFromLsb(dim, base);
+                            }
                             auto* high = ctx.graph.constant(base);
                             auto* low  = ctx.graph.constant(base - width + 1);
                             indexedSignalNode = ctx.graph.slice(indexedSignalNode, high, low);
@@ -3229,8 +4853,19 @@ static DFGNode* buildExprScalarImpl(
                             while ((1LL << selBits) < sourceWidth) ++selBits;
                             if (selBits == 0) selBits = 1;
 
+                            DFGNode* adjustedBase = baseNode;
+                            if (!currentSelectedType->packed_dims.empty() &&
+                                    currentSelectedType->packed_dims.front().right != 0) {
+                                const auto& dim = currentSelectedType->packed_dims.front();
+                                if (dim.left >= dim.right) {
+                                    adjustedBase = ctx.graph.sub(baseNode, ctx.graph.constant(dim.right));
+                                } else {
+                                    adjustedBase = ctx.graph.sub(ctx.graph.constant(dim.right), baseNode);
+                                }
+                                adjustedBase->loc = resolveSourceLoc(*expr, ctx.sm);
+                            }
                             auto* truncSel = ctx.graph.slice(
-                                baseNode,
+                                adjustedBase,
                                 ctx.graph.constant(selBits - 1),
                                 ctx.graph.constant(0));
                             truncSel->loc = resolveSourceLoc(*expr, ctx.sm);
@@ -3248,6 +4883,8 @@ static DFGNode* buildExprScalarImpl(
                                     auto* low  = ctx.graph.constant(v - width + 1);
                                     auto* slice = ctx.graph.slice(indexedSignalNode, high, low);
                                     slice->loc = resolveSourceLoc(*expr, ctx.sm);
+                                    slice->type = Type::makeInteger(
+                                        static_cast<int>(width), currentSelectedType->isSigned());
                                     armData.push_back(slice);
                                 } else {
                                     armData.push_back(zeroNode);
@@ -3260,6 +4897,7 @@ static DFGNode* buildExprScalarImpl(
                         currentSelectedType = Type::makeInteger(
                             static_cast<int>(width),
                             currentSelectedType ? currentSelectedType->isSigned() : false);
+                        indexedSignalNode->type = *currentSelectedType;
                     } else {
                         throw CompilerError(
                             "Only BitSelect and RangeSelect supported, got: " +
@@ -3291,7 +4929,8 @@ static DFGNode* buildExprScalarImpl(
         case SyntaxKind::MultipleConcatenationExpression: {
             // {N{expr}} — repeat expr N times, concatenated MSB-first
             auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
-            int64_t N = evaluateConstantExpr(multiConcat.expression, ctx.params, ctx.sm, *expr);
+            int64_t N = evaluateConstantExpr(multiConcat.expression, ctx.params, ctx.sm, *expr,
+                                             &ctx.pkgRegistry, &ctx.namedTypeRegistry);
             std::vector<DFGNode*> parts;
             parts.reserve(static_cast<size_t>(N) * multiConcat.concatenation->expressions.size());
             for (int64_t i = 0; i < N; i++) {
@@ -3606,6 +5245,48 @@ static DFGNode* buildExprScalarImpl(
             return node;
         }
 
+        case SyntaxKind::InsideExpression: {
+            auto& inside = expr->as<InsideExpressionSyntax>();
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            DFGNode* lhs = buildExprDFG(inside.expr, ctx);
+            DFGNode* result = nullptr;
+
+            for (const auto* rangeExpr : inside.ranges->valueRanges) {
+                DFGNode* match;
+                if (rangeExpr->kind == SyntaxKind::ValueRangeExpression) {
+                    auto& vr = rangeExpr->as<ValueRangeExpressionSyntax>();
+                    if (vr.op.kind != slang::parsing::TokenKind::Colon) {
+                        throw CompilerError(
+                            "inside: only [lo:hi] ranges are supported, not +/- forms",
+                            loc);
+                    }
+                    DFGNode* lo = buildExprDFG(vr.left, ctx);
+                    DFGNode* hi = buildExprDFG(vr.right, ctx);
+                    auto* geq = ctx.graph.ge(lhs, lo);
+                    geq->type = Type::makeInteger(1, false);
+                    auto* leq = ctx.graph.le(lhs, hi);
+                    leq->type = Type::makeInteger(1, false);
+                    match = ctx.graph.bitwiseAnd(geq, leq);
+                    match->type = Type::makeInteger(1, false);
+                } else {
+                    DFGNode* val = buildExprDFG(rangeExpr, ctx);
+                    match = ctx.graph.eq(lhs, val);
+                    match->type = Type::makeInteger(1, false);
+                }
+                match->loc = loc;
+                result = result ? ctx.graph.bitwiseOr(result, match) : match;
+                if (result->type) result->type = Type::makeInteger(1, false);
+            }
+
+            if (!result) {
+                // empty range list — never matches
+                result = ctx.graph.constant(0);
+            }
+            result->type = Type::makeInteger(1, false);
+            result->loc = loc;
+            return result;
+        }
+
         case SyntaxKind::ConditionalExpression: {
             return buildScalarExprValue(expr, ctx).scalar;
         }
@@ -3615,6 +5296,28 @@ static DFGNode* buildExprScalarImpl(
         }
 
         case SyntaxKind::InvocationExpression: {
+            const auto& invocation = expr->as<InvocationExpressionSyntax>();
+            if (invocation.left->kind == SyntaxKind::SystemName) {
+                const std::string sysName(
+                    invocation.left->as<SystemNameSyntax>().systemIdentifier.valueText());
+                if (sysName == "$bits") {
+                    const auto* argument = singleOrderedSystemFunctionArg(invocation, "$bits");
+                    int64_t width = 0;
+                    if (auto staticWidth = staticBitsWidth(
+                            argument, ctx.params, &ctx.pkgRegistry, &ctx.namedTypeRegistry)) {
+                        width = *staticWidth;
+                    } else {
+                        width = bitstreamWidth(buildExprValue(argument, ctx).type);
+                    }
+                    auto* node = ctx.graph.constant(width);
+                    node->type = Type::makeInteger(32, true);
+                    node->loc = resolveSourceLoc(*expr, ctx.sm);
+                    return node;
+                }
+                if (sysName == "$signed" || sysName == "$unsigned") {
+                    return buildExprValue(expr, ctx).scalar;
+                }
+            }
             return inlineSubroutineCall(expr->as<InvocationExpressionSyntax>(), ctx);
         }
 
@@ -3627,7 +5330,8 @@ static DFGNode* buildExprScalarImpl(
 }
 
 void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
-        ResolutionContext& ctx){
+        ResolutionContext& ctx,
+        DFGNode* prebuiltRhs = nullptr){
     const auto& left = assignExpr.left;
     const auto& right = assignExpr.right;
     const auto assignLoc = resolveSourceLoc(assignExpr, ctx.sm);
@@ -3794,16 +5498,25 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
     }
 
-    // Build the expression value of the RHS. Whole-array assignments consume the
-    // array-valued form; scalar paths below use RHSexprNode.
-    ExprValue RHSvalue = (right->kind == SyntaxKind::AssignmentPatternExpression)
-        ? ExprValue{.type = Type{}, .scalar = nullptr, .leaves = {}, .leaf_paths = {}}
-        : buildExprValue(right, ctx);
+    // Build the expression value of the RHS. Expressions with untyped assignment
+    // patterns may need the LHS type, so defer them until LHS normalization below.
+    const bool rhsNeedsAssignmentPatternContext =
+        !prebuiltRhs && expressionNeedsAssignmentPatternContext(right);
+    ExprValue RHSvalue = prebuiltRhs
+        ? ExprValue{.type = prebuiltRhs->type ? *prebuiltRhs->type : Type{},
+                    .scalar = prebuiltRhs, .leaves = {}, .leaf_paths = {}}
+        : rhsNeedsAssignmentPatternContext
+            ? ExprValue{.type = Type{}, .scalar = nullptr, .leaves = {}, .leaf_paths = {}}
+            : buildExprValue(right, ctx);
     DFGNode* RHSexprNode = RHSvalue.scalar;
 
     // LHS concatenation: {elem_n, ..., elem_0} = RHS
     // Decompose RHS into slices and assign each to the corresponding element.
     if (left->kind == SyntaxKind::ConcatenationExpression) {
+        if (rhsNeedsAssignmentPatternContext) {
+            RHSvalue = buildExprValue(right, ctx);
+            RHSexprNode = RHSvalue.scalar;
+        }
         auto& lhsConcat = left->as<ConcatenationExpressionSyntax>();
 
         // Collect elements MSB-first, resolving each name and width from the
@@ -3946,13 +5659,63 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
     if (selectors.empty()) {
         if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
-            declaredType && !declaredType->unpacked_dims.empty() &&
-                !typeContainsStructValue(*declaredType)) {
+            declaredType && !declaredType->unpacked_dims.empty()) {
             if (RHSvalue.type.unpacked_dims != declaredType->unpacked_dims ||
                     RHSvalue.leaves.size() != aggregateValueLeafCount(*declaredType)) {
                 throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
             }
-            connectWholeUnpackedArray(baseName, *declaredType, RHSvalue.leaves);
+
+            if (!typeContainsStructValue(*declaredType)) {
+                connectWholeUnpackedArray(baseName, *declaredType, RHSvalue.leaves);
+                return;
+            }
+
+            Type elementType = *declaredType;
+            elementType.unpacked_dims.clear();
+            const auto suffixes = unpackedIndexSuffixes(*declaredType);
+            std::vector<AggregateLeafBinding> elementPlan;
+            collectAggregateLeafPlan(elementType, "", {}, elementPlan);
+            const size_t leavesPerElement = elementPlan.size();
+            if (leavesPerElement == 0 ||
+                RHSvalue.leaves.size() != suffixes.size() * leavesPerElement) {
+                throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+            }
+
+            for (size_t i = 0; i < suffixes.size(); ++i) {
+                std::string lhsBase = baseName + suffixes[i];
+                std::vector<AggregateLeafBinding> lhsPlan;
+                collectAggregateLeafPlan(elementType, lhsBase, {}, lhsPlan);
+                if (lhsPlan.size() != leavesPerElement) {
+                    throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+                }
+
+                for (size_t j = 0; j < leavesPerElement; ++j) {
+                    const size_t rhsIndex = i * leavesPerElement + j;
+                    ExprValue rhsLeafValue{
+                        .type = lhsPlan[j].leaf_type,
+                        .scalar = RHSvalue.leaves[rhsIndex],
+                        .leaves = {},
+                        .leaf_paths = {},
+                    };
+                    DFGNode* rhsLeaf = coerceAssignmentExprToWidth(
+                        ctx, rhsLeafValue, lhsPlan[j].leaf_type, assignLoc).scalar;
+
+                    std::string outputName = lhsPlan[j].name;
+                    if (ctx.is_sequential) outputName += ".d";
+
+                    if (!ctx.subroutine_locals.count(outputName)) {
+                        recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+                    }
+                    connectNode(outputName, rhsLeaf);
+                    if (!ctx.is_sequential) {
+                        ctx.combDrivers[outputName] = rhsLeaf;
+                    }
+                }
+            }
+
+            if (ctx.is_sequential) {
+                recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
+            }
             return;
         }
     }
@@ -3967,6 +5730,11 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     if (targetDeclaredType) {
         currentSelectedType = *targetDeclaredType;
     }
+
+    bool hasDynamicBitSelect = false;
+    DFGNode* dynamicBitSelectorNode = nullptr;
+    Dimension dynamicBitDim;
+    Type dynamicBitTargetType;
 
     if (!selectors.empty()) {
         for (const auto* elemSelect : selectors) {
@@ -4006,15 +5774,30 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                         }
                     }
                 } catch (const std::runtime_error&) {
-                    throw CompilerError(
-                        "Dynamic index on LHS not supported for: " + baseName,
-                        resolveSourceLoc(assignExpr, ctx.sm));
+                    if (!currentSelectedType || currentSelectedType->packed_dims.empty()) {
+                        throw CompilerError(
+                            "Dynamic index on LHS not supported for: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    if (packedSuffixWidth(*currentSelectedType, 1) != 1) {
+                        throw CompilerError(
+                            "Dynamic index on LHS only supported for single-bit elements: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    hasDynamicBitSelect = true;
+                    dynamicBitSelectorNode = buildExprDFG(selectorExpr, ctx);
+                    dynamicBitDim = currentSelectedType->packed_dims.front();
+                    dynamicBitTargetType = *currentSelectedType;
                 }
             } else if (elemSelect->selector->kind == SyntaxKind::SimpleRangeSelect) {
                 const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                 try {
-                    int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params);
-                    int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params);
+                    int64_t left = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                        ctx.sm, *rangeSelect.left,
+                                                        &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                    int64_t right = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                         ctx.sm, *rangeSelect.right,
+                                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                     if (currentSelectedType && !currentSelectedType->packed_dims.empty()) {
                         const auto& dim = currentSelectedType->packed_dims.front();
                         int64_t elemWidth = packedSuffixWidth(*currentSelectedType, 1);
@@ -4039,8 +5822,12 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 // base +: width → high = base + width - 1, low = base
                 const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                 try {
-                    int64_t base  = evaluateConstantExpr(rangeSelect.left, ctx.params);
-                    int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params);
+                    int64_t base  = evaluateConstantExpr(rangeSelect.left, ctx.params,
+                                                         ctx.sm, *rangeSelect.left,
+                                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                    int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                         ctx.sm, *rangeSelect.right,
+                                                         &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                     rangeLow  = base;
                     rangeHigh = base + width - 1;
                 } catch (const std::runtime_error&) {
@@ -4084,7 +5871,9 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     }
 
     std::optional<Type> assignmentTargetType;
-    if (hasRangeSelect) {
+    if (hasDynamicBitSelect) {
+        assignmentTargetType = Type::makeInteger(1, false);
+    } else if (hasRangeSelect) {
         if (currentSelectedType) {
             assignmentTargetType = *currentSelectedType;
             assignmentTargetType->width =
@@ -4093,19 +5882,28 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     } else if (currentSelectedType) {
         assignmentTargetType = *currentSelectedType;
     }
-    if (right->kind == SyntaxKind::AssignmentPatternExpression) {
+    if (rhsNeedsAssignmentPatternContext) {
+        auto isPackedArrayTarget = [&]() {
+            return assignmentTargetType && !assignmentTargetType->isStruct() &&
+                   assignmentTargetType->unpacked_dims.empty() &&
+                   !assignmentTargetType->packed_dims.empty();
+        };
         if (!hasRangeSelect && assignmentTargetType &&
-            typeContainsStructValue(*assignmentTargetType)) {
-            RHSvalue = buildAssignmentPatternExprValueForTarget(
-                right->as<AssignmentPatternExpressionSyntax>(),
+            (typeContainsStructValue(*assignmentTargetType) || isPackedArrayTarget())) {
+            RHSvalue = buildValueForTargetType(
+                right,
                 *assignmentTargetType,
                 ctx,
-                assignLoc);
+                assignLoc,
+                false);
             RHSexprNode = RHSvalue.scalar;
-        } else {
+        } else if (right->kind == SyntaxKind::AssignmentPatternExpression) {
             throw CompilerError(
                 "Assignment patterns are only supported for whole unpacked arrays or struct literals",
                 assignLoc);
+        } else {
+            RHSvalue = buildExprValue(right, ctx);
+            RHSexprNode = RHSvalue.scalar;
         }
     }
     if (!hasRangeSelect && assignmentTargetType &&
@@ -4115,19 +5913,43 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 std::format("{} NOT a flop and assigned on seq. block", baseName),
                 resolveSourceLoc(assignExpr, ctx.sm));
         }
-        if (!sameAggregateStructTypedefShape(*assignmentTargetType, RHSvalue.type)) {
-            bool rhsStructAggregate = typeContainsStructValue(RHSvalue.type);
-            if (rhsStructAggregate) {
+        std::vector<AggregateLeafBinding> lhsPlan;
+        std::string lhsBase = baseName + indexSuffix;
+        collectAggregateLeafPlan(*assignmentTargetType, lhsBase, {}, lhsPlan);
+
+        if (!sameAggregateStructTypedefShape(*assignmentTargetType, RHSvalue.type) ||
+                RHSvalue.leaves.empty()) {
+            if (typeContainsStructValue(RHSvalue.type) &&
+                    !sameAggregateStructTypedefShape(*assignmentTargetType, RHSvalue.type)) {
                 throw CompilerError(
                     "whole-struct assignment requires matching typedef names",
                     assignLoc);
             }
-            throw CompilerError("struct/vector assignment is not supported", assignLoc);
+            // RHS is a scalar (integer or struct cast) bit-compatible with a packed struct LHS.
+            // Slice it into per-field SLICE nodes, MSB-first (declaration order).
+            if (!RHSvalue.scalar) {
+                throw CompilerError("struct/vector assignment is not supported", assignLoc);
+            }
+            // Compute each leaf's LSB offset inside the scalar.
+            int64_t cursor = 0; // accumulates from LSB end
+            std::vector<int64_t> lsbOffsets(lhsPlan.size());
+            for (int64_t i = static_cast<int64_t>(lhsPlan.size()) - 1; i >= 0; --i) {
+                lsbOffsets[i] = cursor;
+                cursor += lhsPlan[i].leaf_type.width;
+            }
+            RHSvalue.leaves.resize(lhsPlan.size());
+            for (size_t i = 0; i < lhsPlan.size(); ++i) {
+                int64_t lo = lsbOffsets[i];
+                int64_t hi = lo + lhsPlan[i].leaf_type.width - 1;
+                auto* loNode = ctx.graph.constant(lo);
+                auto* hiNode = ctx.graph.constant(hi);
+                auto* sliceNode = ctx.graph.slice(RHSvalue.scalar, hiNode, loNode);
+                sliceNode->type = lhsPlan[i].leaf_type;
+                sliceNode->loc = assignLoc;
+                RHSvalue.leaves[i] = sliceNode;
+            }
         }
 
-        std::vector<AggregateLeafBinding> lhsPlan;
-        std::string lhsBase = baseName + indexSuffix;
-        collectAggregateLeafPlan(*assignmentTargetType, lhsBase, {}, lhsPlan);
         if (RHSvalue.leaves.size() != lhsPlan.size()) {
             throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
         }
@@ -4164,7 +5986,13 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             typeContainsStructValue(RHSvalue.type) &&
             (!assignmentTargetType ||
              !typeContainsStructValue(*assignmentTargetType))) {
-        throw CompilerError("struct/vector assignment is not supported", assignLoc);
+        // Struct RHS assigned to a scalar LHS: concatenate field leaves MSB-first.
+        if (RHSvalue.leaves.empty()) {
+            throw CompilerError("struct/vector assignment is not supported", assignLoc);
+        }
+        RHSexprNode = ctx.graph.concat(RHSvalue.leaves);
+        RHSexprNode->type = Type::makeInteger(RHSvalue.type.width, false);
+        RHSexprNode->loc = assignLoc;
     }
 
     if (!RHSexprNode) {
@@ -4175,6 +6003,95 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         RHSvalue.scalar = RHSexprNode;
         RHSvalue = coerceAssignmentExprToWidth(ctx, RHSvalue, assignmentTargetType, assignLoc);
         RHSexprNode = RHSvalue.scalar;
+    }
+
+    // Dynamic single-bit LHS select: var[dyn_idx] = rhs
+    // For each bit k in the dimension, emit MUX(dyn_idx == k, rhs, prev_bit_k),
+    // then CONCAT all per-bit results MSB-first to drive the full target.
+    if (hasDynamicBitSelect) {
+        if (!memberSuffix.empty()) {
+            throw CompilerError(
+                "Member access after dynamic bit-select on LHS is not supported",
+                assignLoc);
+        }
+
+        std::string outputName;
+        if (ctx.is_sequential) {
+            if (isFlopName(baseName)) {
+                outputName = baseName + indexSuffix + ".d";
+            } else {
+                throw CompilerError(
+                    std::format("{} NOT a flop and assigned on seq. block", baseName),
+                    resolveSourceLoc(assignExpr, ctx.sm));
+            }
+        } else {
+            outputName = baseName + indexSuffix;
+        }
+
+        if (!ctx.subroutine_locals.count(outputName))
+            recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+
+        // Get the current driver (may come from a whole assignment or a materialized partial state).
+        DFGNode* currentDriver = nullptr;
+        if (auto* node = lookupTargetNode(ctx, outputName)) {
+            if (auto d = maybeDriver(node)) currentDriver = d->node;
+        }
+        if (!currentDriver && ctx.is_sequential) {
+            std::string qName = outputName;
+            if (qName.ends_with(".d")) qName = qName.substr(0, qName.length() - 2) + ".q";
+            if (auto it = ctx.local_nodes.find(qName); it != ctx.local_nodes.end())
+                currentDriver = it->second;
+            else if (auto* qNode = lookupNamedNodeInModule(ctx, qName))
+                currentDriver = qNode;
+        }
+        if (!currentDriver) {
+            throw CompilerError(
+                "Dynamic bit-select on LHS: no prior driver for " + outputName, assignLoc);
+        }
+
+        const int64_t totalWidth = dynamicBitTargetType.width;
+        const int64_t lo = std::min<int64_t>(dynamicBitDim.left, dynamicBitDim.right);
+        const int64_t hi = std::max<int64_t>(dynamicBitDim.left, dynamicBitDim.right);
+        const Type bitType = Type::makeInteger(1, false);
+
+        // Build per-bit MUX nodes indexed by LSB offset.
+        std::vector<DFGNode*> bitDrivers(static_cast<size_t>(totalWidth));
+        for (int64_t k = lo; k <= hi; ++k) {
+            int64_t offset = packedIndexOffsetFromLsb(dynamicBitDim, k);
+
+            auto* condNode = ctx.graph.eq(dynamicBitSelectorNode, ctx.graph.constant(k));
+            condNode->type = Type::makeInteger(1, false);
+            condNode->loc = assignLoc;
+
+            auto* prevBit = ctx.graph.slice(
+                currentDriver, ctx.graph.constant(offset), ctx.graph.constant(offset));
+            prevBit->type = bitType;
+            prevBit->loc = assignLoc;
+
+            auto* newBit = ctx.graph.mux(condNode, RHSexprNode, prevBit);
+            newBit->type = bitType;
+            newBit->loc = assignLoc;
+
+            bitDrivers[static_cast<size_t>(offset)] = newBit;
+        }
+
+        // CONCAT MSB-first to reassemble the full-width value.
+        std::vector<DFGNode*> parts;
+        parts.reserve(static_cast<size_t>(totalWidth));
+        for (int64_t b = totalWidth - 1; b >= 0; --b) {
+            parts.push_back(bitDrivers[static_cast<size_t>(b)]);
+        }
+        DFGNode* result = ctx.graph.concat(parts);
+        result->type = dynamicBitTargetType;
+        result->loc = assignLoc;
+
+        connectNode(outputName, result);
+        if (!ctx.is_sequential) {
+            ctx.combDrivers[outputName] = result;
+        } else {
+            recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
+        }
+        return;
     }
 
     // Range-select on LHS: canonical partial-write update
@@ -4219,8 +6136,13 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             outputName = baseName + indexSuffix;
         }
 
-        bool usePartialAggregate = ctx.partial_drivers.contains(outputName) &&
-                                   isPackedAggregateTarget(baseName, indexSuffix, ctx);
+        // If this target has a live partial state, a whole write must replace that
+        // state — not just call connectNode, which would leave a stale partial that
+        // restoreDrivers re-materialises (overwriting the correct driver).  The
+        // isPackedAggregateTarget check was too narrow: it rejected array-element
+        // targets (non-empty indexSuffix) even though they can also accumulate
+        // partial state from bit-select writes.
+        bool usePartialAggregate = ctx.partial_drivers.contains(outputName);
         if (!ctx.subroutine_locals.count(outputName))
             recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
 
@@ -4337,6 +6259,7 @@ static DFGNode* inlineSubroutineCall(
     sub.combDrivers.clear();
     sub.local_nodes.clear();
     sub.local_flop_names.clear();
+    sub.generate_scope_names.clear();
     sub.write_states.clear();
     sub.subroutine_locals.clear();
     sub.triggers = {};
@@ -4345,23 +6268,18 @@ static DFGNode* inlineSubroutineCall(
     sub.currently_inlining.insert(funcName);
     sub.current_write_origin = "subroutine:" + funcName;
 
-    // 4. Bind input formals to actual argument DFG nodes
+    // 4. Bind formals to actual argument DFG nodes.
     const auto* portList = decl->prototype->portList;
-    std::vector<const ExpressionSyntax*> actuals;
-    if (invoc.arguments) {
-        for (const auto* arg : invoc.arguments->parameters) {
-            if (arg->kind != SyntaxKind::OrderedArgument)
-                throw CompilerError("Only ordered function arguments are supported",
-                                    resolveSourceLoc(invoc, ctx.sm));
-            actuals.push_back(extractPortExpr(*arg->as<OrderedArgumentSyntax>().expr));
-        }
-    }
-
     std::vector<std::pair<std::string, const ExpressionSyntax*>> outputBindings;
+
+    struct FormalArg {
+        std::string name;
+        slang::parsing::TokenKind direction;
+    };
+    std::vector<FormalArg> formals;
 
     if (portList) {
         slang::parsing::TokenKind curDir = slang::parsing::TokenKind::InputKeyword; // default
-        size_t argIdx = 0;
         for (const auto* portBase : portList->ports) {
             if (portBase->kind != SyntaxKind::FunctionPort) continue;
             auto& port = portBase->as<FunctionPortSyntax>();
@@ -4371,31 +6289,99 @@ static DFGNode* inlineSubroutineCall(
                 curDir = port.direction.kind;
 
             std::string formalName(port.declarator->name.valueText());
-
-            if (curDir == slang::parsing::TokenKind::InputKeyword) {
-                if (argIdx >= actuals.size())
-                    throw CompilerError(
-                        "Too few arguments in call to function '" + funcName + "'",
-                        resolveSourceLoc(invoc, ctx.sm));
-                auto* argNode = buildExprDFG(actuals[argIdx++], ctx);
-                sub.combDrivers[formalName] = argNode;
-                sub.subroutine_locals.insert(formalName);  // input formals are locals in sub-ctx
-            } else if (curDir == slang::parsing::TokenKind::OutputKeyword) {
-                if (argIdx >= actuals.size())
-                    throw CompilerError(
-                        "Too few arguments in call to '" + funcName + "'",
-                        resolveSourceLoc(invoc, ctx.sm));
-                outputBindings.emplace_back(formalName, actuals[argIdx++]);
-                sub.subroutine_locals.insert(formalName);
-            } else if (curDir == slang::parsing::TokenKind::InOutKeyword) {
-                throw CompilerError(
-                    "inout ports not supported: " + formalName,
-                    resolveSourceLoc(invoc, ctx.sm));
-            } else if (curDir == slang::parsing::TokenKind::RefKeyword) {
-                throw CompilerError(
-                    "ref ports not supported: " + formalName,
-                    resolveSourceLoc(invoc, ctx.sm));
+            if (std::any_of(formals.begin(), formals.end(),
+                            [&](const FormalArg& formal) { return formal.name == formalName; })) {
+                throw CompilerError("Duplicate function formal: " + formalName,
+                                    resolveSourceLoc(invoc, ctx.sm));
             }
+            formals.push_back({formalName, curDir});
+        }
+    }
+
+    std::vector<const ExpressionSyntax*> actuals(formals.size(), nullptr);
+    if (invoc.arguments) {
+        if (!portList && !invoc.arguments->parameters.empty()) {
+            throw CompilerError("Function '" + funcName + "' does not declare arguments",
+                                resolveSourceLoc(invoc, ctx.sm));
+        }
+
+        size_t orderedIdx = 0;
+        bool seenNamed = false;
+        std::set<std::string> namedActuals;
+        for (const auto* arg : invoc.arguments->parameters) {
+            if (arg->kind == SyntaxKind::OrderedArgument) {
+                if (seenNamed) {
+                    throw CompilerError(
+                        "Ordered function arguments cannot appear after named arguments",
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                if (orderedIdx >= formals.size()) {
+                    throw CompilerError("Too many arguments in call to function '" + funcName + "'",
+                                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                actuals[orderedIdx++] = extractPortExpr(*arg->as<OrderedArgumentSyntax>().expr);
+            } else if (arg->kind == SyntaxKind::NamedArgument) {
+                seenNamed = true;
+                const auto& named = arg->as<NamedArgumentSyntax>();
+                std::string actualName(named.name.valueText());
+                if (!named.expr) {
+                    throw CompilerError(
+                        "Named function argument '." + actualName + "' requires an expression",
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                if (!namedActuals.insert(actualName).second) {
+                    throw CompilerError(
+                        "Duplicate named function argument: " + actualName,
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                auto formalIt = std::find_if(
+                    formals.begin(), formals.end(),
+                    [&](const FormalArg& formal) { return formal.name == actualName; });
+                if (formalIt == formals.end()) {
+                    throw CompilerError(
+                        "Unknown named function argument '." + actualName +
+                        "' in call to function '" + funcName + "'",
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                const size_t idx = static_cast<size_t>(std::distance(formals.begin(), formalIt));
+                if (actuals[idx]) {
+                    throw CompilerError(
+                        "Function argument '" + actualName + "' was already bound",
+                        resolveSourceLoc(*arg, ctx.sm));
+                }
+                actuals[idx] = extractPortExpr(*named.expr);
+            } else {
+                throw CompilerError(
+                    "Unsupported function argument kind: " + std::string(toString(arg->kind)),
+                    resolveSourceLoc(*arg, ctx.sm));
+            }
+        }
+    }
+
+    for (size_t i = 0; i < formals.size(); ++i) {
+        const auto& formal = formals[i];
+        const ExpressionSyntax* actual = actuals[i];
+        if (!actual) {
+            throw CompilerError(
+                "Missing argument '" + formal.name + "' in call to function '" + funcName + "'",
+                resolveSourceLoc(invoc, ctx.sm));
+        }
+
+        if (formal.direction == slang::parsing::TokenKind::InputKeyword) {
+            auto* argNode = buildExprDFG(actual, ctx);
+            sub.combDrivers[formal.name] = argNode;
+            sub.subroutine_locals.insert(formal.name);  // input formals are locals in sub-ctx
+        } else if (formal.direction == slang::parsing::TokenKind::OutputKeyword) {
+            outputBindings.emplace_back(formal.name, actual);
+            sub.subroutine_locals.insert(formal.name);
+        } else if (formal.direction == slang::parsing::TokenKind::InOutKeyword) {
+            throw CompilerError(
+                "inout ports not supported: " + formal.name,
+                resolveSourceLoc(invoc, ctx.sm));
+        } else if (formal.direction == slang::parsing::TokenKind::RefKeyword) {
+            throw CompilerError(
+                "ref ports not supported: " + formal.name,
+                resolveSourceLoc(invoc, ctx.sm));
         }
     }
 
@@ -4411,12 +6397,13 @@ static DFGNode* inlineSubroutineCall(
                 Type localType = resolveType(*dataDecl.type, sub.params, sub.namedTypeRegistry, &sub.pkgRegistry);
                 for (auto* d : dataDecl.declarators) {
                     Type declaredType = localType;
-                    auto unpacked = ResolveDimensions(d->dimensions, sub.params, &sub.sm);
+                    auto unpacked = ResolveDimensions(d->dimensions, sub.params, &sub.pkgRegistry, &sub.sm, &sub.namedTypeRegistry);
                     if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
                         unpacked.clear();
                     declaredType.unpacked_dims = unpacked;
                     std::string localName(d->name.valueText());
                     sub.subroutine_locals.insert(localName);
+                    sub.local_declared_types[localName] = declaredType;
                     if (declaredType.isStruct() || !declaredType.unpacked_dims.empty()) {
                         declareLocalAggregateValue(sub, localName, declaredType);
                     }
@@ -4466,6 +6453,43 @@ void resolveExpressionStatementInPlace(
 
     const auto expectedKind = ctx.is_sequential ? SyntaxKind::NonblockingAssignmentExpression :
                                                   SyntaxKind::AssignmentExpression;
+
+    // Compound assignment: x op= y  →  x = x op y
+    auto compoundOp = [&]() -> std::optional<std::function<DFGNode*(DFGNode*, DFGNode*)>> {
+        switch (expr->kind) {
+            case SyntaxKind::AddAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.add(a, b); };
+            case SyntaxKind::SubtractAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.sub(a, b); };
+            case SyntaxKind::MultiplyAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.mul(a, b); };
+            case SyntaxKind::AndAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.bitwiseAnd(a, b); };
+            case SyntaxKind::OrAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.bitwiseOr(a, b); };
+            case SyntaxKind::XorAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.bitwiseXor(a, b); };
+            case SyntaxKind::LogicalLeftShiftAssignmentExpression:
+            case SyntaxKind::ArithmeticLeftShiftAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.shl(a, b); };
+            case SyntaxKind::ArithmeticRightShiftAssignmentExpression:
+                return [&](DFGNode* a, DFGNode* b){ return ctx.graph.asr(a, b); };
+            default:
+                return std::nullopt;
+        }
+    }();
+
+    if (compoundOp) {
+        const auto& assignExpr = expr->as<slang::syntax::BinaryExpressionSyntax>();
+        auto loc = resolveSourceLoc(*exprStatement, ctx.sm);
+        DFGNode* lhsNode = buildExprDFG(assignExpr.left, ctx);
+        DFGNode* rhsNode = buildExprDFG(assignExpr.right, ctx);
+        DFGNode* combined = (*compoundOp)(lhsNode, rhsNode);
+        combined->loc = loc;
+        resolveAssignExpression(assignExpr, ctx, combined);
+        return;
+    }
+
     if (expr->kind != expectedKind){
         throw CompilerError(
         "Can only process assign expression. Current: " + std::string(toString(expr->kind)),
@@ -4498,7 +6522,8 @@ void resolveConditionalStatementInPlace(
     // only elaborate the reachable branch.
     try {
         int64_t predicateValue =
-            evaluateConstantExpr(predicateExpr, ctx.params, ctx.sm, *conditionalStatement);
+            evaluateConstantExpr(predicateExpr, ctx.params, ctx.sm, *conditionalStatement,
+                                 &ctx.pkgRegistry, &ctx.namedTypeRegistry);
         if (predicateValue) {
             executeConditionalBranch(*conditionalStatement->statement, ctx);
         } else if (conditionalStatement->elseClause) {
@@ -4542,37 +6567,47 @@ void resolveConditionalStatementInPlace(
 void resolveCaseStatementInPlace(
         const CaseStatementSyntax* caseStatement,
         ResolutionContext& ctx) {
-
+    bool uniqueCase = false;
     if (caseStatement->uniqueOrPriority) {
         auto keyword = caseStatement->uniqueOrPriority.kind;
-        if (keyword == slang::parsing::TokenKind::UniqueKeyword ||
-                keyword == slang::parsing::TokenKind::Unique0Keyword) {
-            throw CompilerError("unique/unique0 modifiers are not supported on case",
+        if (keyword == slang::parsing::TokenKind::UniqueKeyword) {
+            uniqueCase = true;
+        } else if (keyword == slang::parsing::TokenKind::Unique0Keyword) {
+            throw CompilerError("unique0 modifiers are not supported on case",
                                 resolveSourceLoc(*caseStatement, ctx.sm));
         }
     }
 
-    // Only support basic 'case', not casez/casex
     auto caseKeyword = caseStatement->caseKeyword.kind;
-    if (caseKeyword == slang::parsing::TokenKind::CaseZKeyword) {
-        throw CompilerError("casez not supported",
-                            resolveSourceLoc(*caseStatement, ctx.sm));
-    }
+    bool isCasez = (caseKeyword == slang::parsing::TokenKind::CaseZKeyword);
     if (caseKeyword == slang::parsing::TokenKind::CaseXKeyword) {
         throw CompilerError("casex not supported",
                             resolveSourceLoc(*caseStatement, ctx.sm));
     }
 
-    // Build the selector expression node
-    auto selectorNode = buildExprDFG(caseStatement->expr, ctx);
     const auto caseLoc = resolveSourceLoc(*caseStatement, ctx.sm);
     const auto baselineDrivers = snapshotDrivers(ctx);
+    const CaseExpressionKind selectorKind = classifyCaseExpr(caseStatement->expr, ctx);
+    const auto selectorConstValue = selectorKind == CaseExpressionKind::Constant
+        ? tryEvaluateCaseConstantExpr(caseStatement->expr, ctx)
+        : std::optional<int64_t>{};
 
-    // Collect info for each case branch — drivers only contains signals
-    // actually modified in that branch (diff against fallback)
+    if (isCasez && selectorKind == CaseExpressionKind::Constant) {
+        throw CompilerError(
+            "casez is not supported with a constant-expression selector", caseLoc);
+    }
+
     std::vector<CaseBranch> normalCases;
     std::optional<DriverMap> defaultDrivers;
     std::optional<PartialDriverMap> defaultPartialDrivers;
+    std::vector<int64_t> xSelectorValues;
+
+    struct PendingConstantSelectorBranch {
+        std::vector<DFGNode*> matches;
+        DriverMap modifiedDrivers;
+        PartialDriverMap modifiedPartialDrivers;
+    };
+    std::vector<PendingConstantSelectorBranch> pendingConstantBranches;
 
     for (const auto* item : caseStatement->items) {
         if (item->kind == SyntaxKind::DefaultCaseItem) {
@@ -4584,20 +6619,77 @@ void resolveCaseStatementInPlace(
         } else if (item->kind == SyntaxKind::StandardCaseItem) {
             const auto& caseItem = item->as<StandardCaseItemSyntax>();
 
-            if (caseItem.expressions.size() != 1) {
-                throw CompilerError("Multiple expressions per case item not yet supported",
-                                    resolveSourceLoc(*caseStatement, ctx.sm));
+            if (caseItem.expressions.empty()) {
+                throw CompilerError("Case item must have at least one expression",
+                                    resolveSourceLoc(caseItem, ctx.sm));
             }
 
-            int64_t caseValue = normalizeSelectorCode(
-                evaluateConstantExpr(caseItem.expressions[0], ctx.params, ctx.sm, *caseStatement, &ctx.pkgRegistry),
-                selectorNode,
-                caseLoc);
+            if (selectorKind == CaseExpressionKind::Constant) {
+                std::vector<DFGNode*> itemMatches;
+                itemMatches.reserve(caseItem.expressions.size());
+                for (const auto* caseExpr : caseItem.expressions) {
+                    if (classifyCaseExpr(caseExpr, ctx) != CaseExpressionKind::Variable) {
+                        throw CompilerError(
+                            "Constant-expression case requires variable case items",
+                            resolveSourceLoc(*caseExpr, ctx.sm));
+                    }
+                    itemMatches.push_back(normalizeCaseMatchExpr(
+                        ctx, caseExpr, *selectorConstValue, resolveSourceLoc(*caseExpr, ctx.sm)));
+                }
+
+                restoreDrivers(ctx, baselineDrivers);
+                executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
+                pendingConstantBranches.push_back({
+                    std::move(itemMatches),
+                    modifiedDriversSince(ctx, baselineDrivers),
+                    modifiedPartialDriversSince(ctx, baselineDrivers)
+                });
+                continue;
+            }
+
+            std::vector<int64_t> caseValues;
+            if (isCasez) {
+                for (const auto* caseExpr : caseItem.expressions) {
+                    auto pat = evaluateCasezPattern(
+                        caseExpr, ctx, resolveSourceLoc(*caseExpr, ctx.sm));
+                    if (pat.wildcard_mask == 0) {
+                        caseValues.push_back(pat.value);
+                    } else {
+                        int numWildcards = __builtin_popcountll(
+                            static_cast<uint64_t>(pat.wildcard_mask));
+                        int64_t numCombinations = 1LL << numWildcards;
+                        for (int64_t combo = 0; combo < numCombinations; ++combo) {
+                            int64_t concrete = pat.value;
+                            int64_t remaining = pat.wildcard_mask;
+                            int comboIdx = 0;
+                            while (remaining) {
+                                int bit = __builtin_ctzll(static_cast<uint64_t>(remaining));
+                                if ((combo >> comboIdx) & 1) concrete |= (1LL << bit);
+                                remaining &= remaining - 1;
+                                ++comboIdx;
+                            }
+                            caseValues.push_back(concrete);
+                        }
+                    }
+                }
+            } else {
+                caseValues.reserve(caseItem.expressions.size());
+                for (const auto* caseExpr : caseItem.expressions) {
+                    if (classifyCaseExpr(caseExpr, ctx) != CaseExpressionKind::Constant) {
+                        throw CompilerError(
+                            "Variable-expression case requires constant case items",
+                            resolveSourceLoc(*caseExpr, ctx.sm));
+                    }
+                    caseValues.push_back(evaluateConstantExpr(
+                        caseExpr, ctx.params, ctx.sm, *caseExpr,
+                        &ctx.pkgRegistry, &ctx.namedTypeRegistry));
+                }
+            }
 
             restoreDrivers(ctx, baselineDrivers);
             executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
             normalCases.push_back({
-                {caseValue},
+                std::move(caseValues),
                 modifiedDriversSince(ctx, baselineDrivers),
                 modifiedPartialDriversSince(ctx, baselineDrivers)
             });
@@ -4608,6 +6700,114 @@ void resolveCaseStatementInPlace(
         }
     }
 
+    DFGNode* selectorNode = nullptr;
+    bool uncoveredToX = uniqueCase && !defaultDrivers.has_value();
+    if (selectorKind == CaseExpressionKind::Constant) {
+        int selectorWidth = constantExprWidth(caseStatement->expr, &ctx.sm, &ctx.params,
+                                              &ctx.namedTypeRegistry, &ctx.pkgRegistry);
+        if (selectorWidth != 1) {
+            throw CompilerError("Constant-expression case selector must be exactly 1 bit wide", caseLoc);
+        }
+        if (*selectorConstValue != 0 && *selectorConstValue != 1) {
+            throw CompilerError("Constant-expression case selector must be 1'b0 or 1'b1", caseLoc);
+        }
+
+        std::vector<DFGNode*> itemSelectorBits;
+        itemSelectorBits.reserve(pendingConstantBranches.size());
+        normalCases.clear();
+        normalCases.reserve(pendingConstantBranches.size());
+        for (auto& branch : pendingConstantBranches) {
+            DFGNode* itemMatch = nullptr;
+            for (DFGNode* match : branch.matches) {
+                itemMatch = itemMatch
+                    ? lowerLogicalBinary(DFGOp::BITWISE_OR, itemMatch, match, ctx, caseLoc)
+                    : match;
+            }
+            if (!itemMatch) {
+                throw CompilerError("Case item must have at least one expression", caseLoc);
+            }
+            itemSelectorBits.push_back(itemMatch);
+            normalCases.push_back({
+                {},
+                std::move(branch.modifiedDrivers),
+                std::move(branch.modifiedPartialDrivers)
+            });
+        }
+
+        if (itemSelectorBits.empty()) {
+            selectorNode = ctx.graph.constant(0);
+            selectorNode->type = Type::makeInteger(1, false);
+            selectorNode->loc = caseLoc;
+        } else if (itemSelectorBits.size() == 1) {
+            selectorNode = itemSelectorBits.front();
+        } else {
+            selectorNode = ctx.graph.concat(itemSelectorBits);
+            selectorNode->loc = caseLoc;
+        }
+
+        int64_t selectorPatterns = selectorCodeCountOrThrow(selectorNode, caseLoc);
+        for (int64_t pattern = 0; pattern < selectorPatterns; ++pattern) {
+            int firstMatch = -1;
+            int matchCount = 0;
+            for (size_t itemIndex = 0; itemIndex < itemSelectorBits.size(); ++itemIndex) {
+                bool matched = ((pattern >> (itemSelectorBits.size() - 1 - itemIndex)) & 1LL) != 0;
+                if (!matched) continue;
+                if (firstMatch < 0) firstMatch = static_cast<int>(itemIndex);
+                ++matchCount;
+            }
+            if (matchCount == 0) continue;
+            if (uniqueCase && matchCount > 1) {
+                xSelectorValues.push_back(pattern);
+                continue;
+            }
+            normalCases[static_cast<size_t>(firstMatch)].selectorValues.push_back(pattern);
+        }
+    } else {
+        selectorNode = buildExprDFG(caseStatement->expr, ctx);
+
+        if (isCasez && uniqueCase) {
+            // unique casez: values claimed by multiple branches → X; others → first branch
+            std::map<int64_t, size_t> firstClaim;
+            std::set<int64_t> conflicted;
+            for (size_t i = 0; i < normalCases.size(); ++i) {
+                for (int64_t sv : normalCases[i].selectorValues) {
+                    int64_t normalized = normalizeSelectorCode(sv, selectorNode, caseLoc);
+                    auto [it, inserted] = firstClaim.emplace(normalized, i);
+                    if (!inserted && it->second != i)
+                        conflicted.insert(normalized);
+                }
+            }
+            for (auto& branch : normalCases) {
+                std::vector<int64_t> kept;
+                for (int64_t sv : branch.selectorValues) {
+                    int64_t normalized = normalizeSelectorCode(sv, selectorNode, caseLoc);
+                    if (!conflicted.count(normalized)) kept.push_back(normalized);
+                }
+                branch.selectorValues = std::move(kept);
+            }
+            for (int64_t sv : conflicted) xSelectorValues.push_back(sv);
+        } else {
+            std::set<int64_t> seenCaseValues;
+            for (auto& branch : normalCases) {
+                std::vector<int64_t> kept;
+                for (int64_t sv : branch.selectorValues) {
+                    int64_t normalized = normalizeSelectorCode(sv, selectorNode, caseLoc);
+                    if (!seenCaseValues.insert(normalized).second) {
+                        if (!isCasez) {
+                            throw CompilerError(
+                                std::format("Duplicate case item value {}", normalized),
+                                caseLoc);
+                        }
+                        // casez priority: first match wins, skip later claims
+                    } else {
+                        kept.push_back(normalized);
+                    }
+                }
+                branch.selectorValues = std::move(kept);
+            }
+        }
+    }
+
     restoreDrivers(ctx, baselineDrivers);
     mergeCaseBranches(ctx,
                       selectorNode,
@@ -4615,7 +6815,9 @@ void resolveCaseStatementInPlace(
                       defaultDrivers,
                       defaultPartialDrivers,
                       baselineDrivers,
-                      caseLoc);
+                      caseLoc,
+                      xSelectorValues,
+                      uncoveredToX);
 }
 
 void resolveSequentialBlockStatementInPlace(
@@ -4630,15 +6832,17 @@ void resolveSequentialBlockStatementInPlace(
                     resolveSourceLoc(*item, ctx.sm));
             }
             auto& dataDecl = item->as<DataDeclarationSyntax>();
-            Type localType = resolveType(*dataDecl.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
+            Type localType = resolveType(
+                *dataDecl.type, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
             for (auto* decl : dataDecl.declarators) {
                 Type declaredType = localType;
-                auto unpacked = ResolveDimensions(decl->dimensions, ctx.params, &ctx.sm);
+                auto unpacked = ResolveDimensions(decl->dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm, &ctx.namedTypeRegistry);
                 if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
                     unpacked.clear();
                 declaredType.unpacked_dims = unpacked;
                 std::string localName(decl->name.valueText());
                 ctx.subroutine_locals.insert(localName);
+                ctx.local_declared_types[localName] = declaredType;
                 if (declaredType.isStruct() || !declaredType.unpacked_dims.empty()) {
                     declareLocalAggregateValue(ctx, localName, declaredType);
                 }
@@ -4683,7 +6887,7 @@ void resolveForLoopStatementInPlace(
         decl.declarator->initializer->expr.get(), ctx.params, ctx.sm, *forLoop);
 
     ParameterContext iterCtx = ctx.params;
-    iterCtx.values[loopVar] = initVal;
+    iterCtx.values[loopVar] = integerConstant(initVal);
 
     while (evaluateConstantExpr(forLoop->stopExpr, iterCtx, ctx.sm, *forLoop)) {
         ResolutionContext iterBodyCtx {
@@ -4692,6 +6896,7 @@ void resolveForLoopStatementInPlace(
             ctx.domain_facts, ctx.occurrence,
             ctx.combDrivers,
             ctx.instance_path, ctx.local_nodes, ctx.local_declared_types, ctx.local_aggregate_bindings, ctx.local_flop_names,
+            ctx.generate_scope_names,
             ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
             ctx.moduleLookup, ctx.globalImports,
             ctx.current_write_origin, ctx.partial_drivers, ctx.write_states,
@@ -4704,7 +6909,7 @@ void resolveForLoopStatementInPlace(
         ctx.write_states = iterBodyCtx.write_states;
 
         iterCtx.values[loopVar] =
-            evaluateStepExpr(forLoop->steps[0], loopVar, iterCtx);
+            integerConstant(evaluateStepExpr(forLoop->steps[0], loopVar, iterCtx));
     }
 }
 
@@ -4744,6 +6949,9 @@ void resolveStatementInPlace(
             DFGNode* val = ret.returnValue ? buildExprDFG(ret.returnValue, ctx) : nullptr;
             throw ReturnValue{val};
         }
+
+        case SyntaxKind::EmptyStatement:
+            break;
 
         default:
             throw CompilerError(
@@ -4865,9 +7073,10 @@ ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterCont
         *signal.type.syntax,
         ctx,
         namedTypeRegistry,
-        pkgRegistry);
+        pkgRegistry,
+        sm);
 
-    if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, sm);
+    if (signal.dimensions.syntax) resolved.type.unpacked_dims = ResolveDimensions(*signal.dimensions.syntax, ctx, pkgRegistry, sm, &namedTypeRegistry);
 
     // For some reason getting 1 dimension of [0:0]
     if(resolved.type.unpacked_dims.size() == 1 && resolved.type.unpacked_dims[0].left == 0 && resolved.type.unpacked_dims[0].right == 0){
@@ -4980,7 +7189,10 @@ void prePopulateFlopNodes(DFG& graph, FlopInfo& flop) {
 
 ParameterContext parseParameterValueAssignment(
         const ParameterValueAssignmentSyntax& paramAssign,
-        const ParameterContext& evalCtx) {
+        const ParameterContext& evalCtx,
+        const PackageRegistry& pkgRegistry,
+        const slang::SourceManager& sm,
+        const NamedTypeRegistry* namedTypeRegistry = nullptr) {
     ParameterContext result;
     for (const auto* param : paramAssign.parameters) {
         if (param->kind == SyntaxKind::OrderedParamAssignment) {
@@ -4993,8 +7205,34 @@ ParameterContext parseParameterValueAssignment(
                 throw CompilerError(
                     "Named parameter '" + paramName + "' has no value");
             }
-            int64_t value = evaluateConstantExpr(named.expr, evalCtx);
-            result.values[paramName] = static_cast<int>(value);
+            if (named.expr->kind == SyntaxKind::IdentifierName) {
+                std::string name(named.expr->as<IdentifierNameSyntax>().identifier.valueText());
+                auto it = evalCtx.values.find(name);
+                if (it == evalCtx.values.end()) {
+                    throw CompilerError(
+                        "Parameter '" + name + "' not found in context",
+                        resolveSourceLoc(*named.expr, sm));
+                }
+                result.values[paramName] = it->second;
+            } else if (named.expr->kind == SyntaxKind::ScopedName) {
+                const auto& scoped = named.expr->as<ScopedNameSyntax>();
+                std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                std::string itemName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                auto pkgIt = pkgRegistry.find(pkgName);
+                if (pkgIt == pkgRegistry.end()) {
+                    throw CompilerError("Unknown package: " + pkgName, resolveSourceLoc(*named.expr, sm));
+                }
+                auto constantIt = pkgIt->second.constants.find(itemName);
+                if (constantIt == pkgIt->second.constants.end()) {
+                    throw CompilerError(
+                        "Unknown package constant: " + pkgName + "::" + itemName,
+                        resolveSourceLoc(*named.expr, sm));
+                }
+                result.values[paramName] = constantIt->second;
+            } else {
+                result.values[paramName] =
+                    integerConstant(evaluateConstantExpr(named.expr, evalCtx, &pkgRegistry, namedTypeRegistry, &sm));
+            }
         } else {
             throw CompilerError(
                 "Unsupported parameter assignment kind: " +
@@ -5116,8 +7354,41 @@ void resolveNamedPortConnection(
     // Check if input
     if (subInputNames.contains(portName)) {
         if (!named.expr) {
-            throw CompilerError(
-                "Input port '" + portName + "' requires a connection expression");
+            if (named.openParen.kind != slang::parsing::TokenKind::Unknown)
+                throw CompilerError(
+                    "Input port '" + portName + "' requires a connection expression",
+                    resolveSourceLoc(named, ctx.sm));
+            // .portName (no parens) = implicit connection to same-named signal
+            auto* port = findInputNode(resolvedSub, portName);
+            if (!port) throw CompilerError("Input port '" + portName + "' not found");
+            if (port->type.isStruct() || !port->type.unpacked_dims.empty())
+                throw CompilerError(
+                    "Implicit port connection for aggregate input port '" + portName + "' not supported",
+                    resolveSourceLoc(named, ctx.sm));
+            auto* driver = lookupNamedNodeInModule(ctx, portName);
+            if (!driver) throw CompilerError(
+                "Cannot find signal '" + portName + "' for implicit port connection",
+                resolveSourceLoc(named, ctx.sm));
+            binding.inputs.push_back(ModuleInstanceInputBinding{
+                .port_name = portName,
+                .leaf_name = portName,
+                .path = {},
+                .driver = DFGOutput(driver),
+            });
+            if (ctx.domain_facts) {
+                auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
+                facts.child_input_connections.push_back(ChildInputConnectionFact{
+                    .child_instance_path = appendInstancePath(
+                        ctx.occurrence.instance_path, binding.instance_name),
+                    .child_module_name = resolvedSub.name,
+                    .child_port = portName,
+                    .expr_kind = ConnectionExprKind::SimpleIdentifier,
+                    .parent_signal_name = portName,
+                    .diagnostic_expr_kind = "ImplicitPortConnection",
+                    .loc = resolveSourceLoc(named, ctx.sm),
+                });
+            }
+            return;
         }
         auto* expr = extractPortExpr(*named.expr);
         auto* port = findInputNode(resolvedSub, portName);
@@ -5157,8 +7428,22 @@ void resolveNamedPortConnection(
         }
     } else if (subOutputNames.contains(portName)) {
         if (!named.expr) {
-            throw CompilerError(
-                "Output port '" + portName + "' requires a connection expression");
+            if (named.openParen.kind != slang::parsing::TokenKind::Unknown) return;  // .portName() = explicitly unconnected
+            // .portName (no parens) = implicit connection to same-named signal
+            auto* outputPort = findOutputNode(resolvedSub, portName);
+            if (!outputPort) throw CompilerError("Output port '" + portName + "' not found");
+            auto loc = resolveSourceLoc(named, ctx.sm);
+            if (outputPort->type.isStruct() || !outputPort->type.unpacked_dims.empty()) {
+                connectOutputPortLeaves(graph, binding, *outputPort, portName, ctx, loc);
+                return;
+            }
+            auto* placeholder = getOrCreateOutputPlaceholder(
+                graph, binding, portName, portName, {}, outputPort->type);
+            recordFullWrite(ctx, portName, loc,
+                std::format("module-output:{}:{}", binding.instance_name, portName));
+            if (auto* target = lookupTargetNode(ctx, portName))
+                graph.connectDriver(target, DFGOutput(placeholder));
+            return;
         }
         auto* expr = extractPortExpr(*named.expr);
         auto* outputPort = findOutputNode(resolvedSub, portName);
@@ -5171,13 +7456,37 @@ void resolveNamedPortConnection(
             return;
         } else if (expr->kind == SyntaxKind::IdentifierName) {
             connectName = std::string(expr->as<IdentifierNameSyntax>().identifier.valueText());
+            auto eloc = resolveSourceLoc(*expr, ctx.sm);
             auto* placeholder = getOrCreateOutputPlaceholder(
                 graph, binding, portName, portName, {}, outputPort->type);
-            recordFullWrite(
-                ctx, connectName, resolveSourceLoc(*expr, ctx.sm),
-                std::format("module-output:{}:{}", binding.instance_name, portName));
-            if (auto* target = lookupTargetNode(ctx, connectName)) {
-                graph.connectDriver(target, DFGOutput(placeholder));
+            placeholder->loc = eloc;
+
+            // When the parent variable is a packed struct but the port is a plain
+            // logic vector, reinterpret the scalar port output into individual struct
+            // field signals via SLICE nodes — mirroring buildAggregateLeavesFromScalar
+            // on the input side. Without this, field signals remain at their CONST 0
+            // defaults because lookupTargetNode on the aggregate name finds nothing.
+            const Type* parentType = lookupDeclaredType(connectName, ctx);
+            if (parentType && parentType->isPackedStruct()) {
+                ExprValue aggrValue = buildAggregateLeavesFromScalar(
+                    ExprValue{.type = outputPort->type, .scalar = placeholder,
+                              .leaves = {}, .leaf_paths = {}},
+                    *parentType, ctx, eloc);
+                std::vector<AggregateLeafBinding> plan;
+                collectAggregateLeafPlan(*parentType, connectName, {}, plan);
+                for (size_t i = 0; i < plan.size(); ++i) {
+                    recordFullWrite(ctx, plan[i].name, eloc,
+                                   std::format("module-output:{}:{}", binding.instance_name, portName));
+                    if (auto* target = lookupTargetNode(ctx, plan[i].name)) {
+                        graph.connectDriver(target, DFGOutput(aggrValue.leaves[i]));
+                    }
+                }
+            } else {
+                recordFullWrite(ctx, connectName, eloc,
+                                std::format("module-output:{}:{}", binding.instance_name, portName));
+                if (auto* target = lookupTargetNode(ctx, connectName)) {
+                    graph.connectDriver(target, DFGOutput(placeholder));
+                }
             }
             return;
         } else if (expr->kind == SyntaxKind::IdentifierSelectName) {
@@ -5377,14 +7686,14 @@ int64_t evaluateStepExpr(
             auto it = ctx.values.find(loopVar);
             if (it == ctx.values.end())
                 throw CompilerError("Loop variable '" + loopVar + "' not found in context during increment");
-            return it->second + 1;
+            return it->second.requireInt64("Loop variable '" + loopVar + "'") + 1;
         }
         case SyntaxKind::PostdecrementExpression:
         case SyntaxKind::UnaryPredecrementExpression: {
             auto it = ctx.values.find(loopVar);
             if (it == ctx.values.end())
                 throw CompilerError("Loop variable '" + loopVar + "' not found in context during decrement");
-            return it->second - 1;
+            return it->second.requireInt64("Loop variable '" + loopVar + "'") - 1;
         }
         default:
             throw CompilerError(
@@ -5460,6 +7769,118 @@ static std::set<std::string> collectNBATargets(const SyntaxList<MemberSyntax>& m
     return result;
 }
 
+static void collectGenerateNBATargetsFromMember(const MemberSyntax* member,
+                                                const ParameterContext& ctx,
+                                                const slang::SourceManager& sm,
+                                                std::set<std::string>& out);
+
+static void collectGenerateNBATargetsFromMembers(const SyntaxList<MemberSyntax>& members,
+                                                 const ParameterContext& ctx,
+                                                 const slang::SourceManager& sm,
+                                                 std::set<std::string>& out) {
+    auto directTargets = collectNBATargets(members);
+    out.insert(directTargets.begin(), directTargets.end());
+    for (const auto* member : members) {
+        collectGenerateNBATargetsFromMember(member, ctx, sm, out);
+    }
+}
+
+static void collectGenerateNBATargetsFromSelectedBlock(const MemberSyntax* block,
+                                                       const ParameterContext& ctx,
+                                                       const slang::SourceManager& sm,
+                                                       std::set<std::string>& out) {
+    if (!block) return;
+    if (block->kind == SyntaxKind::GenerateBlock) {
+        collectGenerateNBATargetsFromMembers(
+            block->as<GenerateBlockSyntax>().members, ctx, sm, out);
+    } else {
+        collectGenerateNBATargetsFromMember(block, ctx, sm, out);
+    }
+}
+
+static void collectGenerateNBATargetsFromMember(const MemberSyntax* member,
+                                                const ParameterContext& ctx,
+                                                const slang::SourceManager& sm,
+                                                std::set<std::string>& out) {
+    switch (member->kind) {
+        case SyntaxKind::GenerateRegion: {
+            collectGenerateNBATargetsFromMembers(
+                member->as<GenerateRegionSyntax>().members, ctx, sm, out);
+            break;
+        }
+        case SyntaxKind::GenerateBlock: {
+            collectGenerateNBATargetsFromMembers(
+                member->as<GenerateBlockSyntax>().members, ctx, sm, out);
+            break;
+        }
+        case SyntaxKind::IfGenerate: {
+            const auto& ifGen = member->as<IfGenerateSyntax>();
+            int64_t cond = evaluateConstantExpr(ifGen.condition, ctx, sm, ifGen);
+            const MemberSyntax* selectedBlock = cond ? ifGen.block
+                : (ifGen.elseClause
+                   ? static_cast<const MemberSyntax*>(ifGen.elseClause->clause.get()) : nullptr);
+            collectGenerateNBATargetsFromSelectedBlock(selectedBlock, ctx, sm, out);
+            break;
+        }
+        case SyntaxKind::LoopGenerate: {
+            const auto& loopGen = member->as<LoopGenerateSyntax>();
+            std::string genvarName(loopGen.identifier.valueText());
+            ParameterContext iterCtx = ctx;
+            iterCtx.values[genvarName] =
+                integerConstant(evaluateConstantExpr(loopGen.initialExpr, ctx, sm, loopGen));
+
+            while (evaluateConstantExpr(loopGen.stopExpr, iterCtx, sm, loopGen)) {
+                // Inject localparams declared in the loop body before scanning the block.
+                if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
+                    for (const auto* m : loopGen.block->as<GenerateBlockSyntax>().members) {
+                        if (m->kind != SyntaxKind::ParameterDeclarationStatement) continue;
+                        for (const auto& param : extractParameter(
+                                m->as<ParameterDeclarationStatementSyntax>().parameter, {})) {
+                            if (param.defaultValue)
+                                iterCtx.values[param.name] =
+                                    integerConstant(evaluateConstantExpr(
+                                        param.defaultValue, iterCtx, sm, *m));
+                        }
+                    }
+                }
+                collectGenerateNBATargetsFromSelectedBlock(loopGen.block, iterCtx, sm, out);
+                iterCtx.values[genvarName] =
+                    integerConstant(evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx));
+            }
+            break;
+        }
+        case SyntaxKind::CaseGenerate: {
+            const auto& caseGen = member->as<CaseGenerateSyntax>();
+            int64_t selector = evaluateConstantExpr(caseGen.condition, ctx, sm, caseGen);
+
+            const MemberSyntax* selectedBlock = nullptr;
+            const MemberSyntax* defaultBlock = nullptr;
+            for (const auto* item : caseGen.items) {
+                if (item->kind == SyntaxKind::DefaultCaseItem) {
+                    const auto& defItem = item->as<DefaultCaseItemSyntax>();
+                    defaultBlock = static_cast<const MemberSyntax*>(defItem.clause.get());
+                } else if (item->kind == SyntaxKind::StandardCaseItem) {
+                    if (selectedBlock) continue;
+                    const auto& stdItem = item->as<StandardCaseItemSyntax>();
+                    for (size_t ei = 0; ei < stdItem.expressions.size(); ++ei) {
+                        int64_t val = evaluateConstantExpr(
+                            stdItem.expressions[ei], ctx, sm, stdItem);
+                        if (val == selector) {
+                            selectedBlock = static_cast<const MemberSyntax*>(stdItem.clause.get());
+                            break;
+                        }
+                    }
+                }
+            }
+            collectGenerateNBATargetsFromSelectedBlock(
+                selectedBlock ? selectedBlock : defaultBlock, ctx, sm, out);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 static void declareLocalAggregateValue(ResolutionContext& ctx,
                                        const std::string& name,
                                        const Type& type) {
@@ -5495,10 +7916,11 @@ static void resolveGenerateScopeDecls(
                                   const DeclaratorSyntax& decl,
                                   bool isFlop) {
         std::string name(decl.name.valueText());
-        Type type = resolveType(typeSyntax, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry);
+        Type type = resolveType(
+            typeSyntax, ctx.params, ctx.namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
 
         // Resolve unpacked dimensions from the declarator
-        auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.sm);
+        auto unpacked = ResolveDimensions(decl.dimensions, ctx.params, &ctx.pkgRegistry, &ctx.sm, &ctx.namedTypeRegistry);
         // ResolveDimensions returns [{0,0}] for empty dims — clear it for scalars
         if (unpacked.size() == 1 && unpacked[0].left == 0 && unpacked[0].right == 0)
             unpacked.clear();
@@ -5528,9 +7950,12 @@ static void resolveGenerateScopeDecls(
                 const std::string& localLeafName = localLeafPlan[i].name;
                 ctx.local_nodes[localLeafName + ".d"] = flop.binding.d_leaves[i];
                 ctx.local_nodes[localLeafName + ".q"] = flop.binding.q_leaves[i];
+                ctx.generate_scope_names.insert(localLeafName + ".d");
+                ctx.generate_scope_names.insert(localLeafName + ".q");
             }
             if (flop.binding.aggregate_leaves.size() == 1) {
                 ctx.local_nodes[name] = flop.binding.q_leaves.front();
+                ctx.generate_scope_names.insert(name);
             }
             ctx.local_declared_types[name] = type;
             ctx.local_aggregate_bindings[name] = ModuleNodeBinding{
@@ -5556,6 +7981,7 @@ static void resolveGenerateScopeDecls(
             ctx.local_aggregate_bindings[name] = std::move(binding);
             for (const auto& leaf : localLeafPlan) {
                 ctx.local_nodes[leaf.name] = leaf.leaf;
+                ctx.generate_scope_names.insert(leaf.name);
             }
 
             if (!ctx.instance_path.empty()) {
@@ -5619,18 +8045,169 @@ static void resolveGenerateScopeDecls(
     const std::set<std::string>& nbaTargets,
     ResolutionContext& ctx);
 
+static void registerGenerateLocalTypedefs(const SyntaxList<MemberSyntax>& members,
+                                          const ResolutionContext& ctx,
+                                          ParameterContext& scopeParams,
+                                          NamedTypeRegistry& namedTypeRegistry,
+                                          EnumMemberMap& enumMemberValues) {
+    for (const auto* member : members) {
+        if (member->kind != SyntaxKind::TypedefDeclaration) continue;
+        const auto& syntax = member->as<TypedefDeclarationSyntax>();
+        std::string typeName(syntax.name.valueText());
+        if (namedTypeRegistry.contains(typeName)) {
+            throw CompilerError(
+                "Duplicate typedef in generate scope: " + typeName,
+                resolveSourceLoc(syntax, ctx.sm));
+        }
+
+        if (syntax.type->kind == SyntaxKind::EnumType) {
+            const auto& enumSyntax = syntax.type->as<EnumTypeSyntax>();
+            int width = 32;
+            if (enumSyntax.baseType) {
+                Type base = resolveType(
+                    *enumSyntax.baseType, scopeParams, namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
+                width = base.width;
+            }
+
+            std::vector<EnumMember> members;
+            int64_t nextValue = 0;
+            for (const auto* decl : enumSyntax.members) {
+                int64_t value = nextValue;
+                if (decl->initializer) {
+                    value = evaluateConstantExpr(decl->initializer->expr, scopeParams, &ctx.pkgRegistry);
+                }
+                members.push_back({std::string(decl->name.valueText()), value});
+                nextValue = value + 1;
+            }
+
+            Type enumType = Type::makeEnum(typeName, width, members);
+            namedTypeRegistry[typeName] = enumType;
+            for (const auto& enumMember : members) {
+                scopeParams.values[enumMember.name] =
+                    ConstantValue::bits(enumType, enumMember.value);
+                enumMemberValues[enumMember.name] = {enumMember.value, enumType};
+            }
+            continue;
+        }
+
+        if (syntax.type->kind == SyntaxKind::StructType) {
+            const auto& structSyntax = syntax.type->as<StructUnionTypeSyntax>();
+            std::vector<StructField> fields;
+            std::set<std::string> seenNames;
+            for (const auto* fieldMember : structSyntax.members) {
+                if (fieldMember->type->kind == SyntaxKind::StructType ||
+                    fieldMember->type->kind == SyntaxKind::UnionType) {
+                    throw CompilerError("anonymous struct declarations are not supported",
+                                        resolveSourceLoc(*fieldMember, ctx.sm));
+                }
+                Type memberType = resolveType(
+                    *fieldMember->type, scopeParams, namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
+                for (const auto* declarator : fieldMember->declarators) {
+                    if (declarator->initializer) {
+                        throw CompilerError("struct member initializers/defaults are not supported",
+                                            resolveSourceLoc(*declarator, ctx.sm));
+                    }
+                    if (!declarator->dimensions.empty()) {
+                        throw CompilerError("struct fields cannot be unpacked arrays",
+                                            resolveSourceLoc(*declarator, ctx.sm));
+                    }
+                    std::string fieldName(declarator->name.valueText());
+                    if (!seenNames.insert(fieldName).second) {
+                        throw CompilerError(
+                            "duplicate field name in struct typedef '" + typeName + "': " + fieldName,
+                            resolveSourceLoc(*declarator, ctx.sm));
+                    }
+                    fields.push_back({.name = fieldName, .type = std::make_shared<Type>(memberType)});
+                }
+            }
+
+            namedTypeRegistry[typeName] = Type::makeStruct(
+                typeName,
+                std::format("{}::{}", ctx.instance_path.empty() ? ctx.thisModule->name : ctx.instance_path,
+                            typeName),
+                !structSyntax.packed.isMissing(),
+                std::move(fields));
+            continue;
+        }
+
+        throw CompilerError(
+            "Only enum and struct typedefs are supported in generate scope",
+            resolveSourceLoc(syntax, ctx.sm));
+    }
+}
+
+static void registerGenerateLocalParams(
+        const SyntaxList<MemberSyntax>& members,
+        const ResolutionContext& ctx,
+        ParameterContext& scopeParams,
+        const NamedTypeRegistry& namedTypeRegistry) {
+    for (const auto* member : members) {
+        if (member->kind != SyntaxKind::ParameterDeclarationStatement) continue;
+        const auto& statement = member->as<ParameterDeclarationStatementSyntax>();
+        auto unresolved = extractParameter(statement.parameter, {});
+        for (const auto& param : unresolved) {
+            if (!param.defaultValue)
+                throw CompilerError("localparam '" + param.name + "' must have a default value",
+                                    resolveSourceLoc(statement, ctx.sm));
+            Param resolved = resolveParameter(
+                param, ctx.params, scopeParams, true,
+                &namedTypeRegistry, &ctx.pkgRegistry, &ctx.sm);
+            if (!ctx.instance_path.empty())
+                resolved.name = ctx.instance_path + "." + resolved.name;
+            ctx.thisModule->localparams.push_back(std::move(resolved));
+        }
+    }
+}
+
 // Resolve a list of generate-block members into the current ResolutionContext
 void resolveGenerateMembersInPlace(
         const SyntaxList<MemberSyntax>& members,
         ResolutionContext& ctx) {
-    // Pre-scan: find all flop names (LHS of non-blocking assigns) in this scope
+    ParameterContext scopeParams = ctx.params;
+    NamedTypeRegistry scopeNamedTypes = ctx.namedTypeRegistry;
+    EnumMemberMap scopeEnumMemberValues = ctx.enumMemberValues;
+    registerGenerateLocalTypedefs(
+        members, ctx, scopeParams, scopeNamedTypes, scopeEnumMemberValues);
+    registerGenerateLocalParams(members, ctx, scopeParams, scopeNamedTypes);
+    ResolutionContext scopeCtx{
+        ctx.graph, ctx.thisModule, ctx.flopNames, scopeParams,
+        ctx.sm, ctx.is_sequential, ctx.triggers, ctx.domain_facts, ctx.occurrence,
+        ctx.combDrivers, ctx.instance_path, ctx.local_nodes, ctx.local_declared_types,
+        ctx.local_aggregate_bindings, ctx.local_flop_names, ctx.generate_scope_names, scopeNamedTypes,
+        scopeEnumMemberValues, ctx.pkgRegistry, ctx.moduleLookup, ctx.globalImports,
+        ctx.current_write_origin, ctx.partial_drivers, ctx.write_states, ctx.subroutineRegistry,
+        ctx.subroutine_locals, ctx.currently_inlining, ctx.is_subroutine_scope, ctx.current_return_var};
+    // Pre-scan NBA targets in this scope, then intersect with local declarations.
+    // Only locally-declared signals that have NBA assignments are generate-local flops.
+    // Module-level flops assigned inside a generate block must NOT be added here —
+    // they already have module-level trigger keys and shadowing them causes missing facts.
     auto nbaTargets = collectNBATargets(members);
-    ctx.local_flop_names.insert(nbaTargets.begin(), nbaTargets.end());
+    for (const auto* m : members) {
+        if (m->kind != SyntaxKind::DataDeclaration) continue;
+        for (const auto* decl : m->as<DataDeclarationSyntax>().declarators) {
+            std::string name(decl->name.valueText());
+            if (nbaTargets.count(name))
+                scopeCtx.local_flop_names.insert(name);
+        }
+    }
     // Pre-populate DFG nodes for all signal/net declarations
-    resolveGenerateScopeDecls(members, nbaTargets, ctx);
+    resolveGenerateScopeDecls(members, nbaTargets, scopeCtx);
     // Process all members
     for (auto* m : members)
-        resolveGenerateMemberInPlace(m, ctx);
+        resolveGenerateMemberInPlace(m, scopeCtx);
+    ctx.combDrivers = std::move(scopeCtx.combDrivers);
+    ctx.local_nodes = std::move(scopeCtx.local_nodes);
+    ctx.local_declared_types = std::move(scopeCtx.local_declared_types);
+    ctx.local_aggregate_bindings = std::move(scopeCtx.local_aggregate_bindings);
+    ctx.local_flop_names = std::move(scopeCtx.local_flop_names);
+    ctx.current_write_origin = std::move(scopeCtx.current_write_origin);
+    ctx.partial_drivers = std::move(scopeCtx.partial_drivers);
+    ctx.write_states = std::move(scopeCtx.write_states);
+    ctx.subroutineRegistry = std::move(scopeCtx.subroutineRegistry);
+    ctx.subroutine_locals = std::move(scopeCtx.subroutine_locals);
+    ctx.currently_inlining = std::move(scopeCtx.currently_inlining);
+    ctx.is_subroutine_scope = scopeCtx.is_subroutine_scope;
+    ctx.current_return_var = std::move(scopeCtx.current_return_var);
 }
 
 void resolveGenerateMemberInPlace(
@@ -5646,7 +8223,24 @@ void resolveGenerateMemberInPlace(
 
         case SyntaxKind::GenerateBlock: {
             auto& block = member->as<GenerateBlockSyntax>();
-            resolveGenerateMembersInPlace(block.members, ctx);
+            if (block.beginName) {
+                std::string blockName = std::string(block.beginName->name.valueText());
+                std::string childPath = (ctx.instance_path.empty() ? "" : ctx.instance_path + ".")
+                                        + blockName;
+                ResolutionContext childCtx = ctx;
+                childCtx.instance_path = childPath;
+                childCtx.combDrivers = {};
+                childCtx.generate_scope_names = {};
+                resolveGenerateMembersInPlace(block.members, childCtx);
+                ctx.local_nodes = childCtx.local_nodes;
+                ctx.combDrivers = childCtx.combDrivers;
+                ctx.local_flop_names = childCtx.local_flop_names;
+                ctx.local_aggregate_bindings = childCtx.local_aggregate_bindings;
+                ctx.partial_drivers = childCtx.partial_drivers;
+                ctx.write_states = childCtx.write_states;
+            } else {
+                resolveGenerateMembersInPlace(block.members, ctx);
+            }
             break;
         }
 
@@ -5680,6 +8274,11 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(selectedBlock, childCtx);
                 }
+                ctx.local_nodes = childCtx.local_nodes;
+                ctx.combDrivers = childCtx.combDrivers;
+                ctx.local_flop_names = childCtx.local_flop_names;
+                ctx.local_aggregate_bindings = childCtx.local_aggregate_bindings;
+                ctx.partial_drivers = childCtx.partial_drivers;
                 ctx.write_states = childCtx.write_states;
             } else {
                 // Unnamed block: process without new scope
@@ -5703,10 +8302,12 @@ void resolveGenerateMemberInPlace(
 
             // Build per-iteration context with the genvar bound
             ParameterContext iterCtx = ctx.params;
-            iterCtx.values[genvarName] = evaluateConstantExpr(loopGen.initialExpr, ctx.params, ctx.sm, loopGen);
+            iterCtx.values[genvarName] =
+                integerConstant(evaluateConstantExpr(loopGen.initialExpr, ctx.params, ctx.sm, loopGen));
 
             while (evaluateConstantExpr(loopGen.stopExpr, iterCtx, ctx.sm, loopGen)) {
-                int64_t genval = iterCtx.values.at(genvarName);
+                int64_t genval =
+                    iterCtx.values.at(genvarName).requireInt64("Generate loop variable '" + genvarName + "'");
                 std::string childPath = (ctx.instance_path.empty() ? "" : ctx.instance_path + ".")
                                         + blockName + "[" + std::to_string(genval) + "]";
 
@@ -5715,7 +8316,7 @@ void resolveGenerateMemberInPlace(
                     ctx.graph, ctx.thisModule, ctx.flopNames, iterCtx,
                     ctx.sm, false, {}, ctx.domain_facts, ctx.occurrence, {},
                     childPath, ctx.local_nodes,
-                    ctx.local_declared_types, ctx.local_aggregate_bindings, {},
+                    ctx.local_declared_types, ctx.local_aggregate_bindings, {}, {},
                     ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
                     ctx.moduleLookup, ctx.globalImports,
                     ctx.current_write_origin, ctx.partial_drivers, ctx.write_states};
@@ -5726,10 +8327,11 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(loopGen.block, iterResCtx);
                 }
+                ctx.partial_drivers = iterResCtx.partial_drivers;
                 ctx.write_states = iterResCtx.write_states;
 
                 iterCtx.values[genvarName] =
-                    evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx);
+                    integerConstant(evaluateStepExpr(loopGen.iterationExpr, genvarName, iterCtx));
             }
             break;
         }
@@ -5782,6 +8384,11 @@ void resolveGenerateMemberInPlace(
                 } else {
                     resolveGenerateMemberInPlace(selectedBlock, childCtx);
                 }
+                ctx.local_nodes = childCtx.local_nodes;
+                ctx.combDrivers = childCtx.combDrivers;
+                ctx.local_flop_names = childCtx.local_flop_names;
+                ctx.local_aggregate_bindings = childCtx.local_aggregate_bindings;
+                ctx.partial_drivers = childCtx.partial_drivers;
                 ctx.write_states = childCtx.write_states;
             } else {
                 resolveGenerateMemberInPlace(selectedBlock, ctx);
@@ -5825,7 +8432,8 @@ void resolveGenerateMemberInPlace(
 
             ParameterContext instCtx;
             if (moduleInst.parameters)
-                instCtx = parseParameterValueAssignment(*moduleInst.parameters, ctx.params);
+                instCtx = parseParameterValueAssignment(
+                    *moduleInst.parameters, ctx.params, ctx.pkgRegistry, ctx.sm, &ctx.namedTypeRegistry);
 
             for (const auto* inst : moduleInst.instances) {
                 std::string baseName;
@@ -5850,8 +8458,16 @@ void resolveGenerateMemberInPlace(
             // Pre-populated by resolveGenerateScopeDecls — nothing to do here
             break;
 
+        case SyntaxKind::TypedefDeclaration:
+            // Pre-populated into the scope-local typedef registry.
+            break;
+
         case SyntaxKind::GenvarDeclaration:
             // Genvars handled by LoopGenerate via params — nothing to do here
+            break;
+
+        case SyntaxKind::ParameterDeclarationStatement:
+            // Pre-scanned by registerGenerateLocalParams — nothing to do here
             break;
 
         default:
@@ -5904,46 +8520,101 @@ static Type resolveStructTypedef(const UnresolvedTypedef& typedefDecl,
     }
     const auto& structSyntax = typedefDecl.syntax->as<StructUnionTypeSyntax>();
     auto fields = resolveStructFields(structSyntax, typedefDecl.name, ctx, namedTypeRegistry, pkgRegistry);
-    return Type::makeStruct(typedefDecl.name, typeIdentity, std::move(fields));
+    return Type::makeStruct(
+        typedefDecl.name, typeIdentity, !structSyntax.packed.isMissing(), std::move(fields));
 }
 
 // Resolve all packages into a PackageRegistry
 static PackageRegistry resolvePackages(
-    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages)
+    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
+    const slang::SourceManager& sourceManager)
 {
     PackageRegistry registry;
     for (const auto& pkg : packages) {
         PackageEntry entry;
-        ParameterContext emptyCtx;
-        for (const auto& td : pkg->enumTypedefs) {
-            auto& typeName = td.name;
-            auto* enumSyntax = &td.syntax->as<EnumTypeSyntax>();
-            int width = 32;
-            if (enumSyntax->baseType)
-                width = resolveType(*enumSyntax->baseType, emptyCtx, {}).width;
-            std::vector<EnumMember> members;
-            int64_t nextValue = 0;
-            for (const auto* decl : enumSyntax->members) {
-                int64_t val = nextValue;
-                if (decl->initializer)
-                    val = evaluateConstantExpr(decl->initializer->expr, emptyCtx);
-                members.push_back({std::string(decl->name.valueText()), val});
-                nextValue = val + 1;
+        ParameterContext packageCtx;
+        for (const auto* member : pkg->members) {
+            if (member->kind == SyntaxKind::ParameterDeclarationStatement) {
+                const auto& statement = member->as<ParameterDeclarationStatementSyntax>();
+                auto params = extractParameter(statement.parameter, {});
+                for (const auto& param : params) {
+                    if (!param.defaultValue) {
+                        throw CompilerError(
+                            "Package constant '" + pkg->name + "::" + param.name +
+                            "' must have a default value");
+                    }
+                    Type type = param.type.syntax->kind == SyntaxKind::ImplicitType
+                        ? Type::makeInteger(32, false)
+                        : resolveType(*param.type.syntax, packageCtx, entry.namedTypes, &registry);
+                    if (param.dimensions.syntax && !param.dimensions.syntax->empty()) {
+                        type.unpacked_dims =
+                            ResolveDimensions(*param.dimensions.syntax, packageCtx, &registry, &sourceManager);
+                    }
+                    ConstantValue value = [&]() {
+                        try {
+                            return evaluateConstantValue(
+                                param.defaultValue, type, packageCtx, registry, &entry.namedTypes, sourceManager);
+                        } catch (const CompilerError& error) {
+                            if (error.loc) throw;
+                            throw CompilerError(
+                                error.what(), resolveSourceLoc(*param.defaultValue, sourceManager));
+                        }
+                    }();
+                    if (entry.constants.contains(param.name) || entry.enumMembers.contains(param.name)) {
+                        throw CompilerError(
+                            "Duplicate package member in '" + pkg->name + "': " + param.name);
+                    }
+                    entry.constants.emplace(param.name, value);
+                    packageCtx.values[param.name] = value;
+                }
+                continue;
             }
-            Type enumType = Type::makeEnum(typeName, width, members);
-            entry.namedTypes[typeName] = enumType;
-            for (const auto& m : members)
-                entry.enumMembers[m.name] = {m.value, enumType};
-        }
-        for (const auto& td : pkg->structTypedefs) {
-            if (entry.namedTypes.contains(td.name)) {
-                throw CompilerError("Duplicate typedef in package '" + pkg->name + "': " + td.name);
+            if (member->kind == SyntaxKind::TypedefDeclaration) {
+                const auto& syntax = member->as<TypedefDeclarationSyntax>();
+                UnresolvedTypedef td{
+                    .name = std::string(syntax.name.valueText()),
+                    .syntax = syntax.type,
+                };
+                if (entry.namedTypes.contains(td.name)) {
+                    throw CompilerError("Duplicate typedef in package '" + pkg->name + "': " + td.name);
+                }
+                if (td.syntax->kind == SyntaxKind::EnumType) {
+                    const auto& enumSyntax = td.syntax->as<EnumTypeSyntax>();
+                    int width = 32;
+                    if (enumSyntax.baseType)
+                        width = resolveType(*enumSyntax.baseType, packageCtx, entry.namedTypes, &registry).width;
+                    std::vector<EnumMember> members;
+                    int64_t nextValue = 0;
+                    for (const auto* decl : enumSyntax.members) {
+                        int64_t value = nextValue;
+                        if (decl->initializer)
+                            value = evaluateConstantExpr(decl->initializer->expr, packageCtx, &registry);
+                        members.push_back({std::string(decl->name.valueText()), value});
+                        nextValue = value + 1;
+                    }
+                    Type enumType = Type::makeEnum(td.name, width, members);
+                    entry.namedTypes[td.name] = enumType;
+                    for (const auto& enumMember : members) {
+                        entry.enumMembers[enumMember.name] = {enumMember.value, enumType};
+                        packageCtx.values[enumMember.name] =
+                            ConstantValue::bits(enumType, enumMember.value);
+                    }
+                    continue;
+                }
+                if (td.syntax->kind == SyntaxKind::StructType) {
+                    entry.namedTypes[td.name] = resolveStructTypedef(
+                        td, packageCtx, entry.namedTypes, pkg->name + "::" + td.name, &registry);
+                    continue;
+                }
+                entry.namedTypes[td.name] =
+                    resolveType(*td.syntax, packageCtx, entry.namedTypes, &registry);
+                continue;
             }
-            entry.namedTypes[td.name] = resolveStructTypedef(
-                td, emptyCtx, entry.namedTypes, pkg->name + "::" + td.name);
+            if (member->kind == SyntaxKind::FunctionDeclaration) {
+                const auto* fn = &member->as<FunctionDeclarationSyntax>();
+                entry.functions[getFuncName(*fn)] = fn;
+            }
         }
-        for (const auto* fn : pkg->functions)
-            entry.functions[getFuncName(*fn)] = fn;
         registry[pkg->name] = std::move(entry);
     }
     return registry;
@@ -5968,8 +8639,10 @@ static void applyImports(
                 namedTypeRegistry[k] = v;
             for (const auto& [k, v] : entry.enumMembers) {
                 enumMemberValues[k] = v;
-                localCtx.values[k]  = v.first;
+                localCtx.values[k] = ConstantValue::bits(v.second, v.first);
             }
+            for (const auto& [k, v] : entry.constants)
+                localCtx.values[k] = v;
         } else {
             // explicit import of a single name
             auto it = entry.namedTypes.find(*spec.item);
@@ -5978,8 +8651,12 @@ static void applyImports(
             auto mit = entry.enumMembers.find(*spec.item);
             if (mit != entry.enumMembers.end()) {
                 enumMemberValues[mit->first] = mit->second;
-                localCtx.values[mit->first]  = mit->second.first;
+                localCtx.values[mit->first] =
+                    ConstantValue::bits(mit->second.second, mit->second.first);
             }
+            auto cit = entry.constants.find(*spec.item);
+            if (cit != entry.constants.end())
+                localCtx.values[cit->first] = cit->second;
         }
     }
 }
@@ -5997,16 +8674,76 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     if (domainFacts) domainFacts->getOrCreate(occurrence);
     auto localCtx = std::make_unique<ParameterContext>(topCtx);
 
-    // === Build enum registry from typedef enum declarations ===
-    // Must happen before any type resolution or parameter evaluation so that
-    // enum member names are available as constants.
+    // Header imports are visible to parameters and ports. Body imports are
+    // applied only after the header has been resolved.
     NamedTypeRegistry  namedTypeRegistry;
     EnumMemberMap enumMemberValues;
 
-    // Seed registry from package imports (global first, then module-header imports)
+    // Seed the header namespace from package imports.
     applyImports(globalImports,      pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
-    applyImports(unresolved.imports, pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
+    applyImports(unresolved.headerImports, pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
 
+    // Resolve header parameters before body imports and body-local typedefs.
+    for (const auto& param : unresolved.parameters) {
+        resolved.parameters.push_back(resolveParameter(
+            param, topCtx, *localCtx, false, &namedTypeRegistry, &pkgRegistry, &sourceManager));
+    }
+
+    auto mergeLocalCtx = [&]() {
+        auto merged = std::make_unique<ParameterContext>(topCtx);
+        for (const auto& [k, v] : localCtx->values) {
+            merged->values[k] = v;
+        }
+        return merged;
+    };
+    auto mergedCtx = mergeLocalCtx();
+
+    std::set<const EnumTypeSyntax*> seenInlineEnums;
+    auto registerInlineEnum = [&](const UnresolvedSignal& sig) {
+        if (!sig.type.syntax || sig.type.syntax->kind != SyntaxKind::EnumType) return;
+        auto* enumSyntax = &sig.type.syntax->as<EnumTypeSyntax>();
+        if (!seenInlineEnums.insert(enumSyntax).second) return;
+        std::string typeName = "$anon_enum_" +
+            std::to_string(reinterpret_cast<uintptr_t>(enumSyntax));
+        int width = 32;
+        if (enumSyntax->baseType) {
+            width = resolveType(
+                *enumSyntax->baseType, *mergedCtx, namedTypeRegistry, &pkgRegistry).width;
+        }
+        std::vector<EnumMember> members;
+        int64_t nextValue = 0;
+        for (const auto* decl : enumSyntax->members) {
+            int64_t value = nextValue;
+            if (decl->initializer)
+                value = evaluateConstantExpr(decl->initializer->expr, *mergedCtx, &pkgRegistry);
+            members.push_back({std::string(decl->name.valueText()), value});
+            nextValue = value + 1;
+        }
+        Type enumType = Type::makeEnum(typeName, width, members);
+        namedTypeRegistry[typeName] = enumType;
+        for (const auto& member : members) {
+            mergedCtx->values[member.name] = ConstantValue::bits(enumType, member.value);
+            enumMemberValues[member.name] = {member.value, enumType};
+        }
+    };
+
+    // Ports are resolved before body imports become visible.
+    for (const auto& sig : unresolved.inputs)  registerInlineEnum(sig);
+    for (const auto& sig : unresolved.outputs) registerInlineEnum(sig);
+    for (const auto& input : unresolved.inputs) {
+        addInputNode(resolved, resolveModuleNode(
+            input, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+    }
+    for (const auto& output : unresolved.outputs) {
+        addOutputNode(resolved, resolveModuleNode(
+            output, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+    }
+
+    // The extractor groups body members by kind, so body imports are currently
+    // module-body-wide rather than lexically ordered within the body.
+    applyImports(unresolved.bodyImports, pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
+
+    // === Build body-local enum and struct typedef registries ===
     for (const auto& td : unresolved.enumTypedefs) {
         const auto& typeName = td.name;
         auto* enumSyntax = &td.syntax->as<EnumTypeSyntax>();
@@ -6016,8 +8753,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         // Resolve the underlying base type width (e.g. logic [1:0] → width 2)
         int width = 32;  // default if no explicit base type
         if (enumSyntax->baseType) {
-            // Use an empty registry — base types must be integer types
-            Type base = resolveType(*enumSyntax->baseType, *localCtx, {});
+            Type base = resolveType(*enumSyntax->baseType, *localCtx, namedTypeRegistry, &pkgRegistry);
             width = base.width;
         }
 
@@ -6027,7 +8763,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         for (const auto* decl : enumSyntax->members) {
             int64_t val = nextValue;
             if (decl->initializer) {
-                val = evaluateConstantExpr(decl->initializer->expr, *localCtx);
+                val = evaluateConstantExpr(decl->initializer->expr, *localCtx, &pkgRegistry);
             }
             members.push_back({std::string(decl->name.valueText()), val});
             nextValue = val + 1;
@@ -6039,7 +8775,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         // Inject member names as integer constants (for evaluateConstantExpr in localparams)
         // and as typed entries (for buildExprDFG)
         for (const auto& member : members) {
-            localCtx->values[member.name] = member.value;
+            localCtx->values[member.name] = ConstantValue::bits(enumType, member.value);
             enumMemberValues[member.name] = {member.value, enumType};
         }
     }
@@ -6051,82 +8787,40 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         namedTypeRegistry[td.name] = resolveStructTypedef(
             td, *localCtx, namedTypeRegistry, unresolved.name + "::" + td.name, &pkgRegistry);
     }
-    resolved.named_types = namedTypeRegistry;
-
-    // Resolve parameters
-    for (const auto& param : unresolved.parameters) {
-        resolved.parameters.push_back(resolveParameter(param, topCtx, *localCtx));
-    }
-
     // Resolve localparams (cannot be overridden by instantiation context)
     // Pass enum registry so enum-typed localparams (e.g. localparam op_t X = OP_NOP) are handled
     for (const auto& param : unresolved.localparams) {
-        resolved.localparams.push_back(resolveParameter(param, topCtx, *localCtx, true, &namedTypeRegistry));
+        resolved.localparams.push_back(resolveParameter(
+            param, topCtx, *localCtx, true, &namedTypeRegistry, &pkgRegistry, &sourceManager));
     }
 
-    auto mergedCtx = std::make_unique<ParameterContext>(topCtx);
-    for (const auto& [k, v] : (*localCtx).values) {
-        (*mergedCtx).values[k] = v;
-    }
+    mergedCtx = mergeLocalCtx();
+    for (const auto& sig : unresolved.signals) registerInlineEnum(sig);
+    for (const auto& sig : unresolved.flops)   registerInlineEnum(sig);
+    resolved.named_types = namedTypeRegistry;
 
-    // Pre-scan: register inline enum types from ports/signals so their member names are
-    // available in enumMemberValues and mergedCtx->values before DFG elaboration begins.
-    {
-        std::set<const EnumTypeSyntax*> seen;
-        auto registerInlineEnum = [&](const UnresolvedSignal& sig) {
-            if (!sig.type.syntax || sig.type.syntax->kind != SyntaxKind::EnumType) return;
-            auto* enumSyntax = &sig.type.syntax->as<EnumTypeSyntax>();
-            if (!seen.insert(enumSyntax).second) return;  // same syntax node already registered
-            std::string typeName = "$anon_enum_" +
-                std::to_string(reinterpret_cast<uintptr_t>(enumSyntax));
-            int width = 32;
-            if (enumSyntax->baseType) {
-                NamedTypeRegistry emptyReg;
-                width = resolveType(*enumSyntax->baseType, *mergedCtx, emptyReg).width;
-            }
-            std::vector<EnumMember> members;
-            int64_t nextValue = 0;
-            for (const auto* decl : enumSyntax->members) {
-                int64_t val = nextValue;
-                if (decl->initializer)
-                    val = evaluateConstantExpr(decl->initializer->expr, *mergedCtx);
-                members.push_back({std::string(decl->name.valueText()), val});
-                nextValue = val + 1;
-            }
-            Type enumType = Type::makeEnum(typeName, width, members);
-            namedTypeRegistry[typeName] = enumType;
-            for (const auto& m : members) {
-                mergedCtx->values[m.name] = m.value;
-                enumMemberValues[m.name] = {m.value, enumType};
-            }
-        };
-        for (const auto& sig : unresolved.inputs)  registerInlineEnum(sig);
-        for (const auto& sig : unresolved.outputs) registerInlineEnum(sig);
-        for (const auto& sig : unresolved.signals) registerInlineEnum(sig);
-        for (const auto& sig : unresolved.flops)   registerInlineEnum(sig);
+    std::set<std::string> generateParentFlopNames;
+    for (const auto* genBlock : unresolved.generateBlocks) {
+        collectGenerateNBATargetsFromMember(
+            genBlock, *mergedCtx, sourceManager, generateParentFlopNames);
     }
-
-    // Resolve inputs
-    for (const auto& input : unresolved.inputs) {
-        auto sig = resolveModuleNode(input, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
-        addInputNode(resolved, sig);
+    for (const auto& flop : unresolved.flops) {
+        generateParentFlopNames.erase(flop.name);
     }
-
-    // Resolve outputs
-    for (const auto& output : unresolved.outputs) {
-        auto sig = resolveModuleNode(output, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
-        addOutputNode(resolved, sig);
-    }
+    auto isGenerateParentFlop = [&](const UnresolvedSignal& signal) {
+        return generateParentFlopNames.contains(signal.name);
+    };
 
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
+        if (isGenerateParentFlop(signal)) continue;
         auto sig = resolveModuleNode(signal, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
         addInternalNode(resolved, sig);
     }
 
     // Resolve flops and build flopNames set
     std::set<std::string> flopNames;
-    for (const auto& flop : unresolved.flops) {
+    auto addResolvedFlop = [&](const UnresolvedSignal& flop) {
         const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedModuleNode.name,
@@ -6138,6 +8832,19 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                 .binding = {},
                 });
         flopNames.insert(flop.name);
+    };
+    for (const auto& flop : unresolved.flops) {
+        addResolvedFlop(flop);
+    }
+    for (const auto& signal : unresolved.signals) {
+        if (isGenerateParentFlop(signal)) {
+            addResolvedFlop(signal);
+        }
+    }
+    for (const auto& output : unresolved.outputs) {
+        if (isGenerateParentFlop(output)) {
+            addResolvedFlop(output);
+        }
     }
 
     // === Build subroutine registry from module-local functions ===
@@ -6156,7 +8863,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
     };
     addWildcardFunctions(globalImports);
-    addWildcardFunctions(unresolved.imports);
+    addWildcardFunctions(unresolved.headerImports);
+    addWildcardFunctions(unresolved.bodyImports);
 
     // === Create single DFG and pre-populate ===
     resolved.dfg = std::make_unique<DFG>();
@@ -6164,18 +8872,29 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
     // Pre-populate module PARAMETERS
     for (auto& parameter : resolved.parameters) {
-        parameter.dfg_node = graph.named_constant(parameter.value, "", parameter.name);
+        if ((parameter.type.isStruct() || !parameter.type.unpacked_dims.empty())) {
+            continue;
+        }
+        if (auto scalar = parameter.value.asInt64()) {
+            parameter.dfg_node = graph.named_constant(*scalar, "", parameter.name);
+            parameter.dfg_node->type = parameter.type;
+        }
     }
 
     // Pre-populate module LOCALPARAMS
     // For enum-typed localparams, fix the node type and inject into enumMemberValues
     // so that buildExprDFG returns properly-typed CONST nodes for them.
     for (auto& parameter : resolved.localparams) {
-        auto* node = graph.named_constant(parameter.value, "", parameter.name);
+        if (parameter.type.isStruct() || !parameter.type.unpacked_dims.empty()) {
+            continue;
+        }
+        auto scalar = parameter.value.asInt64();
+        if (!scalar) continue;
+        auto* node = graph.named_constant(*scalar, "", parameter.name);
         parameter.dfg_node = node;
+        node->type = parameter.type;
         if (parameter.type.isEnum()) {
-            node->type = parameter.type;
-            enumMemberValues[parameter.name] = {static_cast<int64_t>(parameter.value), parameter.type};
+            enumMemberValues[parameter.name] = {*scalar, parameter.type};
         }
     }
 
@@ -6204,7 +8923,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     ResolutionContext resCtx{
         graph, &resolved, flopNames, *mergedCtx, sourceManager, false, {},
         domainFacts, occurrence, {},
-        "", {}, {}, {}, {}, namedTypeRegistry, enumMemberValues, pkgRegistry,
+        "", {}, {}, {}, {}, {}, namedTypeRegistry, enumMemberValues, pkgRegistry,
         moduleLookup, globalImports, "", {}, {}, subroutineRegistry
     };
 
@@ -6236,7 +8955,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
         ParameterContext instCtx;
         if (moduleInst->parameters) {
-            instCtx = parseParameterValueAssignment(*moduleInst->parameters, *mergedCtx);
+            instCtx = parseParameterValueAssignment(
+                *moduleInst->parameters, *mergedCtx, pkgRegistry, sourceManager, &namedTypeRegistry);
         }
 
         // Process each instance: resolve the submodule fresh per instance so
@@ -6272,7 +8992,7 @@ Module resolveModules(
             modules.size()));
     }
 
-    PackageRegistry pkgRegistry = resolvePackages(packages);
+    PackageRegistry pkgRegistry = resolvePackages(packages, sourceManager);
 
     ModuleLookup moduleLookup;
     for (const auto& module : modules) {
@@ -6293,7 +9013,7 @@ Module resolveModules(
     const ParameterContext& topParams,
     FrontendDomainFacts* domainFacts) {
 
-    PackageRegistry pkgRegistry = resolvePackages(packages);
+    PackageRegistry pkgRegistry = resolvePackages(packages, sourceManager);
 
     ModuleLookup moduleLookup;
     for (const auto& module : modules) {

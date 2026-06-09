@@ -30,7 +30,7 @@ static void postOrderVisit(DFGNode* node,
 static std::vector<DFGNode*> buildPostOrder(DFG& graph) {
     std::unordered_set<DFGNode*> visited;
     std::vector<DFGNode*> order;
-    for (auto& node : graph.nodes) {
+    for (const auto& node : graph.nodes) {
         postOrderVisit(node.get(), visited, order);
     }
     return order;
@@ -90,14 +90,18 @@ static Type widenTypes(const Type& a, const Type& b) {
 // Throws on mismatch.
 static Type mergeDataTypes(const Type& a, const Type& b,
                                    std::optional<SourceLoc> loc = {}) {
-    if (a.isEnum() || b.isEnum()) {
-        if (!a.isEnum() || !b.isEnum() ||
-            a.enumInfo().type_name != b.enumInfo().type_name)
-            throw CompilerError(
-                std::format("Type error: MUX branches have incompatible types '{}' and '{}'",
-                    a.isEnum() ? a.enumInfo().type_name : "integer",
-                    b.isEnum() ? b.enumInfo().type_name : "integer"), loc);
-        return a;  // same enum type
+    bool aEnum = a.isEnum();
+    bool bEnum = b.isEnum();
+    if (aEnum || bEnum) {
+        if (aEnum && bEnum) {
+            if (a.enumInfo().type_name != b.enumInfo().type_name) {
+                throw CompilerError(
+                    std::format("Type error: MUX branches have incompatible types '{}' and '{}'",
+                        a.enumInfo().type_name, b.enumInfo().type_name), loc);
+            }
+            return a;  // same enum type
+        }
+        return widenTypes(a, b);
     }
     return widenTypes(a, b);
 }
@@ -109,8 +113,8 @@ static Type mergeDataTypes(const Type& a, const Type& b,
 bool inferNodeType(DFGNode* node) {
     if (node->hasType() && node->type->isStruct()) {
         throw CompilerError(std::format(
-            "Invariant violation: struct type '{}' cannot reach type propagation",
-            node->type->structInfo().type_name), node->loc);
+            "Invariant violation: struct type '{}' cannot reach type propagation (node: {})",
+            node->type->structInfo().type_name, node->str()), node->loc);
     }
     if (node->hasType()) return false;
 
@@ -123,6 +127,10 @@ bool inferNodeType(DFGNode* node) {
         case DFGOp::CONST:
             throw CompilerError(std::format(
                 "Type propagation: CONST node '{}' has no type", node->str()), node->loc);
+
+        case DFGOp::X:
+            throw CompilerError(std::format(
+                "Type propagation: X node '{}' has no type", node->str()), node->loc);
 
         // SUB: result is always signed (subtraction can produce negative values)
         case DFGOp::SUB: {
@@ -390,6 +398,20 @@ bool propagateTypes(DFG& graph) {
                     }
                 });
             }
+            // Propagate context width down through arithmetic chains.
+            // A widened arith op must also widen its arith-op inputs.
+            for (const auto& node : graph.nodes) {
+                if (!isArithOp(node->kind()) || !node->hasType()) continue;
+                int contextWidth = node->type->width;
+                DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& edge) {
+                    DFGNode* src = edge.node;
+                    if (src->hasType() && isArithOp(src->kind()) && src->type->width < contextWidth) {
+                        src->type = Type::makeInteger(contextWidth, src->type->isSigned());
+                        backwardChanged = true;
+                        anyChanged = true;
+                    }
+                });
+            }
         } while (backwardChanged);
     }
 
@@ -403,6 +425,42 @@ bool propagateTypes(DFG& graph) {
     }
 
     return anyChanged;
+}
+
+Type resolveNodeTypeNow(DFGNode* node) {
+    if (!node) {
+        throw CompilerError("Directed type inference requested for null DFG node");
+    }
+
+    std::unordered_set<DFGNode*> visited;
+    std::vector<DFGNode*> order;
+    postOrderVisit(node, visited, order);
+
+    bool changed;
+    do {
+        changed = false;
+        for (DFGNode* candidate : order) {
+            if (inferNodeType(candidate)) {
+                changed = true;
+            }
+        }
+    } while (changed);
+
+    for (DFGNode* candidate : order) {
+        if (!candidate->hasType()) {
+            throw CompilerError(std::format(
+                "Directed type inference: node {} remains untyped while resolving {}",
+                candidate->str(), node->str()), candidate->loc);
+        }
+    }
+
+    if (!node->hasType()) {
+        throw CompilerError(std::format(
+            "Directed type inference failed to resolve root node {}", node->str()),
+            node->loc);
+    }
+
+    return *node->type;
 }
 
 } // namespace mate

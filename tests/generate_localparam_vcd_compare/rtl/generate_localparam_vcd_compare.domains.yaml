@@ -1,0 +1,13 @@
+module_name: generate_localparam_vcd_compare
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - data_i
+      - sel_i
+      - toggle_i

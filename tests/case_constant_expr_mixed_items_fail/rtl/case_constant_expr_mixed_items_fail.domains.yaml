@@ -1,0 +1,11 @@
+module_name: case_constant_expr_mixed_items_fail
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - a

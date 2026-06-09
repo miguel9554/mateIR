@@ -23,6 +23,7 @@ struct FrontendOptions {
     TopDomainMode top_domain_mode = TopDomainMode::Yaml;
     bool infer_synchronizers = false;
     std::optional<std::string> emit_inferred_domains_path;
+    std::optional<std::string> emit_inferred_synchronizers_dir;
     std::vector<DebugNodeSpec> debug_dfg_nodes;
     bool dump_passes = false;
 };

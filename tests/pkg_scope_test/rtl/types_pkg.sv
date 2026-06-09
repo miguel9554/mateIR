@@ -2,7 +2,16 @@
 // Contains 6 typedef enums exercising varied bit-widths.
 package types_pkg;
 
-    typedef enum logic [1:0] {
+    parameter int DIR_WIDTH = 2;
+    parameter int DATA_WIDTH = 8;
+
+    typedef logic [DIR_WIDTH-1:0] dir_bits_t;
+    typedef enum dir_bits_t {
+        DIR_ALIAS_N = 2'b00,
+        DIR_ALIAS_E = 2'b01
+    } dir_alias_t;
+
+    typedef enum logic [DIR_WIDTH-1:0] {
         DIR_N = 2'b00,
         DIR_E = 2'b01,
         DIR_S = 2'b10,
@@ -60,4 +69,9 @@ package types_pkg;
         weight_score = {w, sh[1:0]};
     endfunction
 
+endpackage
+
+package body_scope_pkg;
+    parameter int BODY_WIDTH = 3;
+    typedef logic [BODY_WIDTH-1:0] body_word_t;
 endpackage

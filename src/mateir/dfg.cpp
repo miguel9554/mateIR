@@ -7,6 +7,69 @@
 
 namespace mate {
 
+namespace {
+
+std::string typeToJson(const Type& t) {
+    std::ostringstream ss;
+    ss << "{";
+    const char* kind = "integer";
+    if (t.kind == TypeKind::Enum) kind = "enum";
+    else if (t.kind == TypeKind::Struct) kind = "struct";
+    ss << "\"kind\": \"" << kind << "\", ";
+    ss << "\"width\": " << t.width << ", ";
+    ss << "\"signed\": " << (t.isSigned() ? "true" : "false");
+    if (!t.packed_dims.empty()) {
+        ss << ", \"packed_dims\": [";
+        for (size_t i = 0; i < t.packed_dims.size(); ++i) {
+            if (i) ss << ", ";
+            ss << "{\"left\": " << t.packed_dims[i].left
+               << ", \"right\": " << t.packed_dims[i].right << "}";
+        }
+        ss << "]";
+    }
+    if (!t.unpacked_dims.empty()) {
+        ss << ", \"unpacked_dims\": [";
+        for (size_t i = 0; i < t.unpacked_dims.size(); ++i) {
+            if (i) ss << ", ";
+            ss << "{\"left\": " << t.unpacked_dims[i].left
+               << ", \"right\": " << t.unpacked_dims[i].right << "}";
+        }
+        ss << "]";
+    }
+    if (t.kind == TypeKind::Enum) {
+        const auto& ei = t.enumInfo();
+        ss << ", \"enum_type\": \"" << ei.type_name << "\"";
+        ss << ", \"enum_members\": [";
+        for (size_t i = 0; i < ei.members.size(); ++i) {
+            if (i) ss << ", ";
+            ss << "{\"name\": \"" << ei.members[i].name
+               << "\", \"value\": " << ei.members[i].value << "}";
+        }
+        ss << "]";
+    } else if (t.kind == TypeKind::Struct) {
+        const auto& si = t.structInfo();
+        ss << ", \"struct_type\": \"" << si.type_name << "\"";
+        ss << ", \"struct_identity\": \"" << si.type_identity << "\"";
+        ss << ", \"struct_fields\": [";
+        for (size_t i = 0; i < si.fields.size(); ++i) {
+            if (i) ss << ", ";
+            ss << "{";
+            ss << "\"name\": \"" << si.fields[i].name << "\", ";
+            if (!si.fields[i].type) {
+                ss << "\"type\": null";
+            } else {
+                ss << "\"type\": " << typeToJson(*si.fields[i].type);
+            }
+            ss << "}";
+        }
+        ss << "]";
+    }
+    ss << "}";
+    return ss.str();
+}
+
+} // namespace
+
 std::string DFG::renderDot(const std::string& graphName,
                            const std::set<const DFGNode*>& errorNodes,
                            const std::set<const DFGNode*>* filter) const {
@@ -50,6 +113,10 @@ std::string DFG::renderDot(const std::string& graphName,
                 ss << "CONST\\n";
                 if (!node->name.empty()) ss << node->name << "\\n";
                 ss << node->constValue();
+                break;
+            case DFGOp::X:
+                ss << "X";
+                if (!node->name.empty()) ss << "\\n" << node->name;
                 break;
             case DFGOp::ADD: ss << "+"; break;
             case DFGOp::SUB: ss << "-"; break;
@@ -192,11 +259,19 @@ std::string DFG::renderJson(int indent, const std::set<const DFGNode*>* filter) 
 
         ss << indentStr(indent + 2) << "{\n";
         ss << indentStr(indent + 3) << "\"id\": " << i << ",\n";
+        ss << indentStr(indent + 3) << "\"debug_id\": " << node->debug_id << ",\n";
         ss << indentStr(indent + 3) << "\"op\": \"" << to_string(node->kind()) << "\",\n";
 
         // Add name if present
         if (!node->name.empty()) {
             ss << indentStr(indent + 3) << "\"name\": \"" << node->name << "\",\n";
+        }
+        if (!node->instance_path.empty()) {
+            ss << indentStr(indent + 3) << "\"instance_path\": \"" << node->instance_path << "\",\n";
+        }
+        const std::string full_name = node->debugName();
+        if (!full_name.empty()) {
+            ss << indentStr(indent + 3) << "\"full_name\": \"" << full_name << "\",\n";
         }
         // Add data field based on variant type
         if (node->kind() == DFGOp::CONST) {
@@ -204,8 +279,7 @@ std::string DFG::renderJson(int indent, const std::set<const DFGNode*>* filter) 
         }
         // Add type info if available
         if (node->hasType()) {
-            ss << indentStr(indent + 3) << "\"type\": {\"width\": " << node->type->width
-               << ", \"signed\": " << (node->type->isSigned() ? "true" : "false") << "},\n";
+            ss << indentStr(indent + 3) << "\"type\": " << typeToJson(*node->type) << ",\n";
         }
 
         // Add source location if available
@@ -228,11 +302,14 @@ std::string DFG::renderJson(int indent, const std::set<const DFGNode*>* filter) 
         for (size_t j = 0; j < node->rawInputs().size(); ++j) {
             if (j > 0) ss << ", ";
             size_t k = nodeIndex.at(node->rawInputs()[j].node);
+            ss << "{"
+               << "\"role\": \"" << dfgInputRole(*node, j) << "\", "
+               << "\"node\": " << k << ", "
+               << "\"debug_id\": " << node->rawInputs()[j].node->debug_id;
             if (node->rawInputs()[j].port != 0) {
-                ss << "{\"node\": " << k << ", \"port\": " << node->rawInputs()[j].port << "}";
-            } else {
-                ss << k;
+                ss << ", \"port\": " << node->rawInputs()[j].port;
             }
+            ss << "}";
         }
         ss << "]\n";
 

@@ -272,6 +272,37 @@ static std::string aggregate_root_name(const std::string &name) {
     return dot == std::string::npos ? name : name.substr(0, dot);
 }
 
+static std::string structured_group_name(const ExpectedSignal &expected,
+                                         const std::string &leaf_name) {
+    if (leaf_name == expected.name) {
+        return expected.name;
+    }
+
+    if (leaf_name.rfind(expected.name, 0) != 0) {
+        return aggregate_root_name(leaf_name);
+    }
+
+    size_t last_dot = leaf_name.rfind('.');
+    if (last_dot == std::string::npos || last_dot < expected.name.size()) {
+        return expected.name;
+    }
+    return leaf_name.substr(0, last_dot);
+}
+
+static std::string structured_leaf_flat_name(const ExpectedSignal &expected,
+                                             const std::string &leaf_name) {
+    if (leaf_name.rfind(expected.name, 0) != 0) {
+        return normalize_signal_name(leaf_name);
+    }
+
+    std::string out = expected.name;
+    for (size_t i = expected.name.size(); i < leaf_name.size(); ++i) {
+        char ch = leaf_name[i];
+        out.push_back(ch == '.' ? '_' : ch);
+    }
+    return out;
+}
+
 static std::string signal_name_for_file(const std::string &name) {
     std::string normalized = normalize_signal_name(name);
     return normalized;
@@ -333,14 +364,14 @@ static size_t expected_total_width(const ExpectedSignal &signal) {
 static std::vector<std::vector<const StructuredLeafSpec *>> group_structured_leaves(
     const ExpectedSignal &expected) {
     std::vector<std::vector<const StructuredLeafSpec *>> groups;
-    std::map<std::string, size_t> group_index;
+    std::string current_group_name;
     for (const auto &leaf : expected.leaves) {
-        std::string group_name = aggregate_root_name(leaf.name);
-        auto [it, inserted] = group_index.emplace(group_name, groups.size());
-        if (inserted) {
+        std::string group_name = structured_group_name(expected, leaf.name);
+        if (groups.empty() || group_name != current_group_name) {
             groups.push_back({});
+            current_group_name = group_name;
         }
-        groups[it->second].push_back(&leaf);
+        groups.back().push_back(&leaf);
     }
     return groups;
 }
@@ -365,7 +396,7 @@ static std::optional<MatchedSignalValue> match_expected_signal(
             if (group.empty()) {
                 continue;
             }
-            std::string group_name = aggregate_root_name(group.front()->name);
+            std::string group_name = structured_group_name(expected, group.front()->name);
             if (group_name == expected.name) {
                 continue;
             }
@@ -393,7 +424,7 @@ static std::optional<MatchedSignalValue> match_expected_signal(
         if (group.empty()) {
             continue;
         }
-        std::string group_name = aggregate_root_name(group.front()->name);
+        std::string group_name = structured_group_name(expected, group.front()->name);
         std::string group_match_name;
         VCDSignal *group_signal = lookup_signal(signals, group_name, &group_match_name);
         size_t group_width = 0;
@@ -407,6 +438,10 @@ static std::optional<MatchedSignalValue> match_expected_signal(
         for (const auto *leaf : group) {
             std::string leaf_match_name;
             VCDSignal *signal = lookup_signal(signals, leaf->name, &leaf_match_name);
+            if (!signal) {
+                std::string flat_leaf_name = structured_leaf_flat_name(expected, leaf->name);
+                signal = lookup_signal(signals, flat_leaf_name, &leaf_match_name);
+            }
             if (!signal) {
                 return std::nullopt;
             }
@@ -814,7 +849,7 @@ static bool is_structured_alias_signal(const HierarchyModule &mod, const std::st
             if (group.empty()) {
                 continue;
             }
-            std::string group_name = aggregate_root_name(group.front()->name);
+            std::string group_name = structured_group_name(expected, group.front()->name);
             if (group_name == expected.name) {
                 continue;
             }
@@ -908,15 +943,15 @@ static bool has_structured_signal(
         size_t total_width = expected_total_width(expected);
         if (signal_width(it->second.front()) == total_width) {
             if (consumed_names) consumed_names->push_back(it->first);
-            auto groups = group_structured_leaves(expected);
-            for (const auto &group : groups) {
-                if (group.empty()) {
-                    continue;
-                }
-                std::string group_name = aggregate_root_name(group.front()->name);
-                if (group_name == expected.name) {
-                    continue;
-                }
+        auto groups = group_structured_leaves(expected);
+        for (const auto &group : groups) {
+            if (group.empty()) {
+                continue;
+            }
+            std::string group_name = structured_group_name(expected, group.front()->name);
+            if (group_name == expected.name) {
+                continue;
+            }
                 auto group_it = signals.find(group_name);
                 size_t group_width = 0;
                 for (const auto *leaf : group) group_width += leaf->width;
@@ -936,7 +971,7 @@ static bool has_structured_signal(
         if (group.empty()) {
             continue;
         }
-        std::string group_name = aggregate_root_name(group.front()->name);
+        std::string group_name = structured_group_name(expected, group.front()->name);
         auto group_it = signals.find(group_name);
         size_t group_width = 0;
         for (const auto *leaf : group) group_width += leaf->width;
@@ -949,8 +984,12 @@ static bool has_structured_signal(
             std::string leaf_name = leaf->name;
             auto leaf_it = signals.find(leaf_name);
             if (leaf_it == signals.end() || leaf_it->second.empty()) {
-                std::string normalized = normalize_signal_name(leaf_name);
-                leaf_it = signals.find(normalized);
+                std::string flat_leaf_name = structured_leaf_flat_name(expected, leaf_name);
+                leaf_it = signals.find(flat_leaf_name);
+                if (leaf_it == signals.end() || leaf_it->second.empty()) {
+                    std::string normalized = normalize_signal_name(leaf_name);
+                    leaf_it = signals.find(normalized);
+                }
                 if (leaf_it == signals.end() || leaf_it->second.empty()) {
                     return false;
                 }

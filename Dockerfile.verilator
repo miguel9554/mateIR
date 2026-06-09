@@ -1,0 +1,27 @@
+FROM mate-slang:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    verilator \
+    && rm -rf /var/lib/apt/lists/*
+
+# To build Verilator v5.026 from source instead, comment out the apt block above
+# and uncomment the block below:
+#
+# RUN apt-get update && apt-get install -y \
+#     autoconf help2man perl flex bison \
+#     && rm -rf /var/lib/apt/lists/*
+#
+# ENV CC=clang-18
+# ENV CXX=clang++-18
+#
+# RUN git clone --depth 1 --branch v5.026 https://github.com/verilator/verilator.git /tmp/verilator-src && \
+#     cd /tmp/verilator-src && \
+#     autoconf && \
+#     ./configure --prefix=/usr/local CXXFLAGS="-std=c++20" && \
+#     make -j$(nproc) && \
+#     make install && \
+#     sed -i 's/^CFG_CXXFLAGS_STD = $/CFG_CXXFLAGS_STD = -std=c++20/' \
+#         /usr/local/share/verilator/include/verilated.mk && \
+#     rm -rf /tmp/verilator-src

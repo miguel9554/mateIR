@@ -22,6 +22,7 @@ enum class DFGOp {
     OUTPUT,     // Graph sink boundary node (module outputs + flop .d leaves)
     SIGNAL,     // Internal signal (named placeholder)
     CONST,      // Constant value (data: int64_t)
+    X,          // Unspecified value with a fixed simulation choice per node
     // Arithmetic ops
     ADD,
     SUB,
@@ -61,6 +62,7 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::OUTPUT: return "OUTPUT";
         case DFGOp::SIGNAL: return "SIGNAL";
         case DFGOp::CONST: return "CONST";
+        case DFGOp::X: return "X";
         case DFGOp::SLICE: return "SLICE";
         case DFGOp::CONCAT: return "CONCAT";
         case DFGOp::ADD: return "ADD";
@@ -96,6 +98,7 @@ inline int expectedInputs(DFGOp op) {
     switch (op) {
         case DFGOp::INPUT:  return 0;
         case DFGOp::CONST:  return 0;
+        case DFGOp::X:      return 0;
         // OUTPUT: 0 (undriven) or 1 (driven) — validated separately
         case DFGOp::OUTPUT: return -1;
         // SIGNAL: 0 (undriven during construction) or 1 (driven) — validated separately
@@ -165,6 +168,7 @@ struct DFGInputPayload {};
 struct DFGOutputPayload { std::optional<DFGOutput> driver; };
 struct DFGSignalPayload { std::optional<DFGOutput> driver; };
 struct DFGConstPayload { int64_t value; };
+struct DFGXPayload {};
 struct DFGUnaryPayload { DFGOp op; DFGOutput operand; };
 struct DFGBinaryPayload { DFGOp op; DFGOutput lhs; DFGOutput rhs; };
 struct DFGSlicePayload { DFGOutput source; DFGOutput high; DFGOutput low; };
@@ -191,6 +195,7 @@ using DFGPayload = std::variant<
     DFGOutputPayload,
     DFGSignalPayload,
     DFGConstPayload,
+    DFGXPayload,
     DFGUnaryPayload,
     DFGBinaryPayload,
     DFGSlicePayload,
@@ -237,6 +242,7 @@ inline bool isBinaryDFGOp(DFGOp op) {
 };
 
 struct DFGNode {
+    uint64_t debug_id = 0;
     std::string name;  // Optional name (empty = anonymous)
 
     // Hierarchical path set during DFG inlining (empty = top-level node).
@@ -263,11 +269,18 @@ public:
 
     bool hasType() const { return type.has_value(); }
 
+    std::string debugName() const {
+        if (instance_path.empty()) return name;
+        if (name.empty()) return instance_path;
+        return instance_path + "." + name;
+    }
+
     DFGOp kind() const {
         if (std::holds_alternative<DFGInputPayload>(payload_)) return DFGOp::INPUT;
         if (std::holds_alternative<DFGOutputPayload>(payload_)) return DFGOp::OUTPUT;
         if (std::holds_alternative<DFGSignalPayload>(payload_)) return DFGOp::SIGNAL;
         if (std::holds_alternative<DFGConstPayload>(payload_)) return DFGOp::CONST;
+        if (std::holds_alternative<DFGXPayload>(payload_)) return DFGOp::X;
         if (auto* p = std::get_if<DFGUnaryPayload>(&payload_)) return p->op;
         if (auto* p = std::get_if<DFGBinaryPayload>(&payload_)) return p->op;
         if (std::holds_alternative<DFGSlicePayload>(payload_)) return DFGOp::SLICE;
@@ -481,9 +494,58 @@ public:
         if (!instance_path.empty()) result += "@" + instance_path;
         if (!name.empty()) result += "(" + name + ")";
         if (opValue() == DFGOp::CONST) result += "[" + std::to_string(constValue()) + "]";
+        result += "#" + std::to_string(debug_id);
         return result;
     }
 };
+
+inline std::string dfgInputRole(const DFGNode& node, size_t index) {
+    switch (node.kind()) {
+        case DFGOp::MUX:
+            if (index == 0) return "selector";
+            if (index > 0 && index - 1 < node.muxValues().size()) {
+                return "data[" + std::to_string(node.muxValues()[index - 1]) + "]";
+            }
+            break;
+        case DFGOp::SLICE:
+            if (index == 0) return "source";
+            if (index == 1) return "high";
+            if (index == 2) return "low";
+            break;
+        case DFGOp::CONCAT:
+            return "part[" + std::to_string(index) + "]";
+        default:
+            break;
+    }
+    return std::to_string(index);
+}
+
+struct DFGSliceResolvedRange {
+    int64_t source_high = 0;
+    int64_t source_low = 0;
+    int64_t width = 0;
+    int64_t internal_low = 0;
+    int64_t internal_high = 0;
+};
+
+// SLICE indices are always internal-space (0-based from LSB). Elaboration is
+// responsible for converting source-space indices before storing them.
+inline DFGSliceResolvedRange resolveSliceRange(const DFGNode& source_node,
+                                               int64_t high,
+                                               int64_t low) {
+    if (high < low) {
+        throw CompilerError(std::format(
+            "resolveSliceRange: invalid range high={} low={}", high, low), &source_node);
+    }
+
+    return DFGSliceResolvedRange{
+        .source_high = high,
+        .source_low = low,
+        .width = high - low + 1,
+        .internal_low = low,
+        .internal_high = high,
+    };
+}
 
 struct DFGTraversal {
     template<typename Fn>
@@ -553,7 +615,7 @@ struct DFG {
 
     // Create a GraphOutput placeholder node with no driver yet.
     DFGNode* createGraphOutput(const std::string& instance_path, const std::string& name) {
-        auto n = std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGOutputPayload{}, name);
+        auto n = makeNode(DFGOutputPayload{}, name);
         n->instance_path = instance_path;
         nodes.push_back(std::move(n));
         auto result = outputs.insert({nodeKey(instance_path, name), nodes.back().get()});
@@ -565,7 +627,7 @@ struct DFG {
     // Create an anonymous SIGNAL placeholder node with no driver.
     // Not inserted in named maps, so it is not rooted by DCE.
     DFGNode* placeholderSignal(const std::string& instance_path = "") {
-        auto n = std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGSignalPayload{}, "");
+        auto n = makeNode(DFGSignalPayload{}, "");
         n->instance_path = instance_path;
         nodes.push_back(std::move(n));
         return nodes.back().get();
@@ -612,6 +674,13 @@ struct DFG {
     }
 
 private:
+    template<typename... Args>
+    std::unique_ptr<DFGNode> makeNode(Args&&... args) {
+        auto node = std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, std::forward<Args>(args)...);
+        node->debug_id = next_debug_id_++;
+        return node;
+    }
+
     static std::string nodeKey(const std::string& ip, const std::string& name) {
         return ip.empty() ? name : ip + "." + name;
     }
@@ -620,13 +689,14 @@ private:
     std::map<std::string, DFGNode*> constants;
     std::map<std::string, DFGNode*> inputs;
     std::map<std::string, DFGNode*> outputs;
+    uint64_t next_debug_id_ = 1;
 
 public:
 
     // INPUT nodes, they have no inputs.
 
     DFGNode* createGraphInput(const std::string& instance_path, const std::string& name) {
-        nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGInputPayload{}, name));
+        nodes.push_back(makeNode(DFGInputPayload{}, name));
         nodes.back()->instance_path = instance_path;
         auto result = inputs.insert({nodeKey(instance_path, name), nodes.back().get()});
         if (!result.second) {
@@ -636,7 +706,7 @@ public:
         return nodes.back().get();
     }
     DFGNode* named_constant(int64_t v, const std::string& instance_path, const std::string& name) {
-        nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConstPayload{v}, name));
+        nodes.push_back(makeNode(DFGConstPayload{v}, name));
         nodes.back()->instance_path = instance_path;
         nodes.back()->type = Type::makeInteger(32, false);
         constants[nodeKey(instance_path, name)] = nodes.back().get();
@@ -644,14 +714,23 @@ public:
     }
 
     DFGNode* constant(int64_t v) {
-        nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConstPayload{v}));
+        nodes.push_back(makeNode(DFGConstPayload{v}));
         nodes.back()->type = Type::makeInteger(32, false);
+        return nodes.back().get();
+    }
+
+    DFGNode* x(const Type& type, const std::string& name = "") {
+        auto n = name.empty()
+            ? makeNode(DFGXPayload{})
+            : makeNode(DFGXPayload{}, name);
+        n->type = type;
+        nodes.push_back(std::move(n));
         return nodes.back().get();
     }
 
     // Create a named signal placeholder (for internal signals, not ports)
     DFGNode* signal(const std::string& instance_path, const std::string& name) {
-        nodes.push_back(std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGSignalPayload{}, name));
+        nodes.push_back(makeNode(DFGSignalPayload{}, name));
         nodes.back()->instance_path = instance_path;
         return nodes.back().get();
     }
@@ -660,8 +739,8 @@ public:
     // (static bit extraction only). Dynamic indexing must be lowered to MUX instead.
     DFGNode* slice(DFGNode* source, DFGNode* high, DFGNode* low, const std::string& name = "") {
         auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGSlicePayload{source, high, low})
-            : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGSlicePayload{source, high, low}, name);
+            ? makeNode(DFGSlicePayload{source, high, low})
+            : makeNode(DFGSlicePayload{source, high, low}, name);
         nodes.push_back(std::move(n));
         return nodes.back().get();
     }
@@ -676,8 +755,8 @@ public:
 
     DFGNode* concat(const std::vector<DFGOutput>& parts, const std::string& name = "") {
         auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{parts})
-            : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGConcatPayload{parts}, name);
+            ? makeNode(DFGConcatPayload{parts})
+            : makeNode(DFGConcatPayload{parts}, name);
         nodes.push_back(std::move(n));
         return nodes.back().get();
     }
@@ -754,8 +833,8 @@ public:
             arms.push_back({selectorValues[i], DFGOutput(data[i])});
         }
         auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGMuxPayload{DFGOutput(sel), std::move(arms)})
-            : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGMuxPayload{DFGOutput(sel), std::move(arms)}, name);
+            ? makeNode(DFGMuxPayload{DFGOutput(sel), std::move(arms)})
+            : makeNode(DFGMuxPayload{DFGOutput(sel), std::move(arms)}, name);
         nodes.push_back(std::move(n));
         return nodes.back().get();
     }
@@ -769,8 +848,8 @@ public:
         if (!isBinaryDFGOp(op))
             throw CompilerError(std::format("binaryOp: {} is not a binary op", to_string(op)));
         auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGBinaryPayload{op, DFGOutput(a), DFGOutput(b)})
-            : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGBinaryPayload{op, DFGOutput(a), DFGOutput(b)}, name);
+            ? makeNode(DFGBinaryPayload{op, DFGOutput(a), DFGOutput(b)})
+            : makeNode(DFGBinaryPayload{op, DFGOutput(a), DFGOutput(b)}, name);
         nodes.push_back(std::move(n));
         return nodes.back().get();
     }
@@ -779,8 +858,8 @@ public:
         if (!isUnaryDFGOp(op))
             throw CompilerError(std::format("unaryOp: {} is not a unary op", to_string(op)));
         auto n = name.empty()
-            ? std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGUnaryPayload{op, DFGOutput(a)})
-            : std::make_unique<DFGNode>(DFGNode::ConstructionKey{}, DFGUnaryPayload{op, DFGOutput(a)}, name);
+            ? makeNode(DFGUnaryPayload{op, DFGOutput(a)})
+            : makeNode(DFGUnaryPayload{op, DFGOutput(a)}, name);
         nodes.push_back(std::move(n));
         return nodes.back().get();
     }
@@ -840,6 +919,7 @@ public:
             if (actual == 0) {
                 if (node->kind() != DFGOp::INPUT &&
                     node->kind() != DFGOp::CONST &&
+                    node->kind() != DFGOp::X &&
                     node->kind() != DFGOp::OUTPUT &&
                     node->kind() != DFGOp::SIGNAL) {
                     throw CompilerError(std::format(
@@ -919,6 +999,34 @@ public:
                             node->str(), value), node.get());
                     }
                 }
+            } else if (node->kind() == DFGOp::SLICE) {
+                auto slice = node->sliceInputs();
+                if (slice.high.node->kind() != DFGOp::CONST ||
+                    slice.low.node->kind() != DFGOp::CONST) {
+                    throw CompilerError(std::format(
+                        "DFG validate: SLICE {} requires CONST high/low inputs",
+                        node->str()), node.get());
+                }
+                if (!slice.source.node->hasType()) {
+                    continue;  // type not yet propagated; bounds check deferred
+                }
+                if (slice.source.node->type->width <= 0) {
+                    throw CompilerError(std::format(
+                        "DFG validate: SLICE {} source has invalid width {}",
+                        node->str(), slice.source.node->type->width), node.get());
+                }
+
+                int64_t high = slice.high.node->constValue();
+                int64_t low = slice.low.node->constValue();
+                auto resolved = resolveSliceRange(*slice.source.node, high, low);
+                if (resolved.internal_low < 0 ||
+                    resolved.internal_high >= slice.source.node->type->width) {
+                    throw CompilerError(std::format(
+                        "DFG validate: SLICE {} resolves to internal range [{}:{}] "
+                        "outside source width {}",
+                        node->str(), resolved.internal_high, resolved.internal_low,
+                        slice.source.node->type->width), node.get());
+                }
             }
         }
     }
@@ -930,7 +1038,8 @@ public:
         for (const auto& node : nodes) {
             if (node->rawInputs().empty() &&
                 node->kind() != DFGOp::INPUT &&
-                node->kind() != DFGOp::CONST) {
+                node->kind() != DFGOp::CONST &&
+                node->kind() != DFGOp::X) {
                 throw CompilerError(std::format(
                     "DFG validateStrict: node {} has no inputs but is not INPUT or CONST",
                     node->str()), node.get());
@@ -939,6 +1048,14 @@ public:
                 throw CompilerError(std::format(
                     "DFG validateStrict: node {} still carries unpacked_dims",
                     node->str()), node.get());
+            }
+            if (node->kind() == DFGOp::SLICE) {
+                auto slice = node->sliceInputs();
+                if (!slice.source.node->hasType()) {
+                    throw CompilerError(std::format(
+                        "DFG validateStrict: SLICE {} source has no type",
+                        node->str()), node.get());
+                }
             }
         }
     }

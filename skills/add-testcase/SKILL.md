@@ -1,10 +1,10 @@
 ---
 name: add-testcase
-description: Add or update a compiler testcase in tests/. Use this when creating new test scaffolding, deciding whether a handwritten testbench is needed, or validating that a testbench follows the repo's driving rules.
+description: Scaffold a new compiler testcase in tests/. Use this when creating new test scaffolding from scratch. For RTL and TB coding rules, see testcase-rules.
 ---
 
 Use `tools/new_test.py` to scaffold a new testcase:
-- `python3 tools/new_test.py <test_name>`
+- `poetry run python tools/new_test.py <test_name>`
 
 Generated structure:
 - `tests/<name>/rtl/`
@@ -21,13 +21,6 @@ The scaffold also creates:
 - shared Makefile symlinks
 - generated TB helper files via `tools/gen_tb.py`
 
-When a handwritten testbench is needed, follow these rules:
-- each async signal is driven from its own `initial` block
-- timing delays are only allowed in those async-driving `initial` blocks
-- for each clock domain, all synchronous driving belongs in that domain's `always @(posedge clk)` block
-- no timing delays are allowed inside synchronous driver blocks
-- synchronous driving should use NBA assignments
-
 Typical workflow:
 1. Scaffold with `tools/new_test.py`.
 2. Add or update RTL under `tests/<name>/rtl/`.
@@ -39,3 +32,5 @@ If you need extra simulator flags, use:
 - `tests/<name>/custom-sim.args`
 - `tests/<name>/work/custom-sim/custom-sim.args`
 - `tests/<name>/work/static/static.args`
+
+For RTL and TB coding requirements, consult the `testcase-rules` skill.

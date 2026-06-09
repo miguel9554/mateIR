@@ -15,6 +15,7 @@ struct StaticAnalysisSummary {
     size_t outputs = 0;
     size_t signals = 0;
     size_t flops = 0;
+    size_t flop_bits = 0;
     size_t dfg_nodes = 0;
 };
 

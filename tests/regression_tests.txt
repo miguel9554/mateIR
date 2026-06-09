@@ -6,6 +6,8 @@
 
 apb_gpio PASS
 array_indexing PASS
+dynamic_lhs_bitselect PASS
+body_import_header_leak_fail FAIL Parameter 'WIDTH' not found in context
 axi_spi_slave PASS
 cdc_sidecar_async_sync_pass PASS
 cdc_sidecar_cross_clock_pass PASS
@@ -25,7 +27,18 @@ enum_top_test PASS
 enum_cast_width_fail FAIL cast width mismatch
 full_then_partial_write_conflict FAIL Multiple drivers for target 'bus'
 func_test PASS
+general_features_test PASS
+case_constant_expression PASS
+case_constant_expr_wide_selector_fail FAIL Constant-expression case selector must be exactly 1 bit wide
+case_constant_expr_nonbinary_selector_fail FAIL Constant-expression case selector must be 1'b0 or 1'b1
+case_constant_expr_wide_item_fail FAIL Constant-expression case items must be scalar 1-bit expressions
+case_constant_expr_mixed_items_fail FAIL Constant-expression case requires variable case items
+case_constant_expr_const_items_fail FAIL Constant-expression case requires variable case items
+case_variable_expr_variable_items_fail FAIL Variable-expression case requires constant case items
+case_variable_expr_duplicate_items_fail FAIL Duplicate case item value 1
 generate_test PASS
+generate_struct_vcd_compare PASS
+generate_localparam_vcd_compare PASS
 global_domains_chained_clock_alias PASS
 global_domains_clock_alias PASS
 global_domains_const_clock_alias_fail FAIL parent signal 'clk_const' is not a resolved clock input alias
@@ -84,18 +97,13 @@ struct_whole_assign_phase2_fail PASS
 struct_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
 struct_package_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
 struct_package_port_typedef_mismatch_fail FAIL whole-struct assignment requires matching typedef names
-struct_to_vector_assign_fail FAIL struct/vector assignment is not supported
-vector_to_struct_assign_fail FAIL struct/vector assignment is not supported
 struct_conditional_expr PASS
 struct_if_branch_merge PASS
 struct_case_branch_merge PASS
 struct_conditional_typedef_mismatch_fail FAIL whole-struct conditional requires matching typedef names
 struct_if_struct_condition_fail FAIL whole struct cannot be used as a boolean condition
 struct_ternary_struct_condition_fail FAIL whole struct cannot be used as a boolean condition
-struct_literal_positional PASS
-struct_literal_named_members PASS
-struct_literal_default PASS
-struct_literal_typed_prefix_expr PASS
+struct_literal_collection PASS
 struct_literal_duplicate_field_fail FAIL Struct literal has duplicate field
 struct_literal_unknown_field_fail FAIL Unknown field 'bad' on struct type
 struct_literal_missing_field_fail FAIL does not cover field
@@ -120,7 +128,14 @@ task_func_test PASS
 uart PASS
 unpacked_array_copy PASS
 unpacked_reverse_index PASS
+inside_operator PASS
 unique_if_fail FAIL unique/unique0 modifiers are not supported on if
 unique0_if_fail FAIL unique/unique0 modifiers are not supported on if
-unique_case_fail FAIL unique/unique0 modifiers are not supported on case
-unique0_case_fail FAIL unique/unique0 modifiers are not supported on case
+unique0_case_fail FAIL unique0 modifiers are not supported on case
+casez_variable_expr PASS
+casez_constant_expr_fail FAIL casez is not supported with a constant-expression selector
+casez_unique0_fail FAIL unique0 modifiers are not supported on case
+packed_struct_conv PASS
+ibex_compressed_decoder PASS
+arithmetic_ops PASS
+ibex_core PASS

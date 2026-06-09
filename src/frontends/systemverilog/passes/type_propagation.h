@@ -12,4 +12,9 @@ bool propagateTypes(DFG& graph);
 // Returns true if the type was newly set, false if already typed or deferred.
 bool inferNodeType(DFGNode* node);
 
+// Resolve the type of one DFG subgraph immediately.
+// Recursively infers input types for the requested root and throws if any
+// dependency needed for the root remains untyped.
+Type resolveNodeTypeNow(DFGNode* node);
+
 } // namespace mate

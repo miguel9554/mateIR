@@ -1,9 +1,13 @@
 ROOT_DIR = ../..
 PROJECT_ROOT = $(ROOT_DIR)/../..
 MODULE_NAME = $(notdir $(realpath $(ROOT_DIR)))
-VCD_COMPARE_BUILD_DIR ?= $(PROJECT_ROOT)/build/vcd-compare/sanitized
+VCD_COMPARE_BUILD_TARGET ?= dev
+VCD_COMPARE_BUILD_DIR ?= $(PROJECT_ROOT)/build/vcd-compare/$(VCD_COMPARE_BUILD_TARGET)
 VCD_COMPARE = $(VCD_COMPARE_BUILD_DIR)/vcd-compare
+SANITIZER_ENV =
+ifeq ($(VCD_COMPARE_BUILD_TARGET),sanitized)
 SANITIZER_ENV = ASAN_OPTIONS=symbolize=1,detect_leaks=0,abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1,halt_on_error=1
+endif
 
 WORK_REL_TO_ROOT = tests/$(MODULE_NAME)/work
 CUSTOM_SIM_DIR = $(WORK_REL_TO_ROOT)/custom-sim
@@ -22,7 +26,7 @@ HIERARCHY_JSON = $(CUSTOM_SIM_DIR)/debug_output/$(MODULE_NAME)/hierarchy.json
 VCD_COMPARE_ARGS = $(shell cat vcd-diff.args 2>/dev/null)
 
 compare:
-	cmake --preset sanitized -S $(PROJECT_ROOT)/tools/vcd-compare
+	cmake --preset $(VCD_COMPARE_BUILD_TARGET) -S $(PROJECT_ROOT)/tools/vcd-compare
 	cmake --build $(VCD_COMPARE_BUILD_DIR) --parallel
 	$(SANITIZER_ENV) $(VCD_COMPARE) --hierarchy $(PROJECT_ROOT)/$(HIERARCHY_JSON) $(VCD_COMPARE_ARGS) \
 		$(CUSTOM_SIM_VCD) \

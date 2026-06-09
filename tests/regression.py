@@ -11,7 +11,6 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
-SIMULATOR = REPO_ROOT / "build" / "sanitized" / "mate"
 MANIFEST = TESTS_DIR / "regression_tests.txt"
 DFG_API_GUARD = TESTS_DIR / "check_dfg_api_surface.py"
 MODULE_NODE_API_GUARD = TESTS_DIR / "check_module_node_api_surface.py"
@@ -96,7 +95,7 @@ def run_clean(name):
     )
 
 
-def run_validate(name):
+def run_validate(name, build_target):
     """Run a PASS test's specialized script or default validation recipe."""
     static_work_dir = TESTS_DIR / name / "work" / "static"
     regression_script = static_work_dir / "regression.sh"
@@ -104,6 +103,7 @@ def run_validate(name):
         env = os.environ.copy()
         # The simulator is built once upfront; avoid racing cmake in parallel tests.
         env["STATIC_BUILD_TARGET"] = "noop"
+        env.setdefault("VCD_COMPARE_BUILD_TARGET", build_target)
         result = subprocess.run(
             ["bash", str(regression_script)],
             cwd=static_work_dir,
@@ -123,15 +123,16 @@ def run_validate(name):
         cwd=work_dir,
         capture_output=True,
         text=True,
+        env={**os.environ, "VCD_COMPARE_BUILD_TARGET": build_target},
     )
     output = result.stdout + result.stderr
     return result.returncode == 0, output
 
 
-def ensure_simulator():
-    """Build the sanitized simulator before running tests."""
+def ensure_simulator(build_target):
+    """Build the requested simulator before running tests."""
     result = subprocess.run(
-        ["make", "-C", str(REPO_ROOT), "sanitized"],
+        ["make", "-C", str(REPO_ROOT), build_target],
         capture_output=True,
         text=True,
     )
@@ -160,7 +161,7 @@ def run_module_node_api_guard():
     return result.returncode == 0, output
 
 
-def run_expected_failure(name, expected):
+def run_expected_failure(name, expected, simulator):
     """Run an expected-failure compile test. Returns (success, output)."""
     test_dir = TESTS_DIR / name
     extra_args_path = test_dir / "custom-sim.args"
@@ -173,7 +174,7 @@ def run_expected_failure(name, expected):
     with tempfile.TemporaryDirectory(prefix=f"{name}_stimuli_") as stimuli_dir, \
          tempfile.TemporaryDirectory(prefix=f"{name}_output_") as output_dir:
         cmd = [
-            str(SIMULATOR),
+            str(simulator),
             "--simulate",
             "--top",
             name,
@@ -201,14 +202,14 @@ def run_expected_failure(name, expected):
     return ok, output
 
 
-def run_case(case):
+def run_case(case, build_target, simulator):
     """Run a single test case. Returns (name, ok, output)."""
     name = case["name"]
     if case["kind"] == "validate":
         # run_clean(name)
-        ok, output = run_validate(name)
+        ok, output = run_validate(name, build_target)
     else:
-        ok, output = run_expected_failure(name, case["expected_error"])
+        ok, output = run_expected_failure(name, case["expected_error"], simulator)
     return name, ok, output
 
 
@@ -221,7 +222,14 @@ def main():
         default=os.cpu_count() or 1,
         help="Number of tests to run in parallel (default: number of CPUs)",
     )
+    parser.add_argument(
+        "--build",
+        choices=("dev", "sanitized"),
+        default="dev",
+        help="Build preset to use for mate and helper tools (default: dev)",
+    )
     args = parser.parse_args()
+    simulator = REPO_ROOT / "build" / args.build / "mate"
 
     try:
         cases = load_test_cases()
@@ -248,7 +256,7 @@ def main():
         sys.exit(1)
 
     print("Building simulator...", flush=True)
-    ok, output = ensure_simulator()
+    ok, output = ensure_simulator(args.build)
     if not ok:
         print(f"{RED}Failed to build simulator{RESET}")
         print(output)
@@ -261,7 +269,10 @@ def main():
     completed = 0
     total = len(cases)
     with ThreadPoolExecutor(max_workers=jobs) as executor:
-        futures = {executor.submit(run_case, case): case for case in cases}
+        futures = {
+            executor.submit(run_case, case, args.build, simulator): case
+            for case in cases
+        }
         for future in as_completed(futures):
             name, ok, output = future.result()
             results[name] = (ok, output)

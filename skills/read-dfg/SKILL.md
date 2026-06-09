@@ -1,6 +1,6 @@
 ---
 name: read-dfg
-description: Inspect DFG .json or .dot debug artifacts produced by the compiler. Use this when debugging signal drivers, cones, MUX trees, pass-to-pass changes, dead code, or node-path questions. Prefer tools/dfg_inspect.py and compiler debug-node flags over ad hoc scripts.
+description: Inspect DFG .json or .dot debug artifacts produced by the compiler. Use this when debugging signal drivers, dependencies, fanout, op behavior, pass-to-pass changes, dead code, or node identity questions. Prefer tools/dfg_inspect.py and correlate with runtime tracing when structure alone is not enough.
 ---
 
 Use `tools/dfg_inspect.py` for JSON and `dot -Tsvg` for DOT.
@@ -9,37 +9,36 @@ Common locations:
 - `tests/<name>/work/static/debug_output/<top>/`
 - `tests/<name>/work/custom-sim/debug_output/<top>/`
 
-Current pass order:
-- `00_elaboration`
-- `01_dfg_inline`
-- `02_constant_fold`
-- `03_type_propagation`
-- `04_condition_normalization`
-- `05_constant_fold`
-- `06_flop_resolve`
-- `07_load_top_io_domains` or `07_infer_top_clock_reset_domains`
-- `08_cdc_annotations`
-- `09_global_domain_resolve`
-- `10_infer_top_data_input_domains` only in infer mode
-- `10_dce` or `11_dce`
-- `11_domains_propagate_and_check` or `12_domains_propagate_and_check`
-
-Also emitted:
-- `hierarchy.json`
-- `06_flop_resolve_flops.txt`
-- `11_domains_propagate_flops.txt` or `12_domains_propagate_flops.txt`
+Key idea:
+- Use DFG JSON for static structure and lowering state.
+- Use `trace-dfg-runtime` when you need to know what happened at simulation time.
 
 Useful commands:
+- `python3 tools/dfg_inspect.py <file> node <id-or-name> [--details]`
+- `python3 tools/dfg_inspect.py <file> nodes [--op OP] [--name PATTERN] [--at FILE:LINE]`
+- `python3 tools/dfg_inspect.py <file> deps <id-or-name> [--op OP] [--depth N] [--details]`
+- `python3 tools/dfg_inspect.py <file> uses <id-or-name> [--op OP] [--depth N] [--details]`
+- `python3 tools/dfg_inspect.py <file> neighborhood <id-or-name> --fanin N --fanout N`
+- `python3 tools/dfg_inspect.py <file> diff <other.json> [--node ID-OR-NAME] [--cone] [--details]`
+
+Still useful when they fit:
 - `python3 tools/dfg_inspect.py <file> driver <name>`
-- `python3 tools/dfg_inspect.py <file> cone <name>`
+- `python3 tools/dfg_inspect.py <file> cone <name> [--depth N]`
 - `python3 tools/dfg_inspect.py <file> mux <name>`
-- `python3 tools/dfg_inspect.py <file> diff <older.json>`
-- `python3 tools/dfg_inspect.py <file> op MUX`
-- `python3 tools/dfg_inspect.py <file> node <name_or_id>`
+- `python3 tools/dfg_inspect.py <file> mux-case <id-or-name> <case_val>`
+- `python3 tools/dfg_inspect.py <file> const_driven [value]`
+- `python3 tools/dfg_inspect.py <file> group <prefix>`
+- `python3 tools/dfg_inspect.py <file> search <pattern>`
 
 When debugging:
-1. Find the latest pass snapshot for the failing signal.
-2. Check `driver`.
-3. Check `cone` or `mux`.
-4. Compare against the previous pass with `diff`.
-5. If the issue is around a flop or domain tag, inspect `06_flop_resolve_flops.txt` and later pass outputs.
+1. Start with `node --details` for the suspicious signal or node.
+2. Use `deps` to walk backward through the inputs that determine the value.
+3. Use `uses` to see downstream impact and to find the first consumer that changes across passes.
+4. Use `neighborhood` when the issue is local and you want one compact view.
+5. Use `nodes --op OP` or `nodes --at FILE:LINE` when you know the operation kind or source location but not the exact name.
+6. Use `diff` on adjacent passes first. Add `--node` or `--cone` once the suspect area is known.
+7. If the static graph looks correct but the runtime value is wrong, switch to `trace-dfg-runtime`.
+
+Notes:
+- Newer DFG JSON carries richer type data, named inputs, `instance_path`, `full_name`, and stable `debug_id` values. Prefer those when present.
+- Existing checked-in JSON artifacts may predate that schema. If metadata is missing, regenerate artifacts with a fresh compiler build.

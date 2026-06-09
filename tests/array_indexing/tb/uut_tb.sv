@@ -32,6 +32,8 @@ module uut_tb(
             _if.packed_sel   <= 2'd0;
             _if.unpacked_sel <= 2'd0;
             _if.slice_base   <= 5'd0;
+            _if.nzb_dyn_idx  <= 3'd1;
+            _if.nzb_dyn_base <= 3'd1;
         end
 
         wait (_if.rst_n == 1'b0);
@@ -44,6 +46,9 @@ module uut_tb(
                 _if.packed_sel   <= cycle[1:0] ^ lfsr[5:4];
                 _if.unpacked_sel <= cycle[3:2] + lfsr[1:0];
                 _if.slice_base   <= {cycle[1:0] ^ lfsr[3:2], 3'b000};
+                // Drive raw values; RTL sanitises to valid range [1:7] / [1:5].
+                _if.nzb_dyn_idx  <= lfsr[2:0];
+                _if.nzb_dyn_base <= lfsr[5:3];
             end
         end
 
@@ -54,6 +59,8 @@ module uut_tb(
                 _if.packed_sel   <= ~lfsr[1:0];
                 _if.unpacked_sel <= lfsr[3:2];
                 _if.slice_base   <= {lfsr[5:4], 3'b000};
+                _if.nzb_dyn_idx  <= ~lfsr[2:0];
+                _if.nzb_dyn_base <= ~lfsr[5:3];
             end
         end
     end

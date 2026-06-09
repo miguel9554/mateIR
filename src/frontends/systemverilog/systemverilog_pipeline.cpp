@@ -1,6 +1,7 @@
 #include "frontends/systemverilog/systemverilog_pipeline.h"
 
 #include "frontends/systemverilog/passes/cdc_annotations.h"
+#include "frontends/systemverilog/passes/cdc_emit.h"
 #include "frontends/systemverilog/passes/condition_normalization.h"
 #include "frontends/systemverilog/passes/constant_fold.h"
 #include "frontends/systemverilog/passes/dce.h"
@@ -154,6 +155,7 @@ void runMateIRPipeline(MateIR& ir,
                        TopDomainMode topDomainMode,
                        bool inferSynchronizers,
                        const std::optional<std::string>& emitInferredDomainsPath,
+                       const std::optional<std::string>& emitInferredSynchronizersDir,
                        const std::map<std::string, std::string>& cdcPathsByModule,
                        FrontendDomainFacts& domainFacts,
                        const std::vector<DebugNodeSpec>& debugSpecs,
@@ -364,6 +366,9 @@ void runMateIRPipeline(MateIR& ir,
     if (topDomainMode == TopDomainMode::Infer && emitInferredDomainsPath) {
         emitInferredTopDomainsYaml(topModule, domainFacts, *emitInferredDomainsPath);
     }
+    if (inferSynchronizers && emitInferredSynchronizersDir) {
+        emitInferredCdcYamls(domainFacts, *emitInferredSynchronizersDir);
+    }
 }
 
 } // namespace
@@ -377,7 +382,8 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
         if (options.top_module) {
             ParameterContext topParams;
             for (const auto& [name, value] : options.parameters) {
-                topParams.values[name] = static_cast<int>(value);
+                topParams.values[name] =
+                    ConstantValue::bits(Type::makeInteger(64, true), value);
             }
             return resolveModules(extracted.modules, extracted.packages, extracted.globalImports,
                                   sourceManager, *options.top_module, topParams, &domainFacts);
@@ -396,6 +402,7 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
     runMateIRPipeline(ir, topDomainPath, options.top_domain_mode,
                       options.infer_synchronizers,
                       options.emit_inferred_domains_path,
+                      options.emit_inferred_synchronizers_dir,
                       cdcPathsByModule, domainFacts, options.debug_dfg_nodes,
                       options.dump_passes);
 

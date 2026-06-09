@@ -3,6 +3,7 @@
 #include "mateir/dfg.h"
 #include "mateir/domains.h"
 #include "mateir/types.h"
+#include "mateir/constant_value.h"
 
 #include <map>
 #include <memory>
@@ -168,11 +169,11 @@ struct ModuleNode : NamedValueBase {
 };
 
 struct Param : NamedValueBase {
-    double value = 0;
+    ConstantValue value;
     DFGNode* dfg_node = nullptr;  // direct pointer to the corresponding CONST node
     void print(std::ostream& os) const {
         NamedValueBase::print(os);
-        os << " value=" << value;
+        os << " value=" << value.debugString();
     }
 };
 
@@ -223,6 +224,8 @@ struct Module {
     std::string name;           // module type name
     std::string instance_name;  // instance name (empty for the top module)
     std::vector<Param> parameters;
+    // Module-level localparams plus generate-local localparams qualified with
+    // their generate instance path (for example `g_lane[0].Cnt`).
     std::vector<Param> localparams;
     std::map<std::string, Type> named_types;
     std::map<std::string, ModuleNode> nodes;
@@ -363,7 +366,7 @@ void rebuildModuleNodeIndexRecursively(Module& module);
 
 struct ParameterContext {
     // Map from parameter name to its value
-    std::map<std::string, int> values;
+    std::map<std::string, ConstantValue> values;
 };
 
 // Validate that no combinational loops exist in the DFG.

@@ -125,6 +125,7 @@ public:
         SyntaxKind::TaskDeclaration,
         SyntaxKind::ContinuousAssign,
         SyntaxKind::TypedefDeclaration,
+        SyntaxKind::PackageImportDeclaration,
         // SyntaxKind::DefParam,
         // SyntaxKind::ElabSystemTask,
         // SyntaxKind::LocalVariableDeclaration,
@@ -142,11 +143,13 @@ public:
             currentPackage = pkg.get();
             for (auto* member : node.members) {
                 if (member->kind == SyntaxKind::TypedefDeclaration ||
+                    member->kind == SyntaxKind::ParameterDeclarationStatement ||
                     member->kind == SyntaxKind::FunctionDeclaration ||
                     member->kind == SyntaxKind::TaskDeclaration ||
-                    member->kind == SyntaxKind::EmptyMember)
+                    member->kind == SyntaxKind::EmptyMember) {
+                    pkg->members.push_back(member);
                     member->visit(*this);
-                else
+                } else
                     throw CompilerError(
                         "Unsupported package member: " + std::string(toString(member->kind)),
                         resolveSourceLoc(*member, sm));
@@ -163,9 +166,7 @@ public:
         module->parameters = std::move(headerInfo.parameters);
         module->inputs = std::move(headerInfo.inputs);
         module->outputs = std::move(headerInfo.outputs);
-        module->imports = std::move(headerInfo.imports);
-
-        if (node.blockName) throw CompilerError("Can't parse blockName", resolveSourceLoc(node, sm));
+        module->headerImports = std::move(headerInfo.headerImports);
 
         // Set current module context
         currentModule = module.get();
@@ -253,6 +254,9 @@ public:
     }
 
     void handle(const ParameterDeclarationStatementSyntax& node) {
+        if (currentPackage) return;
+        if (!currentModule) throw CompilerError(
+            "Parameter declaration must be inside module or package.", resolveSourceLoc(node, sm));
         currentModule->localparams = extractParameter(node.parameter, currentModule->localparams);
     }
 
@@ -295,19 +299,19 @@ public:
     }
 
     void handle(const PackageImportDeclarationSyntax& node) {
-        // Compilation-unit-scope import (outside any module or package)
-        if (currentModule == nullptr && currentPackage == nullptr) {
-            for (const auto* item : node.items) {
-                ImportSpec spec;
-                spec.package_name = std::string(item->package.valueText());
-                bool isWildcard = (item->item.kind == slang::parsing::TokenKind::Star);
-                spec.item = isWildcard ? std::nullopt
-                                       : std::optional<std::string>(item->item.valueText());
-                globalImports.push_back(spec);
-            }
+        auto* destination = currentModule ? &currentModule->bodyImports : &globalImports;
+        if (currentPackage) {
+            throw CompilerError(
+                "Package body imports are not supported.", resolveSourceLoc(node, sm));
         }
-        // Body-level imports inside a module body are not yet supported (deferred)
-        // Package body imports are handled via the package member loop in handlePackage
+        for (const auto* item : node.items) {
+            ImportSpec spec;
+            spec.package_name = std::string(item->package.valueText());
+            bool isWildcard = (item->item.kind == slang::parsing::TokenKind::Star);
+            spec.item = isWildcard ? std::nullopt
+                                   : std::optional<std::string>(item->item.valueText());
+            destination->push_back(std::move(spec));
+        }
     }
 
     void handle(const TypedefDeclarationSyntax& node) {
@@ -337,6 +341,10 @@ public:
                 "union types are not supported",
                 resolveSourceLoc(node, sm));
         }
+        // Package members are elaborated in source order from their retained
+        // syntax nodes. Allow aliases of supported underlying types through;
+        // resolvePackages validates the underlying type.
+        if (currentPackage) return;
         throw CompilerError(
             "Only enum and struct typedefs are supported (got " +
             std::string(toString(node.type->kind)) + ")",

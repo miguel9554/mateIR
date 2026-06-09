@@ -654,7 +654,7 @@ void Module::print(int indent) const {
     for (const auto& sub : this->hierarchyInstantiation) {
         std::cout << indent_str(indent + 2) << sub.name;
         for (const auto& p : sub.parameters) {
-            std::cout << " " << p.name << "=" << p.value;
+            std::cout << " " << p.name << "=" << p.value.debugString();
         }
         std::cout << std::endl;
     }
@@ -875,7 +875,10 @@ static std::string moduleNodeToJson(const ModuleNode& s) {
 static std::string paramToJson(const Param& p) {
     std::ostringstream ss;
     ss << "{\"name\": \"" << p.name << "\", \"type\": " << typeToJson(p.type)
-       << ", \"value\": " << p.value << "}";
+       << ", \"value\": ";
+    if (auto scalar = p.value.asInt64()) ss << *scalar;
+    else ss << "\"" << p.value.debugString() << "\"";
+    ss << "}";
     return ss.str();
 }
 

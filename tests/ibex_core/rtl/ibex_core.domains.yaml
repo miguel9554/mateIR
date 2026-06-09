@@ -1,0 +1,31 @@
+module_name: ibex_core
+resets:
+  rst_ni:
+    polarity: negative
+clock_domains:
+  clk_i:
+    polarity: posedge
+    inputs_outputs:
+      - boot_addr_i
+      - data_err_i
+      - data_gnt_i
+      - data_rdata_i
+      - data_rvalid_i
+      - debug_req_i
+      - fetch_enable_i
+      - hart_id_i
+      - instr_err_i
+      - instr_gnt_i
+      - instr_rdata_i
+      - instr_rvalid_i
+      - irq_external_i
+      - irq_fast_i
+      - irq_nm_i
+      - irq_software_i
+      - irq_timer_i
+      - rf_rdata_a_ecc_i
+      - rf_rdata_b_ecc_i
+async_domain:
+  - ic_data_rdata_i
+  - ic_scr_key_valid_i
+  - ic_tag_rdata_i

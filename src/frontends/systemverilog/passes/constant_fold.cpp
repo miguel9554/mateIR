@@ -22,6 +22,26 @@ static int64_t getConst(const DFGNode* n) {
     return n->constValue();
 }
 
+static int64_t normalizeToTypeWidth(int64_t value, const Type& type) {
+    const int width = type.width;
+    if (width <= 0 || width >= 63) {
+        return value;
+    }
+
+    const uint64_t mask = (uint64_t{1} << width) - 1;
+    uint64_t truncated = static_cast<uint64_t>(value) & mask;
+    if (!type.isSigned()) {
+        return static_cast<int64_t>(truncated);
+    }
+
+    const uint64_t signBit = uint64_t{1} << (width - 1);
+    if ((truncated & signBit) == 0) {
+        return static_cast<int64_t>(truncated);
+    }
+    truncated |= ~mask;
+    return static_cast<int64_t>(truncated);
+}
+
 static DFGNode* unaryNode(const DFGNode* n) {
     return n->unaryInputs().operand.node;
 }
@@ -36,6 +56,9 @@ static void makeConst(DFGNode* n, int64_t value) {
     // infer it from the inputs now, before they are cleared.
     if (!n->type.has_value())
         inferNodeType(n);
+    if (n->type.has_value()) {
+        value = normalizeToTypeWidth(value, *n->type);
+    }
     n->rewriteToConst(value);
 }
 
@@ -166,6 +189,9 @@ static bool tryConstantFold(DFGNode* node) {
         }
         case DFGOp::MUX: {
             int64_t sel = getConst(node->muxSelector().node);
+            if (node->muxSelector().node->hasType()) {
+                sel = normalizeToTypeWidth(sel, *node->muxSelector().node->type);
+            }
             auto* selected = node->muxDataForValue(sel);
             if (!selected) {
                 throw CompilerError(
@@ -397,7 +423,11 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
         case DFGOp::MUX: {
             auto* sel = node->muxSelector().node;
             if (isConst(sel)) {
-                if (auto* selected = node->muxDataForValue(getConst(sel))) {
+                int64_t selValue = getConst(sel);
+                if (sel->hasType()) {
+                    selValue = normalizeToTypeWidth(selValue, *sel->type);
+                }
+                if (auto* selected = node->muxDataForValue(selValue)) {
                     graph.redirectConsumers(node, selected);
                     return true;
                 }

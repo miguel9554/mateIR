@@ -25,6 +25,8 @@ void printUsage(const char* progName) {
               << "  --infer-synchronizers     Infer CDC synchronizer flops instead of loading .cdc.yaml sidecars\n"
               << "  --emit-inferred-domains <file>\n"
               << "                            Write inferred top-level domains YAML (infer mode only)\n"
+              << "  --emit-inferred-synchronizers <dir>\n"
+              << "                            Write inferred CDC synchronizer YAMLs to dir (infer mode only)\n"
               << "  --analyze                 Run static analysis consumer on mateir\n"
               << "  --simulate                Run cycle-based simulation consumer\n"
               << "  --inputs-dir <dir>        Directory containing input stimuli files\n"
@@ -35,6 +37,9 @@ void printUsage(const char* progName) {
               << "  --debug-node-deps <...>   Comma-separated node names to dump direct DFG inputs\n"
               << "  --debug-node-paths <...>  Comma-separated SOURCE=TARGET queries to dump one dependency chain\n"
               << "  --dump-passes             Dump per-pass DFG .dot/.json and final DFG dump\n"
+              << "  --trace-dfg-node <...>    Comma-separated node ids/names to trace during simulation\n"
+              << "  --trace-dfg-cone <...>    Comma-separated node ids/names whose backward cones are traced\n"
+              << "  --trace-dfg-op <...>      Comma-separated DFG ops to trace during simulation\n"
               << "  --params <K=V,K=V,...>    Comma-separated top parameter overrides\n";
 }
 
@@ -119,8 +124,12 @@ int main(int argc, char** argv) {
     std::string debugNodesStr;
     std::string debugNodeDepsStr;
     std::string debugNodePathsStr;
+    std::string traceDfgNodesStr;
+    std::string traceDfgConesStr;
+    std::string traceDfgOpsStr;
     std::string paramsStr;
     std::string emitInferredDomainsPath;
+    std::string emitInferredSynchronizersDir;
     std::vector<std::string> domainFiles;
     std::vector<std::string> sourceFiles;
     TopDomainMode topDomainMode = TopDomainMode::Yaml;
@@ -146,8 +155,12 @@ int main(int argc, char** argv) {
                    std::strcmp(argv[i], "--debug-nodes") == 0 ||
                    std::strcmp(argv[i], "--debug-node-deps") == 0 ||
                    std::strcmp(argv[i], "--debug-node-paths") == 0 ||
+                   std::strcmp(argv[i], "--trace-dfg-node") == 0 ||
+                   std::strcmp(argv[i], "--trace-dfg-cone") == 0 ||
+                   std::strcmp(argv[i], "--trace-dfg-op") == 0 ||
                    std::strcmp(argv[i], "--params") == 0 ||
-                   std::strcmp(argv[i], "--emit-inferred-domains") == 0) {
+                   std::strcmp(argv[i], "--emit-inferred-domains") == 0 ||
+                   std::strcmp(argv[i], "--emit-inferred-synchronizers") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "ERROR: " << argv[i] << " requires an argument\n";
                 printUsage(argv[0]);
@@ -164,8 +177,12 @@ int main(int argc, char** argv) {
             else if (opt == "--debug-nodes") debugNodesStr = value;
             else if (opt == "--debug-node-deps") debugNodeDepsStr = value;
             else if (opt == "--debug-node-paths") debugNodePathsStr = value;
+            else if (opt == "--trace-dfg-node") traceDfgNodesStr = value;
+            else if (opt == "--trace-dfg-cone") traceDfgConesStr = value;
+            else if (opt == "--trace-dfg-op") traceDfgOpsStr = value;
             else if (opt == "--params") paramsStr = value;
             else if (opt == "--emit-inferred-domains") emitInferredDomainsPath = value;
+            else if (opt == "--emit-inferred-synchronizers") emitInferredSynchronizersDir = value;
         } else if (std::strcmp(argv[i], "--domains") == 0) {
             while (i + 1 < argc && argv[i + 1][0] != '-') {
                 std::string_view arg(argv[i + 1]);
@@ -205,6 +222,9 @@ int main(int argc, char** argv) {
         if (!emitInferredDomainsPath.empty() && topDomainMode != TopDomainMode::Infer) {
             throw CompilerError("--emit-inferred-domains requires --infer-top-domains");
         }
+        if (!emitInferredSynchronizersDir.empty() && !inferSynchronizers) {
+            throw CompilerError("--emit-inferred-synchronizers requires --infer-synchronizers");
+        }
 
         std::cout << "========================================\n";
         std::cout << "mate\n";
@@ -225,6 +245,9 @@ int main(int argc, char** argv) {
         frontendOptions.top_domain_mode = topDomainMode;
         if (!emitInferredDomainsPath.empty()) {
             frontendOptions.emit_inferred_domains_path = emitInferredDomainsPath;
+        }
+        if (!emitInferredSynchronizersDir.empty()) {
+            frontendOptions.emit_inferred_synchronizers_dir = emitInferredSynchronizersDir;
         }
         frontendOptions.debug_dfg_nodes = parseDebugNodes(debugNodesStr);
         frontendOptions.dump_passes = dumpPasses;
@@ -258,6 +281,9 @@ int main(int argc, char** argv) {
             simConfig.output_dir = outputDir;
             simConfig.parameters = frontendOptions.parameters;
             simConfig.debug_dfg_nodes = frontendOptions.debug_dfg_nodes;
+            simConfig.trace_dfg_nodes = splitComma(traceDfgNodesStr);
+            simConfig.trace_dfg_cones = splitComma(traceDfgConesStr);
+            simConfig.trace_dfg_ops = splitComma(traceDfgOpsStr);
 
             if (!flopsInitialStr.empty()) {
                 if (flopsInitialStr == "random") simConfig.flops_initial = FlopsInitial::Random;

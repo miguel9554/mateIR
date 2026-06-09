@@ -35,7 +35,7 @@ std::vector<UnresolvedParam> extractParameter(const ParameterDeclarationBaseSynt
         params.push_back(UnresolvedParam{
             .name = paramName,
             .type = typeInfo,
-            .dimensions = {},
+            .dimensions = {&(declarator->dimensions)},
             .defaultValue = defaultValue
         });
     }
@@ -55,7 +55,7 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
             bool isWildcard = (item->item.kind == slang::parsing::TokenKind::Star);
             spec.item = isWildcard ? std::nullopt
                                    : std::optional<std::string>(item->item.valueText());
-            info.imports.push_back(spec);
+            info.headerImports.push_back(spec);
         }
     }
 
@@ -93,7 +93,7 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
                 UnresolvedSignal portInfo{
                     .name = portName,
                     .type = typeInfo,
-                    .dimensions = {}
+                    .dimensions = {&(port.declarator->dimensions)}
                 };
 
                 if (dir == TokenKind::InputKeyword) {
@@ -112,7 +112,7 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
                 UnresolvedSignal portInfo{
                     .name = portName,
                     .type = typeInfo,
-                    .dimensions = {}
+                    .dimensions = {&(port.declarator->dimensions)}
                 };
 
                 if (dir == TokenKind::InputKeyword) {

@@ -568,12 +568,6 @@ const SimValue* MateIRRuntime::findNodeValue(const DFGNode* node) const {
     return &it->second;
 }
 
-const SimValue* MateIRRuntime::findAsyncInputValue(const std::string& leaf_name) const {
-    auto it = async_values_.find(leaf_name);
-    if (it == async_values_.end()) return nullptr;
-    return &it->second;
-}
-
 bool MateIRRuntime::isFlopQNode(const DFGNode* node) const {
     return flop_q_nodes_.contains(node);
 }

@@ -169,6 +169,26 @@ void collectModuleMetadata(const MateIR& ir,
         }
     });
 
+    // Submodule input/output ports are debug-visible signals (the VCD/debug
+    // tooling traces them) but are not top-level I/O. Register them as internal
+    // observables so every traced module-node leaf resolves to a handle. Top
+    // I/O leaves and ports aliased to an already-observed node are skipped so we
+    // do not duplicate the Input/Output observables built for the top module.
+    auto registerPortLeaves = [&](const ModuleNode& port) {
+        for (const auto& leaf : moduleNodeLeafRefs(port)) {
+            if (!leaf.node) continue;
+            if (metadata.observables_by_node.contains(leaf.node)) continue;
+            Type type = checkedLeafType(
+                std::format("port '{}'", scopedName(module_path, leaf.leaf_name)),
+                port.type, leaf.node);
+            addObservable(metadata, RuntimeObservableKind::Internal, module_path,
+                          leaf.leaf_name, type, leaf.node, std::nullopt, std::nullopt,
+                          std::nullopt, leaf.leaf_index);
+        }
+    };
+    forEachInputNode(module, registerPortLeaves);
+    forEachOutputNode(module, registerPortLeaves);
+
     for (const auto& flop : module.flops) {
         if (flop.clock_domain == InvalidClockId) {
             throw CompilerError(std::format(

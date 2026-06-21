@@ -57,14 +57,23 @@ public:
         const std::function<std::vector<RuntimeInputUpdate>(ClockId)>& sync_update_provider,
         int64_t time_ns);
 
+    // Stable observability surface: outputs and observables are read only
+    // through handles. Adapters (file simulator, future DPI/cocotb) must use
+    // these and never reach into runtime/DFG state directly.
     SimValue getOutput(RuntimeOutputId output) const;
     SimValue getObservable(RuntimeObservableId observable) const;
 
-    // Compatibility/debug accessors for the existing file harness, trace, and VCD layers.
+    // DFG-node trace/debug hooks.
+    //
+    // These are a deliberately narrow, node-level introspection surface used by
+    // the optional `--trace-dfg-*` JSONL emitter. They are NOT the observable
+    // API and NOT part of the future foreign ABI: the DFG trace reports raw
+    // evaluation nodes (CONST/X/internal arithmetic) that have no observable
+    // handle, so they cannot be expressed through getObservable. `trace_sink`
+    // is invoked by the interpreted evaluator with per-node inputs/results.
     const SimValue& checkedGetRef(const DFGNode* node, const DFGNode* context = nullptr) const;
     SimValue checkedGet(const DFGNode* node, const DFGNode* context = nullptr) const;
     const SimValue* findNodeValue(const DFGNode* node) const;
-    const SimValue* findAsyncInputValue(const std::string& leaf_name) const;
     bool isFlopQNode(const DFGNode* node) const;
     std::optional<size_t> nodeIndex(const DFGNode* node) const;
 

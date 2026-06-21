@@ -245,13 +245,31 @@ std::string VcdWriter::requireTopInputSourceName(const ModuleNode& sig,
     return source->name;
 }
 
+RuntimeObservableId VcdWriter::observableForNode(const DFGNode* node,
+                                                 const std::string& context) const {
+    auto it = metadata_.observables_by_node.find(node);
+    if (it == metadata_.observables_by_node.end() || it->second.empty()) {
+        throw CompilerError(std::format(
+            "VcdWriter: {} has no runtime observable", context), node);
+    }
+    // Any observable bound to this node reads the same node value; pick the first.
+    return it->second.front();
+}
+
 void VcdWriter::addDomainInputEntry(vcd_tracer::module& scope, const std::string& name,
                                     const ModuleNode& sig) {
     unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
+    const std::string source = requireTopInputSourceName(sig, std::format("input '{}'", name));
+    const auto* input = metadata_.findInput(source);
+    if (!input || !input->node) {
+        throw CompilerError(std::format(
+            "VcdWriter: domain input '{}' source '{}' has no runtime input leaf", name, source));
+    }
+    RuntimeObservableId observable =
+        observableForNode(input->node, std::format("domain input '{}'", name));
     auto v = std::make_unique<SimVcdValue>(w);
     v->elaborate(scope.get_add_fn(), name);
-    async_values_[requireTopInputSourceName(sig, std::format("input '{}'", name))]
-        .push_back(std::move(v));
+    traced_values_.push_back({observable, std::move(v)});
 }
 
 // ============================================================================
@@ -268,9 +286,11 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
     // Callers (addSignalEntries, addFlopEntries) iterate leaves directly.
 
     unsigned int w = getWidth(node);
+    RuntimeObservableId observable =
+        observableForNode(node, std::format("traced signal '{}'", name));
     auto v = std::make_unique<SimVcdValue>(w);
     v->elaborate(scope.get_add_fn(), name);
-    values_[node].push_back(std::move(v));
+    traced_values_.push_back({observable, std::move(v)});
 }
 
 void VcdWriter::addSignalEntries(vcd_tracer::module& scope, const std::string& name,
@@ -505,8 +525,9 @@ void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
 // VcdWriter constructor
 // ============================================================================
 
-VcdWriter::VcdWriter(const MateIR& ir, const std::string& output_dir)
-    : ir_(ir) {
+VcdWriter::VcdWriter(const MateIR& ir, const MateIRRuntimeMetadata& metadata,
+                     const std::string& output_dir)
+    : ir_(ir), metadata_(metadata) {
     const Module& module = ir_.top;
     std::filesystem::create_directories(output_dir);
 
@@ -542,15 +563,10 @@ void VcdWriter::update(const MateIRRuntime& runtime, int64_t time_ns) {
     grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{time_ns});
     raw_top_->time_update_abs(raw_out_, std::chrono::nanoseconds{time_ns});
 
-    for (auto& [node, vcd_vals] : values_) {
-        const SimValue* value = runtime.findNodeValue(node);
-        if (value)
-            for (auto& vcd_val : vcd_vals) vcd_val->set(*value);
-    }
-    for (auto& [name, vcd_vals] : async_values_) {
-        const SimValue* value = runtime.findAsyncInputValue(name);
-        if (value)
-            for (auto& vcd_val : vcd_vals) vcd_val->set(*value);
+    // Values flow exclusively through runtime observable handles; the VCD layer
+    // never reaches into runtime/DFG state directly.
+    for (auto& traced : traced_values_) {
+        traced.vcd->set(runtime.getObservable(traced.observable));
     }
 }
 

@@ -561,7 +561,7 @@ void Simulator::run() {
     std::cout << "Simulator: starting simulation for module '" << module_.name << "'" << std::endl;
 
     // === VCD Setup ===
-    vcd_ = std::make_unique<VcdWriter>(ir_, config_.output_dir);
+    vcd_ = std::make_unique<VcdWriter>(ir_, runtime_metadata_, config_.output_dir);
 
     // === Initialization (time 0) ===
 

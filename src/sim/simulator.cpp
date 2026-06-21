@@ -96,21 +96,10 @@ bool useSignedCompare(const DFGNode* lhs, const DFGNode* rhs) {
     return nodeSigned(lhs) && nodeSigned(rhs);
 }
 
-bool isTopInputSource(const HierSignalRef& source) {
-    return source.instance_path.elems.empty() && source.ns == SignalNamespace::Input;
-}
-
 bool isActiveLevel(const SimValue& value, edge_t active_edge) {
     return active_edge == POSEDGE
         ? (!value.isZero() && value.lowU64() == 1)
         : value.isZero();
-}
-
-const DFGNode* topInputLeafNode(const Module& module, const std::string& leafName) {
-    if (auto ref = findModuleNamedLeaf(module, leafName)) {
-        return ref->node;
-    }
-    return module.dfg ? module.dfg->getGraphInput("", leafName) : nullptr;
 }
 
 std::string jsonEscape(std::string_view text) {
@@ -181,8 +170,11 @@ std::string formatTypeJson(const std::optional<Type>& type) {
 // ModuleInstance
 // ============================================================================
 
-ModuleInstance::ModuleInstance(const std::string& name, const Module& mod, const MateIR& mate_ir)
-    : instance_name(name), module_def(mod), ir(mate_ir)
+ModuleInstance::ModuleInstance(const std::string& name,
+                               const Module& mod,
+                               const MateIR& mate_ir,
+                               const MateIRRuntimeMetadata& runtime_metadata)
+    : instance_name(name), module_def(mod), ir(mate_ir), metadata(runtime_metadata)
 {
     buildTopInputDomainMaps();
     buildFlopMaps();
@@ -195,33 +187,18 @@ void ModuleInstance::buildTopInputDomainMaps() {
     reset_domains_by_top_input.clear();
     reset_top_input_by_id.clear();
 
-    for (const auto& clock : ir.clocks) {
-        if (!isTopInputSource(clock.source)) {
-            throw CompilerError(std::format(
-                "Simulator: clock domain '{}' has unsupported non-top-input source",
-                clock.display_name));
-        }
-        clock_domains_by_top_input[clock.source.name].push_back(clock.id);
-    }
-
-    for (const auto& reset : ir.resets) {
-        if (!isTopInputSource(reset.source)) {
-            throw CompilerError(std::format(
-                "Simulator: reset domain '{}' has unsupported non-top-input source",
-                reset.display_name));
-        }
-        reset_domains_by_top_input[reset.source.name].push_back(reset.id);
-        reset_top_input_by_id[reset.id] = reset.source.name;
-    }
+    clock_domains_by_top_input = metadata.clock_domains_by_top_input;
+    reset_domains_by_top_input = metadata.reset_domains_by_top_input;
+    reset_top_input_by_id = metadata.reset_top_input_by_id;
 }
 
 void ModuleInstance::setTopInputValue(const std::string& leaf_name, const SimValue& value) {
-    const DFGNode* input_node = topInputLeafNode(module_def, leaf_name);
-    if (!input_node) {
+    const auto* input = metadata.findInput(leaf_name);
+    if (!input || !input->node) {
         throw CompilerError(std::format(
             "Simulator: top-level input '{}' has no bound DFG leaf", leaf_name));
     }
-    values[input_node] = value;
+    values[input->node] = value;
 }
 
 void ModuleInstance::setAsyncInputValue(const std::string& leaf_name, const SimValue& value) {
@@ -385,52 +362,29 @@ void ModuleInstance::buildTopology() {
 // ============================================================================
 
 void ModuleInstance::buildFlopMaps() {
-    // Collect flops from the entire hierarchy (all submodules, bottom-up).
-    // After DFG inlining, flop binding pointers are valid in the flat top DFG.
-    std::function<void(const Module&)> collect = [&](const Module& mod) {
-        for (const auto& flop : mod.flops) {
-            for (auto* qLeaf : flopQLeaves(flop)) {
-                if (qLeaf) flop_q_nodes[qLeaf] = &flop;
-            }
-            if (flop.clock_domain == InvalidClockId) {
-                throw CompilerError(std::format(
-                    "Simulator: flop '{}' has no resolved clock domain", flop.name));
-            }
-            if (flop.clock_domain.value >= ir.clocks.size() ||
-                    ir.clocks[flop.clock_domain.value].id != flop.clock_domain) {
-                throw CompilerError(std::format(
-                    "Simulator: flop '{}' has invalid ClockId {}",
-                    flop.name, flop.clock_domain.value));
-            }
-            for (ResetId resetId : flop.reset_domains.ids) {
-                if (resetId == InvalidResetId ||
-                        resetId.value >= ir.resets.size() ||
-                        ir.resets[resetId.value].id != resetId) {
-                    throw CompilerError(std::format(
-                        "Simulator: flop '{}' has invalid ResetId {}",
-                        flop.name, resetId.value));
-                }
-            }
-            if (!flop.reset_domains.empty() && !flop.reset_value.has_value()) {
-                throw CompilerError(std::format(
-                    "Simulator: flop '{}' has reset domains but no reset value",
-                    flop.name));
-            }
-            CollectedFlop collected{
-                .flop = &flop,
-                .clock_domain = flop.clock_domain,
-                .reset_domains = flop.reset_domains,
-            };
-            for (ResetId resetId : collected.reset_domains.ids) {
-                flops_by_reset[resetId].push_back(collected);
-            }
-            flops_by_clock[collected.clock_domain].push_back(std::move(collected));
+    flop_q_nodes.clear();
+    flops_by_clock.clear();
+    flops_by_reset.clear();
+
+    for (const auto& runtime_flop : metadata.flops) {
+        const auto* flop = runtime_flop.flop;
+        if (!flop) {
+            throw CompilerError(std::format(
+                "Simulator: runtime flop '{}' has no source flop", runtime_flop.name));
         }
-        for (const auto& sub : mod.hierarchyInstantiation) {
-            collect(sub);
+        for (const auto& leaf : runtime_flop.leaves) {
+            if (leaf.q_node) flop_q_nodes[leaf.q_node] = flop;
         }
-    };
-    collect(module_def);
+        CollectedFlop collected{
+            .flop = flop,
+            .clock_domain = runtime_flop.clock_domain,
+            .reset_domains = runtime_flop.reset_domains,
+        };
+        for (ResetId resetId : collected.reset_domains.ids) {
+            flops_by_reset[resetId].push_back(collected);
+        }
+        flops_by_clock[collected.clock_domain].push_back(std::move(collected));
+    }
 }
 
 // ============================================================================
@@ -858,42 +812,19 @@ static int64_t parseTimeWithUnit(const std::string& token,
 // ============================================================================
 
 void Simulator::buildTimeline() {
-    // Determine which inputs are async (clocks, resets, and async data) from resolved input types
-    forEachInputNode(module_, [&](const ModuleNode& input) {
-        std::vector<std::string> names;
-        for (const auto& leaf : moduleNodeLeafRefs(input)) names.push_back(leaf.leaf_name);
-        if (std::holds_alternative<ClockSignal>(input.sync_type) ||
-            std::holds_alternative<ResetSignal>(input.sync_type) ||
-            std::holds_alternative<AsyncSignal>(input.sync_type)) {
-            for (const auto& name : names) async_inputs_.insert(name);
-        }
-    });
-
-    // Map each sync input to its clock domain.
-    forEachInputNode(module_, [&](const ModuleNode& input) {
-        std::vector<std::string> names;
-        for (const auto& leaf : moduleNodeLeafRefs(input)) names.push_back(leaf.leaf_name);
-        if (names.empty()) return;
-        if (async_inputs_.count(names.front())) return;
-        const auto* sync = std::get_if<SyncSignal>(&input.sync_type);
-        if (!sync) {
-            if (std::holds_alternative<StaticSignal>(input.sync_type)) {
+    async_inputs_.clear();
+    sync_input_clock_.clear();
+    for (const auto& input : runtime_metadata_.input_leaves) {
+        if (input.kind == RuntimeInputKind::Sync) {
+            if (!input.clock_domain.has_value()) {
                 throw CompilerError(std::format(
-                    "Simulator: top-level input '{}' cannot be static", input.name));
+                    "Simulator: sync input '{}' has no clock domain", input.leaf_name));
             }
-            throw CompilerError(std::format(
-                "Simulator: input '{}' has unsupported sync type for synchronous input",
-                input.name));
+            sync_input_clock_[input.leaf_name] = *input.clock_domain;
+        } else {
+            async_inputs_.insert(input.leaf_name);
         }
-        ClockId id = sync->clock_domain;
-        if (id == InvalidClockId || id.value >= ir_.clocks.size() ||
-                ir_.clocks[id.value].id != id) {
-            throw CompilerError(std::format(
-                "Simulator: sync input '{}' references invalid ClockId {}",
-                input.name, id.value));
-        }
-        for (const auto& name : names) sync_input_clock_[name] = id;
-    });
+    }
 
     // Parse async input files.
     // Scalar/struct ports: one file per leaf, format "time 0xVALUE".
@@ -955,11 +886,10 @@ void Simulator::buildTimeline() {
             for (const auto& leaf : leaves) {
                 std::string path = config_.inputs_dir + "/" + leaf.leaf_name + ".txt";
                 std::ifstream file = openFile(path);
-                auto* inputNode = findInputNode(module_, leaf.leaf_name);
-                if (!inputNode)
-                    throw CompilerError(std::format(
-                        "Simulator: unknown async input '{}'", leaf.leaf_name));
-                if (inputNode->type.width <= 0)
+                const Type& leafType = leaf.node && leaf.node->type
+                    ? *leaf.node->type
+                    : input.type;
+                if (leafType.width <= 0)
                     throw CompilerError(std::format(
                         "Simulator: async input '{}' has no resolved type width", leaf.leaf_name));
 
@@ -973,7 +903,7 @@ void Simulator::buildTimeline() {
                             "Simulator: bad line in async file '{}': {}", path, line));
                     try {
                         SimValue val = SimValue::fromHexString(
-                            value_token, inputNode->type.width, inputNode->type.isSigned());
+                            value_token, leafType.width, leafType.isSigned());
                         int64_t time = parseTimeWithUnit(time_token, path, line);
                         timeline_.push_back({time, leaf.leaf_name, std::move(val)});
                     } catch (const std::invalid_argument&) {
@@ -1112,12 +1042,9 @@ void Simulator::advanceSyncInputs(const std::set<ClockId>& active_clocks) {
 // ============================================================================
 
 void Simulator::recordOutputs() {
-    forEachOutputNode(module_, [&](const ModuleNode& output) {
-        for (const auto& leaf : moduleNodeLeafRefs(output)) {
-            if (!leaf.node) continue;
-            recorded_values_[leaf.leaf_name].push_back(root_->checkedGet(leaf.node));
-        }
-    });
+    for (const auto& output : runtime_metadata_.output_leaves) {
+        recorded_values_[output.leaf_name].push_back(root_->checkedGet(output.node));
+    }
 }
 
 void Simulator::writeOutputFiles() {
@@ -1142,14 +1069,17 @@ void Simulator::writeOutputFiles() {
 // ============================================================================
 
 Simulator::Simulator(const MateIR& ir, const SimConfig& config)
-    : ir_(ir), module_(ir.top), config_(config)
+    : ir_(ir),
+      module_(ir.top),
+      config_(config),
+      runtime_metadata_(buildMateIRRuntimeMetadata(ir))
 {
     if (!module_.dfg) {
         throw CompilerError("Simulator: module has no DFG");
     }
 
     // Create the root module instance (recursively creates children)
-    root_ = std::make_unique<ModuleInstance>(module_.name, module_, ir_);
+    root_ = std::make_unique<ModuleInstance>(module_.name, module_, ir_, runtime_metadata_);
     initTraceConfiguration();
     root_->trace_sink = [this](int64_t time_ns,
                                const DFGNode* node,

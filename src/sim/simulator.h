@@ -2,6 +2,7 @@
 
 #include "mateir/mateir.h"
 #include "mateir/debug.h"
+#include "sim/runtime_metadata.h"
 #include "sim/sim_value.h"
 #include "sim/vcd_writer.h"
 
@@ -58,6 +59,7 @@ struct ModuleInstance {
     std::string instance_name;
     const Module& module_def;
     const MateIR& ir;
+    const MateIRRuntimeMetadata& metadata;
 
     // Runtime values for all DFG nodes (flat — covers entire design hierarchy)
     std::map<const DFGNode*, SimValue> values;
@@ -81,7 +83,10 @@ struct ModuleInstance {
                        const SimValue&,
                        const std::string&)> trace_sink;
 
-    ModuleInstance(const std::string& name, const Module& mod, const MateIR& ir);
+    ModuleInstance(const std::string& name,
+                   const Module& mod,
+                   const MateIR& ir,
+                   const MateIRRuntimeMetadata& metadata);
 
     // Construction helpers
     void buildTopInputDomainMaps();
@@ -126,6 +131,7 @@ private:
     const MateIR& ir_;
     const Module& module_;
     const SimConfig& config_;
+    MateIRRuntimeMetadata runtime_metadata_;
 
     // The root module instance (contains all state and logic)
     std::unique_ptr<ModuleInstance> root_;

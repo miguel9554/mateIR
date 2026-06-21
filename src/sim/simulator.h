@@ -46,6 +46,11 @@ struct CollectedFlop {
     ResetDomains reset_domains;
 };
 
+struct ActiveDomainEdges {
+    std::set<ClockId> clocks;
+    std::set<ResetId> resets;
+};
+
 // Runtime state for the flat (inlined) design.
 // After DFG inlining, there is a single ModuleInstance for the entire design.
 // All nodes from all submodules are in module_def.dfg (the flat top DFG).
@@ -66,6 +71,9 @@ struct ModuleInstance {
     std::map<const DFGNode*, const FlopInfo*> flop_q_nodes;
     std::map<ClockId, std::vector<CollectedFlop>> flops_by_clock;
     std::map<ResetId, std::vector<CollectedFlop>> flops_by_reset;
+    std::map<std::string, std::vector<ClockId>> clock_domains_by_top_input;
+    std::map<std::string, std::vector<ResetId>> reset_domains_by_top_input;
+    std::map<ResetId, std::string> reset_top_input_by_id;
     int64_t current_time_ns = 0;
     std::function<void(int64_t,
                        const DFGNode*,
@@ -76,11 +84,24 @@ struct ModuleInstance {
     ModuleInstance(const std::string& name, const Module& mod, const MateIR& ir);
 
     // Construction helpers
+    void buildTopInputDomainMaps();
     void buildTopology();
     void buildFlopMaps();  // recurses over hierarchyInstantiation
     void initConsts();
     void initXs(std::mt19937_64& rng);
     void initFlops(FlopsInitial mode, std::mt19937_64& rng);
+
+    // Runtime/model operations
+    void setTopInputValue(const std::string& leaf_name, const SimValue& value);
+    void setAsyncInputValue(const std::string& leaf_name, const SimValue& value);
+    const SimValue& asyncInputValue(const std::string& leaf_name) const;
+    ActiveDomainEdges detectActiveDomainEdges(const std::string& leaf_name,
+                                              const SimValue& old_value,
+                                              const SimValue& new_value) const;
+    bool resetDomainActive(ResetId id) const;
+    std::set<ResetId> activeResetDomains() const;
+    void applyResetEdge(ResetId reset_id);
+    void applyClockEdge(ClockId clock_id);
 
     // Single-pass combinational evaluation (no fixpoint — flat DAG has no cycles)
     void evaluateCombinational();
@@ -112,9 +133,6 @@ private:
     // Testbench infrastructure
     std::vector<AsyncEvent> timeline_;
     std::set<std::string> async_inputs_;
-    std::map<std::string, std::vector<ClockId>> clock_domains_by_top_input_;
-    std::map<std::string, std::vector<ResetId>> reset_domains_by_top_input_;
-    std::map<ResetId, std::string> reset_top_input_by_id_;
     // Sync input -> clock domain
     std::map<std::string, ClockId> sync_input_clock_;
     std::map<std::string, std::vector<SimValue>> sync_input_data_;
@@ -128,12 +146,9 @@ private:
     std::optional<std::string> dfg_trace_path_;
 
     // Testbench methods
-    void buildTopInputDomainMaps();
     void buildTimeline();
     void loadSyncInputs();
     void advanceSyncInputs(const std::set<ClockId>& active_clocks);
-    bool resetDomainActive(ResetId id) const;
-    std::set<ResetId> activeResetDomains() const;
     void recordOutputs();
     void writeOutputFiles();
     void initTraceConfiguration();

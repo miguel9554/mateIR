@@ -68,7 +68,7 @@ private:
     // Testbench methods
     void buildTimeline();
     void loadSyncInputs();
-    void advanceSyncInputs(const std::set<ClockId>& active_clocks);
+    std::vector<RuntimeInputUpdate> collectPostClockSyncInputs(ClockId active_clock);
     void recordOutputs();
     void writeOutputFiles();
     void initTraceConfiguration();

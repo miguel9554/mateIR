@@ -101,6 +101,69 @@ void MateIRRuntime::initialize(FlopsInitial mode, std::mt19937_64& rng) {
     initXs(rng);
 }
 
+void MateIRRuntime::initializeInputsAndEvaluate(
+    std::span<const RuntimeInputUpdate> async_inputs,
+    std::span<const RuntimeInputUpdate> sync_inputs,
+    int64_t time_ns) {
+    for (const auto& update : async_inputs) {
+        initializeAsyncInput(update.input, update.value);
+    }
+    for (const auto& update : sync_inputs) {
+        setSyncInput(update.input, update.value);
+    }
+    for (ResetId reset_id : activeResetDomains()) {
+        resetEdge(reset_id);
+    }
+    updateOutputs(time_ns);
+}
+
+RuntimeEventResult MateIRRuntime::processAsyncInputBatch(
+    std::span<const RuntimeInputUpdate> async_inputs,
+    const std::function<std::vector<RuntimeInputUpdate>(ClockId)>& sync_update_provider,
+    int64_t time_ns) {
+    RuntimeEventResult result;
+
+    // Runtime event ordering for one adapter-provided timestamp batch:
+    // 1. Apply all async input updates and detect active clock/reset edges.
+    // 2. Apply active async-reset edges immediately.
+    // 3. Commit clocked flops for active clock domains, with active resets
+    //    suppressing normal D-to-Q copies.
+    // 4. Ask the adapter for post-clock sync input updates for each active
+    //    clock and validate/apply them inside the runtime.
+    // 5. Re-evaluate combinational logic so outputs and observables are valid.
+    //
+    // The post-clock sync update point preserves the existing file simulator
+    // semantics: the next value from a sync input file is visible to
+    // combinational logic after the edge and to later clock edges, but it is
+    // not sampled by flops on the edge that advanced the file cursor.
+    for (const auto& update : async_inputs) {
+        ActiveDomainEdges active = setAsyncInput(update.input, update.value);
+        result.active_edges.clocks.insert(active.clocks.begin(), active.clocks.end());
+        result.active_edges.resets.insert(active.resets.begin(), active.resets.end());
+    }
+
+    for (ResetId reset_id : result.active_edges.resets) {
+        resetEdge(reset_id);
+    }
+
+    for (ClockId clock_id : result.active_edges.clocks) {
+        clockEdge(clock_id);
+    }
+
+    if (sync_update_provider) {
+        for (ClockId clock_id : result.active_edges.clocks) {
+            std::vector<RuntimeInputUpdate> sync_updates = sync_update_provider(clock_id);
+            for (const auto& update : sync_updates) {
+                validateSyncUpdateForClock(clock_id, update);
+                setSyncInput(update.input, update.value);
+            }
+        }
+    }
+
+    updateOutputs(time_ns);
+    return result;
+}
+
 void MateIRRuntime::initializeAsyncInput(RuntimeInputId input, const SimValue& value) {
     if (input.value >= metadata_.input_leaves.size()) {
         throw CompilerError(std::format(
@@ -146,26 +209,7 @@ void MateIRRuntime::setSyncInput(RuntimeInputId input, const SimValue& value) {
     setTopInputValue(input_metadata.leaf_name, value);
 }
 
-void MateIRRuntime::clockEdge(ClockId clock_id, std::span<const RuntimeInputUpdate> sync_inputs) {
-    for (const auto& update : sync_inputs) {
-        if (update.input.value >= metadata_.input_leaves.size()) {
-            throw CompilerError(std::format(
-                "Simulator runtime: invalid sync input handle {}", update.input.value));
-        }
-        const auto& input_metadata = metadata_.input_leaves.at(update.input.value);
-        if (input_metadata.kind != RuntimeInputKind::Sync) {
-            throw CompilerError(std::format(
-                "Simulator runtime: input '{}' is not a sync input",
-                input_metadata.leaf_name));
-        }
-        if (!input_metadata.clock_domain.has_value() ||
-            input_metadata.clock_domain.value() != clock_id) {
-            throw CompilerError(std::format(
-                "Simulator runtime: sync input '{}' does not belong to clock domain {}",
-                input_metadata.leaf_name, clock_id.value));
-        }
-        setTopInputValue(input_metadata.leaf_name, update.value);
-    }
+void MateIRRuntime::clockEdge(ClockId clock_id) {
     applyClockEdge(clock_id);
 }
 
@@ -287,6 +331,26 @@ std::set<ResetId> MateIRRuntime::activeResetDomains() const {
         }
     }
     return active;
+}
+
+void MateIRRuntime::validateSyncUpdateForClock(ClockId clock_id,
+                                               const RuntimeInputUpdate& update) const {
+    if (update.input.value >= metadata_.input_leaves.size()) {
+        throw CompilerError(std::format(
+            "Simulator runtime: invalid sync input handle {}", update.input.value));
+    }
+    const auto& input_metadata = metadata_.input_leaves.at(update.input.value);
+    if (input_metadata.kind != RuntimeInputKind::Sync) {
+        throw CompilerError(std::format(
+            "Simulator runtime: input '{}' is not a sync input",
+            input_metadata.leaf_name));
+    }
+    if (!input_metadata.clock_domain.has_value() ||
+        input_metadata.clock_domain.value() != clock_id) {
+        throw CompilerError(std::format(
+            "Simulator runtime: sync input '{}' does not belong to active clock domain {}",
+            input_metadata.leaf_name, clock_id.value));
+    }
 }
 
 void MateIRRuntime::applyResetEdge(ResetId reset_id) {

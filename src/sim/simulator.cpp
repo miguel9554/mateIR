@@ -351,11 +351,11 @@ void Simulator::loadSyncInputs() {
 // Sync input advancement
 // ============================================================================
 
-void Simulator::advanceSyncInputs(const std::set<ClockId>& active_clocks) {
+std::vector<RuntimeInputUpdate> Simulator::collectPostClockSyncInputs(ClockId active_clock) {
+    std::vector<RuntimeInputUpdate> updates;
     for (auto& [name, pos] : sync_input_pos_) {
-        // Only advance if this input's clock had its active edge
         auto clk_it = sync_input_clock_.find(name);
-        if (clk_it == sync_input_clock_.end() || !active_clocks.count(clk_it->second))
+        if (clk_it == sync_input_clock_.end() || clk_it->second != active_clock)
             continue;
 
         if (pos + 1 < sync_input_data_[name].size()) {
@@ -366,8 +366,12 @@ void Simulator::advanceSyncInputs(const std::set<ClockId>& active_clocks) {
             throw CompilerError(std::format(
                 "Simulator: sync input '{}' has no runtime handle", name));
         }
-        runtime_->setSyncInput(input->id, sync_input_data_[name][pos]);
+        updates.push_back(RuntimeInputUpdate{
+            .input = input->id,
+            .value = sync_input_data_[name][pos],
+        });
     }
+    return updates;
 }
 
 // ============================================================================
@@ -571,8 +575,9 @@ void Simulator::run() {
         runtime_->initialize(config_.flops_initial, rng);
     }
 
-    // 2. Set async input values from first event in their timeline (must be at time 0)
-    std::map<std::string, SimValue> async_prev;
+    // 2. Gather initial async input values from the first event in their
+    // timeline (must be at time 0).
+    std::vector<RuntimeInputUpdate> initial_async_inputs;
     for (const auto& name : async_inputs_) {
         bool found = false;
         for (const auto& evt : timeline_) {
@@ -582,13 +587,15 @@ void Simulator::run() {
                         "Simulator: async input '{}' first event is at time {} (must be 0)",
                         name, evt.time));
                 }
-                async_prev[name] = evt.value;
                 const auto* input = runtime_metadata_.findInput(name);
                 if (!input) {
                     throw CompilerError(std::format(
                         "Simulator: async input '{}' has no runtime handle", name));
                 }
-                runtime_->initializeAsyncInput(input->id, evt.value);
+                initial_async_inputs.push_back(RuntimeInputUpdate{
+                    .input = input->id,
+                    .value = evt.value,
+                });
                 found = true;
                 break;
             }
@@ -599,23 +606,21 @@ void Simulator::run() {
         }
     }
 
-    // 3. Set sync input values from first line of their files
+    // 3. Gather initial sync input values from the first line of their files.
+    std::vector<RuntimeInputUpdate> initial_sync_inputs;
     for (const auto& [name, data] : sync_input_data_) {
         const auto* input = runtime_metadata_.findInput(name);
         if (!input) {
             throw CompilerError(std::format(
                 "Simulator: sync input '{}' has no runtime handle", name));
         }
-        runtime_->setSyncInput(input->id, data[0]);
+        initial_sync_inputs.push_back(RuntimeInputUpdate{
+            .input = input->id,
+            .value = data[0],
+        });
     }
 
-    // 4. If any reset is asserted at time 0 (level check), apply it
-    for (ResetId reset_id : runtime_->activeResetDomains()) {
-        runtime_->resetEdge(reset_id);
-    }
-
-    // 5. Evaluate all combinational logic (with fixpoint for hierarchy)
-    runtime_->updateOutputs(0);
+    runtime_->initializeInputsAndEvaluate(initial_async_inputs, initial_sync_inputs, 0);
     emitPassiveTraceEvents(0);
 
     // VCD: trace initial state at time 0
@@ -674,8 +679,7 @@ void Simulator::run() {
             new_async[evt->signal_name] = evt->value;
         }
 
-        std::set<ClockId> active_edge_clocks;
-        std::set<ResetId> active_edge_resets;
+        std::vector<RuntimeInputUpdate> async_updates;
 
         for (const auto& [name, new_val] : new_async) {
             const auto* input = runtime_metadata_.findInput(name);
@@ -683,39 +687,25 @@ void Simulator::run() {
                 throw CompilerError(std::format(
                     "Simulator: async input '{}' has no runtime handle", name));
             }
-            ActiveDomainEdges active = runtime_->setAsyncInput(input->id, new_val);
-            for (ClockId id : active.clocks) {
-                active_edge_clocks.insert(id);
-            }
-            for (ResetId id : active.resets) {
-                active_edge_resets.insert(id);
-            }
-
-            async_prev[name] = new_val;
+            async_updates.push_back(RuntimeInputUpdate{
+                .input = input->id,
+                .value = new_val,
+            });
         }
 
-        for (ResetId reset_id : active_edge_resets) {
-            runtime_->resetEdge(reset_id);
-        }
-
-        for (ClockId clock_id : active_edge_clocks) {
-            runtime_->clockEdge(clock_id);
-        }
-
-        // On clock active edge: advance sync inputs
-        if (!active_edge_clocks.empty()) {
-            advanceSyncInputs(active_edge_clocks);
-        }
-
-        // Re-evaluate combinational logic (with fixpoint for hierarchy)
-        runtime_->updateOutputs(batch_time);
+        RuntimeEventResult event_result = runtime_->processAsyncInputBatch(
+            async_updates,
+            [this](ClockId clock_id) {
+                return collectPostClockSyncInputs(clock_id);
+            },
+            batch_time);
         emitPassiveTraceEvents(batch_time);
 
         // VCD: trace all values at every time step
         vcd_->update(*runtime_, batch_time);
 
         // Record output values only on active clock edges (for text output)
-        if (!active_edge_clocks.empty()) {
+        if (!event_result.active_edges.clocks.empty()) {
             recordOutputs();
         }
     }

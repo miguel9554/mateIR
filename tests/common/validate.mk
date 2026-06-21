@@ -3,6 +3,7 @@
 ROOT_DIR = ../..
 
 validate:
+	$(MAKE) -C ../verilator clean
 	$(MAKE) -C ../verilator simulate
 	$(MAKE) -C ../custom-sim simulate
 	$(MAKE) -C ../vcd-diff compare

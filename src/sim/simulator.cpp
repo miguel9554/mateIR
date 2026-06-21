@@ -1,11 +1,11 @@
 #include "sim/simulator.h"
 
 #include <algorithm>
-#include <bit>
 #include <chrono>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -21,86 +21,6 @@
 namespace mate {
 
 namespace {
-
-int nodeWidth(const DFGNode* node) {
-    if (!node || !node->type.has_value() || node->type->width <= 0)
-        throw CompilerError(std::format(
-            "Simulator: node {} has no resolved type width (type_propagation incomplete?)",
-            node ? node->str() : "<null>"),
-            node);
-    return node->type->width;
-}
-
-bool nodeSigned(const DFGNode* node) {
-    return node && node->type.has_value() && node->type->isSigned();
-}
-
-SimValue simValueFromInt(int64_t value, const DFGNode* node) {
-    return SimValue::fromI64(value, nodeWidth(node), nodeSigned(node));
-}
-
-SimValue simValueFromType(int64_t value, const Type& type) {
-    if (type.width <= 0)
-        throw CompilerError(std::format(
-            "Simulator: Type has no width (type_propagation incomplete?)"));
-    return SimValue::fromI64(value, type.width, type.isSigned());
-}
-
-SimValue boolValue(bool value) {
-    return SimValue::fromU64(value ? 1 : 0, 1, false);
-}
-
-void assignFlopResetLeaves(ModuleInstance& root, const FlopInfo& flop, int64_t resetValue) {
-    for (auto* qLeaf : flopQLeaves(flop)) {
-        if (!qLeaf) continue;
-        const Type& type = qLeaf->type.value_or(flop.type);
-        root.values[qLeaf] = simValueFromType(resetValue, type);
-    }
-}
-
-void copyFlopDToQLeaves(ModuleInstance& root, const FlopInfo& flop) {
-    const auto& qLeaves = flopQLeaves(flop);
-    const auto& dLeaves = flopDLeaves(flop);
-    if (qLeaves.size() != dLeaves.size()) {
-        throw CompilerError(std::format(
-            "Simulator: flop '{}' has mismatched d/q leaf counts ({} vs {})",
-            flop.name, dLeaves.size(), qLeaves.size()));
-    }
-    for (size_t i = 0; i < qLeaves.size(); ++i) {
-        auto* qLeaf = qLeaves[i];
-        auto* dLeaf = dLeaves[i];
-        if (qLeaf && dLeaf) {
-            root.values[qLeaf] = root.checkedGet(dLeaf);
-        }
-    }
-}
-
-// SV LRM 11.6.1: if either operand is unsigned, the expression is unsigned
-// and both operands are zero-extended regardless of their individual types.
-// We pass the other operand so we can enforce that rule.
-SimValue widenForArithmetic(const SimValue& value,
-                            const DFGNode* operand_node,
-                            const DFGNode* other_node,
-                            const DFGNode* result_node) {
-    bool self_signed = (operand_node && operand_node->hasType())
-                       ? operand_node->type->isSigned()
-                       : value.isSigned();
-    bool other_signed = (other_node && other_node->hasType())
-                        ? other_node->type->isSigned()
-                        : true;
-    bool is_signed = self_signed && other_signed;
-    return value.resized(nodeWidth(result_node), is_signed);
-}
-
-bool useSignedCompare(const DFGNode* lhs, const DFGNode* rhs) {
-    return nodeSigned(lhs) && nodeSigned(rhs);
-}
-
-bool isActiveLevel(const SimValue& value, edge_t active_edge) {
-    return active_edge == POSEDGE
-        ? (!value.isZero() && value.lowU64() == 1)
-        : value.isZero();
-}
 
 std::string jsonEscape(std::string_view text) {
     std::ostringstream ss;
@@ -166,598 +86,6 @@ std::string formatTypeJson(const std::optional<Type>& type) {
 
 } // namespace
 
-// ============================================================================
-// ModuleInstance
-// ============================================================================
-
-ModuleInstance::ModuleInstance(const std::string& name,
-                               const Module& mod,
-                               const MateIR& mate_ir,
-                               const MateIRRuntimeMetadata& runtime_metadata)
-    : instance_name(name), module_def(mod), ir(mate_ir), metadata(runtime_metadata)
-{
-    buildTopInputDomainMaps();
-    buildFlopMaps();
-    buildTopology();
-    initConsts();
-}
-
-void ModuleInstance::buildTopInputDomainMaps() {
-    clock_domains_by_top_input.clear();
-    reset_domains_by_top_input.clear();
-    reset_top_input_by_id.clear();
-
-    clock_domains_by_top_input = metadata.clock_domains_by_top_input;
-    reset_domains_by_top_input = metadata.reset_domains_by_top_input;
-    reset_top_input_by_id = metadata.reset_top_input_by_id;
-}
-
-void ModuleInstance::setTopInputValue(const std::string& leaf_name, const SimValue& value) {
-    const auto* input = metadata.findInput(leaf_name);
-    if (!input || !input->node) {
-        throw CompilerError(std::format(
-            "Simulator: top-level input '{}' has no bound DFG leaf", leaf_name));
-    }
-    values[input->node] = value;
-}
-
-void ModuleInstance::setAsyncInputValue(const std::string& leaf_name, const SimValue& value) {
-    async_values[leaf_name] = value;
-    setTopInputValue(leaf_name, value);
-}
-
-const SimValue& ModuleInstance::asyncInputValue(const std::string& leaf_name) const {
-    auto it = async_values.find(leaf_name);
-    if (it == async_values.end()) {
-        throw CompilerError(std::format(
-            "Simulator: async input '{}' has no runtime value", leaf_name));
-    }
-    return it->second;
-}
-
-ActiveDomainEdges ModuleInstance::detectActiveDomainEdges(const std::string& leaf_name,
-                                                          const SimValue& old_value,
-                                                          const SimValue& new_value) const {
-    ActiveDomainEdges active;
-    if (old_value.eq(new_value)) return active;
-
-    bool posedge = old_value.isZero() && !new_value.isZero() && new_value.lowU64() == 1;
-    bool negedge = !old_value.isZero() && old_value.lowU64() == 1 && new_value.isZero();
-    if (auto clock_it = clock_domains_by_top_input.find(leaf_name);
-        clock_it != clock_domains_by_top_input.end()) {
-        for (ClockId id : clock_it->second) {
-            const auto& clock = ir.clocks[id.value];
-            if ((clock.edge == POSEDGE && posedge) ||
-                (clock.edge == NEGEDGE && negedge)) {
-                active.clocks.insert(id);
-            }
-        }
-    }
-    if (auto reset_it = reset_domains_by_top_input.find(leaf_name);
-        reset_it != reset_domains_by_top_input.end()) {
-        for (ResetId id : reset_it->second) {
-            const auto& reset = ir.resets[id.value];
-            if ((reset.active_edge == POSEDGE && posedge) ||
-                (reset.active_edge == NEGEDGE && negedge)) {
-                active.resets.insert(id);
-            }
-        }
-    }
-    return active;
-}
-
-bool ModuleInstance::resetDomainActive(ResetId id) const {
-    auto source_it = reset_top_input_by_id.find(id);
-    if (source_it == reset_top_input_by_id.end()) {
-        throw CompilerError(std::format(
-            "Simulator: reset domain {} has no top-level input source", id.value));
-    }
-    return isActiveLevel(asyncInputValue(source_it->second), ir.resets[id.value].active_edge);
-}
-
-std::set<ResetId> ModuleInstance::activeResetDomains() const {
-    std::set<ResetId> active;
-    for (const auto& reset : ir.resets) {
-        if (resetDomainActive(reset.id)) {
-            active.insert(reset.id);
-        }
-    }
-    return active;
-}
-
-void ModuleInstance::applyResetEdge(ResetId reset_id) {
-    auto flop_it = flops_by_reset.find(reset_id);
-    if (flop_it == flops_by_reset.end()) return;
-    for (const auto& collected : flop_it->second) {
-        const auto* flop = collected.flop;
-        if (flop->reset_value.has_value()) {
-            assignFlopResetLeaves(*this, *flop, flop->reset_value.value());
-        }
-    }
-}
-
-void ModuleInstance::applyClockEdge(ClockId clock_id) {
-    auto flop_it = flops_by_clock.find(clock_id);
-    if (flop_it == flops_by_clock.end()) return;
-    for (const auto& collected : flop_it->second) {
-        const auto* flop = collected.flop;
-        bool reset_active = false;
-        for (ResetId reset_id : collected.reset_domains.ids) {
-            if (resetDomainActive(reset_id)) {
-                reset_active = true;
-                break;
-            }
-        }
-        if (reset_active) continue;
-        copyFlopDToQLeaves(*this, *flop);
-    }
-}
-
-// ============================================================================
-// Bit mask helper
-// ============================================================================
-
-SimValue ModuleInstance::maskToWidth(const SimValue& val, const DFGNode* node) {
-    if (val.isAggregate()) return val;
-    if (!node->type.has_value() || node->type->width <= 0)
-        throw CompilerError(std::format(
-            "Simulator: node {} has no resolved type width for masking (type_propagation incomplete?)",
-            node->str()),
-            node);
-    return val.resized(node->type->width, node->type->isSigned());
-}
-
-// ============================================================================
-// Topological sort (Kahn's algorithm)
-// ============================================================================
-
-void ModuleInstance::buildTopology() {
-    const auto& nodes = module_def.dfg->nodes;
-    node_indices.clear();
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        node_indices[nodes[i].get()] = i;
-    }
-
-    std::map<const DFGNode*, int> in_degree;
-    std::map<const DFGNode*, std::vector<const DFGNode*>> successors;
-
-    for (const auto& node : nodes) {
-        in_degree[node.get()] = 0;
-    }
-
-    for (const auto& node : nodes) {
-        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
-            in_degree[node.get()]++;
-            successors[input.node].push_back(node.get());
-        });
-    }
-
-    std::queue<const DFGNode*> q;
-    for (const auto& [node, deg] : in_degree) {
-        if (deg == 0) q.push(node);
-    }
-
-    topo_order.clear();
-    while (!q.empty()) {
-        const DFGNode* curr = q.front();
-        q.pop();
-        topo_order.push_back(curr);
-
-        for (const DFGNode* succ : successors[curr]) {
-            if (--in_degree[succ] == 0) {
-                q.push(succ);
-            }
-        }
-    }
-
-    if (topo_order.size() != nodes.size()) {
-        throw CompilerError(std::format(
-            "Simulator: topological sort failed — {} of {} nodes sorted (cycle in DFG?)",
-            topo_order.size(), nodes.size()));
-    }
-}
-
-// ============================================================================
-// Build flop lookup maps
-// ============================================================================
-
-void ModuleInstance::buildFlopMaps() {
-    flop_q_nodes.clear();
-    flops_by_clock.clear();
-    flops_by_reset.clear();
-
-    for (const auto& runtime_flop : metadata.flops) {
-        const auto* flop = runtime_flop.flop;
-        if (!flop) {
-            throw CompilerError(std::format(
-                "Simulator: runtime flop '{}' has no source flop", runtime_flop.name));
-        }
-        for (const auto& leaf : runtime_flop.leaves) {
-            if (leaf.q_node) flop_q_nodes[leaf.q_node] = flop;
-        }
-        CollectedFlop collected{
-            .flop = flop,
-            .clock_domain = runtime_flop.clock_domain,
-            .reset_domains = runtime_flop.reset_domains,
-        };
-        for (ResetId resetId : collected.reset_domains.ids) {
-            flops_by_reset[resetId].push_back(collected);
-        }
-        flops_by_clock[collected.clock_domain].push_back(std::move(collected));
-    }
-}
-
-// ============================================================================
-// Initialize constant node values
-// ============================================================================
-
-void ModuleInstance::initConsts() {
-    for (const auto& node : module_def.dfg->nodes) {
-        if (node->kind() == DFGOp::CONST) {
-            values[node.get()] = simValueFromInt(node->constValue(), node.get());
-        }
-    }
-}
-
-void ModuleInstance::initXs(std::mt19937_64& rng) {
-    for (const auto& node : module_def.dfg->nodes) {
-        if (node->kind() != DFGOp::X) continue;
-        if (!node->type.has_value()) {
-            throw CompilerError("Simulator: X node has no type", node.get());
-        }
-        values[node.get()] = SimValue::random(node->type->width, node->type->isSigned(), rng);
-    }
-}
-
-// ============================================================================
-// Initialize flop values (recursive)
-// ============================================================================
-
-void ModuleInstance::initFlops(FlopsInitial mode, std::mt19937_64& rng) {
-    // flop_q_nodes already covers all flops from all submodules (built by buildFlopMaps)
-    for (const auto& [qnode, flop] : flop_q_nodes) {
-        const Type& type = qnode->type.value_or(flop->type);
-        int w = type.width;
-        if (mode == FlopsInitial::Random) {
-            values[qnode] = SimValue::random(w, type.isSigned(), rng);
-        } else if (mode == FlopsInitial::AllOnes) {
-            values[qnode] = SimValue::ones(w, type.isSigned());
-        } else {
-            values[qnode] = simValueFromType(0, type);
-        }
-    }
-}
-
-// ============================================================================
-// Node evaluation
-// ============================================================================
-
-const SimValue& ModuleInstance::checkedGetRef(const DFGNode* node, const DFGNode* context) const {
-    auto it = values.find(node);
-    if (it == values.end())
-        throw CompilerError(std::format(
-            "Simulator: node {} has no computed value{}",
-            node->str(),
-            context && context != node
-                ? std::format(" (while evaluating {})", context->str())
-                : ""),
-            context ? context : node);
-    return it->second;
-}
-
-SimValue ModuleInstance::checkedGet(const DFGNode* node, const DFGNode* context) const {
-    return checkedGetRef(node, context);
-}
-
-SimValue ModuleInstance::evaluateNode(const DFGNode* node) {
-    auto getUnaryVal = [&]() -> const SimValue& {
-        return checkedGetRef(node->unaryInputs().operand.node, node);
-    };
-    auto emitTrace = [&](const std::vector<std::pair<std::string, SimValue>>& inputs,
-                         const SimValue& result,
-                         const std::string& decisions_json = "") {
-        if (trace_sink) {
-            trace_sink(current_time_ns, node, inputs, result, decisions_json);
-        }
-    };
-
-    switch (node->kind()) {
-        case DFGOp::INPUT:
-        case DFGOp::CONST:
-        case DFGOp::X:
-            return checkedGetRef(node);
-
-        case DFGOp::SIGNAL:
-        case DFGOp::OUTPUT:
-            if (auto driver = node->driver()) {
-                SimValue result = checkedGetRef(driver->node, node);
-                emitTrace({{"driver", result}}, result);
-                return result;
-            }
-            return checkedGetRef(node);
-
-        case DFGOp::ADD: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhsRaw = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhsRaw = checkedGetRef(inputs.rhs.node, node);
-            SimValue lhs = widenForArithmetic(lhsRaw, inputs.lhs.node, inputs.rhs.node, node);
-            SimValue rhs = widenForArithmetic(rhsRaw, inputs.rhs.node, inputs.lhs.node, node);
-            SimValue result = maskToWidth(lhs.add(rhs), node);
-            emitTrace({{"lhs", lhsRaw}, {"rhs", rhsRaw}}, result,
-                      std::format(
-                          "\"signed\":{},\"lhs_extended_width\":{},\"rhs_extended_width\":{}",
-                          (nodeSigned(inputs.lhs.node) && nodeSigned(inputs.rhs.node)) ? "true" : "false",
-                          lhs.width(), rhs.width()));
-            return result;
-        }
-        case DFGOp::SUB: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhsRaw = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhsRaw = checkedGetRef(inputs.rhs.node, node);
-            SimValue lhs = widenForArithmetic(lhsRaw, inputs.lhs.node, inputs.rhs.node, node);
-            SimValue rhs = widenForArithmetic(rhsRaw, inputs.rhs.node, inputs.lhs.node, node);
-            SimValue result = maskToWidth(lhs.sub(rhs), node);
-            emitTrace({{"lhs", lhsRaw}, {"rhs", rhsRaw}}, result,
-                      std::format(
-                          "\"signed\":{},\"lhs_extended_width\":{},\"rhs_extended_width\":{}",
-                          (nodeSigned(inputs.lhs.node) && nodeSigned(inputs.rhs.node)) ? "true" : "false",
-                          lhs.width(), rhs.width()));
-            return result;
-        }
-        case DFGOp::MUL: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhsRaw = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhsRaw = checkedGetRef(inputs.rhs.node, node);
-            SimValue lhs = widenForArithmetic(lhsRaw, inputs.lhs.node, inputs.rhs.node, node);
-            SimValue rhs = widenForArithmetic(rhsRaw, inputs.rhs.node, inputs.lhs.node, node);
-            SimValue result = maskToWidth(lhs.mul(rhs), node);
-            emitTrace({{"lhs", lhsRaw}, {"rhs", rhsRaw}}, result,
-                      std::format(
-                          "\"signed\":{},\"lhs_extended_width\":{},\"rhs_extended_width\":{}",
-                          (nodeSigned(inputs.lhs.node) && nodeSigned(inputs.rhs.node)) ? "true" : "false",
-                          lhs.width(), rhs.width()));
-            return result;
-        }
-
-        case DFGOp::EQ: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            SimValue result = boolValue(lhs.eq(rhs));
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
-            return result;
-        }
-        case DFGOp::LT: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            const bool is_signed = useSignedCompare(inputs.lhs.node, inputs.rhs.node);
-            SimValue result = boolValue(is_signed
-                ? lhs.signedLt(rhs)
-                : lhs.unsignedLt(rhs));
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result,
-                      std::format("\"signed\":{}", is_signed ? "true" : "false"));
-            return result;
-        }
-        case DFGOp::LE: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            bool is_signed = useSignedCompare(inputs.lhs.node, inputs.rhs.node);
-            bool lt = is_signed
-                ? lhs.signedLt(rhs)
-                : lhs.unsignedLt(rhs);
-            SimValue result = boolValue(lt || lhs.eq(rhs));
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result,
-                      std::format("\"signed\":{}", is_signed ? "true" : "false"));
-            return result;
-        }
-        case DFGOp::GT: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            const bool is_signed = useSignedCompare(inputs.lhs.node, inputs.rhs.node);
-            SimValue result = boolValue(is_signed
-                ? rhs.signedLt(lhs)
-                : rhs.unsignedLt(lhs));
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result,
-                      std::format("\"signed\":{}", is_signed ? "true" : "false"));
-            return result;
-        }
-        case DFGOp::GE: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            bool is_signed = useSignedCompare(inputs.lhs.node, inputs.rhs.node);
-            bool lt = is_signed
-                ? lhs.signedLt(rhs)
-                : lhs.unsignedLt(rhs);
-            SimValue result = boolValue(!lt);
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result,
-                      std::format("\"signed\":{}", is_signed ? "true" : "false"));
-            return result;
-        }
-
-        case DFGOp::SHL: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            SimValue result = lhs.shl(rhs.lowU64());
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
-            return result;
-        }
-        case DFGOp::ASR: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            SimValue result = lhs.shr(rhs.lowU64(), true);
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
-            return result;
-        }
-
-        case DFGOp::MUX:
-        {
-            int64_t selectorValue = static_cast<int64_t>(checkedGetRef(node->muxSelector().node, node).lowU64());
-            int armIndex = node->muxArmIndexForValue(selectorValue);
-            if (armIndex < 0) {
-                throw CompilerError(
-                    std::format("Simulator: MUX {} has no arm for selector value {}",
-                        node->str(), selectorValue),
-                    node);
-            }
-            SimValue result = checkedGetRef(node->muxArmData(static_cast<size_t>(armIndex)).node, node);
-            emitTrace({{"selector", checkedGetRef(node->muxSelector().node, node)}}, result,
-                      std::format(
-                          "\"selected_arm_index\":{},\"selected_arm_value\":{},\"selected_arm_debug_id\":{}",
-                          armIndex, node->muxArmValue(static_cast<size_t>(armIndex)),
-                          node->muxArmData(static_cast<size_t>(armIndex)).node->debug_id));
-            return result;
-        }
-
-        case DFGOp::UNARY_NEGATE:  {
-            SimValue operand = getUnaryVal();
-            SimValue result = operand.negated();
-            emitTrace({{"operand", operand}}, result);
-            return result;
-        }
-        case DFGOp::BITWISE_NOT:   {
-            SimValue operand = getUnaryVal();
-            SimValue result = operand.bitwiseNot();
-            emitTrace({{"operand", operand}}, result);
-            return result;
-        }
-        case DFGOp::BITWISE_AND: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            SimValue result = lhs.bitwiseAnd(rhs);
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
-            return result;
-        }
-        case DFGOp::BITWISE_OR: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            SimValue result = lhs.bitwiseOr(rhs);
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
-            return result;
-        }
-        case DFGOp::BITWISE_XOR: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            SimValue result = lhs.bitwiseXor(rhs);
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
-            return result;
-        }
-        case DFGOp::BITWISE_XNOR: {
-            auto inputs = node->binaryInputs();
-            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
-            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
-            SimValue result = lhs.bitwiseXnor(rhs);
-            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
-            return result;
-        }
-
-        case DFGOp::REDUCTION_AND:
-        {
-            SimValue operand = getUnaryVal();
-            SimValue result = boolValue(operand.reductionAnd());
-            emitTrace({{"operand", operand}}, result);
-            return result;
-        }
-        case DFGOp::REDUCTION_NAND:
-        {
-            SimValue operand = getUnaryVal();
-            SimValue result = boolValue(!operand.reductionAnd());
-            emitTrace({{"operand", operand}}, result);
-            return result;
-        }
-        case DFGOp::REDUCTION_OR:
-        {
-            SimValue operand = getUnaryVal();
-            SimValue result = boolValue(operand.reductionOr());
-            emitTrace({{"operand", operand}}, result);
-            return result;
-        }
-        case DFGOp::REDUCTION_NOR:
-        {
-            SimValue operand = getUnaryVal();
-            SimValue result = boolValue(!operand.reductionOr());
-            emitTrace({{"operand", operand}}, result);
-            return result;
-        }
-        case DFGOp::REDUCTION_XOR:
-        {
-            SimValue operand = getUnaryVal();
-            SimValue result = boolValue(operand.reductionXor());
-            emitTrace({{"operand", operand}}, result);
-            return result;
-        }
-        case DFGOp::REDUCTION_XNOR:
-        {
-            SimValue operand = getUnaryVal();
-            SimValue result = boolValue(!operand.reductionXor());
-            emitTrace({{"operand", operand}}, result);
-            return result;
-        }
-
-        case DFGOp::SLICE: {
-            // SLICE has CONST high/low. Dynamic indexing is lowered to MUX during elaboration.
-            // Unpacked array access is lowered to scalar leaves or MUX-over-leaves;
-            // aggregate SIGNAL nodes no longer appear in the live DFG.
-            auto slice = node->sliceInputs();
-            const DFGNode* source_node = slice.source.node;
-
-            int64_t high = static_cast<int64_t>(checkedGetRef(slice.high.node, node).lowU64());
-            int64_t low = static_cast<int64_t>(checkedGetRef(slice.low.node, node).lowU64());
-            auto resolved = resolveSliceRange(*source_node, high, low);
-            SimValue result = checkedGetRef(slice.source.node, node).slice(
-                static_cast<int>(resolved.internal_high), static_cast<int>(resolved.internal_low));
-            emitTrace(
-                {{"source", checkedGetRef(slice.source.node, node)},
-                 {"high", checkedGetRef(slice.high.node, node)},
-                 {"low", checkedGetRef(slice.low.node, node)}},
-                result,
-                std::format(
-                    "\"internal_low\":{},\"internal_high\":{},\"width\":{}",
-                    resolved.internal_low, resolved.internal_high, resolved.width));
-            return result;
-        }
-
-        case DFGOp::CONCAT: {
-            std::vector<SimValue> parts;
-            parts.reserve(node->concatParts().size());
-            std::vector<std::pair<std::string, SimValue>> inputs;
-            inputs.reserve(node->concatParts().size());
-            for (const auto& part : node->concatParts()) {
-                SimValue value = checkedGetRef(part.node, node);
-                parts.push_back(value);
-                inputs.push_back({dfgInputRole(*node, inputs.size()), value});
-            }
-            SimValue result = SimValue::concat(parts);
-            emitTrace(inputs, result);
-            return result;
-        }
-    }
-
-    throw CompilerError(std::format("Simulator: unhandled op {}", to_string(node->kind())), node);
-}
-
-// ============================================================================
-// Combinational evaluation — single topo-ordered pass (flat DAG, no cycles)
-// ============================================================================
-
-void ModuleInstance::evaluateCombinational() {
-    for (const DFGNode* node : topo_order) {
-        if (node->kind() == DFGOp::INPUT || node->kind() == DFGOp::CONST || node->kind() == DFGOp::X) continue;
-        if (flop_q_nodes.count(node)) continue;
-        SimValue val = maskToWidth(evaluateNode(node), node);
-        values[node] = val;
-    }
-}
-
-// ============================================================================
 // Parse a time token like "5ns" or "1.5us" into integer nanoseconds.
 // ============================================================================
 
@@ -1033,7 +361,12 @@ void Simulator::advanceSyncInputs(const std::set<ClockId>& active_clocks) {
         if (pos + 1 < sync_input_data_[name].size()) {
             pos++;
         }
-        root_->setTopInputValue(name, sync_input_data_[name][pos]);
+        const auto* input = runtime_metadata_.findInput(name);
+        if (!input) {
+            throw CompilerError(std::format(
+                "Simulator: sync input '{}' has no runtime handle", name));
+        }
+        runtime_->setSyncInput(input->id, sync_input_data_[name][pos]);
     }
 }
 
@@ -1043,7 +376,7 @@ void Simulator::advanceSyncInputs(const std::set<ClockId>& active_clocks) {
 
 void Simulator::recordOutputs() {
     for (const auto& output : runtime_metadata_.output_leaves) {
-        recorded_values_[output.leaf_name].push_back(root_->checkedGet(output.node));
+        recorded_values_[output.leaf_name].push_back(runtime_->getOutput(output.id));
     }
 }
 
@@ -1079,13 +412,13 @@ Simulator::Simulator(const MateIR& ir, const SimConfig& config)
     }
 
     // Create the root module instance (recursively creates children)
-    root_ = std::make_unique<ModuleInstance>(module_.name, module_, ir_, runtime_metadata_);
+    runtime_ = std::make_unique<MateIRRuntime>(module_.name, module_, ir_, runtime_metadata_);
     initTraceConfiguration();
-    root_->trace_sink = [this](int64_t time_ns,
-                               const DFGNode* node,
-                               const std::vector<std::pair<std::string, SimValue>>& inputs,
-                               const SimValue& result,
-                               const std::string& decisions_json) {
+    runtime_->trace_sink = [this](int64_t time_ns,
+                                  const DFGNode* node,
+                                  const std::vector<std::pair<std::string, SimValue>>& inputs,
+                                  const SimValue& result,
+                                  const std::string& decisions_json) {
         emitTraceEvent(time_ns, node, inputs, result, decisions_json);
     };
 
@@ -1171,12 +504,12 @@ void Simulator::emitPassiveTraceEvents(int64_t time_ns) {
         if (node->kind() != DFGOp::INPUT &&
             node->kind() != DFGOp::CONST &&
             node->kind() != DFGOp::X &&
-            !root_->flop_q_nodes.contains(node)) {
+            !runtime_->isFlopQNode(node)) {
             continue;
         }
-        auto it = root_->values.find(node);
-        if (it == root_->values.end()) continue;
-        emitTraceEvent(time_ns, node, {}, it->second, "\"source\":\"state\"");
+        const SimValue* value = runtime_->findNodeValue(node);
+        if (!value) continue;
+        emitTraceEvent(time_ns, node, {}, *value, "\"source\":\"state\"");
     }
 }
 
@@ -1187,15 +520,15 @@ void Simulator::emitTraceEvent(int64_t time_ns,
                                const std::string& decisions_json) {
     if (!dfg_trace_out_ || !shouldTraceNode(node)) return;
 
-    auto node_index_it = root_->node_indices.find(node);
-    if (node_index_it == root_->node_indices.end()) {
+    auto node_index = runtime_->nodeIndex(node);
+    if (!node_index.has_value()) {
         throw CompilerError(std::format(
             "Simulator: traced node {} has no live node index", node->str()), node);
     }
 
     *dfg_trace_out_ << "{"
                     << "\"time\":" << time_ns
-                    << ",\"id\":" << node_index_it->second
+                    << ",\"id\":" << *node_index
                     << ",\"debug_id\":" << node->debug_id
                     << ",\"op\":\"" << to_string(node->kind()) << "\""
                     << ",\"name\":\"" << jsonEscape(nodeTraceName(node)) << "\""
@@ -1235,8 +568,7 @@ void Simulator::run() {
             rng_seed = config_.flops_initial_seed.value_or(std::random_device{}());
         }
         std::mt19937_64 rng(rng_seed);
-        root_->initFlops(config_.flops_initial, rng);
-        root_->initXs(rng);
+        runtime_->initialize(config_.flops_initial, rng);
     }
 
     // 2. Set async input values from first event in their timeline (must be at time 0)
@@ -1251,7 +583,12 @@ void Simulator::run() {
                         name, evt.time));
                 }
                 async_prev[name] = evt.value;
-                root_->setAsyncInputValue(name, evt.value);
+                const auto* input = runtime_metadata_.findInput(name);
+                if (!input) {
+                    throw CompilerError(std::format(
+                        "Simulator: async input '{}' has no runtime handle", name));
+                }
+                runtime_->initializeAsyncInput(input->id, evt.value);
                 found = true;
                 break;
             }
@@ -1264,21 +601,25 @@ void Simulator::run() {
 
     // 3. Set sync input values from first line of their files
     for (const auto& [name, data] : sync_input_data_) {
-        root_->setTopInputValue(name, data[0]);
+        const auto* input = runtime_metadata_.findInput(name);
+        if (!input) {
+            throw CompilerError(std::format(
+                "Simulator: sync input '{}' has no runtime handle", name));
+        }
+        runtime_->setSyncInput(input->id, data[0]);
     }
 
     // 4. If any reset is asserted at time 0 (level check), apply it
-    for (ResetId reset_id : root_->activeResetDomains()) {
-        root_->applyResetEdge(reset_id);
+    for (ResetId reset_id : runtime_->activeResetDomains()) {
+        runtime_->resetEdge(reset_id);
     }
 
     // 5. Evaluate all combinational logic (with fixpoint for hierarchy)
-    root_->current_time_ns = 0;
-    root_->evaluateCombinational();
+    runtime_->updateOutputs(0);
     emitPassiveTraceEvents(0);
 
     // VCD: trace initial state at time 0
-    vcd_->update(*root_, 0);
+    vcd_->update(*runtime_, 0);
 
     std::cout << "Simulator: initialization complete, processing "
               << timeline_.size() << " async events" << std::endl;
@@ -1337,11 +678,12 @@ void Simulator::run() {
         std::set<ResetId> active_edge_resets;
 
         for (const auto& [name, new_val] : new_async) {
-            const SimValue& old_val = async_prev[name];
-
-            root_->setAsyncInputValue(name, new_val);
-
-            ActiveDomainEdges active = root_->detectActiveDomainEdges(name, old_val, new_val);
+            const auto* input = runtime_metadata_.findInput(name);
+            if (!input) {
+                throw CompilerError(std::format(
+                    "Simulator: async input '{}' has no runtime handle", name));
+            }
+            ActiveDomainEdges active = runtime_->setAsyncInput(input->id, new_val);
             for (ClockId id : active.clocks) {
                 active_edge_clocks.insert(id);
             }
@@ -1353,11 +695,11 @@ void Simulator::run() {
         }
 
         for (ResetId reset_id : active_edge_resets) {
-            root_->applyResetEdge(reset_id);
+            runtime_->resetEdge(reset_id);
         }
 
         for (ClockId clock_id : active_edge_clocks) {
-            root_->applyClockEdge(clock_id);
+            runtime_->clockEdge(clock_id);
         }
 
         // On clock active edge: advance sync inputs
@@ -1366,12 +708,11 @@ void Simulator::run() {
         }
 
         // Re-evaluate combinational logic (with fixpoint for hierarchy)
-        root_->current_time_ns = batch_time;
-        root_->evaluateCombinational();
+        runtime_->updateOutputs(batch_time);
         emitPassiveTraceEvents(batch_time);
 
         // VCD: trace all values at every time step
-        vcd_->update(*root_, batch_time);
+        vcd_->update(*runtime_, batch_time);
 
         // Record output values only on active clock edges (for text output)
         if (!active_edge_clocks.empty()) {

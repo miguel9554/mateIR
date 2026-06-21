@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mateir/mateir.h"
+#include "sim/runtime.h"
 #include "sim/sim_value.h"
 #include "vcd_tracer.hpp"
 
@@ -12,8 +13,6 @@
 #include <vector>
 
 namespace mate {
-
-struct ModuleInstance;  // forward declaration
 
 class SimVcdValue : public vcd_tracer::value_base {
 public:
@@ -44,7 +43,7 @@ public:
     explicit VcdWriter(const MateIR& ir, const std::string& output_dir);
 
     // Call at every timeline time step. Updates both files in one pass.
-    void update(const ModuleInstance& root, int64_t time_ns);
+    void update(const MateIRRuntime& runtime, int64_t time_ns);
 
     // Flush and close both files.
     void close(int64_t last_time_ns);

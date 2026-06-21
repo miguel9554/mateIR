@@ -2,24 +2,20 @@
 
 #include "mateir/mateir.h"
 #include "mateir/debug.h"
+#include "sim/runtime.h"
 #include "sim/runtime_metadata.h"
 #include "sim/sim_value.h"
 #include "sim/vcd_writer.h"
 
-#include <functional>
 #include <fstream>
 #include <map>
 #include <memory>
-#include <random>
 #include <set>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace mate {
-
-enum class FlopsInitial { Random, AllZeros, AllOnes };
 
 struct SimConfig {
     std::vector<std::string> source_files;
@@ -41,87 +37,6 @@ struct AsyncEvent {
     SimValue value;
 };
 
-struct CollectedFlop {
-    const FlopInfo* flop;
-    ClockId clock_domain;
-    ResetDomains reset_domains;
-};
-
-struct ActiveDomainEdges {
-    std::set<ClockId> clocks;
-    std::set<ResetId> resets;
-};
-
-// Runtime state for the flat (inlined) design.
-// After DFG inlining, there is a single ModuleInstance for the entire design.
-// All nodes from all submodules are in module_def.dfg (the flat top DFG).
-struct ModuleInstance {
-    std::string instance_name;
-    const Module& module_def;
-    const MateIR& ir;
-    const MateIRRuntimeMetadata& metadata;
-
-    // Runtime values for all DFG nodes (flat — covers entire design hierarchy)
-    std::map<const DFGNode*, SimValue> values;
-
-    // Async signal state for edge detection (port_name -> current value)
-    std::map<std::string, SimValue> async_values;
-
-    // Flat topology and flop maps (cover all submodules after inlining)
-    std::vector<const DFGNode*> topo_order;
-    std::unordered_map<const DFGNode*, size_t> node_indices;
-    std::map<const DFGNode*, const FlopInfo*> flop_q_nodes;
-    std::map<ClockId, std::vector<CollectedFlop>> flops_by_clock;
-    std::map<ResetId, std::vector<CollectedFlop>> flops_by_reset;
-    std::map<std::string, std::vector<ClockId>> clock_domains_by_top_input;
-    std::map<std::string, std::vector<ResetId>> reset_domains_by_top_input;
-    std::map<ResetId, std::string> reset_top_input_by_id;
-    int64_t current_time_ns = 0;
-    std::function<void(int64_t,
-                       const DFGNode*,
-                       const std::vector<std::pair<std::string, SimValue>>&,
-                       const SimValue&,
-                       const std::string&)> trace_sink;
-
-    ModuleInstance(const std::string& name,
-                   const Module& mod,
-                   const MateIR& ir,
-                   const MateIRRuntimeMetadata& metadata);
-
-    // Construction helpers
-    void buildTopInputDomainMaps();
-    void buildTopology();
-    void buildFlopMaps();  // recurses over hierarchyInstantiation
-    void initConsts();
-    void initXs(std::mt19937_64& rng);
-    void initFlops(FlopsInitial mode, std::mt19937_64& rng);
-
-    // Runtime/model operations
-    void setTopInputValue(const std::string& leaf_name, const SimValue& value);
-    void setAsyncInputValue(const std::string& leaf_name, const SimValue& value);
-    const SimValue& asyncInputValue(const std::string& leaf_name) const;
-    ActiveDomainEdges detectActiveDomainEdges(const std::string& leaf_name,
-                                              const SimValue& old_value,
-                                              const SimValue& new_value) const;
-    bool resetDomainActive(ResetId id) const;
-    std::set<ResetId> activeResetDomains() const;
-    void applyResetEdge(ResetId reset_id);
-    void applyClockEdge(ClockId clock_id);
-
-    // Single-pass combinational evaluation (no fixpoint — flat DAG has no cycles)
-    void evaluateCombinational();
-
-    // Evaluate a single node
-    SimValue evaluateNode(const DFGNode* node);
-
-    // Mask value to node's bit width
-    static SimValue maskToWidth(const SimValue& val, const DFGNode* node);
-
-    // values.at() with a useful error message naming the missing node
-    const SimValue& checkedGetRef(const DFGNode* node, const DFGNode* context = nullptr) const;
-    SimValue checkedGet(const DFGNode* node, const DFGNode* context = nullptr) const;
-};
-
 class Simulator {
 public:
     Simulator(const MateIR& ir, const SimConfig& config);
@@ -133,8 +48,7 @@ private:
     const SimConfig& config_;
     MateIRRuntimeMetadata runtime_metadata_;
 
-    // The root module instance (contains all state and logic)
-    std::unique_ptr<ModuleInstance> root_;
+    std::unique_ptr<MateIRRuntime> runtime_;
 
     // Testbench infrastructure
     std::vector<AsyncEvent> timeline_;

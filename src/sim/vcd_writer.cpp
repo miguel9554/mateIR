@@ -1,5 +1,4 @@
 #include "sim/vcd_writer.h"
-#include "sim/simulator.h"
 
 #include <filesystem>
 #include <format>
@@ -539,19 +538,19 @@ VcdWriter::VcdWriter(const MateIR& ir, const std::string& output_dir)
 // VcdWriter::update
 // ============================================================================
 
-void VcdWriter::update(const ModuleInstance& root, int64_t time_ns) {
+void VcdWriter::update(const MateIRRuntime& runtime, int64_t time_ns) {
     grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{time_ns});
     raw_top_->time_update_abs(raw_out_, std::chrono::nanoseconds{time_ns});
 
     for (auto& [node, vcd_vals] : values_) {
-        auto it = root.values.find(node);
-        if (it != root.values.end())
-            for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
+        const SimValue* value = runtime.findNodeValue(node);
+        if (value)
+            for (auto& vcd_val : vcd_vals) vcd_val->set(*value);
     }
     for (auto& [name, vcd_vals] : async_values_) {
-        auto it = root.async_values.find(name);
-        if (it != root.async_values.end())
-            for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
+        const SimValue* value = runtime.findAsyncInputValue(name);
+        if (value)
+            for (auto& vcd_val : vcd_vals) vcd_val->set(*value);
     }
 }
 

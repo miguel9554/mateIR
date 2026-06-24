@@ -52,10 +52,12 @@ public:
     void initializeInputsAndEvaluate(std::span<const RuntimeInputUpdate> async_inputs,
                                      std::span<const RuntimeInputUpdate> sync_inputs,
                                      int64_t time_ns);
-    RuntimeEventResult processAsyncInputBatch(
-        std::span<const RuntimeInputUpdate> async_inputs,
-        const std::function<std::vector<RuntimeInputUpdate>(ClockId)>& sync_update_provider,
-        int64_t time_ns);
+    RuntimeEventResult processAsyncInput(RuntimeInputId input,
+                                         const SimValue& value,
+                                         int64_t time_ns);
+    void applyPostClockSyncInputs(ClockId active_clock,
+                                  std::span<const RuntimeInputUpdate> sync_inputs,
+                                  int64_t time_ns);
 
     // Stable observability surface: outputs and observables are read only
     // through handles. Adapters (file simulator, future DPI/cocotb) must use

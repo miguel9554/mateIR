@@ -631,7 +631,7 @@ void Simulator::run() {
 
     recordOutputs();
 
-    // === Main loop: process timeline in time-batches ===
+    // === Main loop: process timeline one timestamp group at a time ===
 
     const size_t total_events = timeline_.size();
     const int progress_interval_pct = 10;
@@ -641,6 +641,7 @@ void Simulator::run() {
     auto step_start    = Clock::now();
     size_t step_events = 0;
     int    last_pct    = 0;
+    std::mt19937_64 same_time_order_rng(0);
 
     size_t idx = 0;
     while (idx < timeline_.size()) {
@@ -673,39 +674,51 @@ void Simulator::run() {
             }
         }
 
-        // Deduplicate: keep the last event per signal at this timestamp.
-        std::map<std::string, SimValue> new_async;
-        for (const auto* evt : batch) {
-            new_async[evt->signal_name] = evt->value;
-        }
-
         std::vector<RuntimeInputUpdate> async_updates;
-
-        for (const auto& [name, new_val] : new_async) {
-            const auto* input = runtime_metadata_.findInput(name);
+        std::set<std::string> seen_signals;
+        for (const auto* evt : batch) {
+            if (!seen_signals.insert(evt->signal_name).second) {
+                throw CompilerError(std::format(
+                    "Simulator: async input '{}' has multiple events at time {}",
+                    evt->signal_name, batch_time));
+            }
+            const auto* input = runtime_metadata_.findInput(evt->signal_name);
             if (!input) {
                 throw CompilerError(std::format(
-                    "Simulator: async input '{}' has no runtime handle", name));
+                    "Simulator: async input '{}' has no runtime handle", evt->signal_name));
             }
             async_updates.push_back(RuntimeInputUpdate{
                 .input = input->id,
-                .value = new_val,
+                .value = evt->value,
             });
         }
 
-        RuntimeEventResult event_result = runtime_->processAsyncInputBatch(
-            async_updates,
-            [this](ClockId clock_id) {
-                return collectPostClockSyncInputs(clock_id);
-            },
-            batch_time);
+        std::shuffle(async_updates.begin(), async_updates.end(), same_time_order_rng);
+
+        RuntimeEventResult timestamp_result;
+        for (const auto& update : async_updates) {
+            RuntimeEventResult event_result =
+                runtime_->processAsyncInput(update.input, update.value, batch_time);
+            timestamp_result.active_edges.clocks.insert(
+                event_result.active_edges.clocks.begin(),
+                event_result.active_edges.clocks.end());
+            timestamp_result.active_edges.resets.insert(
+                event_result.active_edges.resets.begin(),
+                event_result.active_edges.resets.end());
+
+            for (ClockId clock_id : event_result.active_edges.clocks) {
+                std::vector<RuntimeInputUpdate> sync_updates =
+                    collectPostClockSyncInputs(clock_id);
+                runtime_->applyPostClockSyncInputs(clock_id, sync_updates, batch_time);
+            }
+        }
         emitPassiveTraceEvents(batch_time);
 
         // VCD: trace all values at every time step
         vcd_->update(*runtime_, batch_time);
 
         // Record output values only on active clock edges (for text output)
-        if (!event_result.active_edges.clocks.empty()) {
+        if (!timestamp_result.active_edges.clocks.empty()) {
             recordOutputs();
         }
     }

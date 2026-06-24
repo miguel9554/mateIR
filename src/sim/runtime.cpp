@@ -117,30 +117,15 @@ void MateIRRuntime::initializeInputsAndEvaluate(
     updateOutputs(time_ns);
 }
 
-RuntimeEventResult MateIRRuntime::processAsyncInputBatch(
-    std::span<const RuntimeInputUpdate> async_inputs,
-    const std::function<std::vector<RuntimeInputUpdate>(ClockId)>& sync_update_provider,
-    int64_t time_ns) {
+RuntimeEventResult MateIRRuntime::processAsyncInput(RuntimeInputId input,
+                                                    const SimValue& value,
+                                                    int64_t time_ns) {
     RuntimeEventResult result;
 
-    // Runtime event ordering for one adapter-provided timestamp batch:
-    // 1. Apply all async input updates and detect active clock/reset edges.
-    // 2. Apply active async-reset edges immediately.
-    // 3. Commit clocked flops for active clock domains, with active resets
-    //    suppressing normal D-to-Q copies.
-    // 4. Ask the adapter for post-clock sync input updates for each active
-    //    clock and validate/apply them inside the runtime.
-    // 5. Re-evaluate combinational logic so outputs and observables are valid.
-    //
-    // The post-clock sync update point preserves the existing file simulator
-    // semantics: the next value from a sync input file is visible to
-    // combinational logic after the edge and to later clock edges, but it is
-    // not sampled by flops on the edge that advanced the file cursor.
-    for (const auto& update : async_inputs) {
-        ActiveDomainEdges active = setAsyncInput(update.input, update.value);
-        result.active_edges.clocks.insert(active.clocks.begin(), active.clocks.end());
-        result.active_edges.resets.insert(active.resets.begin(), active.resets.end());
-    }
+    // Process exactly one external async transition. Ordering between multiple
+    // same-time transitions belongs to the simulator adapter, not the runtime.
+    ActiveDomainEdges active = setAsyncInput(input, value);
+    result.active_edges = active;
 
     for (ResetId reset_id : result.active_edges.resets) {
         resetEdge(reset_id);
@@ -150,18 +135,22 @@ RuntimeEventResult MateIRRuntime::processAsyncInputBatch(
         clockEdge(clock_id);
     }
 
-    if (sync_update_provider) {
-        for (ClockId clock_id : result.active_edges.clocks) {
-            std::vector<RuntimeInputUpdate> sync_updates = sync_update_provider(clock_id);
-            for (const auto& update : sync_updates) {
-                validateSyncUpdateForClock(clock_id, update);
-                setSyncInput(update.input, update.value);
-            }
-        }
-    }
-
     updateOutputs(time_ns);
     return result;
+}
+
+void MateIRRuntime::applyPostClockSyncInputs(
+    ClockId active_clock,
+    std::span<const RuntimeInputUpdate> sync_inputs,
+    int64_t time_ns) {
+    // Adapter-provided sync streams advance after a clock edge. The new values
+    // are visible to combinational logic and later clock edges, but not to the
+    // flop sampling that just occurred.
+    for (const auto& update : sync_inputs) {
+        validateSyncUpdateForClock(active_clock, update);
+        setSyncInput(update.input, update.value);
+    }
+    updateOutputs(time_ns);
 }
 
 void MateIRRuntime::initializeAsyncInput(RuntimeInputId input, const SimValue& value) {

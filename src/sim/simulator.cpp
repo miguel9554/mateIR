@@ -746,7 +746,6 @@ void Simulator::run() {
     }
     std::cout << "Simulator: output written to '" << config_.output_dir << "/'" << std::endl;
     std::cout << "Simulator: grouped VCD trace written to '" << vcd_->grouped_path() << "'" << std::endl;
-    std::cout << "Simulator: raw VCD trace written to '" << vcd_->raw_path() << "'" << std::endl;
     if (dfg_trace_path_) {
         std::cout << "Simulator: DFG trace written to '" << *dfg_trace_path_ << "'" << std::endl;
     }

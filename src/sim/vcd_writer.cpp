@@ -438,90 +438,6 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
 }
 
 // ============================================================================
-// VcdWriter::setupRaw — raw VCD (no kind grouping)
-// ============================================================================
-
-void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
-                      const std::unordered_set<const DFGNode*>& alive) {
-    // Output ports that are also flops are fully emitted by the flop section.
-    // Skip them here to avoid duplicate (and incorrectly-named) VCD entries.
-    std::unordered_set<std::string> flopOutputPorts;
-    collectFlopBackedAggregateRoots(mod, flopOutputPorts);
-
-    // Cache of generate-scope vcd_tracer::module objects, keyed by dot-separated
-    // scope path. Created on demand; generate scopes are direct children of `scope`.
-    std::map<std::string, std::unique_ptr<vcd_tracer::module>> gen_scopes;
-    std::function<vcd_tracer::module&(const std::string&)> getGenScope;
-    getGenScope = [&](const std::string& path) -> vcd_tracer::module& {
-        return getOrCreateNestedScope(scope, gen_scopes, path);
-    };
-
-    for (const auto* params : {&mod.parameters, &mod.localparams}) {
-        for (const auto& param : *params) {
-            auto dot = param.name.rfind('.');
-            if (dot == std::string::npos) {
-                emitParamValue(scope, static_params_, param.name, param.type, param.value);
-            } else {
-                emitParamValue(getGenScope(param.name.substr(0, dot)), static_params_,
-                               param.name.substr(dot + 1), param.type, param.value);
-            }
-        }
-    }
-
-    forEachInputNode(mod, [&](const ModuleNode& sig) {
-        const std::string& name = sig.name;
-        if (name.ends_with(".q")) return;
-        if (isDomainInput(sig)) {
-            addDomainInputEntry(scope, name, sig);
-        } else {
-            addSignalEntries(scope, name, sig, alive);
-        }
-    });
-
-    forEachInternalNode(mod, [&](const ModuleNode& sig) {
-        const std::string& name = sig.name;
-        if (name.ends_with(".q") || name.ends_with(".d")) return;
-        auto dot = name.rfind('.');
-        if (dot == std::string::npos) {
-            addSignalEntries(scope, name, sig, alive);
-        } else {
-            addSignalEntries(getGenScope(name.substr(0, dot)), name.substr(dot + 1), sig, alive);
-        }
-    });
-
-    for (const auto& flop : mod.flops) {
-        std::string vcd_name = flop.name;
-        if (vcd_name.ends_with(".q")) vcd_name.resize(vcd_name.size() - 2);
-        auto dot = vcd_name.rfind('.');
-        if (dot == std::string::npos) {
-            FlopInfo localFlop = flop;
-            localFlop.name = vcd_name;
-            addFlopEntries(scope, localFlop, alive);
-        } else {
-            FlopInfo localFlop = flop;
-            localFlop.name = vcd_name.substr(dot + 1);
-            addFlopEntries(getGenScope(vcd_name.substr(0, dot)), localFlop, alive);
-        }
-    }
-
-    forEachOutputNode(mod, [&](const ModuleNode& sig) {
-        const std::string& name = sig.name;
-        if (name.ends_with(".d")) return;
-        if (flopOutputPorts.count(name)) return;
-        addSignalEntries(scope, name, sig, alive);
-    });
-
-    for (const auto& sub : mod.hierarchyInstantiation) {
-        const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
-        auto dot = child_name.rfind('.');
-        vcd_tracer::module childScope(
-            dot == std::string::npos ? scope : getGenScope(child_name.substr(0, dot)),
-            dot == std::string::npos ? child_name : child_name.substr(dot + 1));
-        setupRaw(sub, childScope, alive);
-    }
-}
-
-// ============================================================================
 // VcdWriter constructor
 // ============================================================================
 
@@ -532,15 +448,10 @@ VcdWriter::VcdWriter(const MateIR& ir, const MateIRRuntimeMetadata& metadata,
     std::filesystem::create_directories(output_dir);
 
     grouped_path_ = output_dir + "/" + module.name + ".vcd";
-    raw_path_ = output_dir + "/" + module.name + "-raw.vcd";
 
     grouped_out_.open(grouped_path_);
     if (!grouped_out_.is_open())
         throw CompilerError(std::format("VcdWriter: cannot open '{}'", grouped_path_));
-
-    raw_out_.open(raw_path_);
-    if (!raw_out_.is_open())
-        throw CompilerError(std::format("VcdWriter: cannot open '{}'", raw_path_));
 
     // Build alive set: nodes still in the DFG after DCE
     std::unordered_set<const DFGNode*> alive;
@@ -549,10 +460,6 @@ VcdWriter::VcdWriter(const MateIR& ir, const MateIRRuntimeMetadata& metadata,
     grouped_top_ = std::make_unique<vcd_tracer::top>(module.name);
     setupGrouped(module, grouped_top_->root, alive);
     grouped_top_->finalize_header(grouped_out_, std::chrono::system_clock::from_time_t(0));
-
-    raw_top_ = std::make_unique<vcd_tracer::top>(module.name);
-    setupRaw(module, raw_top_->root, alive);
-    raw_top_->finalize_header(raw_out_, std::chrono::system_clock::from_time_t(0));
 }
 
 // ============================================================================
@@ -561,7 +468,6 @@ VcdWriter::VcdWriter(const MateIR& ir, const MateIRRuntimeMetadata& metadata,
 
 void VcdWriter::update(const MateIRRuntime& runtime, int64_t time_ns) {
     grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{time_ns});
-    raw_top_->time_update_abs(raw_out_, std::chrono::nanoseconds{time_ns});
 
     // Values flow exclusively through runtime observable handles; the VCD layer
     // never reaches into runtime/DFG state directly.
@@ -577,10 +483,8 @@ void VcdWriter::update(const MateIRRuntime& runtime, int64_t time_ns) {
 void VcdWriter::close(int64_t last_time_ns) {
     if (last_time_ns > 0) {
         grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{last_time_ns});
-        raw_top_->time_update_abs(raw_out_, std::chrono::nanoseconds{last_time_ns});
     }
     grouped_out_.close();
-    raw_out_.close();
 }
 
 } // namespace mate

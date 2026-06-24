@@ -1,5 +1,4 @@
 #include "sim/vcd_writer.h"
-#include "sim/simulator.h"
 
 #include <filesystem>
 #include <format>
@@ -246,13 +245,31 @@ std::string VcdWriter::requireTopInputSourceName(const ModuleNode& sig,
     return source->name;
 }
 
+RuntimeObservableId VcdWriter::observableForNode(const DFGNode* node,
+                                                 const std::string& context) const {
+    auto it = metadata_.observables_by_node.find(node);
+    if (it == metadata_.observables_by_node.end() || it->second.empty()) {
+        throw CompilerError(std::format(
+            "VcdWriter: {} has no runtime observable", context), node);
+    }
+    // Any observable bound to this node reads the same node value; pick the first.
+    return it->second.front();
+}
+
 void VcdWriter::addDomainInputEntry(vcd_tracer::module& scope, const std::string& name,
                                     const ModuleNode& sig) {
     unsigned int w = sig.type.width > 0 ? static_cast<unsigned int>(sig.type.width) : 1;
+    const std::string source = requireTopInputSourceName(sig, std::format("input '{}'", name));
+    const auto* input = metadata_.findInput(source);
+    if (!input || !input->node) {
+        throw CompilerError(std::format(
+            "VcdWriter: domain input '{}' source '{}' has no runtime input leaf", name, source));
+    }
+    RuntimeObservableId observable =
+        observableForNode(input->node, std::format("domain input '{}'", name));
     auto v = std::make_unique<SimVcdValue>(w);
     v->elaborate(scope.get_add_fn(), name);
-    async_values_[requireTopInputSourceName(sig, std::format("input '{}'", name))]
-        .push_back(std::move(v));
+    traced_values_.push_back({observable, std::move(v)});
 }
 
 // ============================================================================
@@ -269,9 +286,11 @@ void VcdWriter::addEntry(vcd_tracer::module& scope, const std::string& name,
     // Callers (addSignalEntries, addFlopEntries) iterate leaves directly.
 
     unsigned int w = getWidth(node);
+    RuntimeObservableId observable =
+        observableForNode(node, std::format("traced signal '{}'", name));
     auto v = std::make_unique<SimVcdValue>(w);
     v->elaborate(scope.get_add_fn(), name);
-    values_[node].push_back(std::move(v));
+    traced_values_.push_back({observable, std::move(v)});
 }
 
 void VcdWriter::addSignalEntries(vcd_tracer::module& scope, const std::string& name,
@@ -419,108 +438,20 @@ void VcdWriter::setupGrouped(const Module& mod, vcd_tracer::module& scope,
 }
 
 // ============================================================================
-// VcdWriter::setupRaw — raw VCD (no kind grouping)
-// ============================================================================
-
-void VcdWriter::setupRaw(const Module& mod, vcd_tracer::module& scope,
-                      const std::unordered_set<const DFGNode*>& alive) {
-    // Output ports that are also flops are fully emitted by the flop section.
-    // Skip them here to avoid duplicate (and incorrectly-named) VCD entries.
-    std::unordered_set<std::string> flopOutputPorts;
-    collectFlopBackedAggregateRoots(mod, flopOutputPorts);
-
-    // Cache of generate-scope vcd_tracer::module objects, keyed by dot-separated
-    // scope path. Created on demand; generate scopes are direct children of `scope`.
-    std::map<std::string, std::unique_ptr<vcd_tracer::module>> gen_scopes;
-    std::function<vcd_tracer::module&(const std::string&)> getGenScope;
-    getGenScope = [&](const std::string& path) -> vcd_tracer::module& {
-        return getOrCreateNestedScope(scope, gen_scopes, path);
-    };
-
-    for (const auto* params : {&mod.parameters, &mod.localparams}) {
-        for (const auto& param : *params) {
-            auto dot = param.name.rfind('.');
-            if (dot == std::string::npos) {
-                emitParamValue(scope, static_params_, param.name, param.type, param.value);
-            } else {
-                emitParamValue(getGenScope(param.name.substr(0, dot)), static_params_,
-                               param.name.substr(dot + 1), param.type, param.value);
-            }
-        }
-    }
-
-    forEachInputNode(mod, [&](const ModuleNode& sig) {
-        const std::string& name = sig.name;
-        if (name.ends_with(".q")) return;
-        if (isDomainInput(sig)) {
-            addDomainInputEntry(scope, name, sig);
-        } else {
-            addSignalEntries(scope, name, sig, alive);
-        }
-    });
-
-    forEachInternalNode(mod, [&](const ModuleNode& sig) {
-        const std::string& name = sig.name;
-        if (name.ends_with(".q") || name.ends_with(".d")) return;
-        auto dot = name.rfind('.');
-        if (dot == std::string::npos) {
-            addSignalEntries(scope, name, sig, alive);
-        } else {
-            addSignalEntries(getGenScope(name.substr(0, dot)), name.substr(dot + 1), sig, alive);
-        }
-    });
-
-    for (const auto& flop : mod.flops) {
-        std::string vcd_name = flop.name;
-        if (vcd_name.ends_with(".q")) vcd_name.resize(vcd_name.size() - 2);
-        auto dot = vcd_name.rfind('.');
-        if (dot == std::string::npos) {
-            FlopInfo localFlop = flop;
-            localFlop.name = vcd_name;
-            addFlopEntries(scope, localFlop, alive);
-        } else {
-            FlopInfo localFlop = flop;
-            localFlop.name = vcd_name.substr(dot + 1);
-            addFlopEntries(getGenScope(vcd_name.substr(0, dot)), localFlop, alive);
-        }
-    }
-
-    forEachOutputNode(mod, [&](const ModuleNode& sig) {
-        const std::string& name = sig.name;
-        if (name.ends_with(".d")) return;
-        if (flopOutputPorts.count(name)) return;
-        addSignalEntries(scope, name, sig, alive);
-    });
-
-    for (const auto& sub : mod.hierarchyInstantiation) {
-        const std::string& child_name = sub.instance_name.empty() ? sub.name : sub.instance_name;
-        auto dot = child_name.rfind('.');
-        vcd_tracer::module childScope(
-            dot == std::string::npos ? scope : getGenScope(child_name.substr(0, dot)),
-            dot == std::string::npos ? child_name : child_name.substr(dot + 1));
-        setupRaw(sub, childScope, alive);
-    }
-}
-
-// ============================================================================
 // VcdWriter constructor
 // ============================================================================
 
-VcdWriter::VcdWriter(const MateIR& ir, const std::string& output_dir)
-    : ir_(ir) {
+VcdWriter::VcdWriter(const MateIR& ir, const MateIRRuntimeMetadata& metadata,
+                     const std::string& output_dir)
+    : ir_(ir), metadata_(metadata) {
     const Module& module = ir_.top;
     std::filesystem::create_directories(output_dir);
 
     grouped_path_ = output_dir + "/" + module.name + ".vcd";
-    raw_path_ = output_dir + "/" + module.name + "-raw.vcd";
 
     grouped_out_.open(grouped_path_);
     if (!grouped_out_.is_open())
         throw CompilerError(std::format("VcdWriter: cannot open '{}'", grouped_path_));
-
-    raw_out_.open(raw_path_);
-    if (!raw_out_.is_open())
-        throw CompilerError(std::format("VcdWriter: cannot open '{}'", raw_path_));
 
     // Build alive set: nodes still in the DFG after DCE
     std::unordered_set<const DFGNode*> alive;
@@ -529,29 +460,19 @@ VcdWriter::VcdWriter(const MateIR& ir, const std::string& output_dir)
     grouped_top_ = std::make_unique<vcd_tracer::top>(module.name);
     setupGrouped(module, grouped_top_->root, alive);
     grouped_top_->finalize_header(grouped_out_, std::chrono::system_clock::from_time_t(0));
-
-    raw_top_ = std::make_unique<vcd_tracer::top>(module.name);
-    setupRaw(module, raw_top_->root, alive);
-    raw_top_->finalize_header(raw_out_, std::chrono::system_clock::from_time_t(0));
 }
 
 // ============================================================================
 // VcdWriter::update
 // ============================================================================
 
-void VcdWriter::update(const ModuleInstance& root, int64_t time_ns) {
+void VcdWriter::update(const MateIRRuntime& runtime, int64_t time_ns) {
     grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{time_ns});
-    raw_top_->time_update_abs(raw_out_, std::chrono::nanoseconds{time_ns});
 
-    for (auto& [node, vcd_vals] : values_) {
-        auto it = root.values.find(node);
-        if (it != root.values.end())
-            for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
-    }
-    for (auto& [name, vcd_vals] : async_values_) {
-        auto it = root.async_values.find(name);
-        if (it != root.async_values.end())
-            for (auto& vcd_val : vcd_vals) vcd_val->set(it->second);
+    // Values flow exclusively through runtime observable handles; the VCD layer
+    // never reaches into runtime/DFG state directly.
+    for (auto& traced : traced_values_) {
+        traced.vcd->set(runtime.getObservable(traced.observable));
     }
 }
 
@@ -562,10 +483,8 @@ void VcdWriter::update(const ModuleInstance& root, int64_t time_ns) {
 void VcdWriter::close(int64_t last_time_ns) {
     if (last_time_ns > 0) {
         grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{last_time_ns});
-        raw_top_->time_update_abs(raw_out_, std::chrono::nanoseconds{last_time_ns});
     }
     grouped_out_.close();
-    raw_out_.close();
 }
 
 } // namespace mate

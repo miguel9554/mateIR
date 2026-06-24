@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mateir/mateir.h"
+#include "sim/runtime.h"
 #include "sim/sim_value.h"
 #include "vcd_tracer.hpp"
 
@@ -12,8 +13,6 @@
 #include <vector>
 
 namespace mate {
-
-struct ModuleInstance;  // forward declaration
 
 class SimVcdValue : public vcd_tracer::value_base {
 public:
@@ -40,43 +39,50 @@ private:
 
 class VcdWriter {
 public:
-    // Opens both VCD files, runs setup (hier + flat), writes headers.
-    explicit VcdWriter(const MateIR& ir, const std::string& output_dir);
+    // Opens the grouped VCD file, runs setup, and writes the header.
+    // Signal discovery walks the Module hierarchy (the source of truth); each
+    // traced VCD entry is bound to a runtime observable handle so that values
+    // are read exclusively through MateIRRuntime::getObservable at update time.
+    VcdWriter(const MateIR& ir, const MateIRRuntimeMetadata& metadata,
+              const std::string& output_dir);
 
-    // Call at every timeline time step. Updates both files in one pass.
-    void update(const ModuleInstance& root, int64_t time_ns);
+    // Call at every timeline time step.
+    void update(const MateIRRuntime& runtime, int64_t time_ns);
 
-    // Flush and close both files.
+    // Flush and close the VCD file.
     void close(int64_t last_time_ns);
 
     const std::string& grouped_path() const { return grouped_path_; }
-    const std::string& raw_path() const { return raw_path_; }
 
 private:
     std::string grouped_path_;
-    std::string raw_path_;
     const MateIR& ir_;
+    const MateIRRuntimeMetadata& metadata_;
     std::ofstream grouped_out_;
-    std::ofstream raw_out_;
     std::unique_ptr<vcd_tracer::top> grouped_top_;
-    std::unique_ptr<vcd_tracer::top> raw_top_;
 
-    // Merged maps: each vector holds value objects for BOTH hier and flat.
-    // Vectors because after inlining one DFG node may appear in multiple
-    // hierarchy scopes (e.g. top input aliased to submodule input).
-    std::map<const DFGNode*, std::vector<std::unique_ptr<SimVcdValue>>> values_;
-    std::map<std::string, std::vector<std::unique_ptr<SimVcdValue>>> async_values_;
+    // One traced VCD variable bound to the runtime observable handle whose value
+    // it mirrors. After inlining a single DFG node may surface in multiple
+    // hierarchy scopes (e.g. a top input aliased to a submodule input), so the
+    // same observable can back several entries.
+    struct TracedValue {
+        RuntimeObservableId observable;
+        std::unique_ptr<SimVcdValue> vcd;
+    };
+    std::vector<TracedValue> traced_values_;
 
     // Static param values (set once at setup, never updated).
     std::vector<std::unique_ptr<SimVcdValue>> static_params_;
 
-    // Recursive setup helpers — both push into values_ / async_values_ / static_params_.
     void setupGrouped(const Module& mod, vcd_tracer::module& scope,
                       const std::unordered_set<const DFGNode*>& alive);
-    void setupRaw(const Module& mod, vcd_tracer::module& scope,
-                  const std::unordered_set<const DFGNode*>& alive);
 
-    // Shared helper: adds a VCD entry for node into values_.
+    // Resolves the runtime observable handle that backs a traced DFG node.
+    // Throws if the node is not covered by runtime observable metadata.
+    RuntimeObservableId observableForNode(const DFGNode* node,
+                                          const std::string& context) const;
+
+    // Shared helper: adds a VCD entry for node into traced_values_.
     bool isDomainInput(const ModuleNode& sig) const;
     std::string requireTopInputSourceName(const ModuleNode& sig,
                                           const std::string& context) const;

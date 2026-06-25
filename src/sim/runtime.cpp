@@ -103,8 +103,7 @@ void MateIRRuntime::initialize(FlopsInitial mode, std::mt19937_64& rng) {
 
 void MateIRRuntime::initializeInputsAndEvaluate(
     std::span<const RuntimeInputUpdate> async_inputs,
-    std::span<const RuntimeInputUpdate> sync_inputs,
-    int64_t time_ns) {
+    std::span<const RuntimeInputUpdate> sync_inputs) {
     for (const auto& update : async_inputs) {
         initializeAsyncInput(update.input, update.value);
     }
@@ -114,12 +113,11 @@ void MateIRRuntime::initializeInputsAndEvaluate(
     for (ResetId reset_id : activeResetDomains()) {
         resetEdge(reset_id);
     }
-    updateOutputs(time_ns);
+    updateOutputs();
 }
 
 RuntimeEventResult MateIRRuntime::processAsyncInput(RuntimeInputId input,
-                                                    const SimValue& value,
-                                                    int64_t time_ns) {
+                                                    const SimValue& value) {
     RuntimeEventResult result;
 
     // Process exactly one external async transition. Ordering between multiple
@@ -135,14 +133,13 @@ RuntimeEventResult MateIRRuntime::processAsyncInput(RuntimeInputId input,
         clockEdge(clock_id);
     }
 
-    updateOutputs(time_ns);
+    updateOutputs();
     return result;
 }
 
 void MateIRRuntime::applyPostClockSyncInputs(
     ClockId active_clock,
-    std::span<const RuntimeInputUpdate> sync_inputs,
-    int64_t time_ns) {
+    std::span<const RuntimeInputUpdate> sync_inputs) {
     // Adapter-provided sync streams advance after a clock edge. The new values
     // are visible to combinational logic and later clock edges, but not to the
     // flop sampling that just occurred.
@@ -150,7 +147,7 @@ void MateIRRuntime::applyPostClockSyncInputs(
         validateSyncUpdateForClock(active_clock, update);
         setSyncInput(update.input, update.value);
     }
-    updateOutputs(time_ns);
+    updateOutputs();
 }
 
 void MateIRRuntime::initializeAsyncInput(RuntimeInputId input, const SimValue& value) {
@@ -206,8 +203,7 @@ void MateIRRuntime::resetEdge(ResetId reset_id) {
     applyResetEdge(reset_id);
 }
 
-void MateIRRuntime::updateOutputs(int64_t time_ns) {
-    current_time_ns = time_ns;
+void MateIRRuntime::updateOutputs() {
     evaluateCombinational();
 }
 
@@ -575,7 +571,7 @@ SimValue MateIRRuntime::evaluateNode(const DFGNode* node) {
                          const SimValue& result,
                          const std::string& decisions_json = "") {
         if (trace_sink) {
-            trace_sink(current_time_ns, node, inputs, result, decisions_json);
+            trace_sink(node, inputs, result, decisions_json);
         }
     };
 

@@ -64,6 +64,7 @@ private:
     std::unordered_set<const DFGNode*> traced_nodes_;
     std::set<std::string> traced_ops_;
     std::optional<std::string> dfg_trace_path_;
+    int64_t runtime_trace_time_ns_ = 0;
 
     // Testbench methods
     void buildTimeline();

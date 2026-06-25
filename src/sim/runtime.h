@@ -50,14 +50,11 @@ public:
 
     void initialize(FlopsInitial mode, std::mt19937_64& rng);
     void initializeInputsAndEvaluate(std::span<const RuntimeInputUpdate> async_inputs,
-                                     std::span<const RuntimeInputUpdate> sync_inputs,
-                                     int64_t time_ns);
+                                     std::span<const RuntimeInputUpdate> sync_inputs);
     RuntimeEventResult processAsyncInput(RuntimeInputId input,
-                                         const SimValue& value,
-                                         int64_t time_ns);
+                                         const SimValue& value);
     void applyPostClockSyncInputs(ClockId active_clock,
-                                  std::span<const RuntimeInputUpdate> sync_inputs,
-                                  int64_t time_ns);
+                                  std::span<const RuntimeInputUpdate> sync_inputs);
 
     // Stable observability surface: outputs and observables are read only
     // through handles. Adapters (file simulator, future DPI/cocotb) must use
@@ -79,9 +76,7 @@ public:
     bool isFlopQNode(const DFGNode* node) const;
     std::optional<size_t> nodeIndex(const DFGNode* node) const;
 
-    int64_t current_time_ns = 0;
-    std::function<void(int64_t,
-                       const DFGNode*,
+    std::function<void(const DFGNode*,
                        const std::vector<std::pair<std::string, SimValue>>&,
                        const SimValue&,
                        const std::string&)> trace_sink;
@@ -115,7 +110,7 @@ private:
     void setSyncInput(RuntimeInputId input, const SimValue& value);
     void clockEdge(ClockId clock_id);
     void resetEdge(ResetId reset_id);
-    void updateOutputs(int64_t time_ns);
+    void updateOutputs();
     std::set<ResetId> activeResetDomains() const;
     void validateSyncUpdateForClock(ClockId clock_id, const RuntimeInputUpdate& update) const;
     void setTopInputValue(const std::string& leaf_name, const SimValue& value);

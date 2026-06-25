@@ -418,12 +418,11 @@ Simulator::Simulator(const MateIR& ir, const SimConfig& config)
     // Create the root module instance (recursively creates children)
     runtime_ = std::make_unique<MateIRRuntime>(module_.name, module_, ir_, runtime_metadata_);
     initTraceConfiguration();
-    runtime_->trace_sink = [this](int64_t time_ns,
-                                  const DFGNode* node,
+    runtime_->trace_sink = [this](const DFGNode* node,
                                   const std::vector<std::pair<std::string, SimValue>>& inputs,
                                   const SimValue& result,
                                   const std::string& decisions_json) {
-        emitTraceEvent(time_ns, node, inputs, result, decisions_json);
+        emitTraceEvent(runtime_trace_time_ns_, node, inputs, result, decisions_json);
     };
 
     buildTimeline();
@@ -620,7 +619,8 @@ void Simulator::run() {
         });
     }
 
-    runtime_->initializeInputsAndEvaluate(initial_async_inputs, initial_sync_inputs, 0);
+    runtime_trace_time_ns_ = 0;
+    runtime_->initializeInputsAndEvaluate(initial_async_inputs, initial_sync_inputs);
     emitPassiveTraceEvents(0);
 
     // VCD: trace initial state at time 0
@@ -697,8 +697,9 @@ void Simulator::run() {
 
         RuntimeEventResult timestamp_result;
         for (const auto& update : async_updates) {
+            runtime_trace_time_ns_ = batch_time;
             RuntimeEventResult event_result =
-                runtime_->processAsyncInput(update.input, update.value, batch_time);
+                runtime_->processAsyncInput(update.input, update.value);
             timestamp_result.active_edges.clocks.insert(
                 event_result.active_edges.clocks.begin(),
                 event_result.active_edges.clocks.end());
@@ -709,7 +710,8 @@ void Simulator::run() {
             for (ClockId clock_id : event_result.active_edges.clocks) {
                 std::vector<RuntimeInputUpdate> sync_updates =
                     collectPostClockSyncInputs(clock_id);
-                runtime_->applyPostClockSyncInputs(clock_id, sync_updates, batch_time);
+                runtime_trace_time_ns_ = batch_time;
+                runtime_->applyPostClockSyncInputs(clock_id, sync_updates);
             }
         }
         emitPassiveTraceEvents(batch_time);

@@ -1,4 +1,4 @@
-#include "consumers/sim/simulator_consumer.h"
+#include "simulator_consumer.h"
 
 namespace mate {
 

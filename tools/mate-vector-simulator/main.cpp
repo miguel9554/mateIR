@@ -1,4 +1,4 @@
-#include "consumers/sim/simulator_consumer.h"
+#include "simulator_consumer.h"
 #include "frontends/systemverilog/systemverilog_frontend.h"
 #include "sim/runtime_compiler.h"
 #include "util/source_loc.h"

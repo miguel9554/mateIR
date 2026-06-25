@@ -18,8 +18,8 @@ GUARDED_FILES = [
     REPO_ROOT / "src/frontends/systemverilog/passes/io_domains_set.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/sync_domain_propagate.cpp",
     REPO_ROOT / "src/frontends/systemverilog/domain_facts.cpp",
-    REPO_ROOT / "src/sim/simulator.cpp",
-    REPO_ROOT / "src/sim/vcd_writer.cpp",
+    REPO_ROOT / "tools/mate-vector-simulator/simulator.cpp",
+    REPO_ROOT / "tools/mate-vector-simulator/vcd_writer.cpp",
     REPO_ROOT / "src/consumers/static_analysis/static_analysis.cpp",
 ]
 

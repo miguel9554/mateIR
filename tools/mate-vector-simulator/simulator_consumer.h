@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sim/simulator.h"
+#include "simulator.h"
 
 namespace mate {
 

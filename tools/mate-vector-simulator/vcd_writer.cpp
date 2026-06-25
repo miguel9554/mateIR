@@ -1,4 +1,4 @@
-#include "sim/vcd_writer.h"
+#include "vcd_writer.h"
 
 #include <filesystem>
 #include <format>

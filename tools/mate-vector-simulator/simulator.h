@@ -4,7 +4,7 @@
 #include "mateir/debug.h"
 #include "sim/runtime_model.h"
 #include "sim/sim_value.h"
-#include "sim/vcd_writer.h"
+#include "vcd_writer.h"
 
 #include <fstream>
 #include <map>

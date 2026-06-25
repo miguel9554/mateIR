@@ -128,9 +128,9 @@ set(RTL_RUNTIME_COMPILER_SOURCES
 )
 
 set(VECTOR_SIMULATOR_SOURCES
-    src/consumers/sim/simulator_consumer.cpp
-    src/sim/simulator.cpp
-    src/sim/vcd_writer.cpp
+    tools/mate-vector-simulator/simulator_consumer.cpp
+    tools/mate-vector-simulator/simulator.cpp
+    tools/mate-vector-simulator/vcd_writer.cpp
 )
 
 add_library(mate-mateir STATIC ${MATEIR_SOURCES})
@@ -169,7 +169,10 @@ target_include_directories(mate-vcd-tracer PUBLIC
 mate_configure_project_target(mate-vcd-tracer)
 
 add_library(mate-vector-simulator-lib STATIC ${VECTOR_SIMULATOR_SOURCES})
-target_include_directories(mate-vector-simulator-lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(mate-vector-simulator-lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/mate-vector-simulator
+)
 target_link_libraries(mate-vector-simulator-lib
     PUBLIC mate-rtl-runtime mate-vcd-tracer
 )
@@ -181,7 +184,10 @@ target_link_libraries(mate-static-analysis PUBLIC mate-mateir)
 mate_configure_project_target(mate-static-analysis)
 
 add_executable(mate src/main.cpp)
-target_include_directories(mate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(mate PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/mate-vector-simulator
+)
 target_link_libraries(mate PRIVATE
     mate-rtl-runtime-compiler
     mate-static-analysis
@@ -190,7 +196,10 @@ target_link_libraries(mate PRIVATE
 mate_configure_project_target(mate)
 
 add_executable(mate-vector-simulator tools/mate-vector-simulator/main.cpp)
-target_include_directories(mate-vector-simulator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(mate-vector-simulator PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/mate-vector-simulator
+)
 target_link_libraries(mate-vector-simulator PRIVATE
     mate-rtl-runtime-compiler
     mate-vector-simulator-lib

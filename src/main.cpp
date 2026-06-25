@@ -255,6 +255,7 @@ int main(int argc, char** argv) {
 
         auto frontend = makeFrontend(frontendName);
         auto mateir = frontend->compile(frontendOptions);
+        const size_t frontendModuleCount = mateir.frontend_module_count;
 
         std::cout << "----------------------------------------\n";
         std::cout << "\nmateir:\n";
@@ -298,13 +299,14 @@ int main(int argc, char** argv) {
             std::cout << "========================================\n";
             std::cout << "Running simulation...\n";
             std::cout << "========================================\n";
+            RtlRuntimeModel runtimeModel(std::move(mateir));
             SimulatorConsumer simulator(std::move(simConfig));
-            simulator.consume(mateir);
+            simulator.consume(runtimeModel);
         }
 
         std::cout << "========================================\n";
         std::cout << "Compilation completed successfully\n";
-        std::cout << "Found " << mateir.frontend_module_count << " module(s).\n";
+        std::cout << "Found " << frontendModuleCount << " module(s).\n";
     } catch (const CompilerError& e) {
         std::cerr << "ERROR: " << e.what() << "\n";
         return 1;

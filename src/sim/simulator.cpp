@@ -405,18 +405,18 @@ void Simulator::writeOutputFiles() {
 // Constructor
 // ============================================================================
 
-Simulator::Simulator(const MateIR& ir, const SimConfig& config)
-    : ir_(ir),
-      module_(ir.top),
+Simulator::Simulator(const RtlRuntimeModel& model, const SimConfig& config)
+    : model_(model),
+      ir_(model.ir()),
+      module_(model.top()),
       config_(config),
-      runtime_metadata_(buildMateIRRuntimeMetadata(ir))
+      runtime_metadata_(model.metadata())
 {
     if (!module_.dfg) {
         throw CompilerError("Simulator: module has no DFG");
     }
 
-    // Create the root module instance (recursively creates children)
-    runtime_ = std::make_unique<MateIRRuntime>(module_.name, module_, ir_, runtime_metadata_);
+    runtime_ = model_.createInstance();
     initTraceConfiguration();
     runtime_->trace_sink = [this](const DFGNode* node,
                                   const std::vector<std::pair<std::string, SimValue>>& inputs,

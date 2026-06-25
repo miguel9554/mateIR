@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mateir/mateir.h"
-#include "sim/runtime.h"
+#include "sim/runtime_model.h"
 #include "sim/sim_value.h"
 #include "vcd_tracer.hpp"
 
@@ -42,12 +42,12 @@ public:
     // Opens the grouped VCD file, runs setup, and writes the header.
     // Signal discovery walks the Module hierarchy (the source of truth); each
     // traced VCD entry is bound to a runtime observable handle so that values
-    // are read exclusively through MateIRRuntime::getObservable at update time.
+    // are read exclusively through RtlRuntimeInstance::getObservable at update time.
     VcdWriter(const MateIR& ir, const MateIRRuntimeMetadata& metadata,
               const std::string& output_dir);
 
     // Call at every timeline time step.
-    void update(const MateIRRuntime& runtime, int64_t time_ns);
+    void update(const RtlRuntimeInstance& runtime, int64_t time_ns);
 
     // Flush and close the VCD file.
     void close(int64_t last_time_ns);

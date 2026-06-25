@@ -9,8 +9,8 @@ std::string SimulatorConsumer::name() const {
     return "simulator";
 }
 
-void SimulatorConsumer::consume(const MateIR& ir) {
-    Simulator sim(ir, config_);
+void SimulatorConsumer::consume(const RtlRuntimeModel& model) {
+    Simulator sim(model, config_);
     sim.run();
 }
 

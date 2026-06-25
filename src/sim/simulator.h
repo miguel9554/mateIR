@@ -2,8 +2,7 @@
 
 #include "mateir/mateir.h"
 #include "mateir/debug.h"
-#include "sim/runtime.h"
-#include "sim/runtime_metadata.h"
+#include "sim/runtime_model.h"
 #include "sim/sim_value.h"
 #include "sim/vcd_writer.h"
 
@@ -39,16 +38,17 @@ struct AsyncEvent {
 
 class Simulator {
 public:
-    Simulator(const MateIR& ir, const SimConfig& config);
+    Simulator(const RtlRuntimeModel& model, const SimConfig& config);
     void run();
 
 private:
+    const RtlRuntimeModel& model_;
     const MateIR& ir_;
     const Module& module_;
     const SimConfig& config_;
-    MateIRRuntimeMetadata runtime_metadata_;
+    const MateIRRuntimeMetadata& runtime_metadata_;
 
-    std::unique_ptr<MateIRRuntime> runtime_;
+    std::unique_ptr<RtlRuntimeInstance> runtime_;
 
     // Testbench infrastructure
     std::vector<AsyncEvent> timeline_;

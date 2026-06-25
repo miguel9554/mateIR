@@ -118,8 +118,13 @@ set(SYSTEMVERILOG_FRONTEND_SOURCES
 
 set(RTL_RUNTIME_SOURCES
     src/sim/runtime.cpp
+    src/sim/runtime_model.cpp
     src/sim/runtime_metadata.cpp
     src/sim/sim_value.cpp
+)
+
+set(RTL_RUNTIME_COMPILER_SOURCES
+    src/sim/runtime_compiler.cpp
 )
 
 set(VECTOR_SIMULATOR_SOURCES
@@ -149,11 +154,13 @@ target_include_directories(mate-rtl-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(mate-rtl-runtime PUBLIC mate-mateir)
 mate_configure_project_target(mate-rtl-runtime)
 
-add_library(mate-rtl-runtime-compiler INTERFACE)
-target_link_libraries(mate-rtl-runtime-compiler INTERFACE
+add_library(mate-rtl-runtime-compiler STATIC ${RTL_RUNTIME_COMPILER_SOURCES})
+target_include_directories(mate-rtl-runtime-compiler PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-rtl-runtime-compiler PUBLIC
     mate-systemverilog-frontend
     mate-rtl-runtime
 )
+mate_configure_project_target(mate-rtl-runtime-compiler)
 
 add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)
 target_include_directories(mate-vcd-tracer PUBLIC

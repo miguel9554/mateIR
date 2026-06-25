@@ -14,7 +14,7 @@ VCD_FLATTEN ?= python3 $(PROJECT_ROOT)/tools/vcd_flatten.py
 RTL_SRCS = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
 DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 
-SIMULATOR = $(SIMULATOR_BUILD_DIR)/mate
+SIMULATOR = $(SIMULATOR_BUILD_DIR)/mate-vector-simulator
 GROUPED_VCD = $(OUTPUT_DIR)/$(MODULE_NAME).vcd
 FLAT_VCD = $(OUTPUT_DIR)/$(MODULE_NAME)-raw.vcd
 SANITIZER_ENV =
@@ -32,7 +32,7 @@ DEBUG_NODES_ARG = $(if $(DEBUG_NODES),--debug-nodes $(DEBUG_NODES),)
 simulate:
 	$(MAKE) -C $(PROJECT_ROOT) $(SIM_BUILD_TARGET)
 	rm -rf debug_output
-	$(SANITIZER_ENV) $(SIMULATOR) --simulate --top $(MODULE_NAME) \
+	$(SANITIZER_ENV) $(SIMULATOR) --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
 		--domains $(DOMAINS_YAML) \
 		--flops-initial zeros \
@@ -45,7 +45,7 @@ flatten-vcd: $(GROUPED_VCD)
 
 gdb:
 	$(MAKE) -C $(PROJECT_ROOT) debug
-	gdb --args $(PROJECT_ROOT)/build/debug/mate --simulate --top $(MODULE_NAME) \
+	gdb --args $(PROJECT_ROOT)/build/debug/mate-vector-simulator --top $(MODULE_NAME) \
 		--inputs-dir $(STIMULI_DIR) --output-dir $(OUTPUT_DIR) \
 		--domains $(DOMAINS_YAML) \
 		--flops-initial zeros \

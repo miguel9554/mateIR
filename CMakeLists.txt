@@ -189,6 +189,14 @@ target_link_libraries(mate PRIVATE
 )
 mate_configure_project_target(mate)
 
+add_executable(mate-vector-simulator tools/mate-vector-simulator/main.cpp)
+target_include_directories(mate-vector-simulator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-vector-simulator PRIVATE
+    mate-rtl-runtime-compiler
+    mate-vector-simulator-lib
+)
+mate_configure_project_target(mate-vector-simulator)
+
 # Print build configuration
 message(STATUS "")
 message(STATUS "Mate Configuration:")

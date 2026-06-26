@@ -30,15 +30,19 @@ void RtlRuntimeInstance::initializeInputsAndEvaluate(
     runtime_.initializeInputsAndEvaluate(async_inputs, sync_inputs);
 }
 
-RuntimeEventResult RtlRuntimeInstance::processAsyncInput(RuntimeInputId input,
-                                                        const SimValue& value) {
-    return runtime_.processAsyncInput(input, value);
+void RtlRuntimeInstance::applyClockEdge(
+    ClockId clock,
+    edge_t edge,
+    std::span<const RuntimeInputUpdate> sync_inputs) {
+    runtime_.applyClockEdge(clock, edge, sync_inputs);
 }
 
-void RtlRuntimeInstance::applyPostClockSyncInputs(
-    ClockId active_clock,
-    std::span<const RuntimeInputUpdate> sync_inputs) {
-    runtime_.applyPostClockSyncInputs(active_clock, sync_inputs);
+void RtlRuntimeInstance::applyResetEdge(ResetId reset, edge_t edge) {
+    runtime_.applyResetEdge(reset, edge);
+}
+
+void RtlRuntimeInstance::applyAsyncSignalEdge(RuntimeInputId input, const SimValue& value) {
+    runtime_.applyAsyncSignalEdge(input, value);
 }
 
 SimValue RtlRuntimeInstance::getOutput(RuntimeOutputId output) const {

@@ -9,6 +9,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_set>
@@ -57,6 +58,7 @@ private:
     std::map<std::string, ClockId> sync_input_clock_;
     std::map<std::string, std::vector<SimValue>> sync_input_data_;
     std::map<std::string, size_t> sync_input_pos_;
+    std::map<std::string, SimValue> async_input_values_;
     std::map<std::string, std::vector<SimValue>> recorded_values_;
 
     std::unique_ptr<VcdWriter> vcd_;
@@ -70,6 +72,9 @@ private:
     void buildTimeline();
     void loadSyncInputs();
     std::vector<RuntimeInputUpdate> collectPostClockSyncInputs(ClockId active_clock);
+    std::optional<edge_t> updateAsyncInputAndDetectEdge(const RuntimeInputUpdate& update,
+                                                        int64_t time_ns);
+    bool isClockOrResetSource(const std::string& leaf_name) const;
     void recordOutputs();
     void writeOutputFiles();
     void initTraceConfiguration();

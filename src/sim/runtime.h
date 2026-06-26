@@ -24,18 +24,9 @@ struct CollectedFlop {
     ResetDomains reset_domains;
 };
 
-struct ActiveDomainEdges {
-    std::set<ClockId> clocks;
-    std::set<ResetId> resets;
-};
-
 struct RuntimeInputUpdate {
     RuntimeInputId input;
     SimValue value;
-};
-
-struct RuntimeEventResult {
-    ActiveDomainEdges active_edges;
 };
 
 // MateIR-backed interpreted runtime for one mutable DUT instance.
@@ -51,10 +42,11 @@ public:
     void initialize(FlopsInitial mode, std::mt19937_64& rng);
     void initializeInputsAndEvaluate(std::span<const RuntimeInputUpdate> async_inputs,
                                      std::span<const RuntimeInputUpdate> sync_inputs);
-    RuntimeEventResult processAsyncInput(RuntimeInputId input,
-                                         const SimValue& value);
-    void applyPostClockSyncInputs(ClockId active_clock,
-                                  std::span<const RuntimeInputUpdate> sync_inputs);
+    void applyClockEdge(ClockId clock,
+                        edge_t edge,
+                        std::span<const RuntimeInputUpdate> sync_inputs);
+    void applyResetEdge(ResetId reset, edge_t edge);
+    void applyAsyncSignalEdge(RuntimeInputId input, const SimValue& value);
 
     // Stable observability surface: outputs and observables are read only
     // through handles. Adapters (file simulator, future DPI/cocotb) must use
@@ -106,22 +98,21 @@ private:
     void initXs(std::mt19937_64& rng);
     void initFlops(FlopsInitial mode, std::mt19937_64& rng);
     void initializeAsyncInput(RuntimeInputId input, const SimValue& value);
-    ActiveDomainEdges setAsyncInput(RuntimeInputId input, const SimValue& value);
     void setSyncInput(RuntimeInputId input, const SimValue& value);
-    void clockEdge(ClockId clock_id);
-    void resetEdge(ResetId reset_id);
     void updateOutputs();
     std::set<ResetId> activeResetDomains() const;
     void validateSyncUpdateForClock(ClockId clock_id, const RuntimeInputUpdate& update) const;
+    RuntimeInputId clockSourceInput(ClockId clock_id) const;
+    RuntimeInputId resetSourceInput(ResetId reset_id) const;
+    void validateClockEdge(ClockId clock_id, edge_t edge) const;
+    void validateResetEdge(ResetId reset_id, edge_t edge) const;
+    SimValue sourceValueForEdge(RuntimeInputId input, edge_t edge) const;
     void setTopInputValue(const std::string& leaf_name, const SimValue& value);
     void setAsyncInputValue(const std::string& leaf_name, const SimValue& value);
     const SimValue& asyncInputValue(const std::string& leaf_name) const;
-    ActiveDomainEdges detectActiveDomainEdges(const std::string& leaf_name,
-                                              const SimValue& old_value,
-                                              const SimValue& new_value) const;
     bool resetDomainActive(ResetId id) const;
-    void applyResetEdge(ResetId reset_id);
-    void applyClockEdge(ClockId clock_id);
+    void applyResetDomain(ResetId reset_id);
+    void applyClockDomain(ClockId clock_id);
     void evaluateCombinational();
     void assignFlopResetLeaves(const FlopInfo& flop, int64_t reset_value);
     void copyFlopDToQLeaves(const FlopInfo& flop);

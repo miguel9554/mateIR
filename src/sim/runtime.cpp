@@ -78,6 +78,10 @@ bool isActiveLevel(const SimValue& value, edge_t active_edge) {
         : value.isZero();
 }
 
+const char* edgeName(edge_t edge) {
+    return edge == POSEDGE ? "posedge" : "negedge";
+}
+
 } // namespace
 
 // ============================================================================
@@ -111,42 +115,59 @@ void MateIRRuntime::initializeInputsAndEvaluate(
         setSyncInput(update.input, update.value);
     }
     for (ResetId reset_id : activeResetDomains()) {
-        resetEdge(reset_id);
+        applyResetDomain(reset_id);
     }
     updateOutputs();
 }
 
-RuntimeEventResult MateIRRuntime::processAsyncInput(RuntimeInputId input,
-                                                    const SimValue& value) {
-    RuntimeEventResult result;
-
-    // Process exactly one external async transition. Ordering between multiple
-    // same-time transitions belongs to the simulator adapter, not the runtime.
-    ActiveDomainEdges active = setAsyncInput(input, value);
-    result.active_edges = active;
-
-    for (ResetId reset_id : result.active_edges.resets) {
-        resetEdge(reset_id);
-    }
-
-    for (ClockId clock_id : result.active_edges.clocks) {
-        clockEdge(clock_id);
-    }
-
-    updateOutputs();
-    return result;
-}
-
-void MateIRRuntime::applyPostClockSyncInputs(
-    ClockId active_clock,
+void MateIRRuntime::applyClockEdge(
+    ClockId clock,
+    edge_t edge,
     std::span<const RuntimeInputUpdate> sync_inputs) {
-    // Adapter-provided sync streams advance after a clock edge. The new values
-    // are visible to combinational logic and later clock edges, but not to the
-    // flop sampling that just occurred.
+    validateClockEdge(clock, edge);
+    const RuntimeInputId source = clockSourceInput(clock);
+    const auto& input_metadata = metadata_.input_leaves.at(source.value);
+    setAsyncInputValue(input_metadata.leaf_name, sourceValueForEdge(source, edge));
+
+    if (edge == ir_.clocks.at(clock.value).edge) {
+        applyClockDomain(clock);
+    } else if (!sync_inputs.empty()) {
+        throw CompilerError(std::format(
+            "Simulator runtime: inactive {} on clock domain '{}' cannot advance sync inputs",
+            edgeName(edge), ir_.clocks.at(clock.value).display_name));
+    }
+
     for (const auto& update : sync_inputs) {
-        validateSyncUpdateForClock(active_clock, update);
+        validateSyncUpdateForClock(clock, update);
         setSyncInput(update.input, update.value);
     }
+    updateOutputs();
+}
+
+void MateIRRuntime::applyResetEdge(ResetId reset, edge_t edge) {
+    validateResetEdge(reset, edge);
+    const RuntimeInputId source = resetSourceInput(reset);
+    const auto& input_metadata = metadata_.input_leaves.at(source.value);
+    setAsyncInputValue(input_metadata.leaf_name, sourceValueForEdge(source, edge));
+
+    if (edge == ir_.resets.at(reset.value).active_edge) {
+        applyResetDomain(reset);
+    }
+    updateOutputs();
+}
+
+void MateIRRuntime::applyAsyncSignalEdge(RuntimeInputId input, const SimValue& value) {
+    if (input.value >= metadata_.input_leaves.size()) {
+        throw CompilerError(std::format(
+            "Simulator runtime: invalid input handle {}", input.value));
+    }
+    const auto& input_metadata = metadata_.input_leaves.at(input.value);
+    if (input_metadata.kind != RuntimeInputKind::Async) {
+        throw CompilerError(std::format(
+            "Simulator runtime: input '{}' is not a plain async signal",
+            input_metadata.leaf_name));
+    }
+    setAsyncInputValue(input_metadata.leaf_name, value);
     updateOutputs();
 }
 
@@ -164,23 +185,6 @@ void MateIRRuntime::initializeAsyncInput(RuntimeInputId input, const SimValue& v
     setAsyncInputValue(input_metadata.leaf_name, value);
 }
 
-ActiveDomainEdges MateIRRuntime::setAsyncInput(RuntimeInputId input, const SimValue& value) {
-    if (input.value >= metadata_.input_leaves.size()) {
-        throw CompilerError(std::format(
-            "Simulator runtime: invalid input handle {}", input.value));
-    }
-    const auto& input_metadata = metadata_.input_leaves.at(input.value);
-    if (input_metadata.kind == RuntimeInputKind::Sync) {
-        throw CompilerError(std::format(
-            "Simulator runtime: sync input '{}' cannot be driven through async event",
-            input_metadata.leaf_name));
-    }
-
-    const SimValue old_value = asyncInputValue(input_metadata.leaf_name);
-    setAsyncInputValue(input_metadata.leaf_name, value);
-    return detectActiveDomainEdges(input_metadata.leaf_name, old_value, value);
-}
-
 void MateIRRuntime::setSyncInput(RuntimeInputId input, const SimValue& value) {
     if (input.value >= metadata_.input_leaves.size()) {
         throw CompilerError(std::format(
@@ -193,14 +197,6 @@ void MateIRRuntime::setSyncInput(RuntimeInputId input, const SimValue& value) {
             input_metadata.leaf_name));
     }
     setTopInputValue(input_metadata.leaf_name, value);
-}
-
-void MateIRRuntime::clockEdge(ClockId clock_id) {
-    applyClockEdge(clock_id);
-}
-
-void MateIRRuntime::resetEdge(ResetId reset_id) {
-    applyResetEdge(reset_id);
 }
 
 void MateIRRuntime::updateOutputs() {
@@ -268,37 +264,6 @@ const SimValue& MateIRRuntime::asyncInputValue(const std::string& leaf_name) con
     return it->second;
 }
 
-ActiveDomainEdges MateIRRuntime::detectActiveDomainEdges(const std::string& leaf_name,
-                                                          const SimValue& old_value,
-                                                          const SimValue& new_value) const {
-    ActiveDomainEdges active;
-    if (old_value.eq(new_value)) return active;
-
-    bool posedge = old_value.isZero() && !new_value.isZero() && new_value.lowU64() == 1;
-    bool negedge = !old_value.isZero() && old_value.lowU64() == 1 && new_value.isZero();
-    if (auto clock_it = clock_domains_by_top_input_.find(leaf_name);
-        clock_it != clock_domains_by_top_input_.end()) {
-        for (ClockId id : clock_it->second) {
-            const auto& clock = ir_.clocks[id.value];
-            if ((clock.edge == POSEDGE && posedge) ||
-                (clock.edge == NEGEDGE && negedge)) {
-                active.clocks.insert(id);
-            }
-        }
-    }
-    if (auto reset_it = reset_domains_by_top_input_.find(leaf_name);
-        reset_it != reset_domains_by_top_input_.end()) {
-        for (ResetId id : reset_it->second) {
-            const auto& reset = ir_.resets[id.value];
-            if ((reset.active_edge == POSEDGE && posedge) ||
-                (reset.active_edge == NEGEDGE && negedge)) {
-                active.resets.insert(id);
-            }
-        }
-    }
-    return active;
-}
-
 bool MateIRRuntime::resetDomainActive(ResetId id) const {
     auto source_it = reset_top_input_by_id_.find(id);
     if (source_it == reset_top_input_by_id_.end()) {
@@ -338,7 +303,64 @@ void MateIRRuntime::validateSyncUpdateForClock(ClockId clock_id,
     }
 }
 
-void MateIRRuntime::applyResetEdge(ResetId reset_id) {
+RuntimeInputId MateIRRuntime::clockSourceInput(ClockId clock_id) const {
+    if (clock_id.value >= ir_.clocks.size() || ir_.clocks.at(clock_id.value).id != clock_id) {
+        throw CompilerError(std::format(
+            "Simulator runtime: invalid clock domain {}", clock_id.value));
+    }
+    for (const auto& clock : metadata_.clocks) {
+        if (clock.domain_id == clock_id) return clock.source_input;
+    }
+    throw CompilerError(std::format(
+        "Simulator runtime: clock domain {} has no runtime source input", clock_id.value));
+}
+
+RuntimeInputId MateIRRuntime::resetSourceInput(ResetId reset_id) const {
+    if (reset_id.value >= ir_.resets.size() || ir_.resets.at(reset_id.value).id != reset_id) {
+        throw CompilerError(std::format(
+            "Simulator runtime: invalid reset domain {}", reset_id.value));
+    }
+    for (const auto& reset : metadata_.resets) {
+        if (reset.domain_id == reset_id) return reset.source_input;
+    }
+    throw CompilerError(std::format(
+        "Simulator runtime: reset domain {} has no runtime source input", reset_id.value));
+}
+
+void MateIRRuntime::validateClockEdge(ClockId clock_id, edge_t edge) const {
+    const RuntimeInputId source = clockSourceInput(clock_id);
+    const auto& input_metadata = metadata_.input_leaves.at(source.value);
+    if (input_metadata.kind != RuntimeInputKind::Clock) {
+        throw CompilerError(std::format(
+            "Simulator runtime: clock domain '{}' source '{}' is not a clock input",
+            ir_.clocks.at(clock_id.value).display_name, input_metadata.leaf_name));
+    }
+    (void)edge;
+}
+
+void MateIRRuntime::validateResetEdge(ResetId reset_id, edge_t edge) const {
+    const RuntimeInputId source = resetSourceInput(reset_id);
+    const auto& input_metadata = metadata_.input_leaves.at(source.value);
+    if (input_metadata.kind != RuntimeInputKind::Reset) {
+        throw CompilerError(std::format(
+            "Simulator runtime: reset domain '{}' source '{}' is not a reset input",
+            ir_.resets.at(reset_id.value).display_name, input_metadata.leaf_name));
+    }
+    (void)edge;
+}
+
+SimValue MateIRRuntime::sourceValueForEdge(RuntimeInputId input, edge_t edge) const {
+    if (input.value >= metadata_.input_leaves.size()) {
+        throw CompilerError(std::format(
+            "Simulator runtime: invalid input handle {}", input.value));
+    }
+    const auto& input_metadata = metadata_.input_leaves.at(input.value);
+    return SimValue::fromU64(edge == POSEDGE ? 1 : 0,
+                             input_metadata.type.width,
+                             input_metadata.type.isSigned());
+}
+
+void MateIRRuntime::applyResetDomain(ResetId reset_id) {
     auto flop_it = flops_by_reset_.find(reset_id);
     if (flop_it == flops_by_reset_.end()) return;
     for (const auto& collected : flop_it->second) {
@@ -349,7 +371,7 @@ void MateIRRuntime::applyResetEdge(ResetId reset_id) {
     }
 }
 
-void MateIRRuntime::applyClockEdge(ClockId clock_id) {
+void MateIRRuntime::applyClockDomain(ClockId clock_id) {
     auto flop_it = flops_by_clock_.find(clock_id);
     if (flop_it == flops_by_clock_.end()) return;
     for (const auto& collected : flop_it->second) {

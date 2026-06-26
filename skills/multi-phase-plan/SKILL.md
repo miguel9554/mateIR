@@ -38,7 +38,16 @@ Break the work into phases such that:
 - **Each phase is self-contained**: an agent with only PLAN.md and the phase prompt can execute it without needing prior session context
 - **Phases are ordered**: later phases can depend on earlier ones being complete, but not on shared memory
 - **Each phase has a clear completion criteria**: the agent knows when it's done
-- **Phases are reasonably sized**: not too large to do in one session, not so small they're trivial
+- **Each phase justifies its context cost**: starting a fresh agent session is expensive — in time, in context loading, in re-orientation. A phase must do enough meaningful work to pay that off. Medium to large phases are the right default.
+
+**Avoid thin phases.** A phase that only creates empty files, renames a directory, or makes mechanical find-and-replace changes is not worth a fresh context. If a step feels like something you could describe in one sentence and execute in five minutes, it should be merged into an adjacent phase, not given its own session.
+
+**What makes a phase worthwhile**: real reasoning, non-trivial decisions, changes that touch multiple parts of the system cohesively, or work that requires understanding a subsystem deeply before acting on it. A good phase leaves the codebase in a meaningfully different — and complete — state.
+
+Typical phase structure:
+- Phase 1: Scaffolding + first meaningful slice (don't separate these if scaffolding alone is trivial)
+- Phase 2–N: Substantial subsystem-by-subsystem changes, each leaving things in a working state
+- Final phase: Cleanup, deletion of old code, final wiring — only a separate phase if genuinely substantial
 
 ---
 

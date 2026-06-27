@@ -57,46 +57,154 @@ set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/yaml-cpp)
 
-# Collect all source files in src/
-file(GLOB_RECURSE PROJECT_SOURCES CONFIGURE_DEPENDS src/*.cpp)
-
-# VCD tracer library (compiled directly, not via its own CMake project)
-set(VCD_TRACER_SOURCES external/cpp-vcd-tracer/src/vcd_tracer.cpp)
-
-# Create the main executable
-add_executable(mate ${PROJECT_SOURCES} ${VCD_TRACER_SOURCES})
-
-# Ensure no optimizations in Debug builds for reliable debugging (project only, not slang)
-if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(mate PRIVATE -O0 -g3)
-endif()
-
-if(ENABLE_SANITIZERS)
-    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        message(FATAL_ERROR "ENABLE_SANITIZERS requires GCC or Clang")
+function(mate_configure_project_target target_name)
+    # Ensure no optimizations in Debug builds for reliable debugging (project only, not slang)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target_name} PRIVATE -O0 -g3)
     endif()
-    target_compile_options(mate PRIVATE
-        -fno-omit-frame-pointer
-        -fsanitize=address,undefined
-    )
-    target_link_options(mate PRIVATE
-        -fno-omit-frame-pointer
-        -fsanitize=address,undefined
-    )
+
+    if(ENABLE_SANITIZERS)
+        target_compile_options(${target_name} PRIVATE
+            -fno-omit-frame-pointer
+            -fsanitize=address,undefined
+        )
+
+        get_target_property(target_type ${target_name} TYPE)
+        if(target_type STREQUAL "EXECUTABLE")
+            target_link_options(${target_name} PRIVATE
+                -fno-omit-frame-pointer
+                -fsanitize=address,undefined
+            )
+        endif()
+    endif()
+endfunction()
+
+if(ENABLE_SANITIZERS AND NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR "ENABLE_SANITIZERS requires GCC or Clang")
 endif()
 
-# Link against slang
-target_link_libraries(mate PRIVATE
-    slang::slang
-    yaml-cpp
+set(MATEIR_SOURCES
+    src/mateir/constant_value.cpp
+    src/mateir/dfg.cpp
+    src/mateir/module.cpp
+    src/mateir/types.cpp
 )
 
-# Include directories
-target_include_directories(mate PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/yaml-cpp/include
+set(SYSTEMVERILOG_FRONTEND_SOURCES
+    src/frontends/systemverilog/domain_facts.cpp
+    src/frontends/systemverilog/passes/cdc_annotations.cpp
+    src/frontends/systemverilog/passes/cdc_check.cpp
+    src/frontends/systemverilog/passes/cdc_emit.cpp
+    src/frontends/systemverilog/passes/clock_reset_demands.cpp
+    src/frontends/systemverilog/passes/condition_normalization.cpp
+    src/frontends/systemverilog/passes/constant_fold.cpp
+    src/frontends/systemverilog/passes/dce.cpp
+    src/frontends/systemverilog/passes/dfg_inline.cpp
+    src/frontends/systemverilog/passes/domains_propagate_and_check.cpp
+    src/frontends/systemverilog/passes/elaboration.cpp
+    src/frontends/systemverilog/passes/extractor.cpp
+    src/frontends/systemverilog/passes/flop_resolve.cpp
+    src/frontends/systemverilog/passes/global_domain_resolve.cpp
+    src/frontends/systemverilog/passes/io_domains_set.cpp
+    src/frontends/systemverilog/passes/sync_domain_propagate.cpp
+    src/frontends/systemverilog/passes/top_io_domains_emit.cpp
+    src/frontends/systemverilog/passes/top_io_domains_infer.cpp
+    src/frontends/systemverilog/passes/type_propagation.cpp
+    src/frontends/systemverilog/syntax_helpers.cpp
+    src/frontends/systemverilog/systemverilog_frontend.cpp
+    src/frontends/systemverilog/systemverilog_pipeline.cpp
+    src/frontends/systemverilog/unresolved.cpp
+)
+
+set(RTL_RUNTIME_SOURCES
+    src/sim/runtime.cpp
+    src/sim/runtime_model.cpp
+    src/sim/runtime_metadata.cpp
+    src/sim/sim_value.cpp
+)
+
+set(RTL_RUNTIME_COMPILER_SOURCES
+    src/sim/runtime_compiler.cpp
+)
+
+set(VECTOR_SIMULATOR_SOURCES
+    tools/mate-vector-simulator/simulator_consumer.cpp
+    tools/mate-vector-simulator/simulator.cpp
+    tools/mate-vector-simulator/vcd_writer.cpp
+)
+
+add_library(mate-mateir STATIC ${MATEIR_SOURCES})
+target_include_directories(mate-mateir PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-mateir PRIVATE slang::slang)
+mate_configure_project_target(mate-mateir)
+
+add_library(mate-systemverilog-frontend STATIC ${SYSTEMVERILOG_FRONTEND_SOURCES})
+target_include_directories(mate-systemverilog-frontend
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external/yaml-cpp/include
+)
+target_link_libraries(mate-systemverilog-frontend
+    PUBLIC mate-mateir
+    PRIVATE slang::slang yaml-cpp
+)
+mate_configure_project_target(mate-systemverilog-frontend)
+
+add_library(mate-rtl-runtime STATIC ${RTL_RUNTIME_SOURCES})
+target_include_directories(mate-rtl-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-rtl-runtime PUBLIC mate-mateir)
+mate_configure_project_target(mate-rtl-runtime)
+
+add_library(mate-rtl-runtime-compiler STATIC ${RTL_RUNTIME_COMPILER_SOURCES})
+target_include_directories(mate-rtl-runtime-compiler PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-rtl-runtime-compiler PUBLIC
+    mate-systemverilog-frontend
+    mate-rtl-runtime
+)
+mate_configure_project_target(mate-rtl-runtime-compiler)
+
+add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)
+target_include_directories(mate-vcd-tracer PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-vcd-tracer/src
 )
+mate_configure_project_target(mate-vcd-tracer)
+
+add_library(mate-vector-simulator-lib STATIC ${VECTOR_SIMULATOR_SOURCES})
+target_include_directories(mate-vector-simulator-lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/mate-vector-simulator
+)
+target_link_libraries(mate-vector-simulator-lib
+    PUBLIC mate-rtl-runtime mate-vcd-tracer
+)
+mate_configure_project_target(mate-vector-simulator-lib)
+
+add_library(mate-static-analysis STATIC src/consumers/static_analysis/static_analysis.cpp)
+target_include_directories(mate-static-analysis PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-static-analysis PUBLIC mate-mateir)
+mate_configure_project_target(mate-static-analysis)
+
+add_executable(mate src/main.cpp)
+target_include_directories(mate PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/mate-vector-simulator
+)
+target_link_libraries(mate PRIVATE
+    mate-rtl-runtime-compiler
+    mate-static-analysis
+    mate-vector-simulator-lib
+)
+mate_configure_project_target(mate)
+
+add_executable(mate-vector-simulator tools/mate-vector-simulator/main.cpp)
+target_include_directories(mate-vector-simulator PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/mate-vector-simulator
+)
+target_link_libraries(mate-vector-simulator PRIVATE
+    mate-rtl-runtime-compiler
+    mate-vector-simulator-lib
+)
+mate_configure_project_target(mate-vector-simulator)
 
 # Print build configuration
 message(STATUS "")

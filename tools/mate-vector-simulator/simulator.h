@@ -2,14 +2,14 @@
 
 #include "mateir/mateir.h"
 #include "mateir/debug.h"
-#include "sim/runtime.h"
-#include "sim/runtime_metadata.h"
+#include "sim/runtime_model.h"
 #include "sim/sim_value.h"
-#include "sim/vcd_writer.h"
+#include "vcd_writer.h"
 
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_set>
@@ -39,16 +39,17 @@ struct AsyncEvent {
 
 class Simulator {
 public:
-    Simulator(const MateIR& ir, const SimConfig& config);
+    Simulator(const RtlRuntimeModel& model, const SimConfig& config);
     void run();
 
 private:
+    const RtlRuntimeModel& model_;
     const MateIR& ir_;
     const Module& module_;
     const SimConfig& config_;
-    MateIRRuntimeMetadata runtime_metadata_;
+    const MateIRRuntimeMetadata& runtime_metadata_;
 
-    std::unique_ptr<MateIRRuntime> runtime_;
+    std::unique_ptr<RtlRuntimeInstance> runtime_;
 
     // Testbench infrastructure
     std::vector<AsyncEvent> timeline_;
@@ -57,6 +58,7 @@ private:
     std::map<std::string, ClockId> sync_input_clock_;
     std::map<std::string, std::vector<SimValue>> sync_input_data_;
     std::map<std::string, size_t> sync_input_pos_;
+    std::map<std::string, SimValue> async_input_values_;
     std::map<std::string, std::vector<SimValue>> recorded_values_;
 
     std::unique_ptr<VcdWriter> vcd_;
@@ -64,11 +66,15 @@ private:
     std::unordered_set<const DFGNode*> traced_nodes_;
     std::set<std::string> traced_ops_;
     std::optional<std::string> dfg_trace_path_;
+    int64_t runtime_trace_time_ns_ = 0;
 
     // Testbench methods
     void buildTimeline();
     void loadSyncInputs();
     std::vector<RuntimeInputUpdate> collectPostClockSyncInputs(ClockId active_clock);
+    std::optional<edge_t> updateAsyncInputAndDetectEdge(const RuntimeInputUpdate& update,
+                                                        int64_t time_ns);
+    bool isClockOrResetSource(const std::string& leaf_name) const;
     void recordOutputs();
     void writeOutputFiles();
     void initTraceConfiguration();

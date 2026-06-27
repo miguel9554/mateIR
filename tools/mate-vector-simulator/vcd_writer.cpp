@@ -1,4 +1,4 @@
-#include "sim/vcd_writer.h"
+#include "vcd_writer.h"
 
 #include <filesystem>
 #include <format>
@@ -466,7 +466,7 @@ VcdWriter::VcdWriter(const MateIR& ir, const MateIRRuntimeMetadata& metadata,
 // VcdWriter::update
 // ============================================================================
 
-void VcdWriter::update(const MateIRRuntime& runtime, int64_t time_ns) {
+void VcdWriter::update(const RtlRuntimeInstance& runtime, int64_t time_ns) {
     grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{time_ns});
 
     // Values flow exclusively through runtime observable handles; the VCD layer

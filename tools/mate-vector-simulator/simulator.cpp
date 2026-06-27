@@ -1,4 +1,4 @@
-#include "sim/simulator.h"
+#include "simulator.h"
 
 #include <algorithm>
 #include <chrono>
@@ -374,6 +374,65 @@ std::vector<RuntimeInputUpdate> Simulator::collectPostClockSyncInputs(ClockId ac
     return updates;
 }
 
+bool Simulator::isClockOrResetSource(const std::string& leaf_name) const {
+    return runtime_metadata_.clock_domains_by_top_input.contains(leaf_name) ||
+           runtime_metadata_.reset_domains_by_top_input.contains(leaf_name);
+}
+
+std::optional<edge_t> Simulator::updateAsyncInputAndDetectEdge(
+    const RuntimeInputUpdate& update,
+    int64_t time_ns) {
+    if (update.input.value >= runtime_metadata_.input_leaves.size()) {
+        throw CompilerError(std::format(
+            "Simulator: invalid async input handle {}", update.input.value));
+    }
+
+    const auto& input = runtime_metadata_.input_leaves.at(update.input.value);
+    auto value_it = async_input_values_.find(input.leaf_name);
+    if (value_it == async_input_values_.end()) {
+        throw CompilerError(std::format(
+            "Simulator: async input '{}' has no initialized value before time {}",
+            input.leaf_name, time_ns));
+    }
+
+    const SimValue old_value = value_it->second;
+    value_it->second = update.value;
+
+    if (!isClockOrResetSource(input.leaf_name)) {
+        return std::nullopt;
+    }
+    if (old_value.eq(update.value)) {
+        return std::nullopt;
+    }
+    if (old_value.width() != 1 || update.value.width() != 1) {
+        throw CompilerError(std::format(
+            "Simulator: clock/reset input '{}' must be scalar binary at time {}",
+            input.leaf_name, time_ns));
+    }
+
+    const bool old_zero = old_value.isZero();
+    const bool old_one = !old_zero && old_value.lowU64() == 1;
+    const bool new_zero = update.value.isZero();
+    const bool new_one = !new_zero && update.value.lowU64() == 1;
+    if (!old_one && !old_zero) {
+        throw CompilerError(std::format(
+            "Simulator: clock/reset input '{}' previous value is not binary at time {}",
+            input.leaf_name, time_ns));
+    }
+    if (!new_one && !new_zero) {
+        throw CompilerError(std::format(
+            "Simulator: clock/reset input '{}' new value is not binary at time {}",
+            input.leaf_name, time_ns));
+    }
+
+    if (old_zero && new_one) return POSEDGE;
+    if (old_one && new_zero) return NEGEDGE;
+
+    throw CompilerError(std::format(
+        "Simulator: clock/reset input '{}' changed without a binary edge at time {}",
+        input.leaf_name, time_ns));
+}
+
 // ============================================================================
 // Output recording
 // ============================================================================
@@ -405,25 +464,24 @@ void Simulator::writeOutputFiles() {
 // Constructor
 // ============================================================================
 
-Simulator::Simulator(const MateIR& ir, const SimConfig& config)
-    : ir_(ir),
-      module_(ir.top),
+Simulator::Simulator(const RtlRuntimeModel& model, const SimConfig& config)
+    : model_(model),
+      ir_(model.ir()),
+      module_(model.top()),
       config_(config),
-      runtime_metadata_(buildMateIRRuntimeMetadata(ir))
+      runtime_metadata_(model.metadata())
 {
     if (!module_.dfg) {
         throw CompilerError("Simulator: module has no DFG");
     }
 
-    // Create the root module instance (recursively creates children)
-    runtime_ = std::make_unique<MateIRRuntime>(module_.name, module_, ir_, runtime_metadata_);
+    runtime_ = model_.createInstance();
     initTraceConfiguration();
-    runtime_->trace_sink = [this](int64_t time_ns,
-                                  const DFGNode* node,
+    runtime_->trace_sink = [this](const DFGNode* node,
                                   const std::vector<std::pair<std::string, SimValue>>& inputs,
                                   const SimValue& result,
                                   const std::string& decisions_json) {
-        emitTraceEvent(time_ns, node, inputs, result, decisions_json);
+        emitTraceEvent(runtime_trace_time_ns_, node, inputs, result, decisions_json);
     };
 
     buildTimeline();
@@ -578,6 +636,7 @@ void Simulator::run() {
     // 2. Gather initial async input values from the first event in their
     // timeline (must be at time 0).
     std::vector<RuntimeInputUpdate> initial_async_inputs;
+    async_input_values_.clear();
     for (const auto& name : async_inputs_) {
         bool found = false;
         for (const auto& evt : timeline_) {
@@ -596,6 +655,7 @@ void Simulator::run() {
                     .input = input->id,
                     .value = evt.value,
                 });
+                async_input_values_[name] = evt.value;
                 found = true;
                 break;
             }
@@ -620,7 +680,8 @@ void Simulator::run() {
         });
     }
 
-    runtime_->initializeInputsAndEvaluate(initial_async_inputs, initial_sync_inputs, 0);
+    runtime_trace_time_ns_ = 0;
+    runtime_->initializeInputsAndEvaluate(initial_async_inputs, initial_sync_inputs);
     emitPassiveTraceEvents(0);
 
     // VCD: trace initial state at time 0
@@ -695,22 +756,56 @@ void Simulator::run() {
 
         std::shuffle(async_updates.begin(), async_updates.end(), same_time_order_rng);
 
-        RuntimeEventResult timestamp_result;
+        bool timestamp_had_active_clock_edge = false;
         for (const auto& update : async_updates) {
-            RuntimeEventResult event_result =
-                runtime_->processAsyncInput(update.input, update.value, batch_time);
-            timestamp_result.active_edges.clocks.insert(
-                event_result.active_edges.clocks.begin(),
-                event_result.active_edges.clocks.end());
-            timestamp_result.active_edges.resets.insert(
-                event_result.active_edges.resets.begin(),
-                event_result.active_edges.resets.end());
+            runtime_trace_time_ns_ = batch_time;
 
-            for (ClockId clock_id : event_result.active_edges.clocks) {
-                std::vector<RuntimeInputUpdate> sync_updates =
-                    collectPostClockSyncInputs(clock_id);
-                runtime_->applyPostClockSyncInputs(clock_id, sync_updates, batch_time);
+            const auto& input_metadata = runtime_metadata_.input_leaves.at(update.input.value);
+            const std::string& leaf_name = input_metadata.leaf_name;
+            const auto clock_it = runtime_metadata_.clock_domains_by_top_input.find(leaf_name);
+            const auto reset_it = runtime_metadata_.reset_domains_by_top_input.find(leaf_name);
+            const bool is_clock_source =
+                clock_it != runtime_metadata_.clock_domains_by_top_input.end();
+            const bool is_reset_source =
+                reset_it != runtime_metadata_.reset_domains_by_top_input.end();
+
+            std::optional<edge_t> edge = updateAsyncInputAndDetectEdge(update, batch_time);
+            if (is_clock_source && is_reset_source) {
+                throw CompilerError(std::format(
+                    "Simulator: async input '{}' is both a clock and reset source; "
+                    "edge ordering is ambiguous",
+                    leaf_name));
             }
+
+            if (is_clock_source) {
+                if (!edge.has_value()) continue;
+                for (ClockId clock_id : clock_it->second) {
+                    std::vector<RuntimeInputUpdate> sync_updates;
+                    if (*edge == ir_.clocks.at(clock_id.value).edge) {
+                        sync_updates = collectPostClockSyncInputs(clock_id);
+                        timestamp_had_active_clock_edge = true;
+                    }
+                    runtime_trace_time_ns_ = batch_time;
+                    runtime_->applyClockEdge(clock_id, *edge, sync_updates);
+                }
+                continue;
+            }
+
+            if (is_reset_source) {
+                if (!edge.has_value()) continue;
+                for (ResetId reset_id : reset_it->second) {
+                    runtime_trace_time_ns_ = batch_time;
+                    runtime_->applyResetEdge(reset_id, *edge);
+                }
+                continue;
+            }
+
+            if (input_metadata.kind != RuntimeInputKind::Async) {
+                throw CompilerError(std::format(
+                    "Simulator: input '{}' cannot be driven as a plain async signal",
+                    leaf_name));
+            }
+            runtime_->applyAsyncSignalEdge(update.input, update.value);
         }
         emitPassiveTraceEvents(batch_time);
 
@@ -718,7 +813,7 @@ void Simulator::run() {
         vcd_->update(*runtime_, batch_time);
 
         // Record output values only on active clock edges (for text output)
-        if (!timestamp_result.active_edges.clocks.empty()) {
+        if (timestamp_had_active_clock_edge) {
             recordOutputs();
         }
     }

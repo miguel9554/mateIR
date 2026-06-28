@@ -1,147 +1,147 @@
 `timescale 1ns/1ps
 
 module tb;
-    logic clk;
-    logic rst_n;
-    logic [15:0] data;
-    logic [1:0] idx;
-    logic [3:0] base;
+    logic i_clk;
+    logic i_rst_n;
+    logic [15:0] i_data;
+    logic [1:0] i_idx;
+    logic [3:0] i_base;
 
-    logic [7:0] dpi_const_slice_case_arst;
-    logic [7:0] dpi_const_slice_case_norst;
-    logic [7:0] dpi_dynamic_part_case_arst;
-    logic [7:0] dpi_dynamic_part_case_norst;
-    logic [7:0] dpi_unpacked_const_case_arst;
-    logic [7:0] dpi_unpacked_const_case_norst;
-    logic [7:0] dpi_unpacked_dynamic_case_arst;
-    logic [7:0] dpi_unpacked_dynamic_case_norst;
-    logic [7:0] dpi_multi_item_case_arst;
-    logic [7:0] dpi_multi_item_case_norst;
-    logic [7:0] dpi_concat_case_arst;
-    logic [7:0] dpi_concat_case_norst;
-    logic [7:0] dpi_named_arg_func_arst;
-    logic [7:0] dpi_named_arg_func_norst;
-    logic dpi_dynamic_bit_pow2_arst;
-    logic dpi_dynamic_bit_pow2_norst;
-    logic dpi_dynamic_bit_nonpow2_arst;
-    logic dpi_dynamic_bit_nonpow2_norst;
-    logic [13:0] dpi_nzb_range_arst;
-    logic [7:0] dpi_nzb_lower_arst;
-    logic [7:0] dpi_nzb_upper_norst;
-    logic [13:0] dpi_nzb_arith_norst;
+    logic [7:0] o_dpi_const_slice_case_arst;
+    logic [7:0] o_dpi_const_slice_case_norst;
+    logic [7:0] o_dpi_dynamic_part_case_arst;
+    logic [7:0] o_dpi_dynamic_part_case_norst;
+    logic [7:0] o_dpi_unpacked_const_case_arst;
+    logic [7:0] o_dpi_unpacked_const_case_norst;
+    logic [7:0] o_dpi_unpacked_dynamic_case_arst;
+    logic [7:0] o_dpi_unpacked_dynamic_case_norst;
+    logic [7:0] o_dpi_multi_item_case_arst;
+    logic [7:0] o_dpi_multi_item_case_norst;
+    logic [7:0] o_dpi_concat_case_arst;
+    logic [7:0] o_dpi_concat_case_norst;
+    logic [7:0] o_dpi_named_arg_func_arst;
+    logic [7:0] o_dpi_named_arg_func_norst;
+    logic o_dpi_dynamic_bit_pow2_arst;
+    logic o_dpi_dynamic_bit_pow2_norst;
+    logic o_dpi_dynamic_bit_nonpow2_arst;
+    logic o_dpi_dynamic_bit_nonpow2_norst;
+    logic [13:0] o_dpi_nzb_range_arst;
+    logic [7:0] o_dpi_nzb_lower_arst;
+    logic [7:0] o_dpi_nzb_upper_norst;
+    logic [13:0] o_dpi_nzb_arith_norst;
 
-    logic [7:0] rtl_const_slice_case_arst;
-    logic [7:0] rtl_const_slice_case_norst;
-    logic [7:0] rtl_dynamic_part_case_arst;
-    logic [7:0] rtl_dynamic_part_case_norst;
-    logic [7:0] rtl_unpacked_const_case_arst;
-    logic [7:0] rtl_unpacked_const_case_norst;
-    logic [7:0] rtl_unpacked_dynamic_case_arst;
-    logic [7:0] rtl_unpacked_dynamic_case_norst;
-    logic [7:0] rtl_multi_item_case_arst;
-    logic [7:0] rtl_multi_item_case_norst;
-    logic [7:0] rtl_concat_case_arst;
-    logic [7:0] rtl_concat_case_norst;
-    logic [7:0] rtl_named_arg_func_arst;
-    logic [7:0] rtl_named_arg_func_norst;
-    logic rtl_dynamic_bit_pow2_arst;
-    logic rtl_dynamic_bit_pow2_norst;
-    logic rtl_dynamic_bit_nonpow2_arst;
-    logic rtl_dynamic_bit_nonpow2_norst;
-    logic [13:0] rtl_nzb_range_arst;
-    logic [7:0] rtl_nzb_lower_arst;
-    logic [7:0] rtl_nzb_upper_norst;
-    logic [13:0] rtl_nzb_arith_norst;
+    logic [7:0] o_rtl_const_slice_case_arst;
+    logic [7:0] o_rtl_const_slice_case_norst;
+    logic [7:0] o_rtl_dynamic_part_case_arst;
+    logic [7:0] o_rtl_dynamic_part_case_norst;
+    logic [7:0] o_rtl_unpacked_const_case_arst;
+    logic [7:0] o_rtl_unpacked_const_case_norst;
+    logic [7:0] o_rtl_unpacked_dynamic_case_arst;
+    logic [7:0] o_rtl_unpacked_dynamic_case_norst;
+    logic [7:0] o_rtl_multi_item_case_arst;
+    logic [7:0] o_rtl_multi_item_case_norst;
+    logic [7:0] o_rtl_concat_case_arst;
+    logic [7:0] o_rtl_concat_case_norst;
+    logic [7:0] o_rtl_named_arg_func_arst;
+    logic [7:0] o_rtl_named_arg_func_norst;
+    logic o_rtl_dynamic_bit_pow2_arst;
+    logic o_rtl_dynamic_bit_pow2_norst;
+    logic o_rtl_dynamic_bit_nonpow2_arst;
+    logic o_rtl_dynamic_bit_nonpow2_norst;
+    logic [13:0] o_rtl_nzb_range_arst;
+    logic [7:0] o_rtl_nzb_lower_arst;
+    logic [7:0] o_rtl_nzb_upper_norst;
+    logic [13:0] o_rtl_nzb_arith_norst;
 
     uut_if _if();
 
-    assign clk = _if.clk;
-    assign rst_n = _if.rst_n;
-    assign data = _if.data;
-    assign idx = _if.idx;
-    assign base = _if.base;
+    assign i_clk = _if.i_clk;
+    assign i_rst_n = _if.i_rst_n;
+    assign i_data = _if.i_data;
+    assign i_idx = _if.i_idx;
+    assign i_base = _if.i_base;
 
-    assign _if.const_slice_case_arst = dpi_const_slice_case_arst;
-    assign _if.const_slice_case_norst = dpi_const_slice_case_norst;
-    assign _if.dynamic_part_case_arst = dpi_dynamic_part_case_arst;
-    assign _if.dynamic_part_case_norst = dpi_dynamic_part_case_norst;
-    assign _if.unpacked_const_case_arst = dpi_unpacked_const_case_arst;
-    assign _if.unpacked_const_case_norst = dpi_unpacked_const_case_norst;
-    assign _if.unpacked_dynamic_case_arst = dpi_unpacked_dynamic_case_arst;
-    assign _if.unpacked_dynamic_case_norst = dpi_unpacked_dynamic_case_norst;
-    assign _if.multi_item_case_arst = dpi_multi_item_case_arst;
-    assign _if.multi_item_case_norst = dpi_multi_item_case_norst;
-    assign _if.concat_case_arst = dpi_concat_case_arst;
-    assign _if.concat_case_norst = dpi_concat_case_norst;
-    assign _if.named_arg_func_arst = dpi_named_arg_func_arst;
-    assign _if.named_arg_func_norst = dpi_named_arg_func_norst;
-    assign _if.dynamic_bit_pow2_arst = dpi_dynamic_bit_pow2_arst;
-    assign _if.dynamic_bit_pow2_norst = dpi_dynamic_bit_pow2_norst;
-    assign _if.dynamic_bit_nonpow2_arst = dpi_dynamic_bit_nonpow2_arst;
-    assign _if.dynamic_bit_nonpow2_norst = dpi_dynamic_bit_nonpow2_norst;
-    assign _if.nzb_range_arst = dpi_nzb_range_arst;
-    assign _if.nzb_lower_arst = dpi_nzb_lower_arst;
-    assign _if.nzb_upper_norst = dpi_nzb_upper_norst;
-    assign _if.nzb_arith_norst = dpi_nzb_arith_norst;
+    assign _if.o_const_slice_case_arst = o_dpi_const_slice_case_arst;
+    assign _if.o_const_slice_case_norst = o_dpi_const_slice_case_norst;
+    assign _if.o_dynamic_part_case_arst = o_dpi_dynamic_part_case_arst;
+    assign _if.o_dynamic_part_case_norst = o_dpi_dynamic_part_case_norst;
+    assign _if.o_unpacked_const_case_arst = o_dpi_unpacked_const_case_arst;
+    assign _if.o_unpacked_const_case_norst = o_dpi_unpacked_const_case_norst;
+    assign _if.o_unpacked_dynamic_case_arst = o_dpi_unpacked_dynamic_case_arst;
+    assign _if.o_unpacked_dynamic_case_norst = o_dpi_unpacked_dynamic_case_norst;
+    assign _if.o_multi_item_case_arst = o_dpi_multi_item_case_arst;
+    assign _if.o_multi_item_case_norst = o_dpi_multi_item_case_norst;
+    assign _if.o_concat_case_arst = o_dpi_concat_case_arst;
+    assign _if.o_concat_case_norst = o_dpi_concat_case_norst;
+    assign _if.o_named_arg_func_arst = o_dpi_named_arg_func_arst;
+    assign _if.o_named_arg_func_norst = o_dpi_named_arg_func_norst;
+    assign _if.o_dynamic_bit_pow2_arst = o_dpi_dynamic_bit_pow2_arst;
+    assign _if.o_dynamic_bit_pow2_norst = o_dpi_dynamic_bit_pow2_norst;
+    assign _if.o_dynamic_bit_nonpow2_arst = o_dpi_dynamic_bit_nonpow2_arst;
+    assign _if.o_dynamic_bit_nonpow2_norst = o_dpi_dynamic_bit_nonpow2_norst;
+    assign _if.o_nzb_range_arst = o_dpi_nzb_range_arst;
+    assign _if.o_nzb_lower_arst = o_dpi_nzb_lower_arst;
+    assign _if.o_nzb_upper_norst = o_dpi_nzb_upper_norst;
+    assign _if.o_nzb_arith_norst = o_dpi_nzb_arith_norst;
 
     general_features_test rtl_uut(
-        .clk(clk),
-        .rst_n(rst_n),
-        .data(data),
-        .idx(idx),
-        .base(base),
-        .const_slice_case_arst(rtl_const_slice_case_arst),
-        .const_slice_case_norst(rtl_const_slice_case_norst),
-        .dynamic_part_case_arst(rtl_dynamic_part_case_arst),
-        .dynamic_part_case_norst(rtl_dynamic_part_case_norst),
-        .unpacked_const_case_arst(rtl_unpacked_const_case_arst),
-        .unpacked_const_case_norst(rtl_unpacked_const_case_norst),
-        .unpacked_dynamic_case_arst(rtl_unpacked_dynamic_case_arst),
-        .unpacked_dynamic_case_norst(rtl_unpacked_dynamic_case_norst),
-        .multi_item_case_arst(rtl_multi_item_case_arst),
-        .multi_item_case_norst(rtl_multi_item_case_norst),
-        .concat_case_arst(rtl_concat_case_arst),
-        .concat_case_norst(rtl_concat_case_norst),
-        .named_arg_func_arst(rtl_named_arg_func_arst),
-        .named_arg_func_norst(rtl_named_arg_func_norst),
-        .dynamic_bit_pow2_arst(rtl_dynamic_bit_pow2_arst),
-        .dynamic_bit_pow2_norst(rtl_dynamic_bit_pow2_norst),
-        .dynamic_bit_nonpow2_arst(rtl_dynamic_bit_nonpow2_arst),
-        .dynamic_bit_nonpow2_norst(rtl_dynamic_bit_nonpow2_norst),
-        .nzb_range_arst(rtl_nzb_range_arst),
-        .nzb_lower_arst(rtl_nzb_lower_arst),
-        .nzb_upper_norst(rtl_nzb_upper_norst),
-        .nzb_arith_norst(rtl_nzb_arith_norst)
+        .i_clk(i_clk),
+        .i_rst_n(i_rst_n),
+        .i_data(i_data),
+        .i_idx(i_idx),
+        .i_base(i_base),
+        .o_const_slice_case_arst(o_rtl_const_slice_case_arst),
+        .o_const_slice_case_norst(o_rtl_const_slice_case_norst),
+        .o_dynamic_part_case_arst(o_rtl_dynamic_part_case_arst),
+        .o_dynamic_part_case_norst(o_rtl_dynamic_part_case_norst),
+        .o_unpacked_const_case_arst(o_rtl_unpacked_const_case_arst),
+        .o_unpacked_const_case_norst(o_rtl_unpacked_const_case_norst),
+        .o_unpacked_dynamic_case_arst(o_rtl_unpacked_dynamic_case_arst),
+        .o_unpacked_dynamic_case_norst(o_rtl_unpacked_dynamic_case_norst),
+        .o_multi_item_case_arst(o_rtl_multi_item_case_arst),
+        .o_multi_item_case_norst(o_rtl_multi_item_case_norst),
+        .o_concat_case_arst(o_rtl_concat_case_arst),
+        .o_concat_case_norst(o_rtl_concat_case_norst),
+        .o_named_arg_func_arst(o_rtl_named_arg_func_arst),
+        .o_named_arg_func_norst(o_rtl_named_arg_func_norst),
+        .o_dynamic_bit_pow2_arst(o_rtl_dynamic_bit_pow2_arst),
+        .o_dynamic_bit_pow2_norst(o_rtl_dynamic_bit_pow2_norst),
+        .o_dynamic_bit_nonpow2_arst(o_rtl_dynamic_bit_nonpow2_arst),
+        .o_dynamic_bit_nonpow2_norst(o_rtl_dynamic_bit_nonpow2_norst),
+        .o_nzb_range_arst(o_rtl_nzb_range_arst),
+        .o_nzb_lower_arst(o_rtl_nzb_lower_arst),
+        .o_nzb_upper_norst(o_rtl_nzb_upper_norst),
+        .o_nzb_arith_norst(o_rtl_nzb_arith_norst)
     );
 
     general_features_test_dpi dpi_uut(
-        .clk(clk),
-        .rst_n(rst_n),
-        .data(data),
-        .idx(idx),
-        .base(base),
-        .const_slice_case_arst(dpi_const_slice_case_arst),
-        .const_slice_case_norst(dpi_const_slice_case_norst),
-        .dynamic_part_case_arst(dpi_dynamic_part_case_arst),
-        .dynamic_part_case_norst(dpi_dynamic_part_case_norst),
-        .unpacked_const_case_arst(dpi_unpacked_const_case_arst),
-        .unpacked_const_case_norst(dpi_unpacked_const_case_norst),
-        .unpacked_dynamic_case_arst(dpi_unpacked_dynamic_case_arst),
-        .unpacked_dynamic_case_norst(dpi_unpacked_dynamic_case_norst),
-        .multi_item_case_arst(dpi_multi_item_case_arst),
-        .multi_item_case_norst(dpi_multi_item_case_norst),
-        .concat_case_arst(dpi_concat_case_arst),
-        .concat_case_norst(dpi_concat_case_norst),
-        .named_arg_func_arst(dpi_named_arg_func_arst),
-        .named_arg_func_norst(dpi_named_arg_func_norst),
-        .dynamic_bit_pow2_arst(dpi_dynamic_bit_pow2_arst),
-        .dynamic_bit_pow2_norst(dpi_dynamic_bit_pow2_norst),
-        .dynamic_bit_nonpow2_arst(dpi_dynamic_bit_nonpow2_arst),
-        .dynamic_bit_nonpow2_norst(dpi_dynamic_bit_nonpow2_norst),
-        .nzb_range_arst(dpi_nzb_range_arst),
-        .nzb_lower_arst(dpi_nzb_lower_arst),
-        .nzb_upper_norst(dpi_nzb_upper_norst),
-        .nzb_arith_norst(dpi_nzb_arith_norst)
+        .i_clk(i_clk),
+        .i_rst_n(i_rst_n),
+        .i_data(i_data),
+        .i_idx(i_idx),
+        .i_base(i_base),
+        .o_const_slice_case_arst(o_dpi_const_slice_case_arst),
+        .o_const_slice_case_norst(o_dpi_const_slice_case_norst),
+        .o_dynamic_part_case_arst(o_dpi_dynamic_part_case_arst),
+        .o_dynamic_part_case_norst(o_dpi_dynamic_part_case_norst),
+        .o_unpacked_const_case_arst(o_dpi_unpacked_const_case_arst),
+        .o_unpacked_const_case_norst(o_dpi_unpacked_const_case_norst),
+        .o_unpacked_dynamic_case_arst(o_dpi_unpacked_dynamic_case_arst),
+        .o_unpacked_dynamic_case_norst(o_dpi_unpacked_dynamic_case_norst),
+        .o_multi_item_case_arst(o_dpi_multi_item_case_arst),
+        .o_multi_item_case_norst(o_dpi_multi_item_case_norst),
+        .o_concat_case_arst(o_dpi_concat_case_arst),
+        .o_concat_case_norst(o_dpi_concat_case_norst),
+        .o_named_arg_func_arst(o_dpi_named_arg_func_arst),
+        .o_named_arg_func_norst(o_dpi_named_arg_func_norst),
+        .o_dynamic_bit_pow2_arst(o_dpi_dynamic_bit_pow2_arst),
+        .o_dynamic_bit_pow2_norst(o_dpi_dynamic_bit_pow2_norst),
+        .o_dynamic_bit_nonpow2_arst(o_dpi_dynamic_bit_nonpow2_arst),
+        .o_dynamic_bit_nonpow2_norst(o_dpi_dynamic_bit_nonpow2_norst),
+        .o_nzb_range_arst(o_dpi_nzb_range_arst),
+        .o_nzb_lower_arst(o_dpi_nzb_lower_arst),
+        .o_nzb_upper_norst(o_dpi_nzb_upper_norst),
+        .o_nzb_arith_norst(o_dpi_nzb_arith_norst)
     );
 
     uut_tb uut_tb(.*);
@@ -215,31 +215,31 @@ module tb;
     endtask
 
     task automatic check_outputs();
-        check_vec8("const_slice_case_arst", dpi_const_slice_case_arst, rtl_const_slice_case_arst, pass_const_slice_case_arst, fail_const_slice_case_arst);
-        check_vec8("const_slice_case_norst", dpi_const_slice_case_norst, rtl_const_slice_case_norst, pass_const_slice_case_norst, fail_const_slice_case_norst);
-        check_vec8("dynamic_part_case_arst", dpi_dynamic_part_case_arst, rtl_dynamic_part_case_arst, pass_dynamic_part_case_arst, fail_dynamic_part_case_arst);
-        check_vec8("dynamic_part_case_norst", dpi_dynamic_part_case_norst, rtl_dynamic_part_case_norst, pass_dynamic_part_case_norst, fail_dynamic_part_case_norst);
-        check_vec8("unpacked_const_case_arst", dpi_unpacked_const_case_arst, rtl_unpacked_const_case_arst, pass_unpacked_const_case_arst, fail_unpacked_const_case_arst);
-        check_vec8("unpacked_const_case_norst", dpi_unpacked_const_case_norst, rtl_unpacked_const_case_norst, pass_unpacked_const_case_norst, fail_unpacked_const_case_norst);
-        check_vec8("unpacked_dynamic_case_arst", dpi_unpacked_dynamic_case_arst, rtl_unpacked_dynamic_case_arst, pass_unpacked_dynamic_case_arst, fail_unpacked_dynamic_case_arst);
-        check_vec8("unpacked_dynamic_case_norst", dpi_unpacked_dynamic_case_norst, rtl_unpacked_dynamic_case_norst, pass_unpacked_dynamic_case_norst, fail_unpacked_dynamic_case_norst);
-        check_vec8("multi_item_case_arst", dpi_multi_item_case_arst, rtl_multi_item_case_arst, pass_multi_item_case_arst, fail_multi_item_case_arst);
-        check_vec8("multi_item_case_norst", dpi_multi_item_case_norst, rtl_multi_item_case_norst, pass_multi_item_case_norst, fail_multi_item_case_norst);
-        check_vec8("concat_case_arst", dpi_concat_case_arst, rtl_concat_case_arst, pass_concat_case_arst, fail_concat_case_arst);
-        check_vec8("concat_case_norst", dpi_concat_case_norst, rtl_concat_case_norst, pass_concat_case_norst, fail_concat_case_norst);
-        check_vec8("named_arg_func_arst", dpi_named_arg_func_arst, rtl_named_arg_func_arst, pass_named_arg_func_arst, fail_named_arg_func_arst);
-        check_vec8("named_arg_func_norst", dpi_named_arg_func_norst, rtl_named_arg_func_norst, pass_named_arg_func_norst, fail_named_arg_func_norst);
-        check_bit("dynamic_bit_pow2_arst", dpi_dynamic_bit_pow2_arst, rtl_dynamic_bit_pow2_arst, pass_dynamic_bit_pow2_arst, fail_dynamic_bit_pow2_arst);
-        check_bit("dynamic_bit_pow2_norst", dpi_dynamic_bit_pow2_norst, rtl_dynamic_bit_pow2_norst, pass_dynamic_bit_pow2_norst, fail_dynamic_bit_pow2_norst);
-        check_bit("dynamic_bit_nonpow2_arst", dpi_dynamic_bit_nonpow2_arst, rtl_dynamic_bit_nonpow2_arst, pass_dynamic_bit_nonpow2_arst, fail_dynamic_bit_nonpow2_arst);
-        check_bit("dynamic_bit_nonpow2_norst", dpi_dynamic_bit_nonpow2_norst, rtl_dynamic_bit_nonpow2_norst, pass_dynamic_bit_nonpow2_norst, fail_dynamic_bit_nonpow2_norst);
-        check_vec14("nzb_range_arst", dpi_nzb_range_arst, rtl_nzb_range_arst, pass_nzb_range_arst, fail_nzb_range_arst);
-        check_vec8("nzb_lower_arst", dpi_nzb_lower_arst, rtl_nzb_lower_arst, pass_nzb_lower_arst, fail_nzb_lower_arst);
-        check_vec8("nzb_upper_norst", dpi_nzb_upper_norst, rtl_nzb_upper_norst, pass_nzb_upper_norst, fail_nzb_upper_norst);
-        check_vec14("nzb_arith_norst", dpi_nzb_arith_norst, rtl_nzb_arith_norst, pass_nzb_arith_norst, fail_nzb_arith_norst);
+        check_vec8("const_slice_case_arst", o_dpi_const_slice_case_arst, o_rtl_const_slice_case_arst, pass_const_slice_case_arst, fail_const_slice_case_arst);
+        check_vec8("const_slice_case_norst", o_dpi_const_slice_case_norst, o_rtl_const_slice_case_norst, pass_const_slice_case_norst, fail_const_slice_case_norst);
+        check_vec8("dynamic_part_case_arst", o_dpi_dynamic_part_case_arst, o_rtl_dynamic_part_case_arst, pass_dynamic_part_case_arst, fail_dynamic_part_case_arst);
+        check_vec8("dynamic_part_case_norst", o_dpi_dynamic_part_case_norst, o_rtl_dynamic_part_case_norst, pass_dynamic_part_case_norst, fail_dynamic_part_case_norst);
+        check_vec8("unpacked_const_case_arst", o_dpi_unpacked_const_case_arst, o_rtl_unpacked_const_case_arst, pass_unpacked_const_case_arst, fail_unpacked_const_case_arst);
+        check_vec8("unpacked_const_case_norst", o_dpi_unpacked_const_case_norst, o_rtl_unpacked_const_case_norst, pass_unpacked_const_case_norst, fail_unpacked_const_case_norst);
+        check_vec8("unpacked_dynamic_case_arst", o_dpi_unpacked_dynamic_case_arst, o_rtl_unpacked_dynamic_case_arst, pass_unpacked_dynamic_case_arst, fail_unpacked_dynamic_case_arst);
+        check_vec8("unpacked_dynamic_case_norst", o_dpi_unpacked_dynamic_case_norst, o_rtl_unpacked_dynamic_case_norst, pass_unpacked_dynamic_case_norst, fail_unpacked_dynamic_case_norst);
+        check_vec8("multi_item_case_arst", o_dpi_multi_item_case_arst, o_rtl_multi_item_case_arst, pass_multi_item_case_arst, fail_multi_item_case_arst);
+        check_vec8("multi_item_case_norst", o_dpi_multi_item_case_norst, o_rtl_multi_item_case_norst, pass_multi_item_case_norst, fail_multi_item_case_norst);
+        check_vec8("concat_case_arst", o_dpi_concat_case_arst, o_rtl_concat_case_arst, pass_concat_case_arst, fail_concat_case_arst);
+        check_vec8("concat_case_norst", o_dpi_concat_case_norst, o_rtl_concat_case_norst, pass_concat_case_norst, fail_concat_case_norst);
+        check_vec8("named_arg_func_arst", o_dpi_named_arg_func_arst, o_rtl_named_arg_func_arst, pass_named_arg_func_arst, fail_named_arg_func_arst);
+        check_vec8("named_arg_func_norst", o_dpi_named_arg_func_norst, o_rtl_named_arg_func_norst, pass_named_arg_func_norst, fail_named_arg_func_norst);
+        check_bit("dynamic_bit_pow2_arst", o_dpi_dynamic_bit_pow2_arst, o_rtl_dynamic_bit_pow2_arst, pass_dynamic_bit_pow2_arst, fail_dynamic_bit_pow2_arst);
+        check_bit("dynamic_bit_pow2_norst", o_dpi_dynamic_bit_pow2_norst, o_rtl_dynamic_bit_pow2_norst, pass_dynamic_bit_pow2_norst, fail_dynamic_bit_pow2_norst);
+        check_bit("dynamic_bit_nonpow2_arst", o_dpi_dynamic_bit_nonpow2_arst, o_rtl_dynamic_bit_nonpow2_arst, pass_dynamic_bit_nonpow2_arst, fail_dynamic_bit_nonpow2_arst);
+        check_bit("dynamic_bit_nonpow2_norst", o_dpi_dynamic_bit_nonpow2_norst, o_rtl_dynamic_bit_nonpow2_norst, pass_dynamic_bit_nonpow2_norst, fail_dynamic_bit_nonpow2_norst);
+        check_vec14("nzb_range_arst", o_dpi_nzb_range_arst, o_rtl_nzb_range_arst, pass_nzb_range_arst, fail_nzb_range_arst);
+        check_vec8("nzb_lower_arst", o_dpi_nzb_lower_arst, o_rtl_nzb_lower_arst, pass_nzb_lower_arst, fail_nzb_lower_arst);
+        check_vec8("nzb_upper_norst", o_dpi_nzb_upper_norst, o_rtl_nzb_upper_norst, pass_nzb_upper_norst, fail_nzb_upper_norst);
+        check_vec14("nzb_arith_norst", o_dpi_nzb_arith_norst, o_rtl_nzb_arith_norst, pass_nzb_arith_norst, fail_nzb_arith_norst);
     endtask
 
-    always @(posedge clk) begin
+    always @(posedge i_clk) begin
         check_outputs();
     end
 

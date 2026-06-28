@@ -28,34 +28,34 @@ using mate::dpi::DpiInstanceContext;
 using mate::dpi::DpiOutputBinding;
 
 struct GeneralFeaturesBindings {
-    DpiInputBinding clk;
-    DpiInputBinding rst_n;
-    DpiInputBinding data;
-    DpiInputBinding idx;
-    DpiInputBinding base;
+    DpiInputBinding i_clk;
+    DpiInputBinding i_rst_n;
+    DpiInputBinding i_data;
+    DpiInputBinding i_idx;
+    DpiInputBinding i_base;
 
-    DpiOutputBinding const_slice_case_arst;
-    DpiOutputBinding const_slice_case_norst;
-    DpiOutputBinding dynamic_part_case_arst;
-    DpiOutputBinding dynamic_part_case_norst;
-    DpiOutputBinding unpacked_const_case_arst;
-    DpiOutputBinding unpacked_const_case_norst;
-    DpiOutputBinding unpacked_dynamic_case_arst;
-    DpiOutputBinding unpacked_dynamic_case_norst;
-    DpiOutputBinding multi_item_case_arst;
-    DpiOutputBinding multi_item_case_norst;
-    DpiOutputBinding concat_case_arst;
-    DpiOutputBinding concat_case_norst;
-    DpiOutputBinding named_arg_func_arst;
-    DpiOutputBinding named_arg_func_norst;
-    DpiOutputBinding dynamic_bit_pow2_arst;
-    DpiOutputBinding dynamic_bit_pow2_norst;
-    DpiOutputBinding dynamic_bit_nonpow2_arst;
-    DpiOutputBinding dynamic_bit_nonpow2_norst;
-    DpiOutputBinding nzb_range_arst;
-    DpiOutputBinding nzb_lower_arst;
-    DpiOutputBinding nzb_upper_norst;
-    DpiOutputBinding nzb_arith_norst;
+    DpiOutputBinding o_const_slice_case_arst;
+    DpiOutputBinding o_const_slice_case_norst;
+    DpiOutputBinding o_dynamic_part_case_arst;
+    DpiOutputBinding o_dynamic_part_case_norst;
+    DpiOutputBinding o_unpacked_const_case_arst;
+    DpiOutputBinding o_unpacked_const_case_norst;
+    DpiOutputBinding o_unpacked_dynamic_case_arst;
+    DpiOutputBinding o_unpacked_dynamic_case_norst;
+    DpiOutputBinding o_multi_item_case_arst;
+    DpiOutputBinding o_multi_item_case_norst;
+    DpiOutputBinding o_concat_case_arst;
+    DpiOutputBinding o_concat_case_norst;
+    DpiOutputBinding o_named_arg_func_arst;
+    DpiOutputBinding o_named_arg_func_norst;
+    DpiOutputBinding o_dynamic_bit_pow2_arst;
+    DpiOutputBinding o_dynamic_bit_pow2_norst;
+    DpiOutputBinding o_dynamic_bit_nonpow2_arst;
+    DpiOutputBinding o_dynamic_bit_nonpow2_norst;
+    DpiOutputBinding o_nzb_range_arst;
+    DpiOutputBinding o_nzb_lower_arst;
+    DpiOutputBinding o_nzb_upper_norst;
+    DpiOutputBinding o_nzb_arith_norst;
 };
 
 struct GeneralFeaturesTestContext {
@@ -71,33 +71,33 @@ struct GeneralFeaturesTestContext {
         using mate::dpi::bindOutput;
 
         return GeneralFeaturesBindings{
-            .clk = bindInput(model, "clk", RuntimeInputKind::Clock),
-            .rst_n = bindInput(model, "rst_n", RuntimeInputKind::Reset),
-            .data = bindInput(model, "data", RuntimeInputKind::Sync),
-            .idx = bindInput(model, "idx", RuntimeInputKind::Sync),
-            .base = bindInput(model, "base", RuntimeInputKind::Sync),
-            .const_slice_case_arst = bindOutput(model, "const_slice_case_arst"),
-            .const_slice_case_norst = bindOutput(model, "const_slice_case_norst"),
-            .dynamic_part_case_arst = bindOutput(model, "dynamic_part_case_arst"),
-            .dynamic_part_case_norst = bindOutput(model, "dynamic_part_case_norst"),
-            .unpacked_const_case_arst = bindOutput(model, "unpacked_const_case_arst"),
-            .unpacked_const_case_norst = bindOutput(model, "unpacked_const_case_norst"),
-            .unpacked_dynamic_case_arst = bindOutput(model, "unpacked_dynamic_case_arst"),
-            .unpacked_dynamic_case_norst = bindOutput(model, "unpacked_dynamic_case_norst"),
-            .multi_item_case_arst = bindOutput(model, "multi_item_case_arst"),
-            .multi_item_case_norst = bindOutput(model, "multi_item_case_norst"),
-            .concat_case_arst = bindOutput(model, "concat_case_arst"),
-            .concat_case_norst = bindOutput(model, "concat_case_norst"),
-            .named_arg_func_arst = bindOutput(model, "named_arg_func_arst"),
-            .named_arg_func_norst = bindOutput(model, "named_arg_func_norst"),
-            .dynamic_bit_pow2_arst = bindOutput(model, "dynamic_bit_pow2_arst"),
-            .dynamic_bit_pow2_norst = bindOutput(model, "dynamic_bit_pow2_norst"),
-            .dynamic_bit_nonpow2_arst = bindOutput(model, "dynamic_bit_nonpow2_arst"),
-            .dynamic_bit_nonpow2_norst = bindOutput(model, "dynamic_bit_nonpow2_norst"),
-            .nzb_range_arst = bindOutput(model, "nzb_range_arst"),
-            .nzb_lower_arst = bindOutput(model, "nzb_lower_arst"),
-            .nzb_upper_norst = bindOutput(model, "nzb_upper_norst"),
-            .nzb_arith_norst = bindOutput(model, "nzb_arith_norst"),
+            .i_clk = bindInput(model, "i_clk", RuntimeInputKind::Clock),
+            .i_rst_n = bindInput(model, "i_rst_n", RuntimeInputKind::Reset),
+            .i_data = bindInput(model, "i_data", RuntimeInputKind::Sync),
+            .i_idx = bindInput(model, "i_idx", RuntimeInputKind::Sync),
+            .i_base = bindInput(model, "i_base", RuntimeInputKind::Sync),
+            .o_const_slice_case_arst = bindOutput(model, "o_const_slice_case_arst"),
+            .o_const_slice_case_norst = bindOutput(model, "o_const_slice_case_norst"),
+            .o_dynamic_part_case_arst = bindOutput(model, "o_dynamic_part_case_arst"),
+            .o_dynamic_part_case_norst = bindOutput(model, "o_dynamic_part_case_norst"),
+            .o_unpacked_const_case_arst = bindOutput(model, "o_unpacked_const_case_arst"),
+            .o_unpacked_const_case_norst = bindOutput(model, "o_unpacked_const_case_norst"),
+            .o_unpacked_dynamic_case_arst = bindOutput(model, "o_unpacked_dynamic_case_arst"),
+            .o_unpacked_dynamic_case_norst = bindOutput(model, "o_unpacked_dynamic_case_norst"),
+            .o_multi_item_case_arst = bindOutput(model, "o_multi_item_case_arst"),
+            .o_multi_item_case_norst = bindOutput(model, "o_multi_item_case_norst"),
+            .o_concat_case_arst = bindOutput(model, "o_concat_case_arst"),
+            .o_concat_case_norst = bindOutput(model, "o_concat_case_norst"),
+            .o_named_arg_func_arst = bindOutput(model, "o_named_arg_func_arst"),
+            .o_named_arg_func_norst = bindOutput(model, "o_named_arg_func_norst"),
+            .o_dynamic_bit_pow2_arst = bindOutput(model, "o_dynamic_bit_pow2_arst"),
+            .o_dynamic_bit_pow2_norst = bindOutput(model, "o_dynamic_bit_pow2_norst"),
+            .o_dynamic_bit_nonpow2_arst = bindOutput(model, "o_dynamic_bit_nonpow2_arst"),
+            .o_dynamic_bit_nonpow2_norst = bindOutput(model, "o_dynamic_bit_nonpow2_norst"),
+            .o_nzb_range_arst = bindOutput(model, "o_nzb_range_arst"),
+            .o_nzb_lower_arst = bindOutput(model, "o_nzb_lower_arst"),
+            .o_nzb_upper_norst = bindOutput(model, "o_nzb_upper_norst"),
+            .o_nzb_arith_norst = bindOutput(model, "o_nzb_arith_norst"),
         };
     }
 };
@@ -120,72 +120,72 @@ GeneralFeaturesTestContext& checkedContext(void* raw) {
 }
 
 void writeOutputs(GeneralFeaturesTestContext& context,
-                  svLogicVecVal* const_slice_case_arst,
-                  svLogicVecVal* const_slice_case_norst,
-                  svLogicVecVal* dynamic_part_case_arst,
-                  svLogicVecVal* dynamic_part_case_norst,
-                  svLogicVecVal* unpacked_const_case_arst,
-                  svLogicVecVal* unpacked_const_case_norst,
-                  svLogicVecVal* unpacked_dynamic_case_arst,
-                  svLogicVecVal* unpacked_dynamic_case_norst,
-                  svLogicVecVal* multi_item_case_arst,
-                  svLogicVecVal* multi_item_case_norst,
-                  svLogicVecVal* concat_case_arst,
-                  svLogicVecVal* concat_case_norst,
-                  svLogicVecVal* named_arg_func_arst,
-                  svLogicVecVal* named_arg_func_norst,
-                  svLogic* dynamic_bit_pow2_arst,
-                  svLogic* dynamic_bit_pow2_norst,
-                  svLogic* dynamic_bit_nonpow2_arst,
-                  svLogic* dynamic_bit_nonpow2_norst,
-                  svLogicVecVal* nzb_range_arst,
-                  svLogicVecVal* nzb_lower_arst,
-                  svLogicVecVal* nzb_upper_norst,
-                  svLogicVecVal* nzb_arith_norst) {
+                  svLogicVecVal* o_const_slice_case_arst,
+                  svLogicVecVal* o_const_slice_case_norst,
+                  svLogicVecVal* o_dynamic_part_case_arst,
+                  svLogicVecVal* o_dynamic_part_case_norst,
+                  svLogicVecVal* o_unpacked_const_case_arst,
+                  svLogicVecVal* o_unpacked_const_case_norst,
+                  svLogicVecVal* o_unpacked_dynamic_case_arst,
+                  svLogicVecVal* o_unpacked_dynamic_case_norst,
+                  svLogicVecVal* o_multi_item_case_arst,
+                  svLogicVecVal* o_multi_item_case_norst,
+                  svLogicVecVal* o_concat_case_arst,
+                  svLogicVecVal* o_concat_case_norst,
+                  svLogicVecVal* o_named_arg_func_arst,
+                  svLogicVecVal* o_named_arg_func_norst,
+                  svLogic* o_dynamic_bit_pow2_arst,
+                  svLogic* o_dynamic_bit_pow2_norst,
+                  svLogic* o_dynamic_bit_nonpow2_arst,
+                  svLogic* o_dynamic_bit_nonpow2_norst,
+                  svLogicVecVal* o_nzb_range_arst,
+                  svLogicVecVal* o_nzb_lower_arst,
+                  svLogicVecVal* o_nzb_upper_norst,
+                  svLogicVecVal* o_nzb_arith_norst) {
     using mate::dpi::writeScalarOutput;
     using mate::dpi::writeVectorOutput;
 
-    writeVectorOutput(context.instance, context.bindings.const_slice_case_arst, const_slice_case_arst);
-    writeVectorOutput(context.instance, context.bindings.const_slice_case_norst, const_slice_case_norst);
-    writeVectorOutput(context.instance, context.bindings.dynamic_part_case_arst, dynamic_part_case_arst);
-    writeVectorOutput(context.instance, context.bindings.dynamic_part_case_norst, dynamic_part_case_norst);
-    writeVectorOutput(context.instance, context.bindings.unpacked_const_case_arst, unpacked_const_case_arst);
-    writeVectorOutput(context.instance, context.bindings.unpacked_const_case_norst, unpacked_const_case_norst);
-    writeVectorOutput(context.instance, context.bindings.unpacked_dynamic_case_arst, unpacked_dynamic_case_arst);
-    writeVectorOutput(context.instance, context.bindings.unpacked_dynamic_case_norst, unpacked_dynamic_case_norst);
-    writeVectorOutput(context.instance, context.bindings.multi_item_case_arst, multi_item_case_arst);
-    writeVectorOutput(context.instance, context.bindings.multi_item_case_norst, multi_item_case_norst);
-    writeVectorOutput(context.instance, context.bindings.concat_case_arst, concat_case_arst);
-    writeVectorOutput(context.instance, context.bindings.concat_case_norst, concat_case_norst);
-    writeVectorOutput(context.instance, context.bindings.named_arg_func_arst, named_arg_func_arst);
-    writeVectorOutput(context.instance, context.bindings.named_arg_func_norst, named_arg_func_norst);
-    writeScalarOutput(context.instance, context.bindings.dynamic_bit_pow2_arst, dynamic_bit_pow2_arst);
-    writeScalarOutput(context.instance, context.bindings.dynamic_bit_pow2_norst, dynamic_bit_pow2_norst);
-    writeScalarOutput(context.instance, context.bindings.dynamic_bit_nonpow2_arst, dynamic_bit_nonpow2_arst);
-    writeScalarOutput(context.instance, context.bindings.dynamic_bit_nonpow2_norst, dynamic_bit_nonpow2_norst);
-    writeVectorOutput(context.instance, context.bindings.nzb_range_arst, nzb_range_arst);
-    writeVectorOutput(context.instance, context.bindings.nzb_lower_arst, nzb_lower_arst);
-    writeVectorOutput(context.instance, context.bindings.nzb_upper_norst, nzb_upper_norst);
-    writeVectorOutput(context.instance, context.bindings.nzb_arith_norst, nzb_arith_norst);
+    writeVectorOutput(context.instance, context.bindings.o_const_slice_case_arst, o_const_slice_case_arst);
+    writeVectorOutput(context.instance, context.bindings.o_const_slice_case_norst, o_const_slice_case_norst);
+    writeVectorOutput(context.instance, context.bindings.o_dynamic_part_case_arst, o_dynamic_part_case_arst);
+    writeVectorOutput(context.instance, context.bindings.o_dynamic_part_case_norst, o_dynamic_part_case_norst);
+    writeVectorOutput(context.instance, context.bindings.o_unpacked_const_case_arst, o_unpacked_const_case_arst);
+    writeVectorOutput(context.instance, context.bindings.o_unpacked_const_case_norst, o_unpacked_const_case_norst);
+    writeVectorOutput(context.instance, context.bindings.o_unpacked_dynamic_case_arst, o_unpacked_dynamic_case_arst);
+    writeVectorOutput(context.instance, context.bindings.o_unpacked_dynamic_case_norst, o_unpacked_dynamic_case_norst);
+    writeVectorOutput(context.instance, context.bindings.o_multi_item_case_arst, o_multi_item_case_arst);
+    writeVectorOutput(context.instance, context.bindings.o_multi_item_case_norst, o_multi_item_case_norst);
+    writeVectorOutput(context.instance, context.bindings.o_concat_case_arst, o_concat_case_arst);
+    writeVectorOutput(context.instance, context.bindings.o_concat_case_norst, o_concat_case_norst);
+    writeVectorOutput(context.instance, context.bindings.o_named_arg_func_arst, o_named_arg_func_arst);
+    writeVectorOutput(context.instance, context.bindings.o_named_arg_func_norst, o_named_arg_func_norst);
+    writeScalarOutput(context.instance, context.bindings.o_dynamic_bit_pow2_arst, o_dynamic_bit_pow2_arst);
+    writeScalarOutput(context.instance, context.bindings.o_dynamic_bit_pow2_norst, o_dynamic_bit_pow2_norst);
+    writeScalarOutput(context.instance, context.bindings.o_dynamic_bit_nonpow2_arst, o_dynamic_bit_nonpow2_arst);
+    writeScalarOutput(context.instance, context.bindings.o_dynamic_bit_nonpow2_norst, o_dynamic_bit_nonpow2_norst);
+    writeVectorOutput(context.instance, context.bindings.o_nzb_range_arst, o_nzb_range_arst);
+    writeVectorOutput(context.instance, context.bindings.o_nzb_lower_arst, o_nzb_lower_arst);
+    writeVectorOutput(context.instance, context.bindings.o_nzb_upper_norst, o_nzb_upper_norst);
+    writeVectorOutput(context.instance, context.bindings.o_nzb_arith_norst, o_nzb_arith_norst);
 }
 
 std::array<RuntimeInputUpdate, 2> initialAsyncInputs(const GeneralFeaturesBindings& bindings,
-                                                     svLogic clk,
-                                                     svLogic rst_n) {
+                                                     svLogic i_clk,
+                                                     svLogic i_rst_n) {
     return {
-        mate::dpi::scalarInputUpdate(bindings.clk, clk),
-        mate::dpi::scalarInputUpdate(bindings.rst_n, rst_n),
+        mate::dpi::scalarInputUpdate(bindings.i_clk, i_clk),
+        mate::dpi::scalarInputUpdate(bindings.i_rst_n, i_rst_n),
     };
 }
 
 std::array<RuntimeInputUpdate, 3> syncInputs(const GeneralFeaturesBindings& bindings,
-                                             const svLogicVecVal* data,
-                                             const svLogicVecVal* idx,
-                                             const svLogicVecVal* base) {
+                                             const svLogicVecVal* i_data,
+                                             const svLogicVecVal* i_idx,
+                                             const svLogicVecVal* i_base) {
     return {
-        mate::dpi::vectorInputUpdate(bindings.data, data),
-        mate::dpi::vectorInputUpdate(bindings.idx, idx),
-        mate::dpi::vectorInputUpdate(bindings.base, base),
+        mate::dpi::vectorInputUpdate(bindings.i_data, i_data),
+        mate::dpi::vectorInputUpdate(bindings.i_idx, i_idx),
+        mate::dpi::vectorInputUpdate(bindings.i_base, i_base),
     };
 }
 
@@ -202,61 +202,61 @@ void* mate_gft_create_context() {
 }
 
 void mate_gft_init_values(void* context_handle,
-                          svLogic clk,
-                          svLogic rst_n,
-                          const svLogicVecVal* data,
-                          const svLogicVecVal* idx,
-                          const svLogicVecVal* base,
-                          svLogicVecVal* const_slice_case_arst,
-                          svLogicVecVal* const_slice_case_norst,
-                          svLogicVecVal* dynamic_part_case_arst,
-                          svLogicVecVal* dynamic_part_case_norst,
-                          svLogicVecVal* unpacked_const_case_arst,
-                          svLogicVecVal* unpacked_const_case_norst,
-                          svLogicVecVal* unpacked_dynamic_case_arst,
-                          svLogicVecVal* unpacked_dynamic_case_norst,
-                          svLogicVecVal* multi_item_case_arst,
-                          svLogicVecVal* multi_item_case_norst,
-                          svLogicVecVal* concat_case_arst,
-                          svLogicVecVal* concat_case_norst,
-                          svLogicVecVal* named_arg_func_arst,
-                          svLogicVecVal* named_arg_func_norst,
-                          svLogic* dynamic_bit_pow2_arst,
-                          svLogic* dynamic_bit_pow2_norst,
-                          svLogic* dynamic_bit_nonpow2_arst,
-                          svLogic* dynamic_bit_nonpow2_norst,
-                          svLogicVecVal* nzb_range_arst,
-                          svLogicVecVal* nzb_lower_arst,
-                          svLogicVecVal* nzb_upper_norst,
-                          svLogicVecVal* nzb_arith_norst) {
+                          svLogic i_clk,
+                          svLogic i_rst_n,
+                          const svLogicVecVal* i_data,
+                          const svLogicVecVal* i_idx,
+                          const svLogicVecVal* i_base,
+                          svLogicVecVal* o_const_slice_case_arst,
+                          svLogicVecVal* o_const_slice_case_norst,
+                          svLogicVecVal* o_dynamic_part_case_arst,
+                          svLogicVecVal* o_dynamic_part_case_norst,
+                          svLogicVecVal* o_unpacked_const_case_arst,
+                          svLogicVecVal* o_unpacked_const_case_norst,
+                          svLogicVecVal* o_unpacked_dynamic_case_arst,
+                          svLogicVecVal* o_unpacked_dynamic_case_norst,
+                          svLogicVecVal* o_multi_item_case_arst,
+                          svLogicVecVal* o_multi_item_case_norst,
+                          svLogicVecVal* o_concat_case_arst,
+                          svLogicVecVal* o_concat_case_norst,
+                          svLogicVecVal* o_named_arg_func_arst,
+                          svLogicVecVal* o_named_arg_func_norst,
+                          svLogic* o_dynamic_bit_pow2_arst,
+                          svLogic* o_dynamic_bit_pow2_norst,
+                          svLogic* o_dynamic_bit_nonpow2_arst,
+                          svLogic* o_dynamic_bit_nonpow2_norst,
+                          svLogicVecVal* o_nzb_range_arst,
+                          svLogicVecVal* o_nzb_lower_arst,
+                          svLogicVecVal* o_nzb_upper_norst,
+                          svLogicVecVal* o_nzb_arith_norst) {
     mate::dpi::withDpiErrorBoundary("mate_gft_init_values", [&]() {
         auto& context = checkedContext(context_handle);
-        const auto async_inputs = initialAsyncInputs(context.bindings, clk, rst_n);
-        const auto sync_inputs_now = syncInputs(context.bindings, data, idx, base);
+        const auto async_inputs = initialAsyncInputs(context.bindings, i_clk, i_rst_n);
+        const auto sync_inputs_now = syncInputs(context.bindings, i_data, i_idx, i_base);
         mate::dpi::initializeInstance(context.instance, async_inputs, sync_inputs_now);
         writeOutputs(context,
-                     const_slice_case_arst,
-                     const_slice_case_norst,
-                     dynamic_part_case_arst,
-                     dynamic_part_case_norst,
-                     unpacked_const_case_arst,
-                     unpacked_const_case_norst,
-                     unpacked_dynamic_case_arst,
-                     unpacked_dynamic_case_norst,
-                     multi_item_case_arst,
-                     multi_item_case_norst,
-                     concat_case_arst,
-                     concat_case_norst,
-                     named_arg_func_arst,
-                     named_arg_func_norst,
-                     dynamic_bit_pow2_arst,
-                     dynamic_bit_pow2_norst,
-                     dynamic_bit_nonpow2_arst,
-                     dynamic_bit_nonpow2_norst,
-                     nzb_range_arst,
-                     nzb_lower_arst,
-                     nzb_upper_norst,
-                     nzb_arith_norst);
+                     o_const_slice_case_arst,
+                     o_const_slice_case_norst,
+                     o_dynamic_part_case_arst,
+                     o_dynamic_part_case_norst,
+                     o_unpacked_const_case_arst,
+                     o_unpacked_const_case_norst,
+                     o_unpacked_dynamic_case_arst,
+                     o_unpacked_dynamic_case_norst,
+                     o_multi_item_case_arst,
+                     o_multi_item_case_norst,
+                     o_concat_case_arst,
+                     o_concat_case_norst,
+                     o_named_arg_func_arst,
+                     o_named_arg_func_norst,
+                     o_dynamic_bit_pow2_arst,
+                     o_dynamic_bit_pow2_norst,
+                     o_dynamic_bit_nonpow2_arst,
+                     o_dynamic_bit_nonpow2_norst,
+                     o_nzb_range_arst,
+                     o_nzb_lower_arst,
+                     o_nzb_upper_norst,
+                     o_nzb_arith_norst);
     });
 }
 
@@ -267,215 +267,215 @@ void mate_gft_destroy(void* context_handle) {
 }
 
 void mate_gft_clk_posedge(void* context_handle,
-                          const svLogicVecVal* data,
-                          const svLogicVecVal* idx,
-                          const svLogicVecVal* base,
-                          svLogicVecVal* const_slice_case_arst,
-                          svLogicVecVal* const_slice_case_norst,
-                          svLogicVecVal* dynamic_part_case_arst,
-                          svLogicVecVal* dynamic_part_case_norst,
-                          svLogicVecVal* unpacked_const_case_arst,
-                          svLogicVecVal* unpacked_const_case_norst,
-                          svLogicVecVal* unpacked_dynamic_case_arst,
-                          svLogicVecVal* unpacked_dynamic_case_norst,
-                          svLogicVecVal* multi_item_case_arst,
-                          svLogicVecVal* multi_item_case_norst,
-                          svLogicVecVal* concat_case_arst,
-                          svLogicVecVal* concat_case_norst,
-                          svLogicVecVal* named_arg_func_arst,
-                          svLogicVecVal* named_arg_func_norst,
-                          svLogic* dynamic_bit_pow2_arst,
-                          svLogic* dynamic_bit_pow2_norst,
-                          svLogic* dynamic_bit_nonpow2_arst,
-                          svLogic* dynamic_bit_nonpow2_norst,
-                          svLogicVecVal* nzb_range_arst,
-                          svLogicVecVal* nzb_lower_arst,
-                          svLogicVecVal* nzb_upper_norst,
-                          svLogicVecVal* nzb_arith_norst) {
+                          const svLogicVecVal* i_data,
+                          const svLogicVecVal* i_idx,
+                          const svLogicVecVal* i_base,
+                          svLogicVecVal* o_const_slice_case_arst,
+                          svLogicVecVal* o_const_slice_case_norst,
+                          svLogicVecVal* o_dynamic_part_case_arst,
+                          svLogicVecVal* o_dynamic_part_case_norst,
+                          svLogicVecVal* o_unpacked_const_case_arst,
+                          svLogicVecVal* o_unpacked_const_case_norst,
+                          svLogicVecVal* o_unpacked_dynamic_case_arst,
+                          svLogicVecVal* o_unpacked_dynamic_case_norst,
+                          svLogicVecVal* o_multi_item_case_arst,
+                          svLogicVecVal* o_multi_item_case_norst,
+                          svLogicVecVal* o_concat_case_arst,
+                          svLogicVecVal* o_concat_case_norst,
+                          svLogicVecVal* o_named_arg_func_arst,
+                          svLogicVecVal* o_named_arg_func_norst,
+                          svLogic* o_dynamic_bit_pow2_arst,
+                          svLogic* o_dynamic_bit_pow2_norst,
+                          svLogic* o_dynamic_bit_nonpow2_arst,
+                          svLogic* o_dynamic_bit_nonpow2_norst,
+                          svLogicVecVal* o_nzb_range_arst,
+                          svLogicVecVal* o_nzb_lower_arst,
+                          svLogicVecVal* o_nzb_upper_norst,
+                          svLogicVecVal* o_nzb_arith_norst) {
     mate::dpi::withDpiErrorBoundary("mate_gft_clk_posedge", [&]() {
         auto& context = checkedContext(context_handle);
-        const auto sync_inputs_now = syncInputs(context.bindings, data, idx, base);
-        mate::dpi::applyClockEdge(context.instance, context.bindings.clk, mate::POSEDGE, sync_inputs_now);
+        const auto sync_inputs_now = syncInputs(context.bindings, i_data, i_idx, i_base);
+        mate::dpi::applyClockEdge(context.instance, context.bindings.i_clk, mate::POSEDGE, sync_inputs_now);
         writeOutputs(context,
-                     const_slice_case_arst,
-                     const_slice_case_norst,
-                     dynamic_part_case_arst,
-                     dynamic_part_case_norst,
-                     unpacked_const_case_arst,
-                     unpacked_const_case_norst,
-                     unpacked_dynamic_case_arst,
-                     unpacked_dynamic_case_norst,
-                     multi_item_case_arst,
-                     multi_item_case_norst,
-                     concat_case_arst,
-                     concat_case_norst,
-                     named_arg_func_arst,
-                     named_arg_func_norst,
-                     dynamic_bit_pow2_arst,
-                     dynamic_bit_pow2_norst,
-                     dynamic_bit_nonpow2_arst,
-                     dynamic_bit_nonpow2_norst,
-                     nzb_range_arst,
-                     nzb_lower_arst,
-                     nzb_upper_norst,
-                     nzb_arith_norst);
+                     o_const_slice_case_arst,
+                     o_const_slice_case_norst,
+                     o_dynamic_part_case_arst,
+                     o_dynamic_part_case_norst,
+                     o_unpacked_const_case_arst,
+                     o_unpacked_const_case_norst,
+                     o_unpacked_dynamic_case_arst,
+                     o_unpacked_dynamic_case_norst,
+                     o_multi_item_case_arst,
+                     o_multi_item_case_norst,
+                     o_concat_case_arst,
+                     o_concat_case_norst,
+                     o_named_arg_func_arst,
+                     o_named_arg_func_norst,
+                     o_dynamic_bit_pow2_arst,
+                     o_dynamic_bit_pow2_norst,
+                     o_dynamic_bit_nonpow2_arst,
+                     o_dynamic_bit_nonpow2_norst,
+                     o_nzb_range_arst,
+                     o_nzb_lower_arst,
+                     o_nzb_upper_norst,
+                     o_nzb_arith_norst);
     });
 }
 
 void mate_gft_clk_negedge(void* context_handle,
-                          svLogicVecVal* const_slice_case_arst,
-                          svLogicVecVal* const_slice_case_norst,
-                          svLogicVecVal* dynamic_part_case_arst,
-                          svLogicVecVal* dynamic_part_case_norst,
-                          svLogicVecVal* unpacked_const_case_arst,
-                          svLogicVecVal* unpacked_const_case_norst,
-                          svLogicVecVal* unpacked_dynamic_case_arst,
-                          svLogicVecVal* unpacked_dynamic_case_norst,
-                          svLogicVecVal* multi_item_case_arst,
-                          svLogicVecVal* multi_item_case_norst,
-                          svLogicVecVal* concat_case_arst,
-                          svLogicVecVal* concat_case_norst,
-                          svLogicVecVal* named_arg_func_arst,
-                          svLogicVecVal* named_arg_func_norst,
-                          svLogic* dynamic_bit_pow2_arst,
-                          svLogic* dynamic_bit_pow2_norst,
-                          svLogic* dynamic_bit_nonpow2_arst,
-                          svLogic* dynamic_bit_nonpow2_norst,
-                          svLogicVecVal* nzb_range_arst,
-                          svLogicVecVal* nzb_lower_arst,
-                          svLogicVecVal* nzb_upper_norst,
-                          svLogicVecVal* nzb_arith_norst) {
+                          svLogicVecVal* o_const_slice_case_arst,
+                          svLogicVecVal* o_const_slice_case_norst,
+                          svLogicVecVal* o_dynamic_part_case_arst,
+                          svLogicVecVal* o_dynamic_part_case_norst,
+                          svLogicVecVal* o_unpacked_const_case_arst,
+                          svLogicVecVal* o_unpacked_const_case_norst,
+                          svLogicVecVal* o_unpacked_dynamic_case_arst,
+                          svLogicVecVal* o_unpacked_dynamic_case_norst,
+                          svLogicVecVal* o_multi_item_case_arst,
+                          svLogicVecVal* o_multi_item_case_norst,
+                          svLogicVecVal* o_concat_case_arst,
+                          svLogicVecVal* o_concat_case_norst,
+                          svLogicVecVal* o_named_arg_func_arst,
+                          svLogicVecVal* o_named_arg_func_norst,
+                          svLogic* o_dynamic_bit_pow2_arst,
+                          svLogic* o_dynamic_bit_pow2_norst,
+                          svLogic* o_dynamic_bit_nonpow2_arst,
+                          svLogic* o_dynamic_bit_nonpow2_norst,
+                          svLogicVecVal* o_nzb_range_arst,
+                          svLogicVecVal* o_nzb_lower_arst,
+                          svLogicVecVal* o_nzb_upper_norst,
+                          svLogicVecVal* o_nzb_arith_norst) {
     mate::dpi::withDpiErrorBoundary("mate_gft_clk_negedge", [&]() {
         auto& context = checkedContext(context_handle);
         const std::array<RuntimeInputUpdate, 0> no_sync_inputs{};
-        mate::dpi::applyClockEdge(context.instance, context.bindings.clk, mate::NEGEDGE, no_sync_inputs);
+        mate::dpi::applyClockEdge(context.instance, context.bindings.i_clk, mate::NEGEDGE, no_sync_inputs);
         writeOutputs(context,
-                     const_slice_case_arst,
-                     const_slice_case_norst,
-                     dynamic_part_case_arst,
-                     dynamic_part_case_norst,
-                     unpacked_const_case_arst,
-                     unpacked_const_case_norst,
-                     unpacked_dynamic_case_arst,
-                     unpacked_dynamic_case_norst,
-                     multi_item_case_arst,
-                     multi_item_case_norst,
-                     concat_case_arst,
-                     concat_case_norst,
-                     named_arg_func_arst,
-                     named_arg_func_norst,
-                     dynamic_bit_pow2_arst,
-                     dynamic_bit_pow2_norst,
-                     dynamic_bit_nonpow2_arst,
-                     dynamic_bit_nonpow2_norst,
-                     nzb_range_arst,
-                     nzb_lower_arst,
-                     nzb_upper_norst,
-                     nzb_arith_norst);
+                     o_const_slice_case_arst,
+                     o_const_slice_case_norst,
+                     o_dynamic_part_case_arst,
+                     o_dynamic_part_case_norst,
+                     o_unpacked_const_case_arst,
+                     o_unpacked_const_case_norst,
+                     o_unpacked_dynamic_case_arst,
+                     o_unpacked_dynamic_case_norst,
+                     o_multi_item_case_arst,
+                     o_multi_item_case_norst,
+                     o_concat_case_arst,
+                     o_concat_case_norst,
+                     o_named_arg_func_arst,
+                     o_named_arg_func_norst,
+                     o_dynamic_bit_pow2_arst,
+                     o_dynamic_bit_pow2_norst,
+                     o_dynamic_bit_nonpow2_arst,
+                     o_dynamic_bit_nonpow2_norst,
+                     o_nzb_range_arst,
+                     o_nzb_lower_arst,
+                     o_nzb_upper_norst,
+                     o_nzb_arith_norst);
     });
 }
 
 void mate_gft_rst_n_negedge(void* context_handle,
-                            svLogicVecVal* const_slice_case_arst,
-                            svLogicVecVal* const_slice_case_norst,
-                            svLogicVecVal* dynamic_part_case_arst,
-                            svLogicVecVal* dynamic_part_case_norst,
-                            svLogicVecVal* unpacked_const_case_arst,
-                            svLogicVecVal* unpacked_const_case_norst,
-                            svLogicVecVal* unpacked_dynamic_case_arst,
-                            svLogicVecVal* unpacked_dynamic_case_norst,
-                            svLogicVecVal* multi_item_case_arst,
-                            svLogicVecVal* multi_item_case_norst,
-                            svLogicVecVal* concat_case_arst,
-                            svLogicVecVal* concat_case_norst,
-                            svLogicVecVal* named_arg_func_arst,
-                            svLogicVecVal* named_arg_func_norst,
-                            svLogic* dynamic_bit_pow2_arst,
-                            svLogic* dynamic_bit_pow2_norst,
-                            svLogic* dynamic_bit_nonpow2_arst,
-                            svLogic* dynamic_bit_nonpow2_norst,
-                            svLogicVecVal* nzb_range_arst,
-                            svLogicVecVal* nzb_lower_arst,
-                            svLogicVecVal* nzb_upper_norst,
-                            svLogicVecVal* nzb_arith_norst) {
+                            svLogicVecVal* o_const_slice_case_arst,
+                            svLogicVecVal* o_const_slice_case_norst,
+                            svLogicVecVal* o_dynamic_part_case_arst,
+                            svLogicVecVal* o_dynamic_part_case_norst,
+                            svLogicVecVal* o_unpacked_const_case_arst,
+                            svLogicVecVal* o_unpacked_const_case_norst,
+                            svLogicVecVal* o_unpacked_dynamic_case_arst,
+                            svLogicVecVal* o_unpacked_dynamic_case_norst,
+                            svLogicVecVal* o_multi_item_case_arst,
+                            svLogicVecVal* o_multi_item_case_norst,
+                            svLogicVecVal* o_concat_case_arst,
+                            svLogicVecVal* o_concat_case_norst,
+                            svLogicVecVal* o_named_arg_func_arst,
+                            svLogicVecVal* o_named_arg_func_norst,
+                            svLogic* o_dynamic_bit_pow2_arst,
+                            svLogic* o_dynamic_bit_pow2_norst,
+                            svLogic* o_dynamic_bit_nonpow2_arst,
+                            svLogic* o_dynamic_bit_nonpow2_norst,
+                            svLogicVecVal* o_nzb_range_arst,
+                            svLogicVecVal* o_nzb_lower_arst,
+                            svLogicVecVal* o_nzb_upper_norst,
+                            svLogicVecVal* o_nzb_arith_norst) {
     mate::dpi::withDpiErrorBoundary("mate_gft_rst_n_negedge", [&]() {
         auto& context = checkedContext(context_handle);
-        mate::dpi::applyResetEdge(context.instance, context.bindings.rst_n, mate::NEGEDGE);
+        mate::dpi::applyResetEdge(context.instance, context.bindings.i_rst_n, mate::NEGEDGE);
         writeOutputs(context,
-                     const_slice_case_arst,
-                     const_slice_case_norst,
-                     dynamic_part_case_arst,
-                     dynamic_part_case_norst,
-                     unpacked_const_case_arst,
-                     unpacked_const_case_norst,
-                     unpacked_dynamic_case_arst,
-                     unpacked_dynamic_case_norst,
-                     multi_item_case_arst,
-                     multi_item_case_norst,
-                     concat_case_arst,
-                     concat_case_norst,
-                     named_arg_func_arst,
-                     named_arg_func_norst,
-                     dynamic_bit_pow2_arst,
-                     dynamic_bit_pow2_norst,
-                     dynamic_bit_nonpow2_arst,
-                     dynamic_bit_nonpow2_norst,
-                     nzb_range_arst,
-                     nzb_lower_arst,
-                     nzb_upper_norst,
-                     nzb_arith_norst);
+                     o_const_slice_case_arst,
+                     o_const_slice_case_norst,
+                     o_dynamic_part_case_arst,
+                     o_dynamic_part_case_norst,
+                     o_unpacked_const_case_arst,
+                     o_unpacked_const_case_norst,
+                     o_unpacked_dynamic_case_arst,
+                     o_unpacked_dynamic_case_norst,
+                     o_multi_item_case_arst,
+                     o_multi_item_case_norst,
+                     o_concat_case_arst,
+                     o_concat_case_norst,
+                     o_named_arg_func_arst,
+                     o_named_arg_func_norst,
+                     o_dynamic_bit_pow2_arst,
+                     o_dynamic_bit_pow2_norst,
+                     o_dynamic_bit_nonpow2_arst,
+                     o_dynamic_bit_nonpow2_norst,
+                     o_nzb_range_arst,
+                     o_nzb_lower_arst,
+                     o_nzb_upper_norst,
+                     o_nzb_arith_norst);
     });
 }
 
 void mate_gft_rst_n_posedge(void* context_handle,
-                            svLogicVecVal* const_slice_case_arst,
-                            svLogicVecVal* const_slice_case_norst,
-                            svLogicVecVal* dynamic_part_case_arst,
-                            svLogicVecVal* dynamic_part_case_norst,
-                            svLogicVecVal* unpacked_const_case_arst,
-                            svLogicVecVal* unpacked_const_case_norst,
-                            svLogicVecVal* unpacked_dynamic_case_arst,
-                            svLogicVecVal* unpacked_dynamic_case_norst,
-                            svLogicVecVal* multi_item_case_arst,
-                            svLogicVecVal* multi_item_case_norst,
-                            svLogicVecVal* concat_case_arst,
-                            svLogicVecVal* concat_case_norst,
-                            svLogicVecVal* named_arg_func_arst,
-                            svLogicVecVal* named_arg_func_norst,
-                            svLogic* dynamic_bit_pow2_arst,
-                            svLogic* dynamic_bit_pow2_norst,
-                            svLogic* dynamic_bit_nonpow2_arst,
-                            svLogic* dynamic_bit_nonpow2_norst,
-                            svLogicVecVal* nzb_range_arst,
-                            svLogicVecVal* nzb_lower_arst,
-                            svLogicVecVal* nzb_upper_norst,
-                            svLogicVecVal* nzb_arith_norst) {
+                            svLogicVecVal* o_const_slice_case_arst,
+                            svLogicVecVal* o_const_slice_case_norst,
+                            svLogicVecVal* o_dynamic_part_case_arst,
+                            svLogicVecVal* o_dynamic_part_case_norst,
+                            svLogicVecVal* o_unpacked_const_case_arst,
+                            svLogicVecVal* o_unpacked_const_case_norst,
+                            svLogicVecVal* o_unpacked_dynamic_case_arst,
+                            svLogicVecVal* o_unpacked_dynamic_case_norst,
+                            svLogicVecVal* o_multi_item_case_arst,
+                            svLogicVecVal* o_multi_item_case_norst,
+                            svLogicVecVal* o_concat_case_arst,
+                            svLogicVecVal* o_concat_case_norst,
+                            svLogicVecVal* o_named_arg_func_arst,
+                            svLogicVecVal* o_named_arg_func_norst,
+                            svLogic* o_dynamic_bit_pow2_arst,
+                            svLogic* o_dynamic_bit_pow2_norst,
+                            svLogic* o_dynamic_bit_nonpow2_arst,
+                            svLogic* o_dynamic_bit_nonpow2_norst,
+                            svLogicVecVal* o_nzb_range_arst,
+                            svLogicVecVal* o_nzb_lower_arst,
+                            svLogicVecVal* o_nzb_upper_norst,
+                            svLogicVecVal* o_nzb_arith_norst) {
     mate::dpi::withDpiErrorBoundary("mate_gft_rst_n_posedge", [&]() {
         auto& context = checkedContext(context_handle);
-        mate::dpi::applyResetEdge(context.instance, context.bindings.rst_n, mate::POSEDGE);
+        mate::dpi::applyResetEdge(context.instance, context.bindings.i_rst_n, mate::POSEDGE);
         writeOutputs(context,
-                     const_slice_case_arst,
-                     const_slice_case_norst,
-                     dynamic_part_case_arst,
-                     dynamic_part_case_norst,
-                     unpacked_const_case_arst,
-                     unpacked_const_case_norst,
-                     unpacked_dynamic_case_arst,
-                     unpacked_dynamic_case_norst,
-                     multi_item_case_arst,
-                     multi_item_case_norst,
-                     concat_case_arst,
-                     concat_case_norst,
-                     named_arg_func_arst,
-                     named_arg_func_norst,
-                     dynamic_bit_pow2_arst,
-                     dynamic_bit_pow2_norst,
-                     dynamic_bit_nonpow2_arst,
-                     dynamic_bit_nonpow2_norst,
-                     nzb_range_arst,
-                     nzb_lower_arst,
-                     nzb_upper_norst,
-                     nzb_arith_norst);
+                     o_const_slice_case_arst,
+                     o_const_slice_case_norst,
+                     o_dynamic_part_case_arst,
+                     o_dynamic_part_case_norst,
+                     o_unpacked_const_case_arst,
+                     o_unpacked_const_case_norst,
+                     o_unpacked_dynamic_case_arst,
+                     o_unpacked_dynamic_case_norst,
+                     o_multi_item_case_arst,
+                     o_multi_item_case_norst,
+                     o_concat_case_arst,
+                     o_concat_case_norst,
+                     o_named_arg_func_arst,
+                     o_named_arg_func_norst,
+                     o_dynamic_bit_pow2_arst,
+                     o_dynamic_bit_pow2_norst,
+                     o_dynamic_bit_nonpow2_arst,
+                     o_dynamic_bit_nonpow2_norst,
+                     o_nzb_range_arst,
+                     o_nzb_lower_arst,
+                     o_nzb_upper_norst,
+                     o_nzb_arith_norst);
     });
 }
 

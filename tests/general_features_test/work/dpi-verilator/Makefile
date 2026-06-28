@@ -13,6 +13,7 @@ TOP_MODULE = tb
 OUT = obj_dir/V$(TOP_MODULE)
 RTL_SRC = $(RTL_DIR)/general_features_test.v
 DOMAINS_SRC = $(RTL_DIR)/general_features_test.domains.yaml
+GEN_SV_PKG = $(GENERATED_DIR)/general_features_test_dpi_pkg.sv
 GEN_SV = $(GENERATED_DIR)/general_features_test_dpi.sv
 GEN_CPP = $(GENERATED_DIR)/general_features_test_dpi.cpp
 GEN_STAMP = $(GENERATED_DIR)/.stamp
@@ -22,6 +23,7 @@ TB_SRCS = \
 	$(TB_DIR)/generated/uut_if.sv \
 	$(TB_DIR)/uut_tb.sv \
 	$(TB_DIR)/dpi/tb.sv \
+	$(GEN_SV_PKG) \
 	$(GEN_SV)
 
 DPI_CPP = $(GEN_CPP)
@@ -60,7 +62,7 @@ $(GEN_STAMP): prep $(RTL_SRC) $(DOMAINS_SRC)
 		$(RTL_SRC)
 	touch $(GEN_STAMP)
 
-$(GEN_SV) $(GEN_CPP): $(GEN_STAMP)
+$(GEN_SV_PKG) $(GEN_SV) $(GEN_CPP): $(GEN_STAMP)
 
 $(OUT): prep $(TB_SRCS) $(DPI_CPP) $(MATE_LIBS)
 	rm -rf obj_dir

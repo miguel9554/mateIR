@@ -531,20 +531,10 @@ void emitSvCallArgs(std::ostringstream& out,
     out << "\n";
 }
 
-std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
+std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
-    out << "module " << config.module_name << " (\n";
-    for (size_t i = 0; i < ports.inputs.size(); ++i) {
-        out << svPortDecl("input ", ports.inputs[i]) << ",\n";
-    }
-    for (size_t i = 0; i < ports.outputs.size(); ++i) {
-        out << svPortDecl("output", ports.outputs[i]) << (i + 1 == ports.outputs.size() ? "\n" : ",\n");
-    }
-    out << ");\n\n";
-    for (const auto& output : ports.outputs) {
-        out << "    logic " << svRange(output.type) << "next_" << output.name << ";\n";
-    }
-    out << "\n";
+    const std::string pkg_name = config.module_name + "_pkg";
+    out << "package " << pkg_name << ";\n";
     out << "    import \"DPI-C\" function chandle " << config.function_prefix << "_create_context();\n";
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_destroy(input chandle ctx);\n\n";
 
@@ -589,6 +579,27 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         }
     }
 
+    out << "endpackage\n";
+    return out.str();
+}
+
+std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
+    std::ostringstream out;
+    out << "module " << config.module_name << "\n";
+    out << "    import " << config.module_name << "_pkg::*;\n";
+    out << "(\n";
+    for (size_t i = 0; i < ports.inputs.size(); ++i) {
+        out << svPortDecl("input ", ports.inputs[i]) << ",\n";
+    }
+    for (size_t i = 0; i < ports.outputs.size(); ++i) {
+        out << svPortDecl("output", ports.outputs[i]) << (i + 1 == ports.outputs.size() ? "\n" : ",\n");
+    }
+    out << ");\n\n";
+    for (const auto& output : ports.outputs) {
+        out << "    logic " << svRange(output.type) << "next_" << output.name << ";\n";
+    }
+    out << "\n";
+
     out << "    chandle ctx;\n";
     out << "    logic initialized;\n";
     for (size_t index : ports.clocks) out << "    logic last_" << ports.inputs.at(index).name << ";\n";
@@ -605,6 +616,8 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         const auto& reset = ports.inputs.at(index);
         out << "        last_" << reset.name << " = " << reset.name << ";\n";
     }
+    std::vector<const Port*> all_inputs;
+    for (const auto& input : ports.inputs) all_inputs.push_back(&input);
     out << "        #0;\n";
     out << "        " << config.function_prefix << "_init_values(\n";
     emitSvCallArgs(out, all_inputs, ports.outputs);
@@ -769,6 +782,7 @@ int main(int argc, char** argv) {
 
         std::filesystem::create_directories(config.out_dir);
         writeFile(config.out_dir / (config.module_name + ".cpp"), makeCpp(config, ports, model));
+        writeFile(config.out_dir / (config.module_name + "_pkg.sv"), makeSvPkg(config, ports, model));
         writeFile(config.out_dir / (config.module_name + ".sv"), makeSv(config, ports, model));
     } catch (const CompilerError& e) {
         std::cerr << "ERROR: " << e.what() << "\n";

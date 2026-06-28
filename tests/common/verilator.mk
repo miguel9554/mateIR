@@ -11,12 +11,12 @@ MODULE_NAME    = $(notdir $(realpath $(ROOT_DIR)))
 CUSTOM_SIM_DIR = $(ROOT_DIR)/work/custom-sim
 
 # Source file discovery — packages before modules that import them
-RTL_GEN_DIR = $(RTL_DIR)/generated
-RTL_PKGS    = $(shell find -L $(RTL_DIR) -path $(RTL_GEN_DIR) -prune -o -type f -name "*_pkg.sv" -print)
-RTL_SRCS    = $(RTL_PKGS) $(shell find -L $(RTL_DIR) -path $(RTL_GEN_DIR) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print | grep -v "_pkg.sv")
-DPI_DIR     = $(TB_DIR)/dpi
-TB_SRCS     = $(shell find -L $(TB_DIR) \( -path $(GEN_DIR) -o -path $(DPI_DIR) \) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print)
-GEN_SRCS    = $(shell find -L $(GEN_DIR) -type f \( -name "*.v" -o -name "*.sv" \) 2>/dev/null)
+RTL_GEN_DIR  = $(RTL_DIR)/generated
+RTL_PKGS     = $(shell find -L $(RTL_DIR) -path $(RTL_GEN_DIR) -prune -o -type f -name "*_pkg.sv" -print)
+RTL_SRCS     = $(RTL_PKGS) $(shell find -L $(RTL_DIR) -path $(RTL_GEN_DIR) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print | grep -v "_pkg.sv")
+DPI_DIR      = $(TB_DIR)/dpi
+TB_SRCS      = $(shell find -L $(TB_DIR) \( -path $(GEN_DIR) -o -path $(DPI_DIR) \) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print)
+GEN_SRCS     = $(shell find -L $(GEN_DIR) -type f \( -name "*.v" -o -name "*.sv" \) 2>/dev/null)
 DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 TOP_MODULE   = tb
 OUT          = obj_dir/V$(TOP_MODULE)
@@ -53,19 +53,17 @@ MATE_CPPFLAGS = \
 	-I$(abspath $(PROJECT_ROOT)/src) \
 	-I$(abspath $(PROJECT_ROOT)/external/slang/external/ieee1800)
 
-# Drop tb.sv (replaced by dpi/tb.sv) and uut_recorder.sv (not used in DPI mode).
-DPI_GEN_SRCS = $(filter-out %/tb.sv %/uut_recorder.sv, $(GEN_SRCS))
-SRCS         = $(RTL_SRCS) $(TB_SRCS) $(DPI_GEN_SRCS) $(GEN_SV_PKG) $(GEN_SV) $(DPI_DIR)/tb.sv
+SRCS = $(RTL_SRCS) $(TB_SRCS) $(GEN_SRCS) $(GEN_SV_PKG) $(GEN_SV)
 
 $(info RTL_SRCS=$(RTL_SRCS))
 $(info TB_SRCS=$(TB_SRCS))
-$(info DPI_GEN_SRCS=$(DPI_GEN_SRCS))
+$(info GEN_SRCS=$(GEN_SRCS))
 
 prep: force
 	$(MAKE) -C $(PROJECT_ROOT) dev
 
-$(GEN_DIR)/uut_if.sv $(GEN_DIR)/checker_dpi.sv: $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT)
-	cd $(PROJECT_ROOT) && python tools/gen_tb.py $(MODULE_NAME)
+$(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv: $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
+	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi $(MODULE_NAME)
 
 $(GEN_STAMP): prep $(RTL_SRCS) $(DOMAINS_YAML)
 	mkdir -p $(DPI_GEN_DIR)
@@ -80,7 +78,7 @@ $(GEN_STAMP): prep $(RTL_SRCS) $(DOMAINS_YAML)
 
 $(GEN_SV_PKG) $(GEN_SV) $(GEN_CPP): $(GEN_STAMP)
 
-$(OUT): prep $(GEN_DIR)/uut_if.sv $(GEN_DIR)/checker_dpi.sv $(GEN_CPP) $(MATE_LIBS)
+$(OUT): prep $(GEN_DIR)/tb.sv $(GEN_CPP) $(MATE_LIBS)
 	rm -rf obj_dir
 	verilator --trace --timing --cc --exe --build --main \
 		$(VERILATOR_WARNS) \
@@ -101,7 +99,7 @@ $(info RTL_SRCS=$(RTL_SRCS))
 $(info TB_SRCS=$(TB_SRCS))
 $(info GEN_SRCS=$(GEN_SRCS))
 
-$(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv: $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT)
+$(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv: $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py $(MODULE_NAME)
 
 $(OUT): $(SRCS) $(GEN_DIR)/tb.sv

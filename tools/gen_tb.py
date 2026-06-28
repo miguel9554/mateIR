@@ -424,7 +424,7 @@ def gen_uut_if(module: ModuleInfo) -> str:
     return '\n'.join(lines)
 
 
-def gen_tb(module: ModuleInfo) -> str:
+def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     lines = []
     has_params = len(module.parameters) > 0
 
@@ -435,7 +435,8 @@ def gen_tb(module: ModuleInfo) -> str:
         lines.append(f'module tb {import_clause};')
     else:
         lines.append('module tb;')
-    lines.append('    localparam bit INCLUDE_DPI_MODULE = 0;')
+    dpi_val = '1' if include_dpi else '0'
+    lines.append(f'    localparam bit INCLUDE_DPI_MODULE = {dpi_val};')
     lines.append('    localparam bit INCLUDE_UUT_RECORDER = !INCLUDE_DPI_MODULE;')
 
     inputs = [p for p in module.ports if p.direction == 'input']
@@ -705,11 +706,13 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
 
 
 def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <module_name>", file=sys.stderr)
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('module_name')
+    parser.add_argument('--dpi', action='store_true', help='Set INCLUDE_DPI_MODULE=1 in tb.sv')
+    args = parser.parse_args()
 
-    module_name = sys.argv[1]
+    module_name = args.module_name
     project_root = Path(__file__).resolve().parent.parent
 
     rtl_dir = project_root / 'tests' / module_name / 'rtl'
@@ -730,10 +733,15 @@ def main():
     domains = load_domains(domains_path, port_names)
     validate(module, domains)
 
-    (output_dir / 'uut_if.sv').write_text(gen_uut_if(module))
-    (output_dir / 'tb.sv').write_text(gen_tb(module))
-    (output_dir / 'uut_recorder.sv').write_text(gen_recorder(module, domains))
-    (output_dir / 'checker_dpi.sv').write_text(gen_dpi_checker(module, domains))
+    def write(path: Path, content: str) -> None:
+        if path.exists() and path.read_text() == content:
+            return
+        path.write_text(content)
+
+    write(output_dir / 'uut_if.sv', gen_uut_if(module))
+    write(output_dir / 'tb.sv', gen_tb(module, include_dpi=args.dpi))
+    write(output_dir / 'uut_recorder.sv', gen_recorder(module, domains))
+    write(output_dir / 'checker_dpi.sv', gen_dpi_checker(module, domains))
 
     print(f"Generated testbench files in {output_dir}")
 

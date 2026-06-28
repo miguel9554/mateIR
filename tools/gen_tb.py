@@ -510,7 +510,15 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     # DPI conditional block
     lines.append('')
     lines.append('    if (INCLUDE_DPI_MODULE) begin : g_dpi')
-    lines.append('        uut_if dpi_if();')
+    if has_params:
+        lines.append('        uut_if#(')
+        param_conns = []
+        for p in module.parameters:
+            param_conns.append(f'            .{p.name}({p.name})')
+        lines.append(',\n'.join(param_conns))
+        lines.append('        ) dpi_if();')
+    else:
+        lines.append('        uut_if dpi_if();')
     lines.append('')
     lines.append(f'        {module.name}_dpi dpi_uut(')
     port_conns = [f'            .{p.name}(dpi_if.{p.name})' for p in module.ports]

@@ -22,6 +22,8 @@ TB_SRCS = \
 	$(RTL_SRC) \
 	$(TB_DIR)/generated/uut_if.sv \
 	$(TB_DIR)/uut_tb.sv \
+	$(TB_DIR)/common/tb_common.sv \
+	$(TB_DIR)/dpi/checker.sv \
 	$(TB_DIR)/dpi/tb.sv \
 	$(GEN_SV_PKG) \
 	$(GEN_SV)

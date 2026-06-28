@@ -64,4 +64,13 @@ module tb;
     general_features_test_dpi uut(.*);
     uut_tb uut_tb(.*);
 
+    initial begin
+        string database_name;
+        if (!$value$plusargs("WAVES=%s", database_name)) begin
+            $fatal(1, "Please provide WAVES database name");
+        end
+        $dumpfile(database_name);
+        $dumpvars(0, tb);
+    end
+
 endmodule

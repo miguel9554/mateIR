@@ -56,7 +56,7 @@ $(OUT): $(TB_SRCS) $(DPI_CPP) $(BUILD_DIR)/libmate-dpi-support.a
 		$(DPI_CPP)
 
 $(WAVES): $(OUT) force
-	./$(OUT) $(SEED_ARG)
+	./$(OUT) +WAVES=$(WAVES) $(SEED_ARG)
 
 simulate:
 	$(MAKE) $(WAVES)

@@ -42,6 +42,7 @@ tests/**/*.txt
 !tests/regression_tests.txt
 tests/**/obj_dir
 tests/**/tb/generated/
+tests/**/rtl/generated/
 tests/**/work/**/obj_dir/
 tests/**/work/**/debug_output
 tests/**/work/**/output

@@ -28,7 +28,10 @@ module general_features_test_dpi (
     output logic [13:0] nzb_arith_norst
 );
 
-    import "DPI-C" function chandle mate_gft_init(
+    import "DPI-C" function chandle mate_gft_create_context();
+
+    import "DPI-C" function void mate_gft_init_values(
+        input chandle      ctx,
         input logic        clk,
         input logic        rst_n,
         input logic [15:0] data,
@@ -168,14 +171,18 @@ module general_features_test_dpi (
     );
 
     chandle ctx;
+    logic initialized;
     logic last_clk;
     logic last_rst_n;
 
     initial begin
+        ctx = mate_gft_create_context();
+        initialized = 1'b0;
         last_clk = clk;
         last_rst_n = rst_n;
         #0;
-        ctx = mate_gft_init(
+        mate_gft_init_values(
+            ctx,
             clk,
             rst_n,
             data,
@@ -204,6 +211,7 @@ module general_features_test_dpi (
             nzb_upper_norst,
             nzb_arith_norst
         );
+        initialized = 1'b1;
     end
 
     final begin
@@ -219,128 +227,138 @@ module general_features_test_dpi (
         clk_changed = (clk !== last_clk);
         rst_changed = (rst_n !== last_rst_n);
 
-        if (clk_changed && rst_changed) begin
-            $fatal(1, "general_features_test_dpi does not support clk and rst_n changing in the same delta cycle");
-        end
-
-        if (clk_changed) begin
-            last_clk = clk;
-            if (clk === 1'b1) begin
-                mate_gft_clk_posedge(
-                    ctx,
-                    data,
-                    idx,
-                    base,
-                    const_slice_case_arst,
-                    const_slice_case_norst,
-                    dynamic_part_case_arst,
-                    dynamic_part_case_norst,
-                    unpacked_const_case_arst,
-                    unpacked_const_case_norst,
-                    unpacked_dynamic_case_arst,
-                    unpacked_dynamic_case_norst,
-                    multi_item_case_arst,
-                    multi_item_case_norst,
-                    concat_case_arst,
-                    concat_case_norst,
-                    named_arg_func_arst,
-                    named_arg_func_norst,
-                    dynamic_bit_pow2_arst,
-                    dynamic_bit_pow2_norst,
-                    dynamic_bit_nonpow2_arst,
-                    dynamic_bit_nonpow2_norst,
-                    nzb_range_arst,
-                    nzb_lower_arst,
-                    nzb_upper_norst,
-                    nzb_arith_norst
-                );
-            end else if (clk === 1'b0) begin
-                mate_gft_clk_negedge(
-                    ctx,
-                    const_slice_case_arst,
-                    const_slice_case_norst,
-                    dynamic_part_case_arst,
-                    dynamic_part_case_norst,
-                    unpacked_const_case_arst,
-                    unpacked_const_case_norst,
-                    unpacked_dynamic_case_arst,
-                    unpacked_dynamic_case_norst,
-                    multi_item_case_arst,
-                    multi_item_case_norst,
-                    concat_case_arst,
-                    concat_case_norst,
-                    named_arg_func_arst,
-                    named_arg_func_norst,
-                    dynamic_bit_pow2_arst,
-                    dynamic_bit_pow2_norst,
-                    dynamic_bit_nonpow2_arst,
-                    dynamic_bit_nonpow2_norst,
-                    nzb_range_arst,
-                    nzb_lower_arst,
-                    nzb_upper_norst,
-                    nzb_arith_norst
-                );
-            end else begin
-                $fatal(1, "general_features_test_dpi only accepts 2-state clk values");
+        if (!initialized) begin
+            if (clk_changed) begin
+                last_clk = clk;
             end
-        end
+            if (rst_changed) begin
+                last_rst_n = rst_n;
+            end
+        end else begin
 
-        if (rst_changed) begin
-            last_rst_n = rst_n;
-            if (rst_n === 1'b1) begin
-                mate_gft_rst_n_posedge(
-                    ctx,
-                    const_slice_case_arst,
-                    const_slice_case_norst,
-                    dynamic_part_case_arst,
-                    dynamic_part_case_norst,
-                    unpacked_const_case_arst,
-                    unpacked_const_case_norst,
-                    unpacked_dynamic_case_arst,
-                    unpacked_dynamic_case_norst,
-                    multi_item_case_arst,
-                    multi_item_case_norst,
-                    concat_case_arst,
-                    concat_case_norst,
-                    named_arg_func_arst,
-                    named_arg_func_norst,
-                    dynamic_bit_pow2_arst,
-                    dynamic_bit_pow2_norst,
-                    dynamic_bit_nonpow2_arst,
-                    dynamic_bit_nonpow2_norst,
-                    nzb_range_arst,
-                    nzb_lower_arst,
-                    nzb_upper_norst,
-                    nzb_arith_norst
-                );
-            end else if (rst_n === 1'b0) begin
-                mate_gft_rst_n_negedge(
-                    ctx,
-                    const_slice_case_arst,
-                    const_slice_case_norst,
-                    dynamic_part_case_arst,
-                    dynamic_part_case_norst,
-                    unpacked_const_case_arst,
-                    unpacked_const_case_norst,
-                    unpacked_dynamic_case_arst,
-                    unpacked_dynamic_case_norst,
-                    multi_item_case_arst,
-                    multi_item_case_norst,
-                    concat_case_arst,
-                    concat_case_norst,
-                    named_arg_func_arst,
-                    named_arg_func_norst,
-                    dynamic_bit_pow2_arst,
-                    dynamic_bit_pow2_norst,
-                    dynamic_bit_nonpow2_arst,
-                    dynamic_bit_nonpow2_norst,
-                    nzb_range_arst,
-                    nzb_lower_arst,
-                    nzb_upper_norst,
-                    nzb_arith_norst
-                );
-            end else begin
-                $fatal(1, "general_features_test_dpi only accepts 2-state rst_n values");
+            if (clk_changed && rst_changed) begin
+                $fatal(1, "general_features_test_dpi does not support clk and rst_n changing in the same delta cycle");
+            end
+
+            if (clk_changed) begin
+                last_clk = clk;
+                if (clk === 1'b1) begin
+                    mate_gft_clk_posedge(
+                        ctx,
+                        data,
+                        idx,
+                        base,
+                        const_slice_case_arst,
+                        const_slice_case_norst,
+                        dynamic_part_case_arst,
+                        dynamic_part_case_norst,
+                        unpacked_const_case_arst,
+                        unpacked_const_case_norst,
+                        unpacked_dynamic_case_arst,
+                        unpacked_dynamic_case_norst,
+                        multi_item_case_arst,
+                        multi_item_case_norst,
+                        concat_case_arst,
+                        concat_case_norst,
+                        named_arg_func_arst,
+                        named_arg_func_norst,
+                        dynamic_bit_pow2_arst,
+                        dynamic_bit_pow2_norst,
+                        dynamic_bit_nonpow2_arst,
+                        dynamic_bit_nonpow2_norst,
+                        nzb_range_arst,
+                        nzb_lower_arst,
+                        nzb_upper_norst,
+                        nzb_arith_norst
+                    );
+                end else if (clk === 1'b0) begin
+                    mate_gft_clk_negedge(
+                        ctx,
+                        const_slice_case_arst,
+                        const_slice_case_norst,
+                        dynamic_part_case_arst,
+                        dynamic_part_case_norst,
+                        unpacked_const_case_arst,
+                        unpacked_const_case_norst,
+                        unpacked_dynamic_case_arst,
+                        unpacked_dynamic_case_norst,
+                        multi_item_case_arst,
+                        multi_item_case_norst,
+                        concat_case_arst,
+                        concat_case_norst,
+                        named_arg_func_arst,
+                        named_arg_func_norst,
+                        dynamic_bit_pow2_arst,
+                        dynamic_bit_pow2_norst,
+                        dynamic_bit_nonpow2_arst,
+                        dynamic_bit_nonpow2_norst,
+                        nzb_range_arst,
+                        nzb_lower_arst,
+                        nzb_upper_norst,
+                        nzb_arith_norst
+                    );
+                end else begin
+                    $fatal(1, "general_features_test_dpi only accepts 2-state clk values");
+                end
+            end
+
+            if (rst_changed) begin
+                last_rst_n = rst_n;
+                if (rst_n === 1'b1) begin
+                    mate_gft_rst_n_posedge(
+                        ctx,
+                        const_slice_case_arst,
+                        const_slice_case_norst,
+                        dynamic_part_case_arst,
+                        dynamic_part_case_norst,
+                        unpacked_const_case_arst,
+                        unpacked_const_case_norst,
+                        unpacked_dynamic_case_arst,
+                        unpacked_dynamic_case_norst,
+                        multi_item_case_arst,
+                        multi_item_case_norst,
+                        concat_case_arst,
+                        concat_case_norst,
+                        named_arg_func_arst,
+                        named_arg_func_norst,
+                        dynamic_bit_pow2_arst,
+                        dynamic_bit_pow2_norst,
+                        dynamic_bit_nonpow2_arst,
+                        dynamic_bit_nonpow2_norst,
+                        nzb_range_arst,
+                        nzb_lower_arst,
+                        nzb_upper_norst,
+                        nzb_arith_norst
+                    );
+                end else if (rst_n === 1'b0) begin
+                    mate_gft_rst_n_negedge(
+                        ctx,
+                        const_slice_case_arst,
+                        const_slice_case_norst,
+                        dynamic_part_case_arst,
+                        dynamic_part_case_norst,
+                        unpacked_const_case_arst,
+                        unpacked_const_case_norst,
+                        unpacked_dynamic_case_arst,
+                        unpacked_dynamic_case_norst,
+                        multi_item_case_arst,
+                        multi_item_case_norst,
+                        concat_case_arst,
+                        concat_case_norst,
+                        named_arg_func_arst,
+                        named_arg_func_norst,
+                        dynamic_bit_pow2_arst,
+                        dynamic_bit_pow2_norst,
+                        dynamic_bit_nonpow2_arst,
+                        dynamic_bit_nonpow2_norst,
+                        nzb_range_arst,
+                        nzb_lower_arst,
+                        nzb_upper_norst,
+                        nzb_arith_norst
+                    );
+                end else begin
+                    $fatal(1, "general_features_test_dpi only accepts 2-state rst_n values");
+                end
             end
         end
     end

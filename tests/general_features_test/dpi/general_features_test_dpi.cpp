@@ -193,40 +193,48 @@ std::array<RuntimeInputUpdate, 3> syncInputs(const GeneralFeaturesBindings& bind
 
 extern "C" {
 
-void* mate_gft_init(svLogic clk,
-                    svLogic rst_n,
-                    const svLogicVecVal* data,
-                    const svLogicVecVal* idx,
-                    const svLogicVecVal* base,
-                    svLogicVecVal* const_slice_case_arst,
-                    svLogicVecVal* const_slice_case_norst,
-                    svLogicVecVal* dynamic_part_case_arst,
-                    svLogicVecVal* dynamic_part_case_norst,
-                    svLogicVecVal* unpacked_const_case_arst,
-                    svLogicVecVal* unpacked_const_case_norst,
-                    svLogicVecVal* unpacked_dynamic_case_arst,
-                    svLogicVecVal* unpacked_dynamic_case_norst,
-                    svLogicVecVal* multi_item_case_arst,
-                    svLogicVecVal* multi_item_case_norst,
-                    svLogicVecVal* concat_case_arst,
-                    svLogicVecVal* concat_case_norst,
-                    svLogicVecVal* named_arg_func_arst,
-                    svLogicVecVal* named_arg_func_norst,
-                    svLogic* dynamic_bit_pow2_arst,
-                    svLogic* dynamic_bit_pow2_norst,
-                    svLogic* dynamic_bit_nonpow2_arst,
-                    svLogic* dynamic_bit_nonpow2_norst,
-                    svLogicVecVal* nzb_range_arst,
-                    svLogicVecVal* nzb_lower_arst,
-                    svLogicVecVal* nzb_upper_norst,
-                    svLogicVecVal* nzb_arith_norst) {
-    return mate::dpi::withDpiErrorBoundary("mate_gft_init", [&]() -> void* {
+void* mate_gft_create_context() {
+    return mate::dpi::withDpiErrorBoundary("mate_gft_create_context", [&]() -> void* {
         auto context = std::make_unique<GeneralFeaturesTestContext>(
             mate::dpi::getOrCreateCompiledModel(compileConfig()));
-        const auto async_inputs = initialAsyncInputs(context->bindings, clk, rst_n);
-        const auto sync_inputs_now = syncInputs(context->bindings, data, idx, base);
-        mate::dpi::initializeInstance(context->instance, async_inputs, sync_inputs_now);
-        writeOutputs(*context,
+        return context.release();
+    });
+}
+
+void mate_gft_init_values(void* context_handle,
+                          svLogic clk,
+                          svLogic rst_n,
+                          const svLogicVecVal* data,
+                          const svLogicVecVal* idx,
+                          const svLogicVecVal* base,
+                          svLogicVecVal* const_slice_case_arst,
+                          svLogicVecVal* const_slice_case_norst,
+                          svLogicVecVal* dynamic_part_case_arst,
+                          svLogicVecVal* dynamic_part_case_norst,
+                          svLogicVecVal* unpacked_const_case_arst,
+                          svLogicVecVal* unpacked_const_case_norst,
+                          svLogicVecVal* unpacked_dynamic_case_arst,
+                          svLogicVecVal* unpacked_dynamic_case_norst,
+                          svLogicVecVal* multi_item_case_arst,
+                          svLogicVecVal* multi_item_case_norst,
+                          svLogicVecVal* concat_case_arst,
+                          svLogicVecVal* concat_case_norst,
+                          svLogicVecVal* named_arg_func_arst,
+                          svLogicVecVal* named_arg_func_norst,
+                          svLogic* dynamic_bit_pow2_arst,
+                          svLogic* dynamic_bit_pow2_norst,
+                          svLogic* dynamic_bit_nonpow2_arst,
+                          svLogic* dynamic_bit_nonpow2_norst,
+                          svLogicVecVal* nzb_range_arst,
+                          svLogicVecVal* nzb_lower_arst,
+                          svLogicVecVal* nzb_upper_norst,
+                          svLogicVecVal* nzb_arith_norst) {
+    mate::dpi::withDpiErrorBoundary("mate_gft_init_values", [&]() {
+        auto& context = checkedContext(context_handle);
+        const auto async_inputs = initialAsyncInputs(context.bindings, clk, rst_n);
+        const auto sync_inputs_now = syncInputs(context.bindings, data, idx, base);
+        mate::dpi::initializeInstance(context.instance, async_inputs, sync_inputs_now);
+        writeOutputs(context,
                      const_slice_case_arst,
                      const_slice_case_norst,
                      dynamic_part_case_arst,
@@ -249,7 +257,6 @@ void* mate_gft_init(svLogic clk,
                      nzb_lower_arst,
                      nzb_upper_norst,
                      nzb_arith_norst);
-        return context.release();
     });
 }
 

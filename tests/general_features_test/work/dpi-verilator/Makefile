@@ -47,7 +47,7 @@ $(BUILD_DIR)/libmate-dpi-support.a: force
 
 $(OUT): $(TB_SRCS) $(DPI_CPP) $(BUILD_DIR)/libmate-dpi-support.a
 	rm -rf obj_dir
-	verilator --timing --cc --exe --build --main \
+	verilator --trace --timing --cc --exe --build --main \
 		$(VERILATOR_WARNS) \
 		--top-module $(TOP_MODULE) \
 		-CFLAGS '$(MATE_CPPFLAGS)' \

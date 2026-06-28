@@ -10,8 +10,10 @@ DPI_DIR = $(ROOT_DIR)/dpi
 BUILD_DIR = $(PROJECT_ROOT)/build/dev
 TOP_MODULE = tb
 OUT = obj_dir/V$(TOP_MODULE)
+RTL_SRC = $(RTL_DIR)/general_features_test.v
 
 TB_SRCS = \
+	$(RTL_SRC) \
 	$(TB_DIR)/generated/uut_if.sv \
 	$(TB_DIR)/uut_tb.sv \
 	$(TB_DIR)/dpi/tb.sv \

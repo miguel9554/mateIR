@@ -531,6 +531,72 @@ def gen_tb(module: ModuleInfo) -> str:
     return '\n'.join(lines)
 
 
+def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
+    lines = []
+    primary_clk = list(domains.clock_domains.keys())[0]
+
+    # Build checker entries: (port, leaf_name_or_None, leaf_type_or_None)
+    entries: list[tuple[Port, str | None, str | None]] = []
+    for port in module.ports:
+        if port.direction != 'output':
+            continue
+        if port.unpacked_dims:
+            continue  # unpacked array outputs not supported
+        if port.struct_leaves:
+            for leaf_name, leaf_type in port.struct_leaves:
+                entries.append((port, leaf_name, leaf_type))
+        else:
+            entries.append((port, None, None))
+
+    n = len(entries)
+
+    all_imports = ['import tb_pkg::*;'] + list(module.imports)
+
+    lines.append('module checker_dpi')
+    for imp in all_imports:
+        lines.append(f'    {imp}')
+    lines.append('(')
+    lines.append('    uut_if.master dpi_if,')
+    lines.append('    uut_if.master rtl_if')
+    lines.append(');')
+    lines.append(f'    localparam int N = {n};')
+    lines.append('    int fails[N];')
+    lines.append('')
+
+    for i, (port, leaf_name, leaf_type) in enumerate(entries):
+        if leaf_name is not None:
+            leaf_suffix = leaf_name.replace('.', '_')
+            sig_name = f'{port.name}.{leaf_name}'
+            inst = f'u_{port.name}_{leaf_suffix}'
+            type_str = leaf_type
+        else:
+            sig_name = port.name
+            inst = f'u_{port.name}'
+            type_str = port_type_str(port, use_resolved=True)
+        lines.append(
+            f'    signal_checker #(.TYPE({type_str}), .NAME("{sig_name}")) {inst}'
+            f' (.clk(rtl_if.{primary_clk}), .a(dpi_if.{sig_name}), .b(rtl_if.{sig_name}),'
+            f' .fail_count(fails[{i}]));'
+        )
+
+    lines.append('')
+    lines.append('    final begin')
+    lines.append('        int total_fail;')
+    lines.append('        total_fail = 0;')
+    lines.append('        foreach (fails[i]) total_fail += fails[i];')
+    lines.append('        if (total_fail != 0) begin')
+    lines.append('            $display("[%0t] %s", $realtime, red($sformatf("FAIL: DPI and RTL mismatched (%0d total failures)", total_fail)));')
+    lines.append('            $fatal(1);')
+    lines.append('        end else begin')
+    lines.append('            $display("[%0t] %s", $realtime, green("PASS: 100% match between DPI and RTL"));')
+    lines.append('        end')
+    lines.append('    end')
+    lines.append('endmodule')
+    lines.append('')
+
+    return '\n'.join(lines)
+
+
 def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
     lines = []
     import_clause = (' ' + ' '.join(module.imports)) if module.imports else ''
@@ -667,6 +733,7 @@ def main():
     (output_dir / 'uut_if.sv').write_text(gen_uut_if(module))
     (output_dir / 'tb.sv').write_text(gen_tb(module))
     (output_dir / 'uut_recorder.sv').write_text(gen_recorder(module, domains))
+    (output_dir / 'checker_dpi.sv').write_text(gen_dpi_checker(module, domains))
 
     print(f"Generated testbench files in {output_dir}")
 

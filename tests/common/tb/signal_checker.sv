@@ -1,4 +1,6 @@
-module signal_checker #(
+module signal_checker
+    import tb_pkg::*;
+#(
     type TYPE = logic,
     string NAME = ""
 )(
@@ -15,6 +17,6 @@ module signal_checker #(
     end
 
     final begin
-        $display("  %s: pass=%0d fail=%0d", NAME, pass_count, fail_count);
+        $display("[%0t]   %s: pass=%0d fail=%0d", $realtime, NAME, pass_count, fail_count);
     end
 endmodule

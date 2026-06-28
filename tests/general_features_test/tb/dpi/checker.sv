@@ -1,4 +1,6 @@
-module checker_dpi(
+module checker_dpi
+    import tb_pkg::*;
+(
     uut_if.master dpi_if,
     uut_if.master rtl_if
 );
@@ -32,9 +34,11 @@ module checker_dpi(
         int total_fail;
         total_fail = 0;
         foreach (fails[i]) total_fail += fails[i];
-        if (total_fail != 0)
-            $fatal(1, "FAIL: DPI and RTL mismatched (%0d total failures)", total_fail);
-        else
-            $display("PASS: 100%% match between DPI and RTL");
+        if (total_fail != 0) begin
+            $display("[%0t] %s", $realtime, red($sformatf("FAIL: DPI and RTL mismatched (%0d total failures)", total_fail)));
+            $fatal(1);
+        end else begin
+            $display("[%0t] %s", $realtime, green("PASS: 100% match between DPI and RTL"));
+        end
     end
 endmodule

@@ -435,6 +435,8 @@ def gen_tb(module: ModuleInfo) -> str:
         lines.append(f'module tb {import_clause};')
     else:
         lines.append('module tb;')
+    lines.append('    localparam bit INCLUDE_DPI_MODULE = 0;')
+    lines.append('    localparam bit INCLUDE_UUT_RECORDER = !INCLUDE_DPI_MODULE;')
 
     inputs = [p for p in module.ports if p.direction == 'input']
     outputs = [p for p in module.ports if p.direction == 'output']
@@ -499,8 +501,29 @@ def gen_tb(module: ModuleInfo) -> str:
     else:
         lines.append(f'    {module.name} uut(.*);')
     lines.append('    uut_tb uut_tb(.*);')
-    lines.append('    uut_recorder u_recorder(.*);')
+    lines.append('    if (INCLUDE_UUT_RECORDER) begin : g_recorder')
+    lines.append('        uut_recorder u_recorder(.*);')
+    lines.append('    end')
     lines.append('    tb_common u_tb_common();')
+
+    # DPI conditional block
+    lines.append('')
+    lines.append('    if (INCLUDE_DPI_MODULE) begin : g_dpi')
+    lines.append('        uut_if dpi_if();')
+    lines.append('')
+    lines.append(f'        {module.name}_dpi dpi_uut(')
+    port_conns = [f'            .{p.name}(dpi_if.{p.name})' for p in module.ports]
+    lines.append(',\n'.join(port_conns))
+    lines.append('        );')
+    lines.append('')
+    lines.append('        uut_tb dpi_tb(._if(dpi_if));')
+    lines.append('')
+    lines.append('        checker_dpi u_checker(')
+    lines.append('            .dpi_if(dpi_if),')
+    lines.append('            .rtl_if(_if)')
+    lines.append('        );')
+    lines.append('    end')
+
     lines.append('')
     lines.append('endmodule')
     lines.append('')

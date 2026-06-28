@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <queue>
 #include <random>
@@ -735,14 +736,14 @@ void Simulator::run() {
             }
         }
 
-        std::vector<RuntimeInputUpdate> async_updates;
-        std::set<std::string> seen_signals;
+        // Build a map from signal name to last event, so duplicate timestamps keep the last value.
+        std::map<std::string, const AsyncEvent*> last_event_for_signal;
         for (const auto* evt : batch) {
-            if (!seen_signals.insert(evt->signal_name).second) {
-                throw CompilerError(std::format(
-                    "Simulator: async input '{}' has multiple events at time {}",
-                    evt->signal_name, batch_time));
-            }
+            last_event_for_signal[evt->signal_name] = evt;
+        }
+
+        std::vector<RuntimeInputUpdate> async_updates;
+        for (const auto& [name, evt] : last_event_for_signal) {
             const auto* input = runtime_metadata_.findInput(evt->signal_name);
             if (!input) {
                 throw CompilerError(std::format(

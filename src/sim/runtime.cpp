@@ -129,9 +129,8 @@ void MateIRRuntime::applyClockEdge(
     const auto& input_metadata = metadata_.input_leaves.at(source.value);
     setAsyncInputValue(input_metadata.leaf_name, sourceValueForEdge(source, edge));
 
-    if (edge == ir_.clocks.at(clock.value).edge) {
-        applyClockDomain(clock);
-    } else if (!sync_inputs.empty()) {
+    const bool active_edge = edge == ir_.clocks.at(clock.value).edge;
+    if (!active_edge && !sync_inputs.empty()) {
         throw CompilerError(std::format(
             "Simulator runtime: inactive {} on clock domain '{}' cannot advance sync inputs",
             edgeName(edge), ir_.clocks.at(clock.value).display_name));
@@ -140,6 +139,11 @@ void MateIRRuntime::applyClockEdge(
     for (const auto& update : sync_inputs) {
         validateSyncUpdateForClock(clock, update);
         setSyncInput(update.input, update.value);
+    }
+
+    if (active_edge) {
+        evaluateCombinational();
+        applyClockDomain(clock);
     }
     updateOutputs();
 }

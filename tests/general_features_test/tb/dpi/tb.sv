@@ -180,7 +180,7 @@ module tb;
             pass_count++;
         end else begin
             fail_count++;
-            $display("%0t MISMATCH %s dpi=%0h rtl=%0h", $realtime, name, dpi_value, rtl_value);
+            // $display("%0t MISMATCH %s dpi=%0h rtl=%0h", $realtime, name, dpi_value, rtl_value);
         end
     endtask
 
@@ -195,7 +195,7 @@ module tb;
             pass_count++;
         end else begin
             fail_count++;
-            $display("%0t MISMATCH %s dpi=%0h rtl=%0h", $realtime, name, dpi_value, rtl_value);
+            // $display("%0t MISMATCH %s dpi=%0h rtl=%0h", $realtime, name, dpi_value, rtl_value);
         end
     endtask
 
@@ -210,7 +210,7 @@ module tb;
             pass_count++;
         end else begin
             fail_count++;
-            $display("%0t MISMATCH %s dpi=%0b rtl=%0b", $realtime, name, dpi_value, rtl_value);
+            // $display("%0t MISMATCH %s dpi=%0b rtl=%0b", $realtime, name, dpi_value, rtl_value);
         end
     endtask
 

@@ -1,4 +1,4 @@
-.PHONY: simulate clean force
+.PHONY: simulate clean force prep
 
 WAVES = waves.vcd
 
@@ -44,10 +44,10 @@ MATE_CPPFLAGS = \
 
 all: simulate
 
-$(BUILD_DIR)/libmate-dpi-support.a: force
+prep: force
 	$(MAKE) -C $(PROJECT_ROOT) dev
 
-$(OUT): $(TB_SRCS) $(DPI_CPP) $(BUILD_DIR)/libmate-dpi-support.a
+$(OUT): prep $(TB_SRCS) $(DPI_CPP) $(MATE_LIBS)
 	rm -rf obj_dir
 	verilator --trace --timing --cc --exe --build --main \
 		$(VERILATOR_WARNS) \

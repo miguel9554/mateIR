@@ -1020,16 +1020,40 @@ static DFGNode* materializePartialTarget(ResolutionContext& ctx,
                                          const std::optional<SourceLoc>& loc) {
     sortSlices(state);
     std::vector<DFGNode*> parts;
-    parts.reserve(state.slices.size());
+    parts.reserve(static_cast<size_t>(state.type.width));
+    DFGNode* targetNode = lookupTargetNode(ctx, targetName);
+
+    auto makeRetainedSlice = [&](int64_t low, int64_t high) -> DFGNode* {
+        DFGNode* retained = nullptr;
+        if (targetNode) {
+            retained = ctx.graph.slice(targetNode, ctx.graph.constant(high), ctx.graph.constant(low));
+        } else {
+            retained = ctx.graph.x(Type::makeInteger(static_cast<int>(high - low + 1), state.type.isSigned()));
+        }
+        retained->type = Type::makeInteger(static_cast<int>(high - low + 1), state.type.isSigned());
+        if (loc) retained->loc = *loc;
+        return retained;
+    };
+
+    int64_t nextHigh = state.type.width - 1;
     for (const auto& slice : state.slices) {
+        if (slice.high < 0 || slice.low > nextHigh) continue;
+        if (slice.high < nextHigh) {
+            parts.push_back(makeRetainedSlice(slice.high + 1, nextHigh));
+        }
         parts.push_back(slice.expr);
+        nextHigh = slice.low - 1;
+    }
+    if (nextHigh >= 0) {
+        parts.push_back(makeRetainedSlice(0, nextHigh));
     }
     DFGNode* driver = nullptr;
     if (!parts.empty()) {
         driver = ctx.graph.concat(parts);
+        driver->type = state.type;
         if (loc) driver->loc = *loc;
         connectDriver(ctx, targetName, driver);
-    } else if (auto* node = lookupTargetNode(ctx, targetName)) {
+    } else if (auto* node = targetNode) {
         node->clearDriver();
     }
     return driver;

@@ -31,6 +31,7 @@ module uut_tb (
 
     always @(posedge _if.clk) begin
         _if.angle_in <= $urandom();
+        _if.random_val <= $urandom();
     end
 
     // Testbench procedure

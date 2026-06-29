@@ -8,3 +8,4 @@ clock_domains:
     inputs_outputs:
     - start
     - angle_in
+    - random_val

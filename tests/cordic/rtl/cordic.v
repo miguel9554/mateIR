@@ -15,9 +15,11 @@ module cordic #(
     input  wire                clk,        // Clock signal
     input  wire                rst_n,      // Active-low reset
     input  wire                start,      // Start computation
+    input  wire signed [WL-1:0] random_val,  // Input angle in radians, Q1.14, range: [-π/2, π/2]
     input  wire signed [WL-1:0] angle_in,  // Input angle in radians, Q1.14, range: [-π/2, π/2]
     output reg  signed [WL-1:0] cos_out,   // Cosine output, Q1.14
     output reg  signed [WL-1:0] test,   // Sine output, Q1.14
+    output reg  signed [WL-1:0] test_2,   // Sine output, Q1.14
     output reg  signed [WL-1:0] sin_out,   // Sine output, Q1.14
     output reg                 done        // Computation complete flag
 );
@@ -31,6 +33,7 @@ module cordic #(
 
     assign atan_table_current = atan_table[i];  // Current arctan value for iteration i
 
+    assign test_2 = angle_in + random_val;
     always @(posedge clk) test <= angle_in+1;
 
     //--------------------------------------------------------------------------

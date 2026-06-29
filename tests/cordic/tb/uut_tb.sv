@@ -27,8 +27,10 @@ module uut_tb (
 
     int seed = 67;
 
+    initial $urandom(seed);
+
     always @(posedge _if.clk) begin
-        _if.angle_in <= $urandom(seed);
+        _if.angle_in <= $urandom();
     end
 
     // Testbench procedure

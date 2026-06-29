@@ -17,6 +17,7 @@ module cordic #(
     input  wire                start,      // Start computation
     input  wire signed [WL-1:0] angle_in,  // Input angle in radians, Q1.14, range: [-π/2, π/2]
     output reg  signed [WL-1:0] cos_out,   // Cosine output, Q1.14
+    output reg  signed [WL-1:0] test,   // Sine output, Q1.14
     output reg  signed [WL-1:0] sin_out,   // Sine output, Q1.14
     output reg                 done        // Computation complete flag
 );
@@ -29,6 +30,8 @@ module cordic #(
     wire signed [WL-1:0] atan_table_current;
 
     assign atan_table_current = atan_table[i];  // Current arctan value for iteration i
+
+    always @(posedge clk) test <= angle_in+1;
 
     //--------------------------------------------------------------------------
     // Internal registers

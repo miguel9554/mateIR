@@ -11,7 +11,8 @@ SIM_BUILD_PRESET ?= $(if $(filter noop,$(SIM_BUILD_TARGET)),dev,$(SIM_BUILD_TARG
 SIMULATOR_BUILD_DIR = $(PROJECT_ROOT)/build/$(SIM_BUILD_PRESET)
 VCD_FLATTEN ?= python3 $(PROJECT_ROOT)/tools/vcd_flatten.py
 
-RTL_SRCS = $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \))
+RTL_GEN_DIR = $(RTL_DIR)/generated
+RTL_SRCS = $(shell find -L $(RTL_DIR) -path $(RTL_GEN_DIR) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print)
 DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 
 SIMULATOR = $(SIMULATOR_BUILD_DIR)/mate-vector-simulator

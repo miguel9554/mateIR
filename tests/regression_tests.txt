@@ -16,6 +16,7 @@ cdc_sidecar_missing_fail FAIL without a declared synchronizer
 cdc_sidecar_unknown_flop_fail FAIL unknown synchronizer flop
 const_only_dynamic_fail FAIL DIV operation requires constant operands
 const_only_ops PASS
+continuous_partial_vector_read PASS
 cordic PASS
 counter_top PASS
 cross_module_async_to_sync_fail FAIL samples Async input without a declared synchronizer

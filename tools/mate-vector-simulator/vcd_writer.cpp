@@ -467,12 +467,22 @@ VcdWriter::VcdWriter(const MateIR& ir, const MateIRRuntimeMetadata& metadata,
 // ============================================================================
 
 void VcdWriter::update(const RtlRuntimeInstance& runtime, int64_t time_ns) {
+    update(runtime, time_ns, {});
+}
+
+void VcdWriter::update(const RtlRuntimeInstance& runtime, int64_t time_ns,
+                       const std::map<RuntimeObservableId, SimValue>& observable_overrides) {
     grouped_top_->time_update_abs(grouped_out_, std::chrono::nanoseconds{time_ns});
 
     // Values flow exclusively through runtime observable handles; the VCD layer
     // never reaches into runtime/DFG state directly.
     for (auto& traced : traced_values_) {
-        traced.vcd->set(runtime.getObservable(traced.observable));
+        auto override_it = observable_overrides.find(traced.observable);
+        if (override_it != observable_overrides.end()) {
+            traced.vcd->set(override_it->second);
+        } else {
+            traced.vcd->set(runtime.getObservable(traced.observable));
+        }
     }
 }
 

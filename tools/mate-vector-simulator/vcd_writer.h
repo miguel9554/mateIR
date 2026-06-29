@@ -48,6 +48,8 @@ public:
 
     // Call at every timeline time step.
     void update(const RtlRuntimeInstance& runtime, int64_t time_ns);
+    void update(const RtlRuntimeInstance& runtime, int64_t time_ns,
+                const std::map<RuntimeObservableId, SimValue>& observable_overrides);
 
     // Flush and close the VCD file.
     void close(int64_t last_time_ns);

@@ -60,6 +60,7 @@ private:
     std::map<std::string, size_t> sync_input_pos_;
     std::map<std::string, SimValue> async_input_values_;
     std::map<std::string, std::vector<SimValue>> recorded_values_;
+    std::map<RuntimeObservableId, SimValue> vcd_input_overrides_;
 
     std::unique_ptr<VcdWriter> vcd_;
     std::unique_ptr<std::ofstream> dfg_trace_out_;
@@ -71,7 +72,9 @@ private:
     // Testbench methods
     void buildTimeline();
     void loadSyncInputs();
-    std::vector<RuntimeInputUpdate> collectPostClockSyncInputs(ClockId active_clock);
+    std::vector<RuntimeInputUpdate> collectPostClockSyncInputs(
+        ClockId active_clock,
+        std::map<RuntimeObservableId, SimValue>& vcd_overrides);
     std::optional<edge_t> updateAsyncInputAndDetectEdge(const RuntimeInputUpdate& update,
                                                         int64_t time_ns);
     bool isClockOrResetSource(const std::string& leaf_name) const;

@@ -36,6 +36,25 @@ module cordic #(
     assign test_2 = angle_in + random_val;
     always @(posedge clk) test <= angle_in+1;
 
+    /*
+    logic signed [WL-1:0] angle_in_sampled;
+    logic signed [WL-1:0] angle_in_current;
+    int counter = 0;
+    bit has_been_initialized = 0;
+
+    always @(angle_in) begin
+        if (has_been_initialized) begin
+            angle_in_current = angle_in;
+            $display("[%0t] Cycle %0d: angle_in %h->%h", $realtime, counter++, angle_in_sampled, angle_in_current);
+            angle_in_sampled = angle_in;
+        end
+        else begin
+            has_been_initialized = 1;
+            angle_in_sampled = angle_in;
+        end
+    end
+    */
+
     //--------------------------------------------------------------------------
     // Internal registers
     //--------------------------------------------------------------------------

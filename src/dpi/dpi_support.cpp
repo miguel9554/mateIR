@@ -224,7 +224,7 @@ void applyClockEdge(DpiInstanceContext& context,
         throw CompilerError(std::format(
             "DPI support: input '{}' is not a bound clock", clock.leaf_name));
     }
-    context.runtime().applyClockEdge(*clock.clock_domain, edge, sync_inputs);
+    context.runtime().applyClockEdge(*clock.clock_domain, edge, sync_inputs, sync_inputs);
 }
 
 void applyResetEdge(DpiInstanceContext& context,

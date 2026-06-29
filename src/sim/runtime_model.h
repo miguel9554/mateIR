@@ -30,7 +30,8 @@ public:
                                      std::span<const RuntimeInputUpdate> sync_inputs);
     void applyClockEdge(ClockId clock,
                         edge_t edge,
-                        std::span<const RuntimeInputUpdate> sync_inputs);
+                        std::span<const RuntimeInputUpdate> sync_inputs_before,
+                        std::span<const RuntimeInputUpdate> sync_inputs_after);
     void applyResetEdge(ResetId reset, edge_t edge);
     void applyAsyncSignalEdge(RuntimeInputId input, const SimValue& value);
 

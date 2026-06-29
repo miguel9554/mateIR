@@ -352,10 +352,8 @@ void Simulator::loadSyncInputs() {
 // Sync input advancement
 // ============================================================================
 
-std::vector<RuntimeInputUpdate> Simulator::collectPostClockSyncInputs(
-    ClockId active_clock,
-    std::map<RuntimeObservableId, SimValue>& vcd_overrides) {
-    std::vector<RuntimeInputUpdate> updates;
+SyncInputTransition Simulator::collectClockSyncInputTransition(ClockId active_clock) {
+    SyncInputTransition transition;
     for (auto& [name, pos] : sync_input_pos_) {
         auto clk_it = sync_input_clock_.find(name);
         if (clk_it == sync_input_clock_.end() || clk_it->second != active_clock)
@@ -367,7 +365,7 @@ std::vector<RuntimeInputUpdate> Simulator::collectPostClockSyncInputs(
                 "Simulator: sync input '{}' has no runtime handle", name));
         }
         const auto& data = sync_input_data_[name];
-        updates.push_back(RuntimeInputUpdate{
+        transition.before.push_back(RuntimeInputUpdate{
             .input = input->id,
             .value = data[pos],
         });
@@ -375,21 +373,12 @@ std::vector<RuntimeInputUpdate> Simulator::collectPostClockSyncInputs(
         if (pos + 1 < data.size()) {
             pos++;
         }
-        const SimValue& visible_value = data[pos];
-        if (!input->node) {
-            throw CompilerError(std::format(
-                "Simulator: sync input '{}' has no bound DFG leaf", name));
-        }
-        auto observable_it = runtime_metadata_.observables_by_node.find(input->node);
-        if (observable_it == runtime_metadata_.observables_by_node.end()) {
-            throw CompilerError(std::format(
-                "Simulator: sync input '{}' has no runtime observable", name));
-        }
-        for (RuntimeObservableId observable : observable_it->second) {
-            vcd_overrides[observable] = visible_value;
-        }
+        transition.after.push_back(RuntimeInputUpdate{
+            .input = input->id,
+            .value = data[pos],
+        });
     }
-    return updates;
+    return transition;
 }
 
 bool Simulator::isClockOrResetSource(const std::string& leaf_name) const {
@@ -635,7 +624,6 @@ void Simulator::emitTraceEvent(int64_t time_ns,
 
 void Simulator::run() {
     std::cout << "Simulator: starting simulation for module '" << module_.name << "'" << std::endl;
-    vcd_input_overrides_.clear();
 
     // === VCD Setup ===
     vcd_ = std::make_unique<VcdWriter>(ir_, runtime_metadata_, config_.output_dir);
@@ -799,13 +787,15 @@ void Simulator::run() {
             if (is_clock_source) {
                 if (!edge.has_value()) continue;
                 for (ClockId clock_id : clock_it->second) {
-                    std::vector<RuntimeInputUpdate> sync_updates;
+                    SyncInputTransition sync_transition;
                     if (*edge == ir_.clocks.at(clock_id.value).edge) {
-                        sync_updates = collectPostClockSyncInputs(clock_id, vcd_input_overrides_);
+                        sync_transition = collectClockSyncInputTransition(clock_id);
                         timestamp_had_active_clock_edge = true;
                     }
                     runtime_trace_time_ns_ = batch_time;
-                    runtime_->applyClockEdge(clock_id, *edge, sync_updates);
+                    runtime_->applyClockEdge(clock_id, *edge,
+                                             sync_transition.before,
+                                             sync_transition.after);
                 }
                 continue;
             }
@@ -829,7 +819,7 @@ void Simulator::run() {
         emitPassiveTraceEvents(batch_time);
 
         // VCD: trace all values at every time step
-        vcd_->update(*runtime_, batch_time, vcd_input_overrides_);
+        vcd_->update(*runtime_, batch_time);
 
         // Record output values only on active clock edges (for text output)
         if (timestamp_had_active_clock_edge) {

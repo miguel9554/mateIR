@@ -33,8 +33,9 @@ void RtlRuntimeInstance::initializeInputsAndEvaluate(
 void RtlRuntimeInstance::applyClockEdge(
     ClockId clock,
     edge_t edge,
-    std::span<const RuntimeInputUpdate> sync_inputs) {
-    runtime_.applyClockEdge(clock, edge, sync_inputs);
+    std::span<const RuntimeInputUpdate> sync_inputs_before,
+    std::span<const RuntimeInputUpdate> sync_inputs_after) {
+    runtime_.applyClockEdge(clock, edge, sync_inputs_before, sync_inputs_after);
 }
 
 void RtlRuntimeInstance::applyResetEdge(ResetId reset, edge_t edge) {

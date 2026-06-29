@@ -123,27 +123,34 @@ void MateIRRuntime::initializeInputsAndEvaluate(
 void MateIRRuntime::applyClockEdge(
     ClockId clock,
     edge_t edge,
-    std::span<const RuntimeInputUpdate> sync_inputs) {
+    std::span<const RuntimeInputUpdate> sync_inputs_before,
+    std::span<const RuntimeInputUpdate> sync_inputs_after) {
     validateClockEdge(clock, edge);
     const RuntimeInputId source = clockSourceInput(clock);
     const auto& input_metadata = metadata_.input_leaves.at(source.value);
     setAsyncInputValue(input_metadata.leaf_name, sourceValueForEdge(source, edge));
 
     const bool active_edge = edge == ir_.clocks.at(clock.value).edge;
-    if (!active_edge && !sync_inputs.empty()) {
+    if (!active_edge && (!sync_inputs_before.empty() || !sync_inputs_after.empty())) {
         throw CompilerError(std::format(
             "Simulator runtime: inactive {} on clock domain '{}' cannot advance sync inputs",
             edgeName(edge), ir_.clocks.at(clock.value).display_name));
     }
 
-    for (const auto& update : sync_inputs) {
+    for (const auto& update : sync_inputs_before) {
         validateSyncUpdateForClock(clock, update);
         setSyncInput(update.input, update.value);
+    }
+    for (const auto& update : sync_inputs_after) {
+        validateSyncUpdateForClock(clock, update);
     }
 
     if (active_edge) {
         evaluateCombinational();
         applyClockDomain(clock);
+        for (const auto& update : sync_inputs_after) {
+            setSyncInput(update.input, update.value);
+        }
     }
     updateOutputs();
 }

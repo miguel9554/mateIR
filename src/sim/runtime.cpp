@@ -733,6 +733,14 @@ SimValue MateIRRuntime::evaluateNode(const DFGNode* node) {
             emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
             return result;
         }
+        case DFGOp::SHR: {
+            auto inputs = node->binaryInputs();
+            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
+            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
+            SimValue result = lhs.shr(rhs.lowU64(), false);
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
+            return result;
+        }
         case DFGOp::ASR: {
             auto inputs = node->binaryInputs();
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);

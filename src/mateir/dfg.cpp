@@ -126,7 +126,8 @@ std::string DFG::renderDot(const std::string& graphName,
             case DFGOp::LE:  ss << "<="; break;
             case DFGOp::GT:  ss << ">"; break;
             case DFGOp::GE:  ss << ">="; break;
-            case DFGOp::SHL: ss << "<<<"; break;
+            case DFGOp::SHL: ss << "<<"; break;
+            case DFGOp::SHR: ss << ">>"; break;
             case DFGOp::ASR: ss << ">>>"; break;
             case DFGOp::MUX: ss << "MUX"; break;
             case DFGOp::SLICE: ss << "SLICE"; break;

@@ -3839,12 +3839,44 @@ static ExprValue buildExprValue(
             return total;
         }
         if (node->kind() == DFGOp::ADD || node->kind() == DFGOp::SUB ||
-            node->kind() == DFGOp::MUL) {
+            node->kind() == DFGOp::MUL ||
+            node->kind() == DFGOp::BITWISE_AND ||
+            node->kind() == DFGOp::BITWISE_OR ||
+            node->kind() == DFGOp::BITWISE_XOR ||
+            node->kind() == DFGOp::BITWISE_XNOR) {
             auto inputs = node->binaryInputs();
             int lw = self(self, inputs.lhs.node);
             int rw = self(self, inputs.rhs.node);
             if (lw <= 0 || rw <= 0) return 0;
             return std::max(lw, rw);
+        }
+        if (node->kind() == DFGOp::SHL || node->kind() == DFGOp::SHR ||
+            node->kind() == DFGOp::ASR) {
+            return self(self, node->binaryInputs().lhs.node);
+        }
+        if (node->kind() == DFGOp::BITWISE_NOT ||
+            node->kind() == DFGOp::UNARY_NEGATE) {
+            return self(self, node->unaryInputs().operand.node);
+        }
+        if (node->kind() == DFGOp::EQ || node->kind() == DFGOp::LT ||
+            node->kind() == DFGOp::LE || node->kind() == DFGOp::GT ||
+            node->kind() == DFGOp::GE ||
+            node->kind() == DFGOp::REDUCTION_AND ||
+            node->kind() == DFGOp::REDUCTION_NAND ||
+            node->kind() == DFGOp::REDUCTION_OR ||
+            node->kind() == DFGOp::REDUCTION_NOR ||
+            node->kind() == DFGOp::REDUCTION_XOR ||
+            node->kind() == DFGOp::REDUCTION_XNOR) {
+            return 1;
+        }
+        if (node->kind() == DFGOp::MUX) {
+            int width = 0;
+            for (size_t i = 0; i < node->muxArmCount(); ++i) {
+                int armWidth = self(self, node->muxArmData(i).node);
+                if (armWidth <= 0) return 0;
+                width = std::max(width, armWidth);
+            }
+            return width;
         }
         if (node->kind() == DFGOp::SIGNAL) {
             auto drv = node->driver();
@@ -3858,7 +3890,8 @@ static ExprValue buildExprValue(
         bool makeSigned = castExpr.signing.valueText() == "signed";
         ExprValue inner = buildScalarExprValue(castExpr.inner->expression, ctx);
         int knownWidth = computeKnownWidth(computeKnownWidth, inner.scalar);
-        Type newType = Type::makeInteger(inner.type.width, makeSigned,
+        int castWidth = knownWidth > 0 ? knownWidth : inner.type.width;
+        Type newType = Type::makeInteger(castWidth, makeSigned,
                                         inner.type.packed_dims, inner.type.unpacked_dims);
         if (inner.scalar->kind() == DFGOp::CONST) {
             inner.scalar->type = newType;
@@ -3890,7 +3923,8 @@ static ExprValue buildExprValue(
                 const auto* arg = singleOrderedSystemFunctionArg(invocation, sysName);
                 ExprValue inner = buildScalarExprValue(arg, ctx);
                 int knownWidth = computeKnownWidth(computeKnownWidth, inner.scalar);
-                Type newType = Type::makeInteger(inner.type.width, makeSigned,
+                int castWidth = knownWidth > 0 ? knownWidth : inner.type.width;
+                Type newType = Type::makeInteger(castWidth, makeSigned,
                                                 inner.type.packed_dims, inner.type.unpacked_dims);
                 if (inner.scalar->kind() == DFGOp::CONST) {
                     inner.scalar->type = newType;
@@ -5246,7 +5280,16 @@ static DFGNode* buildExprScalarImpl(
             return node;
         }
 
-        case SyntaxKind::LogicalShiftRightExpression:
+        case SyntaxKind::LogicalShiftRightExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            rejectFrontendEnum(lhs, "SHR", loc);
+            auto* node = ctx.graph.shr(lhs.scalar, buildExprDFG(binary.right, ctx));
+            node->loc = loc;
+            return node;
+        }
+
         case SyntaxKind::ArithmeticShiftRightExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
             auto loc = resolveSourceLoc(*expr, ctx.sm);

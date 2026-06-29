@@ -182,6 +182,11 @@ static bool tryConstantFold(DFGNode* node) {
             result = lhs << rhs;
             break;
         }
+        case DFGOp::SHR: {
+            auto [lhs, rhs] = binaryConst();
+            result = static_cast<int64_t>(static_cast<uint64_t>(lhs) >> rhs);
+            break;
+        }
         case DFGOp::ASR: {
             auto [lhs, rhs] = binaryConst();
             result = lhs >> rhs;
@@ -400,6 +405,20 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
                 return true;
             }
             // 0 << x -> 0
+            if (isConst(lhs) && getConst(lhs) == 0) {
+                makeConst(node, 0);
+                return true;
+            }
+            break;
+        }
+        case DFGOp::SHR: {
+            auto [lhs, rhs] = binaryNodes(node);
+            // x >> 0 -> x
+            if (isConst(rhs) && getConst(rhs) == 0) {
+                graph.redirectConsumers(node, lhs);
+                return true;
+            }
+            // 0 >> x -> 0
             if (isConst(lhs) && getConst(lhs) == 0) {
                 makeConst(node, 0);
                 return true;

@@ -25,12 +25,19 @@ module uut_tb (
 
     end
 
+    int seed = 67;
+
+    always @(posedge _if.clk) begin
+        _if.angle_in <= $urandom(seed);
+    end
+
     // Testbench procedure
     always @(posedge _if.clk) begin
+        // _if.angle_in <= $urandom(seed);
         // Initialize signals
         @(posedge _if.clk) begin
             _if.start    <= 0;
-            _if.angle_in <= 16'sd0;
+            // _if.angle_in <= 16'sd0;
         end
 
         // Wait for 2 clocks after reset deassertion
@@ -41,7 +48,7 @@ module uut_tb (
         // -------------------------------------------------
         // Test Case 1: 0 degrees
         @(posedge _if.clk) begin
-            _if.angle_in <= 16'sd0;
+            // _if.angle_in <= 16'sd0;
             _if.start    <= 1;
         end
 
@@ -55,7 +62,7 @@ module uut_tb (
         // -------------------------------------------------
         // Test Case 2: 45 degrees
         @(posedge _if.clk) begin
-            _if.angle_in <= 16'sb0011_0010_0100_0100;
+            // _if.angle_in <= 16'sb0011_0010_0100_0100;
             _if.start    <= 1;
         end
 
@@ -69,7 +76,7 @@ module uut_tb (
         // -------------------------------------------------
         // Test Case 3: -45 degrees
         @(posedge _if.clk) begin
-            _if.angle_in <= -16'sb0011_0010_0100_0100;
+            // _if.angle_in <= -16'sb0011_0010_0100_0100;
             _if.start    <= 1;
         end
 
@@ -83,7 +90,7 @@ module uut_tb (
         // -------------------------------------------------
         // Test Case 4: 90 degrees
         @(posedge _if.clk) begin
-            _if.angle_in <= 16'sb0110_0100_1000_1000;
+            // _if.angle_in <= 16'sb0110_0100_1000_1000;
             _if.start    <= 1;
         end
 
@@ -97,7 +104,7 @@ module uut_tb (
         // -------------------------------------------------
         // Test Case 5: -90 degrees
         @(posedge _if.clk) begin
-            _if.angle_in <= -16'sb0110_0100_1000_1000;
+            // _if.angle_in <= -16'sb0110_0100_1000_1000;
             _if.start    <= 1;
         end
 
@@ -111,7 +118,7 @@ module uut_tb (
         // -------------------------------------------------
         // Test Case 6: 30 degrees
         @(posedge _if.clk) begin
-            _if.angle_in <= 16'sb0010_0001_1000_0011;
+            // _if.angle_in <= 16'sb0010_0001_1000_0011;
             _if.start    <= 1;
         end
 
@@ -125,7 +132,7 @@ module uut_tb (
         // -------------------------------------------------
         // Test Case 7: -60 degrees
         @(posedge _if.clk) begin
-            _if.angle_in <= 16'sb1011_1100_1111_1011;
+            // _if.angle_in <= 16'sb1011_1100_1111_1011;
             _if.start    <= 1;
         end
 
@@ -139,7 +146,7 @@ module uut_tb (
         // -------------------------------------------------
         // Test Case 8: 8.16 degrees
         @(posedge _if.clk) begin
-            _if.angle_in <= 16'sb0000_1001_0001_1101;
+            // _if.angle_in <= 16'sb0000_1001_0001_1101;
             _if.start    <= 1;
         end
 

@@ -4,7 +4,7 @@ ROOT_DIR = ../..
 
 validate:
 	$(MAKE) -C ../verilator clean
-	$(MAKE) -C ../verilator simulate
+	$(MAKE) -C ../verilator simulate DPI=0
 	$(MAKE) -C ../custom-sim simulate
 	$(MAKE) -C ../vcd-diff compare
 

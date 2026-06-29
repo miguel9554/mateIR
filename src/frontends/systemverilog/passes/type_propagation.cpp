@@ -192,6 +192,7 @@ bool inferNodeType(DFGNode* node) {
 
         // Shift ops: result = left operand type (enum not allowed)
         case DFGOp::SHL:
+        case DFGOp::SHR:
         case DFGOp::ASR: {
             auto* lhs = node->binaryInputs().lhs.node;
             if (!lhs->hasType()) return false;
@@ -272,7 +273,9 @@ bool inferNodeType(DFGNode* node) {
             auto* driver = driverOutput->node;
             if (!driver->hasType()) return false;
             rejectStructType(driver, to_string(node->kind()));
-            node->type = *driver->type;
+            if (!node->hasType()) {
+                node->type = *driver->type;
+            }
             return true;
         }
 

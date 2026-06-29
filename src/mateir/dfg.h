@@ -40,7 +40,8 @@ enum class DFGOp {
     GT,         // Greater than (>)
     GE,         // Greater or equal (>=)
     // Shift ops
-    SHL,        // Arithmetic shift left (<<<)
+    SHL,        // Shift left (<< and <<<)
+    SHR,        // Logical shift right (>>)
     ASR,        // Arithmetic shift right (>>>)
     // Binary bitwise/logical ops
     BITWISE_NOT,
@@ -74,6 +75,7 @@ inline const char* to_string(DFGOp op) {
         case DFGOp::GT: return "GT";
         case DFGOp::GE: return "GE";
         case DFGOp::SHL: return "SHL";
+        case DFGOp::SHR: return "SHR";
         case DFGOp::ASR: return "ASR";
         case DFGOp::MUX: return "MUX";
         case DFGOp::UNARY_NEGATE: return "UNARY_NEGATE";
@@ -117,6 +119,7 @@ inline int expectedInputs(DFGOp op) {
         case DFGOp::GT:     return 2;
         case DFGOp::GE:     return 2;
         case DFGOp::SHL:    return 2;
+        case DFGOp::SHR:    return 2;
         case DFGOp::ASR:    return 2;
 
         case DFGOp::UNARY_NEGATE:    return 1;
@@ -230,6 +233,7 @@ inline bool isBinaryDFGOp(DFGOp op) {
         case DFGOp::GT:
         case DFGOp::GE:
         case DFGOp::SHL:
+        case DFGOp::SHR:
         case DFGOp::ASR:
         case DFGOp::BITWISE_AND:
         case DFGOp::BITWISE_OR:
@@ -811,6 +815,10 @@ public:
 
     DFGNode* shl(DFGNode* a, DFGNode* b, const std::string& name = "") {
         return binaryOp(DFGOp::SHL, a, b, name);
+    }
+
+    DFGNode* shr(DFGNode* a, DFGNode* b, const std::string& name = "") {
+        return binaryOp(DFGOp::SHR, a, b, name);
     }
 
     DFGNode* asr(DFGNode* a, DFGNode* b, const std::string& name = "") {

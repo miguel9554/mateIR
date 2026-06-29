@@ -140,4 +140,5 @@ casez_unique0_fail FAIL unique0 modifiers are not supported on case
 packed_struct_conv PASS
 ibex_compressed_decoder PASS
 arithmetic_ops PASS
+shift_operator_matrix PASS
 ibex_core PASS

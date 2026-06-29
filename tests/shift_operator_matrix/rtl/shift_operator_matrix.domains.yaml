@@ -1,0 +1,16 @@
+module_name: shift_operator_matrix
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - a_i
+    - b_i
+    - c_i
+    - shamt_i
+    - sign_i
+    - sel_i

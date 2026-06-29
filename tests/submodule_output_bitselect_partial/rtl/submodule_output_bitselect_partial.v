@@ -1,4 +1,5 @@
 module submodule_output_bitselect_partial (
+    input wire clk,
     input wire [3:0] in_bus,
     output wire [3:0] out_bus
 );

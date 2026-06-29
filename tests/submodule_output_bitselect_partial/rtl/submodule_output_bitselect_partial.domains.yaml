@@ -1,3 +1,9 @@
 module_name: submodule_output_bitselect_partial
-async_domain:
-- in_bus
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - in_bus
+outputs:
+  out_bus:
+    kind: Sync

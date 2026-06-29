@@ -123,6 +123,7 @@ struct_flop_reset PASS
 union_typedef_fail FAIL union types are not supported
 submodule_output_bitselect_partial PASS
 submodule_multi_output_partial PASS
+undriven_packed_bits_fail FAIL Undriven bits for packed target 'bus'
 subword_assign PASS
 task_func_test PASS
 uart PASS

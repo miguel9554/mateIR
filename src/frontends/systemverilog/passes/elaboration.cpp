@@ -913,6 +913,70 @@ static void sortSlices(PartialTargetState& state) {
               });
 }
 
+static std::string formatMissingPackedRanges(const std::vector<std::pair<int64_t, int64_t>>& ranges) {
+    std::vector<std::string> parts;
+    parts.reserve(ranges.size());
+    for (const auto& [low, high] : ranges) {
+        if (low == high) {
+            parts.push_back(std::format("[{}]", low));
+        } else {
+            parts.push_back(std::format("[{}:{}]", high, low));
+        }
+    }
+
+    std::string result;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i != 0) result += ", ";
+        result += parts[i];
+    }
+    return result;
+}
+
+static void validatePartialTargetFullyDriven(const std::string& targetName,
+                                             const PartialTargetState& state) {
+    if (state.type.width <= 0) return;
+
+    std::vector<bool> driven(static_cast<size_t>(state.type.width), false);
+    std::optional<SourceLoc> firstLoc;
+    for (const auto& slice : state.slices) {
+        if (!firstLoc && slice.loc) firstLoc = slice.loc;
+        if (slice.low < 0 || slice.high < slice.low || slice.high >= state.type.width) {
+            throw CompilerError(
+                std::format("Partial write for packed target '{}' has invalid range [{}:{}] for width {}",
+                            targetName, slice.high, slice.low, state.type.width),
+                slice.loc);
+        }
+        for (int64_t bit = slice.low; bit <= slice.high; ++bit) {
+            driven[static_cast<size_t>(bit)] = true;
+        }
+    }
+
+    std::vector<std::pair<int64_t, int64_t>> missing;
+    int64_t bit = state.type.width - 1;
+    while (bit >= 0) {
+        if (driven[static_cast<size_t>(bit)]) {
+            --bit;
+            continue;
+        }
+        int64_t high = bit;
+        while (bit >= 0 && !driven[static_cast<size_t>(bit)]) --bit;
+        missing.push_back({bit + 1, high});
+    }
+
+    if (!missing.empty()) {
+        throw CompilerError(
+            std::format("Undriven bits for packed target '{}': {}",
+                        targetName, formatMissingPackedRanges(missing)),
+            firstLoc);
+    }
+}
+
+static void validatePartialTargetsFullyDriven(const PartialDriverMap& partialDrivers) {
+    for (const auto& [targetName, state] : partialDrivers) {
+        validatePartialTargetFullyDriven(targetName, state);
+    }
+}
+
 static bool partialStatesEqual(const PartialTargetState& lhs, const PartialTargetState& rhs) {
     auto sameLoc = [](const std::optional<SourceLoc>& a, const std::optional<SourceLoc>& b) {
         if (a.has_value() != b.has_value()) return false;
@@ -8974,6 +9038,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
     }
 
+    validatePartialTargetsFullyDriven(resCtx.partial_drivers);
     rebuildModuleNodeIndexRecursively(resolved);
     return resolved;
 }

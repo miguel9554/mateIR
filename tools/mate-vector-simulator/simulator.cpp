@@ -14,6 +14,7 @@
 #include <queue>
 #include <random>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -365,7 +366,7 @@ SyncInputTransition Simulator::collectClockSyncInputTransition(ClockId active_cl
                 "Simulator: sync input '{}' has no runtime handle", name));
         }
         const auto& data = sync_input_data_[name];
-        transition.before.push_back(RuntimeInputUpdate{
+        transition.before_edge.push_back(RuntimeInputUpdate{
             .input = input->id,
             .value = data[pos],
         });
@@ -373,7 +374,7 @@ SyncInputTransition Simulator::collectClockSyncInputTransition(ClockId active_cl
         if (pos + 1 < data.size()) {
             pos++;
         }
-        transition.after.push_back(RuntimeInputUpdate{
+        transition.after_edge.push_back(RuntimeInputUpdate{
             .input = input->id,
             .value = data[pos],
         });
@@ -794,8 +795,10 @@ void Simulator::run() {
                     }
                     runtime_trace_time_ns_ = batch_time;
                     runtime_->applyClockEdge(clock_id, *edge,
-                                             sync_transition.before,
-                                             sync_transition.after);
+                                             sync_transition.before_edge);
+                    if (!sync_transition.after_edge.empty()) {
+                        runtime_->setInputValues(sync_transition.after_edge);
+                    }
                 }
                 continue;
             }
@@ -814,7 +817,7 @@ void Simulator::run() {
                     "Simulator: input '{}' cannot be driven as a plain async signal",
                     leaf_name));
             }
-            runtime_->applyAsyncSignalEdge(update.input, update.value);
+            runtime_->setInputValues(std::span<const RuntimeInputUpdate>(&update, 1));
         }
         emitPassiveTraceEvents(batch_time);
 

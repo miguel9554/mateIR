@@ -82,10 +82,13 @@ void initializeInstance(DpiInstanceContext& context,
                         std::span<const RuntimeInputUpdate> async_inputs,
                         std::span<const RuntimeInputUpdate> sync_inputs);
 
+void setInputValues(DpiInstanceContext& context,
+                    std::span<const RuntimeInputUpdate> inputs);
+
 void applyClockEdge(DpiInstanceContext& context,
                     const DpiInputBinding& clock,
                     edge_t edge,
-                    std::span<const RuntimeInputUpdate> sync_inputs);
+                    std::span<const RuntimeInputUpdate> inputs_before_edge);
 
 void applyResetEdge(DpiInstanceContext& context,
                     const DpiInputBinding& reset,

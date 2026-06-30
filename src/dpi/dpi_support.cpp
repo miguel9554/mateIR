@@ -216,15 +216,20 @@ void initializeInstance(DpiInstanceContext& context,
     context.runtime().initializeInputsAndEvaluate(async_inputs, sync_inputs);
 }
 
+void setInputValues(DpiInstanceContext& context,
+                    std::span<const RuntimeInputUpdate> inputs) {
+    context.runtime().setInputValues(inputs);
+}
+
 void applyClockEdge(DpiInstanceContext& context,
                     const DpiInputBinding& clock,
                     edge_t edge,
-                    std::span<const RuntimeInputUpdate> sync_inputs) {
+                    std::span<const RuntimeInputUpdate> inputs_before_edge) {
     if (clock.kind != RuntimeInputKind::Clock || !clock.clock_domain.has_value()) {
         throw CompilerError(std::format(
             "DPI support: input '{}' is not a bound clock", clock.leaf_name));
     }
-    context.runtime().applyClockEdge(*clock.clock_domain, edge, sync_inputs, sync_inputs);
+    context.runtime().applyClockEdge(*clock.clock_domain, edge, inputs_before_edge);
 }
 
 void applyResetEdge(DpiInstanceContext& context,

@@ -442,6 +442,23 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    });\n";
     out << "}\n\n";
 
+    emitFunctionHeader("set_input_values", ports.sync_inputs, true);
+    out << " {\n";
+    out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_set_input_values\", [&]() {\n";
+    out << "        auto& context = checkedContext(context_handle);\n";
+    out << "        std::vector<mate::RuntimeInputUpdate> inputs;\n";
+    out << "        inputs.reserve(" << ports.sync_inputs.size() << ");\n";
+    for (size_t index : ports.sync_inputs) {
+        const auto& input = ports.inputs.at(index);
+        out << "        inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
+    }
+    out << "        mate::dpi::setInputValues(context.instance, inputs);\n";
+    out << "        writeOutputs(context";
+    for (const auto& output : ports.outputs) out << ", " << output.name;
+    out << ");\n";
+    out << "    });\n";
+    out << "}\n\n";
+
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs.at(clock_index);
         const auto runtime_clock = std::find_if(
@@ -544,6 +561,12 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     emitSvImportArgs(out, all_inputs, ports.outputs);
     out << "    );\n\n";
 
+    std::vector<const Port*> sync_inputs;
+    for (size_t index : ports.sync_inputs) sync_inputs.push_back(&ports.inputs.at(index));
+    out << "    import \"DPI-C\" function void " << config.function_prefix << "_set_input_values(\n";
+    emitSvImportArgs(out, sync_inputs, ports.outputs);
+    out << "    );\n\n";
+
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs.at(clock_index);
         const auto runtime_clock = std::find_if(
@@ -632,6 +655,25 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     out << "            " << config.function_prefix << "_destroy(ctx);\n";
     out << "        end\n";
     out << "    end\n\n";
+    if (!ports.sync_inputs.empty()) {
+        out << "    always @(";
+        for (size_t i = 0; i < ports.sync_inputs.size(); ++i) {
+            if (i) out << " or ";
+            out << ports.inputs.at(ports.sync_inputs.at(i)).name;
+        }
+        out << ") begin\n";
+        out << "        if (initialized) begin\n";
+        out << "            " << config.function_prefix << "_set_input_values(\n";
+        std::vector<const Port*> event_inputs;
+        for (size_t index : ports.sync_inputs) event_inputs.push_back(&ports.inputs.at(index));
+        emitSvCallArgs(out, event_inputs, ports.outputs);
+        out << "            );\n";
+        for (const auto& output : ports.outputs) {
+            out << "            " << output.name << " = next_" << output.name << ";\n";
+        }
+        out << "        end\n";
+        out << "    end\n\n";
+    }
     out << "    always @(";
     bool first_event = true;
     for (size_t index : ports.clocks) {

@@ -38,8 +38,8 @@ struct AsyncEvent {
 };
 
 struct SyncInputTransition {
-    std::vector<RuntimeInputUpdate> before;
-    std::vector<RuntimeInputUpdate> after;
+    std::vector<RuntimeInputUpdate> before_edge;
+    std::vector<RuntimeInputUpdate> after_edge;
 };
 
 class Simulator {

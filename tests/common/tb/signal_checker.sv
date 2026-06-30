@@ -17,6 +17,9 @@ module signal_checker
     end
 
     final begin
-        $display("[%0t]   %s: pass=%0d fail=%0d", $realtime, NAME, pass_count, fail_count);
+        string status;
+
+        status = (fail_count == 0) ? green("PASS") : red("FAIL");
+        $display("[%0t]   %s: %s pass=%0d fail=%0d", $realtime, NAME, status, pass_count, fail_count);
     end
 endmodule

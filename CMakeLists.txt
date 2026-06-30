@@ -220,7 +220,7 @@ mate_configure_project_target(mate-vector-simulator)
 
 add_executable(mate-dpi-codegen tools/mate-dpi-codegen/main.cpp)
 target_include_directories(mate-dpi-codegen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mate-dpi-codegen PRIVATE mate-rtl-runtime-compiler)
+target_link_libraries(mate-dpi-codegen PRIVATE mate-rtl-runtime-compiler slang::slang)
 mate_configure_project_target(mate-dpi-codegen)
 
 # Print build configuration

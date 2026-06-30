@@ -1,7 +1,10 @@
 #include "frontends/systemverilog/systemverilog_frontend.h"
+#include "frontends/systemverilog/passes/extractor.h"
 #include "mateir/module.h"
 #include "sim/runtime_compiler.h"
 #include "util/source_loc.h"
+
+#include "slang/syntax/SyntaxTree.h"
 
 #include <algorithm>
 #include <cctype>
@@ -11,11 +14,13 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <span>
 #include <vector>
 
 using namespace mate;
@@ -25,6 +30,7 @@ namespace {
 struct Port {
     std::string name;
     Type type;
+    std::optional<std::string> sv_type_name;
     RuntimeInputKind input_kind = RuntimeInputKind::Async;
     std::optional<ClockId> clock_domain;
     std::optional<ResetId> reset_domain;
@@ -47,6 +53,10 @@ struct Config {
     std::filesystem::path out_dir;
     std::string module_name;
     std::string function_prefix;
+};
+
+struct SvSurfaceFacts {
+    std::map<std::string, std::string> port_type_names;
 };
 
 [[noreturn]] void usage(const char* prog) {
@@ -154,17 +164,182 @@ std::string cppString(std::string_view text) {
     return out;
 }
 
+std::shared_ptr<slang::syntax::SyntaxTree> loadSyntaxTree(const std::vector<std::string>& sources) {
+    if (sources.empty()) {
+        throw CompilerError("mate-dpi-codegen: no source files provided");
+    }
+
+    if (sources.size() == 1) {
+        auto tree_result = slang::syntax::SyntaxTree::fromFile(sources.front());
+        if (!tree_result) {
+            throw CompilerError("mate-dpi-codegen: failed to load source file: " + sources.front());
+        }
+        return std::move(tree_result).value();
+    }
+
+    std::vector<std::string_view> paths(sources.begin(), sources.end());
+    auto tree_result =
+        slang::syntax::SyntaxTree::fromFiles(std::span<const std::string_view>(paths));
+    if (!tree_result) {
+        throw CompilerError("mate-dpi-codegen: failed to load source files");
+    }
+    return std::move(tree_result).value();
+}
+
+bool packageDefinesType(const UnresolvedPackage& package, std::string_view type_name) {
+    const auto matches = [&](const UnresolvedTypedef& td) {
+        return td.name == type_name;
+    };
+    return std::any_of(package.enumTypedefs.begin(), package.enumTypedefs.end(), matches) ||
+           std::any_of(package.structTypedefs.begin(), package.structTypedefs.end(), matches);
+}
+
+std::optional<std::string> resolveImportedTypeName(
+    std::string_view type_name,
+    const std::vector<ImportSpec>& global_imports,
+    const std::vector<ImportSpec>& header_imports,
+    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages) {
+
+    auto find_package = [&](std::string_view package_name) -> const UnresolvedPackage* {
+        for (const auto& package : packages) {
+            if (package->name == package_name) return package.get();
+        }
+        return nullptr;
+    };
+
+    std::vector<std::string> candidates;
+    auto consider_imports = [&](const std::vector<ImportSpec>& imports) {
+        for (const auto& spec : imports) {
+            if (spec.item && *spec.item != type_name) continue;
+            const auto* package = find_package(spec.package_name);
+            if (!package) {
+                throw CompilerError("mate-dpi-codegen: unknown package import '" +
+                                    spec.package_name + "'");
+            }
+            if (!packageDefinesType(*package, type_name)) continue;
+            const std::string qualified = spec.package_name + "::" + std::string(type_name);
+            if (std::find(candidates.begin(), candidates.end(), qualified) == candidates.end()) {
+                candidates.push_back(qualified);
+            }
+        }
+    };
+
+    consider_imports(global_imports);
+    consider_imports(header_imports);
+
+    if (candidates.empty()) return std::nullopt;
+    if (candidates.size() > 1) {
+        std::ostringstream msg;
+        msg << "mate-dpi-codegen: type '" << type_name
+            << "' is imported from multiple packages:";
+        for (const auto& candidate : candidates) msg << " " << candidate;
+        throw CompilerError(msg.str());
+    }
+    return candidates.front();
+}
+
+std::optional<std::string> externalTypeNameForPort(
+    const UnresolvedSignal& signal,
+    const std::vector<ImportSpec>& global_imports,
+    const std::vector<ImportSpec>& header_imports,
+    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages) {
+
+    if (!signal.type.syntax || signal.type.syntax->kind != slang::syntax::SyntaxKind::NamedType) {
+        return std::nullopt;
+    }
+
+    const auto& named = signal.type.syntax->as<slang::syntax::NamedTypeSyntax>();
+    if (named.name->kind == slang::syntax::SyntaxKind::ScopedName) {
+        const auto& scoped = named.name->as<slang::syntax::ScopedNameSyntax>();
+        if (scoped.left->kind != slang::syntax::SyntaxKind::IdentifierName ||
+            scoped.right->kind != slang::syntax::SyntaxKind::IdentifierName) {
+            return std::nullopt;
+        }
+        const std::string package_name(
+            scoped.left->as<slang::syntax::IdentifierNameSyntax>().identifier.valueText());
+        const std::string type_name(
+            scoped.right->as<slang::syntax::IdentifierNameSyntax>().identifier.valueText());
+        return package_name + "::" + type_name;
+    }
+
+    if (named.name->kind != slang::syntax::SyntaxKind::IdentifierName) {
+        return std::nullopt;
+    }
+    const std::string type_name(
+        named.name->as<slang::syntax::IdentifierNameSyntax>().identifier.valueText());
+    return resolveImportedTypeName(type_name, global_imports, header_imports, packages);
+}
+
+SvSurfaceFacts collectSvSurfaceFacts(const Config& config) {
+    auto tree = loadSyntaxTree(config.sources);
+    auto& diagnostics = tree->diagnostics();
+    for (const auto& diag : diagnostics) {
+        if (diag.isError()) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: syntax errors found while extracting SV surface facts: {} diagnostic(s)",
+                diagnostics.size()));
+        }
+    }
+
+    ExtractedIR extracted = buildIR(*tree);
+    const UnresolvedModule* top = nullptr;
+    for (const auto& module : extracted.modules) {
+        if (module->name == config.top_module) {
+            top = module.get();
+            break;
+        }
+    }
+    if (!top) {
+        throw CompilerError("mate-dpi-codegen: top module '" + config.top_module +
+                            "' not found while extracting SV surface facts");
+    }
+
+    SvSurfaceFacts facts;
+    auto collect = [&](const std::vector<UnresolvedSignal>& signals) {
+        for (const auto& signal : signals) {
+            if (auto external_name = externalTypeNameForPort(
+                    signal, extracted.globalImports, top->headerImports, extracted.packages)) {
+                facts.port_type_names[signal.name] = *external_name;
+            }
+        }
+    };
+    collect(top->inputs);
+    collect(top->outputs);
+    return facts;
+}
+
 std::string svRange(const Type& type) {
     if (type.width == 1) return "";
     return std::format("[{}:0] ", type.width - 1);
 }
 
 std::string svPortDecl(std::string_view direction, const Port& port) {
+    if (port.sv_type_name) {
+        return std::format("    {} {} {}", direction, *port.sv_type_name, port.name);
+    }
     return std::format("    {} logic {}{}", direction, svRange(port.type), port.name);
 }
 
 std::string svImportArg(std::string_view direction, const Port& port, std::string_view name) {
     return std::format("        {} logic {}{}", direction, svRange(port.type), name);
+}
+
+std::string svDpiInputWireName(const Port& port) {
+    return "dpi_" + port.name;
+}
+
+std::string svDpiInputSignal(const Port& port) {
+    if (!port.sv_type_name) return port.name;
+    return svDpiInputWireName(port);
+}
+
+std::string svDpiInputExpr(const Port& port) {
+    return svDpiInputSignal(port);
+}
+
+std::string svPublicOutputExpr(const Port& port, std::string_view value) {
+    if (!port.sv_type_name) return std::string(value);
+    return std::format("{}'({})", *port.sv_type_name, value);
 }
 
 std::string cppDpiType(const Type& type, bool output) {
@@ -202,25 +377,37 @@ std::string kindName(RuntimeInputKind kind) {
     throw CompilerError("mate-dpi-codegen: unknown runtime input kind");
 }
 
-void validatePackedScalarPort(const ModuleNode& node) {
+void validatePackedIntegralPort(const ModuleNode& node) {
     if (node.type.isAggregate() || node.binding.aggregate_leaves.size() != 1) {
         throw CompilerError(std::format(
             "mate-dpi-codegen: top port '{}' is not a supported single packed scalar/vector leaf",
             node.name));
     }
-    if (node.type.kind != TypeKind::Integer || node.type.width <= 0) {
+    if ((node.type.kind != TypeKind::Integer && node.type.kind != TypeKind::Enum) ||
+        node.type.width <= 0) {
         throw CompilerError(std::format(
             "mate-dpi-codegen: top port '{}' has unsupported type", node.name));
     }
 }
 
-ModelPorts collectPorts(const RtlRuntimeModel& model) {
+std::optional<std::string> svTypeNameForPort(const SvSurfaceFacts& facts, const ModuleNode& node) {
+    if (node.type.kind != TypeKind::Enum) return std::nullopt;
+    auto it = facts.port_type_names.find(node.name);
+    if (it == facts.port_type_names.end()) {
+        throw CompilerError(std::format(
+            "mate-dpi-codegen: enum top port '{}' has no externally referenceable SystemVerilog type",
+            node.name));
+    }
+    return it->second;
+}
+
+ModelPorts collectPorts(const RtlRuntimeModel& model, const SvSurfaceFacts& sv_facts) {
     ModelPorts ports;
     const auto& top = model.top();
     const auto& metadata = model.metadata();
 
     forEachInputNode(top, [&](const ModuleNode& node) {
-        validatePackedScalarPort(node);
+        validatePackedIntegralPort(node);
         const auto& leaf = node.binding.aggregate_leaves.front();
         const auto* input = metadata.findInput(leaf.name);
         if (!input) {
@@ -239,6 +426,7 @@ ModelPorts collectPorts(const RtlRuntimeModel& model) {
         ports.inputs.push_back(Port{
             .name = node.name,
             .type = node.type,
+            .sv_type_name = svTypeNameForPort(sv_facts, node),
             .input_kind = input->kind,
             .clock_domain = input->clock_domain,
             .reset_domain = input->reset_domain,
@@ -250,7 +438,7 @@ ModelPorts collectPorts(const RtlRuntimeModel& model) {
     });
 
     forEachOutputNode(top, [&](const ModuleNode& node) {
-        validatePackedScalarPort(node);
+        validatePackedIntegralPort(node);
         const auto& leaf = node.binding.aggregate_leaves.front();
         const auto* output = metadata.findOutput(leaf.name);
         if (!output) {
@@ -268,6 +456,7 @@ ModelPorts collectPorts(const RtlRuntimeModel& model) {
         ports.outputs.push_back(Port{
             .name = node.name,
             .type = node.type,
+            .sv_type_name = svTypeNameForPort(sv_facts, node),
             .input_kind = RuntimeInputKind::Async,
             .clock_domain = std::nullopt,
             .reset_domain = std::nullopt,
@@ -553,7 +742,7 @@ void emitSvCallArgs(std::ostringstream& out,
                     const std::vector<const Port*>& inputs,
                     const std::vector<Port>& outputs) {
     out << "                        ctx";
-    for (const auto* input : inputs) out << ",\n                        " << input->name;
+    for (const auto* input : inputs) out << ",\n                        " << svDpiInputExpr(*input);
     for (const auto& output : outputs) out << ",\n                        next_" << output.name;
     out << "\n";
 }
@@ -635,6 +824,11 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     for (const auto& output : ports.outputs) {
         out << "    logic " << svRange(output.type) << "next_" << output.name << ";\n";
     }
+    for (const auto& input : ports.inputs) {
+        if (!input.sv_type_name) continue;
+        out << "    logic " << svRange(input.type) << svDpiInputWireName(input) << ";\n";
+        out << "    assign " << svDpiInputWireName(input) << " = " << input.name << ";\n";
+    }
     out << "\n";
 
     out << "    chandle ctx;\n";
@@ -660,7 +854,8 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     emitSvCallArgs(out, all_inputs, ports.outputs);
     out << "        );\n";
     for (const auto& output : ports.outputs) {
-        out << "        " << output.name << " = next_" << output.name << ";\n";
+        out << "        " << output.name << " = "
+            << svPublicOutputExpr(output, "next_" + output.name) << ";\n";
     }
     out << "        initialized = 1'b1;\n";
     out << "    end\n\n";
@@ -688,7 +883,8 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         emitSvCallArgs(out, event_inputs, ports.outputs);
         out << "            );\n";
         for (const auto& output : ports.outputs) {
-            out << "            " << output.name << " = next_" << output.name << ";\n";
+            out << "            " << output.name << " = "
+                << svPublicOutputExpr(output, "next_" + output.name) << ";\n";
         }
         out << "        end\n";
         out << "    end\n\n";
@@ -753,7 +949,8 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
 
     auto emitCommitOutputs = [&]() {
         for (const auto& output : ports.outputs) {
-            out << "                " << output.name << " <= next_" << output.name << ";\n";
+            out << "                " << output.name << " <= "
+                << svPublicOutputExpr(output, "next_" + output.name) << ";\n";
         }
     };
 
@@ -842,7 +1039,8 @@ int main(int argc, char** argv) {
 
         SystemVerilogFrontend frontend;
         RtlRuntimeModel model = compileRtlRuntimeModel(frontend, options);
-        ModelPorts ports = collectPorts(model);
+        SvSurfaceFacts sv_facts = collectSvSurfaceFacts(config);
+        ModelPorts ports = collectPorts(model, sv_facts);
 
         std::filesystem::create_directories(config.out_dir);
         writeFile(config.out_dir / (config.module_name + ".cpp"), makeCpp(config, ports, model));

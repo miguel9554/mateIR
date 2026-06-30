@@ -259,6 +259,27 @@ def port_type_str(port: Port, use_resolved: bool = False) -> str:
     return ' '.join(parts)
 
 
+def single_unpacked_indices(unpacked_dims: str) -> list[int]:
+    """Return declaration-order indices for a simple one-dimensional unpacked range."""
+    if not unpacked_dims or unpacked_dims.count('[') != 1:
+        return []
+    text = unpacked_dims.strip()
+    if not text.startswith('[') or not text.endswith(']'):
+        return []
+    body = text[1:-1].strip()
+    if ':' in body:
+        left_text, right_text = [part.strip() for part in body.split(':', 1)]
+        if not re.fullmatch(r'-?\d+', left_text) or not re.fullmatch(r'-?\d+', right_text):
+            return []
+        left = int(left_text)
+        right = int(right_text)
+        step = 1 if left <= right else -1
+        return list(range(left, right + step, step))
+    if not re.fullmatch(r'\d+', body):
+        return []
+    return list(range(int(body)))
+
+
 @dataclass
 class DomainConfig:
     module_name: str
@@ -550,7 +571,13 @@ def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
         if port.direction != 'output':
             continue
         if port.unpacked_dims:
-            continue  # unpacked array outputs not supported
+            indices = single_unpacked_indices(port.unpacked_dims)
+            if not indices or port.struct_leaves:
+                continue
+            type_str = port_type_str(port, use_resolved=True)
+            for index in indices:
+                entries.append((port, f'[{index}]', type_str))
+            continue
         if port.struct_leaves:
             for leaf_name, leaf_type in port.struct_leaves:
                 entries.append((port, leaf_name, leaf_type))
@@ -574,8 +601,17 @@ def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
 
     for i, (port, leaf_name, leaf_type) in enumerate(entries):
         if leaf_name is not None:
-            leaf_suffix = leaf_name.replace('.', '_')
-            sig_name = f'{port.name}.{leaf_name}'
+            leaf_suffix = (
+                leaf_name.replace('.', '_')
+                .replace('[', '_')
+                .replace(']', '')
+                .replace(':', '_')
+                .strip('_')
+            )
+            if leaf_name.startswith('['):
+                sig_name = f'{port.name}{leaf_name}'
+            else:
+                sig_name = f'{port.name}.{leaf_name}'
             inst = f'u_{port.name}_{leaf_suffix}'
             type_str = leaf_type
         else:

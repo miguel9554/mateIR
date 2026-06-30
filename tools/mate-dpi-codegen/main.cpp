@@ -329,11 +329,21 @@ std::string svRange(const Type& type) {
     return std::format("[{}:0] ", type.width - 1);
 }
 
+std::string svUnpackedDims(const Type& type) {
+    std::ostringstream out;
+    for (const auto& dim : type.unpacked_dims) {
+        out << " [" << dim.left << ":" << dim.right << "]";
+    }
+    return out.str();
+}
+
 std::string svPortDecl(std::string_view direction, const Port& port) {
     if (port.sv_type_name) {
-        return std::format("    {} {} {}", direction, *port.sv_type_name, port.name);
+        return std::format("    {} {} {}{}", direction, *port.sv_type_name, port.name,
+                           svUnpackedDims(port.type));
     }
-    return std::format("    {} logic {}{}", direction, svRange(port.type), port.name);
+    return std::format("    {} logic {}{}{}", direction, svRange(port.type), port.name,
+                       svUnpackedDims(port.type));
 }
 
 std::string leafIdentifier(std::string_view leaf_name) {

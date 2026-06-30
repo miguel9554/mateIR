@@ -576,9 +576,6 @@ ModelPorts collectPorts(const RtlRuntimeModel& model, const SvSurfaceFacts& sv_f
     if (ports.clocks.empty()) {
         throw CompilerError("mate-dpi-codegen: supported DPI shape requires at least one clock input");
     }
-    if (ports.resets.empty()) {
-        throw CompilerError("mate-dpi-codegen: supported DPI shape requires at least one reset input");
-    }
     return ports;
 }
 
@@ -1103,22 +1100,6 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         out << "            if (" << reset.name << "_changed) last_" << reset.name << " = " << reset.name << ";\n";
     }
     out << "        end else begin\n";
-    out << "            if (";
-    bool any_pair = false;
-    std::vector<std::string> changed_names;
-    for (size_t index : ports.clocks) changed_names.push_back(ports.inputs.at(index).name + "_changed");
-    for (size_t index : ports.resets) changed_names.push_back(ports.inputs.at(index).name + "_changed");
-    for (size_t i = 0; i < changed_names.size(); ++i) {
-        for (size_t j = i + 1; j < changed_names.size(); ++j) {
-            if (any_pair) out << " || ";
-            any_pair = true;
-            out << "(" << changed_names[i] << " && " << changed_names[j] << ")";
-        }
-    }
-    out << ") begin\n";
-    out << "                $fatal(1, \"" << config.module_name
-        << " does not support multiple clock/reset changes in the same delta cycle\");\n";
-    out << "            end\n\n";
 
     auto emitCommitOutputs = [&]() {
         for (LeafIndex index : output_leaves) {

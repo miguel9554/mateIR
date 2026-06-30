@@ -86,6 +86,7 @@ $(OUT): $(GEN_DIR)/tb.sv $(GEN_CPP) $(MATE_LIBS) | prep
 	verilator --trace --timing --cc --exe --build --main \
 		$(VERILATOR_WARNS) \
 		--top-module $(TOP_MODULE) \
+		-I$(RTL_DIR) \
 		-CFLAGS '$(MATE_CPPFLAGS)' \
 		-LDFLAGS '$(MATE_LIBS)' \
 		$(SRCS) \

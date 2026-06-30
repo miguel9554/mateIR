@@ -7,6 +7,7 @@
 apb_gpio PASS
 array_indexing PASS
 dynamic_lhs_bitselect PASS
+dpi_unpacked_array_ports PASS
 body_import_header_leak_fail FAIL Parameter 'WIDTH' not found in context
 axi_spi_slave PASS
 cdc_sidecar_async_sync_pass PASS

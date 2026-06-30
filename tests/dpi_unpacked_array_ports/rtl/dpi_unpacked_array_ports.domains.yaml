@@ -1,0 +1,12 @@
+module_name: dpi_unpacked_array_ports
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - data_i
+    - flag_i

@@ -25,18 +25,26 @@ module uut_tb (
 
     end
 
-    int seed = 67;
+    logic [31:0] lfsr;
 
-    initial $urandom(seed);
+    initial begin
+        lfsr = 32'd67;
+    end
 
     always @(posedge _if.clk) begin
-        _if.angle_in <= $urandom();
-        _if.random_val <= $urandom();
+        logic [31:0] lfsr_next;
+
+        lfsr_next = tb_pkg::next_lfsr(lfsr);
+        _if.angle_in <= lfsr_next[15:0];
+
+        lfsr_next = tb_pkg::next_lfsr(lfsr_next);
+        _if.random_val <= lfsr_next[15:0];
+
+        lfsr <= lfsr_next;
     end
 
     // Testbench procedure
     always @(posedge _if.clk) begin
-        // _if.angle_in <= $urandom(seed);
         // Initialize signals
         @(posedge _if.clk) begin
             _if.start    <= 0;

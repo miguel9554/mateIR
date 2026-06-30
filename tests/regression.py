@@ -3,6 +3,7 @@
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,9 @@ MODULE_NODE_API_GUARD = TESTS_DIR / "check_module_node_api_surface.py"
 GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"
+
+RUN_MODE_VALIDATE = "validate"
+RUN_MODE_VERILATOR_DPI = "verilator-dpi"
 
 
 def load_test_cases():
@@ -84,6 +88,36 @@ def load_test_cases():
     return cases
 
 
+def filter_cases_by_name(cases, names):
+    """Filter cases to the requested test names."""
+    if not names:
+        return cases
+
+    requested = set(names)
+    selected = [case for case in cases if case["name"] in requested]
+    found = {case["name"] for case in selected}
+    missing = sorted(requested - found)
+    if missing:
+        raise RuntimeError(f"unknown test name(s): {', '.join(missing)}")
+    return selected
+
+
+def select_cases_for_mode(cases, run_mode):
+    """Return the cases that can be run by the requested mode."""
+    if run_mode == RUN_MODE_VALIDATE:
+        return cases
+    if run_mode != RUN_MODE_VERILATOR_DPI:
+        raise RuntimeError(f"unknown run mode '{run_mode}'")
+    return cases
+
+
+def docker_run_prefix():
+    """Return the wrapper prefix needed to run a command in the canonical environment."""
+    if Path("/.dockerenv").exists() or shutil.which("docker") is None:
+        return []
+    return ["scripts/docker-run.sh"]
+
+
 def run_clean(name):
     """Run make clean for a test case. Returns nothing."""
     work_dir = TESTS_DIR / name / "work" / "validate"
@@ -129,10 +163,35 @@ def run_validate(name, build_target):
     return result.returncode == 0, output
 
 
+def run_verilator_dpi(name):
+    """Run a PASS test through the Verilator DPI simulation recipe."""
+    result = subprocess.run(
+        docker_run_prefix()
+        + [
+            "make",
+            "-C",
+            f"tests/{name}/work/verilator/",
+            "clean",
+            "simulate",
+            "DPI=1",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+    return result.returncode == 0, output
+
+
+def has_verilator_dpi_recipe(name):
+    """Return whether the test has a Verilator makefile for DPI simulation."""
+    return (TESTS_DIR / name / "work" / "verilator" / "Makefile").exists()
+
+
 def ensure_simulator(build_target):
     """Build the requested simulator before running tests."""
     result = subprocess.run(
-        ["make", "-C", str(REPO_ROOT), build_target],
+        docker_run_prefix() + ["make", "-C", str(REPO_ROOT), build_target],
         capture_output=True,
         text=True,
     )
@@ -202,12 +261,20 @@ def run_expected_failure(name, expected, simulator):
     return ok, output
 
 
-def run_case(case, build_target, simulator):
+def run_case(case, build_target, simulator, run_mode):
     """Run a single test case. Returns (name, ok, output)."""
     name = case["name"]
     if case["kind"] == "validate":
         # run_clean(name)
-        ok, output = run_validate(name, build_target)
+        if run_mode == RUN_MODE_VALIDATE:
+            ok, output = run_validate(name, build_target)
+        elif run_mode == RUN_MODE_VERILATOR_DPI:
+            if has_verilator_dpi_recipe(name):
+                ok, output = run_verilator_dpi(name)
+            else:
+                ok, output = run_validate(name, build_target)
+        else:
+            raise RuntimeError(f"unknown run mode '{run_mode}'")
     else:
         ok, output = run_expected_failure(name, case["expected_error"], simulator)
     return name, ok, output
@@ -228,11 +295,33 @@ def main():
         default="dev",
         help="Build preset to use for mate and helper tools (default: dev)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=(RUN_MODE_VALIDATE, RUN_MODE_VERILATOR_DPI),
+        default=RUN_MODE_VALIDATE,
+        help=(
+            "Per-PASS-test command mode. 'validate' runs the validate target; "
+            "'verilator-dpi' runs scripts/docker-run.sh make -C "
+            "tests/<test>/work/verilator/ clean simulate DPI=1 (default: validate)"
+        ),
+    )
+    parser.add_argument(
+        "--test",
+        action="append",
+        dest="tests",
+        help="Run only the named manifest test. May be passed more than once.",
+    )
     args = parser.parse_args()
     simulator = REPO_ROOT / "build" / args.build / "mate"
 
     try:
         cases = load_test_cases()
+    except RuntimeError as exc:
+        print(f"{RED}{exc}{RESET}")
+        sys.exit(1)
+    try:
+        cases = filter_cases_by_name(cases, args.tests)
+        cases = select_cases_for_mode(cases, args.mode)
     except RuntimeError as exc:
         print(f"{RED}{exc}{RESET}")
         sys.exit(1)
@@ -263,6 +352,8 @@ def main():
         sys.exit(1)
 
     jobs = max(1, args.jobs)
+    if args.mode == RUN_MODE_VERILATOR_DPI:
+        jobs = 1
     print(f"Running {len(cases)} tests with {jobs} worker(s)...", flush=True)
 
     results = {}
@@ -270,7 +361,7 @@ def main():
     total = len(cases)
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
-            executor.submit(run_case, case, args.build, simulator): case
+            executor.submit(run_case, case, args.build, simulator, args.mode): case
             for case in cases
         }
         for future in as_completed(futures):

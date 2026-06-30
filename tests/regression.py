@@ -3,7 +3,6 @@
 import argparse
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -108,14 +107,12 @@ def select_cases_for_mode(cases, run_mode):
         return cases
     if run_mode != RUN_MODE_VERILATOR_DPI:
         raise RuntimeError(f"unknown run mode '{run_mode}'")
-    return cases
-
-
-def docker_run_prefix():
-    """Return the wrapper prefix needed to run a command in the canonical environment."""
-    if Path("/.dockerenv").exists() or shutil.which("docker") is None:
-        return []
-    return ["scripts/docker-run.sh"]
+    return [
+        case
+        for case in cases
+        if case["kind"] != "validate"
+        or (TESTS_DIR / case["name"] / "work" / "verilator").is_dir()
+    ]
 
 
 def run_clean(name):
@@ -129,8 +126,19 @@ def run_clean(name):
     )
 
 
-def run_validate(name, build_target):
+def run_validate(name, build_target, run_mode):
     """Run a PASS test's specialized script or default validation recipe."""
+    if run_mode == RUN_MODE_VERILATOR_DPI:
+        work_dir = TESTS_DIR / name / "work" / "verilator"
+        result = subprocess.run(
+            ["make", "simulate", "DPI=1", "DPI_BUILD_TARGET=noop"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+        )
+        output = result.stdout + result.stderr
+        return result.returncode == 0, output
+
     static_work_dir = TESTS_DIR / name / "work" / "static"
     regression_script = static_work_dir / "regression.sh"
     if regression_script.exists():
@@ -163,35 +171,10 @@ def run_validate(name, build_target):
     return result.returncode == 0, output
 
 
-def run_verilator_dpi(name):
-    """Run a PASS test through the Verilator DPI simulation recipe."""
-    result = subprocess.run(
-        docker_run_prefix()
-        + [
-            "make",
-            "-C",
-            f"tests/{name}/work/verilator/",
-            "clean",
-            "simulate",
-            "DPI=1",
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    output = result.stdout + result.stderr
-    return result.returncode == 0, output
-
-
-def has_verilator_dpi_recipe(name):
-    """Return whether the test has a Verilator makefile for DPI simulation."""
-    return (TESTS_DIR / name / "work" / "verilator" / "Makefile").exists()
-
-
 def ensure_simulator(build_target):
     """Build the requested simulator before running tests."""
     result = subprocess.run(
-        docker_run_prefix() + ["make", "-C", str(REPO_ROOT), build_target],
+        ["make", "-C", str(REPO_ROOT), build_target],
         capture_output=True,
         text=True,
     )
@@ -266,15 +249,9 @@ def run_case(case, build_target, simulator, run_mode):
     name = case["name"]
     if case["kind"] == "validate":
         # run_clean(name)
-        if run_mode == RUN_MODE_VALIDATE:
-            ok, output = run_validate(name, build_target)
-        elif run_mode == RUN_MODE_VERILATOR_DPI:
-            if has_verilator_dpi_recipe(name):
-                ok, output = run_verilator_dpi(name)
-            else:
-                ok, output = run_validate(name, build_target)
-        else:
+        if run_mode not in {RUN_MODE_VALIDATE, RUN_MODE_VERILATOR_DPI}:
             raise RuntimeError(f"unknown run mode '{run_mode}'")
+        ok, output = run_validate(name, build_target, run_mode)
     else:
         ok, output = run_expected_failure(name, case["expected_error"], simulator)
     return name, ok, output
@@ -301,8 +278,8 @@ def main():
         default=RUN_MODE_VALIDATE,
         help=(
             "Per-PASS-test command mode. 'validate' runs the validate target; "
-            "'verilator-dpi' runs scripts/docker-run.sh make -C "
-            "tests/<test>/work/verilator/ clean simulate DPI=1 (default: validate)"
+            "'verilator-dpi' runs make simulate DPI=1 in "
+            "tests/<test>/work/verilator/ (default: validate)"
         ),
     )
     parser.add_argument(
@@ -352,8 +329,6 @@ def main():
         sys.exit(1)
 
     jobs = max(1, args.jobs)
-    if args.mode == RUN_MODE_VERILATOR_DPI:
-        jobs = 1
     print(f"Running {len(cases)} tests with {jobs} worker(s)...", flush=True)
 
     results = {}

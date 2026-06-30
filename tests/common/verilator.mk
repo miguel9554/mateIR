@@ -32,6 +32,7 @@ DPI ?= 0
 ifeq ($(DPI),1)
 
 BUILD_DIR   = $(PROJECT_ROOT)/build/dev
+DPI_BUILD_TARGET ?= dev
 DPI_GEN_DIR = $(RTL_GEN_DIR)
 GEN_SV_PKG  = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi_pkg.sv
 GEN_SV      = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi.sv
@@ -60,12 +61,14 @@ $(info TB_SRCS=$(TB_SRCS))
 $(info GEN_SRCS=$(GEN_SRCS))
 
 prep: force
-	$(MAKE) -C $(PROJECT_ROOT) dev
+	@if [ "$(DPI_BUILD_TARGET)" != "noop" ]; then \
+		$(MAKE) -C $(PROJECT_ROOT) $(DPI_BUILD_TARGET); \
+	fi
 
 $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv: $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi $(MODULE_NAME)
 
-$(GEN_STAMP): prep $(RTL_SRCS) $(DOMAINS_YAML)
+$(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) | prep
 	mkdir -p $(DPI_GEN_DIR)
 	$(BUILD_DIR)/mate-dpi-codegen \
 		--top $(MODULE_NAME) \
@@ -78,7 +81,7 @@ $(GEN_STAMP): prep $(RTL_SRCS) $(DOMAINS_YAML)
 
 $(GEN_SV_PKG) $(GEN_SV) $(GEN_CPP): $(GEN_STAMP)
 
-$(OUT): prep $(GEN_DIR)/tb.sv $(GEN_CPP) $(MATE_LIBS)
+$(OUT): $(GEN_DIR)/tb.sv $(GEN_CPP) $(MATE_LIBS) | prep
 	rm -rf obj_dir
 	verilator --trace --timing --cc --exe --build --main \
 		$(VERILATOR_WARNS) \

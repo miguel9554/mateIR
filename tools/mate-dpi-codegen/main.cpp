@@ -27,13 +27,29 @@ using namespace mate;
 
 namespace {
 
+struct PortLeaf {
+    std::string port_name;
+    std::string leaf_name;
+    Type type;
+    AggregatePath path;
+    RuntimeInputKind input_kind = RuntimeInputKind::Async;
+    std::optional<ClockId> clock_domain;
+    std::optional<ResetId> reset_domain;
+};
+
 struct Port {
     std::string name;
     Type type;
     std::optional<std::string> sv_type_name;
+    std::vector<PortLeaf> leaves;
     RuntimeInputKind input_kind = RuntimeInputKind::Async;
     std::optional<ClockId> clock_domain;
     std::optional<ResetId> reset_domain;
+};
+
+struct LeafIndex {
+    size_t port = 0;
+    size_t leaf = 0;
 };
 
 struct ModelPorts {
@@ -41,8 +57,8 @@ struct ModelPorts {
     std::vector<Port> outputs;
     std::vector<size_t> clocks;
     std::vector<size_t> resets;
-    std::vector<size_t> async_inputs;
-    std::vector<size_t> sync_inputs;
+    std::vector<LeafIndex> async_inputs;
+    std::vector<LeafIndex> sync_inputs;
 };
 
 struct Config {
@@ -320,26 +336,53 @@ std::string svPortDecl(std::string_view direction, const Port& port) {
     return std::format("    {} logic {}{}", direction, svRange(port.type), port.name);
 }
 
-std::string svImportArg(std::string_view direction, const Port& port, std::string_view name) {
-    return std::format("        {} logic {}{}", direction, svRange(port.type), name);
+std::string leafIdentifier(std::string_view leaf_name) {
+    return sanitizeIdentifier(leaf_name);
 }
 
-std::string svDpiInputWireName(const Port& port) {
-    return "dpi_" + port.name;
+std::string nextOutputLeafName(const PortLeaf& leaf) {
+    return "next_" + leafIdentifier(leaf.leaf_name);
 }
 
-std::string svDpiInputSignal(const Port& port) {
-    if (!port.sv_type_name) return port.name;
-    return svDpiInputWireName(port);
+std::string svPathExpr(std::string_view base, const AggregatePath& path) {
+    std::string out(base);
+    for (const auto& elem : path) {
+        if (elem.kind == AggregatePathElemKind::Field) {
+            out += "." + elem.field_name;
+        } else if (elem.kind == AggregatePathElemKind::Index) {
+            out += std::format("[{}]", elem.index);
+        } else {
+            throw CompilerError("mate-dpi-codegen: unknown aggregate path element kind");
+        }
+    }
+    return out;
 }
 
-std::string svDpiInputExpr(const Port& port) {
-    return svDpiInputSignal(port);
+std::string svInputLeafExpr(const PortLeaf& leaf) {
+    return svPathExpr(leaf.port_name, leaf.path);
 }
 
-std::string svPublicOutputExpr(const Port& port, std::string_view value) {
-    if (!port.sv_type_name) return std::string(value);
-    return std::format("{}'({})", *port.sv_type_name, value);
+std::string svOutputLeafExpr(const PortLeaf& leaf) {
+    return svPathExpr(leaf.port_name, leaf.path);
+}
+
+std::string svImportArg(std::string_view direction, const PortLeaf& leaf, std::string_view name) {
+    return std::format("        {} logic {}{}", direction, svRange(leaf.type), name);
+}
+
+std::string svDpiInputWireName(const PortLeaf& leaf) {
+    return "dpi_" + leafIdentifier(leaf.leaf_name);
+}
+
+std::string svDpiInputSignal(const Port& port, const PortLeaf& leaf) {
+    if (!port.sv_type_name) return svInputLeafExpr(leaf);
+    return svDpiInputWireName(leaf);
+}
+
+std::string svOutputLeafValueExpr(const Port& port, const PortLeaf& leaf) {
+    if (!port.sv_type_name) return nextOutputLeafName(leaf);
+    if (leaf.path.empty()) return std::format("{}'({})", *port.sv_type_name, nextOutputLeafName(leaf));
+    return nextOutputLeafName(leaf);
 }
 
 std::string cppDpiType(const Type& type, bool output) {
@@ -347,24 +390,24 @@ std::string cppDpiType(const Type& type, bool output) {
     return output ? "svLogicVecVal*" : "const svLogicVecVal*";
 }
 
-std::string inputUpdateCall(const Port& port, std::string_view argument) {
-    if (port.type.width == 1) {
+std::string inputUpdateCall(const PortLeaf& leaf, std::string_view argument) {
+    if (leaf.type.width == 1) {
         return std::format("mate::dpi::scalarInputUpdate(context.bindings.inputs.at(kInput_{}), {})",
-                           sanitizeIdentifier(port.name), argument);
+                           leafIdentifier(leaf.leaf_name), argument);
     }
     return std::format("mate::dpi::vectorInputUpdate(context.bindings.inputs.at(kInput_{}), {})",
-                       sanitizeIdentifier(port.name), argument);
+                       leafIdentifier(leaf.leaf_name), argument);
 }
 
-std::string outputWriteCall(const Port& port) {
-    if (port.type.width == 1) {
+std::string outputWriteCall(const PortLeaf& leaf) {
+    if (leaf.type.width == 1) {
         return std::format(
             "    mate::dpi::writeScalarOutput(context.instance, context.bindings.outputs.at(kOutput_{}), {});\n",
-            sanitizeIdentifier(port.name), port.name);
+            leafIdentifier(leaf.leaf_name), leafIdentifier(leaf.leaf_name));
     }
     return std::format(
         "    mate::dpi::writeVectorOutput(context.instance, context.bindings.outputs.at(kOutput_{}), {});\n",
-        sanitizeIdentifier(port.name), port.name);
+        leafIdentifier(leaf.leaf_name), leafIdentifier(leaf.leaf_name));
 }
 
 std::string kindName(RuntimeInputKind kind) {
@@ -377,25 +420,38 @@ std::string kindName(RuntimeInputKind kind) {
     throw CompilerError("mate-dpi-codegen: unknown runtime input kind");
 }
 
-void validatePackedIntegralPort(const ModuleNode& node) {
-    if (node.type.isAggregate() || node.binding.aggregate_leaves.size() != 1) {
+void validateDpiSupportedPort(const ModuleNode& node) {
+    if (node.binding.aggregate_leaves.empty()) {
         throw CompilerError(std::format(
-            "mate-dpi-codegen: top port '{}' is not a supported single packed scalar/vector leaf",
+            "mate-dpi-codegen: top port '{}' has no runtime leaves",
             node.name));
     }
-    if ((node.type.kind != TypeKind::Integer && node.type.kind != TypeKind::Enum) ||
-        node.type.width <= 0) {
+    if (node.type.kind != TypeKind::Integer &&
+        node.type.kind != TypeKind::Enum &&
+        node.type.kind != TypeKind::Struct) {
         throw CompilerError(std::format(
             "mate-dpi-codegen: top port '{}' has unsupported type", node.name));
+    }
+    for (const auto& leaf : node.binding.aggregate_leaves) {
+        if ((leaf.leaf_type.kind != TypeKind::Integer &&
+             leaf.leaf_type.kind != TypeKind::Enum) ||
+            leaf.leaf_type.width <= 0 ||
+            leaf.leaf_type.isAggregate()) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: top port leaf '{}' has unsupported type",
+                leaf.name));
+        }
     }
 }
 
 std::optional<std::string> svTypeNameForPort(const SvSurfaceFacts& facts, const ModuleNode& node) {
-    if (node.type.kind != TypeKind::Enum) return std::nullopt;
+    if (node.type.kind != TypeKind::Enum && node.type.kind != TypeKind::Struct) {
+        return std::nullopt;
+    }
     auto it = facts.port_type_names.find(node.name);
     if (it == facts.port_type_names.end()) {
         throw CompilerError(std::format(
-            "mate-dpi-codegen: enum top port '{}' has no externally referenceable SystemVerilog type",
+            "mate-dpi-codegen: top port '{}' has no externally referenceable SystemVerilog type",
             node.name));
     }
     return it->second;
@@ -407,60 +463,114 @@ ModelPorts collectPorts(const RtlRuntimeModel& model, const SvSurfaceFacts& sv_f
     const auto& metadata = model.metadata();
 
     forEachInputNode(top, [&](const ModuleNode& node) {
-        validatePackedIntegralPort(node);
-        const auto& leaf = node.binding.aggregate_leaves.front();
-        const auto* input = metadata.findInput(leaf.name);
-        if (!input) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: runtime metadata is missing input '{}'", leaf.name));
-        }
-        if (input->port_name != node.name || input->leaf_name != node.name) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: input '{}' is not a direct top-level leaf", node.name));
-        }
-        if (input->type.width != node.type.width) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: input '{}' type width mismatch", node.name));
-        }
+        validateDpiSupportedPort(node);
         const size_t index = ports.inputs.size();
-        ports.inputs.push_back(Port{
+        Port port{
             .name = node.name,
             .type = node.type,
             .sv_type_name = svTypeNameForPort(sv_facts, node),
-            .input_kind = input->kind,
-            .clock_domain = input->clock_domain,
-            .reset_domain = input->reset_domain,
-        });
-        if (input->kind == RuntimeInputKind::Clock) ports.clocks.push_back(index);
-        else if (input->kind == RuntimeInputKind::Reset) ports.resets.push_back(index);
-        else if (input->kind == RuntimeInputKind::Async) ports.async_inputs.push_back(index);
-        else if (input->kind == RuntimeInputKind::Sync) ports.sync_inputs.push_back(index);
-    });
-
-    forEachOutputNode(top, [&](const ModuleNode& node) {
-        validatePackedIntegralPort(node);
-        const auto& leaf = node.binding.aggregate_leaves.front();
-        const auto* output = metadata.findOutput(leaf.name);
-        if (!output) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: runtime metadata is missing output '{}'", leaf.name));
-        }
-        if (output->port_name != node.name || output->leaf_name != node.name) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: output '{}' is not a direct top-level leaf", node.name));
-        }
-        if (output->type.width != node.type.width) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: output '{}' type width mismatch", node.name));
-        }
-        ports.outputs.push_back(Port{
-            .name = node.name,
-            .type = node.type,
-            .sv_type_name = svTypeNameForPort(sv_facts, node),
+            .leaves = {},
             .input_kind = RuntimeInputKind::Async,
             .clock_domain = std::nullopt,
             .reset_domain = std::nullopt,
-        });
+        };
+        for (const auto& leaf : node.binding.aggregate_leaves) {
+            const auto* input = metadata.findInput(leaf.name);
+            if (!input) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: runtime metadata is missing input '{}'", leaf.name));
+            }
+            if (input->port_name != node.name || input->leaf_name != leaf.name) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: input leaf '{}' is not a direct top-level leaf",
+                    leaf.name));
+            }
+            if (input->type.width != leaf.leaf_type.width) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: input leaf '{}' type width mismatch", leaf.name));
+            }
+            if (port.leaves.empty()) {
+                port.input_kind = input->kind;
+                port.clock_domain = input->clock_domain;
+                port.reset_domain = input->reset_domain;
+            } else if (port.input_kind != input->kind ||
+                       port.clock_domain != input->clock_domain ||
+                       port.reset_domain != input->reset_domain) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: input '{}' leaves have inconsistent runtime classification",
+                    node.name));
+            }
+            port.leaves.push_back(PortLeaf{
+                .port_name = node.name,
+                .leaf_name = leaf.name,
+                .type = leaf.leaf_type,
+                .path = leaf.path,
+                .input_kind = input->kind,
+                .clock_domain = input->clock_domain,
+                .reset_domain = input->reset_domain,
+            });
+        }
+        ports.inputs.push_back(std::move(port));
+        if (ports.inputs.back().input_kind == RuntimeInputKind::Clock) {
+            if (ports.inputs.back().leaves.size() != 1) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: clock input '{}' must be scalar", node.name));
+            }
+            ports.clocks.push_back(index);
+        } else if (ports.inputs.back().input_kind == RuntimeInputKind::Reset) {
+            if (ports.inputs.back().leaves.size() != 1) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: reset input '{}' must be scalar", node.name));
+            }
+            ports.resets.push_back(index);
+        } else {
+            for (size_t leaf_index = 0; leaf_index < ports.inputs.back().leaves.size(); ++leaf_index) {
+                LeafIndex ref{.port = index, .leaf = leaf_index};
+                if (ports.inputs.back().input_kind == RuntimeInputKind::Async)
+                    ports.async_inputs.push_back(ref);
+                else if (ports.inputs.back().input_kind == RuntimeInputKind::Sync)
+                    ports.sync_inputs.push_back(ref);
+            }
+        }
+    });
+
+    forEachOutputNode(top, [&](const ModuleNode& node) {
+        validateDpiSupportedPort(node);
+        Port port{
+            .name = node.name,
+            .type = node.type,
+            .sv_type_name = svTypeNameForPort(sv_facts, node),
+            .leaves = {},
+            .input_kind = RuntimeInputKind::Async,
+            .clock_domain = std::nullopt,
+            .reset_domain = std::nullopt,
+        };
+        for (const auto& leaf : node.binding.aggregate_leaves) {
+            const auto* output = metadata.findOutput(leaf.name);
+            if (!output) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: runtime metadata is missing output '{}'", leaf.name));
+            }
+            if (output->port_name != node.name || output->leaf_name != leaf.name) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: output leaf '{}' is not a direct top-level leaf",
+                    leaf.name));
+            }
+            if (output->type.width != leaf.leaf_type.width) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: output leaf '{}' type width mismatch", leaf.name));
+            }
+            port.leaves.push_back(PortLeaf{
+                .port_name = node.name,
+                .leaf_name = leaf.name,
+                .type = leaf.leaf_type,
+                .path = leaf.path,
+                .input_kind = RuntimeInputKind::Async,
+                .clock_domain = std::nullopt,
+                .reset_domain = std::nullopt,
+            });
+        }
+        ports.outputs.push_back(std::move(port));
     });
 
     if (ports.clocks.empty()) {
@@ -472,11 +582,39 @@ ModelPorts collectPorts(const RtlRuntimeModel& model, const SvSurfaceFacts& sv_f
     return ports;
 }
 
-std::vector<size_t> syncInputsForClock(const ModelPorts& ports, const Port& clock) {
-    std::vector<size_t> result;
+const PortLeaf& inputLeaf(const ModelPorts& ports, LeafIndex index) {
+    return ports.inputs.at(index.port).leaves.at(index.leaf);
+}
+
+const PortLeaf& outputLeaf(const ModelPorts& ports, LeafIndex index) {
+    return ports.outputs.at(index.port).leaves.at(index.leaf);
+}
+
+std::vector<LeafIndex> allInputLeaves(const ModelPorts& ports) {
+    std::vector<LeafIndex> result;
+    for (size_t port_index = 0; port_index < ports.inputs.size(); ++port_index) {
+        for (size_t leaf_index = 0; leaf_index < ports.inputs[port_index].leaves.size(); ++leaf_index) {
+            result.push_back(LeafIndex{.port = port_index, .leaf = leaf_index});
+        }
+    }
+    return result;
+}
+
+std::vector<LeafIndex> allOutputLeaves(const ModelPorts& ports) {
+    std::vector<LeafIndex> result;
+    for (size_t port_index = 0; port_index < ports.outputs.size(); ++port_index) {
+        for (size_t leaf_index = 0; leaf_index < ports.outputs[port_index].leaves.size(); ++leaf_index) {
+            result.push_back(LeafIndex{.port = port_index, .leaf = leaf_index});
+        }
+    }
+    return result;
+}
+
+std::vector<LeafIndex> syncInputsForClock(const ModelPorts& ports, const Port& clock) {
+    std::vector<LeafIndex> result;
     if (!clock.clock_domain) return result;
-    for (size_t index : ports.sync_inputs) {
-        if (ports.inputs.at(index).clock_domain == clock.clock_domain) {
+    for (LeafIndex index : ports.sync_inputs) {
+        if (inputLeaf(ports, index).clock_domain == clock.clock_domain) {
             result.push_back(index);
         }
     }
@@ -493,6 +631,8 @@ std::string cppEdge(edge_t edge) {
 
 std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
+    const auto input_leaves = allInputLeaves(ports);
+    const auto output_leaves = allOutputLeaves(ports);
     out << "#include \"dpi/dpi_support.h\"\n\n";
     out << "#include <memory>\n";
     out << "#include <string>\n";
@@ -503,26 +643,30 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    std::vector<mate::dpi::DpiInputBinding> inputs;\n";
     out << "    std::vector<mate::dpi::DpiOutputBinding> outputs;\n";
     out << "};\n\n";
-    for (size_t i = 0; i < ports.inputs.size(); ++i) {
-        out << "constexpr size_t kInput_" << sanitizeIdentifier(ports.inputs[i].name)
+    for (size_t i = 0; i < input_leaves.size(); ++i) {
+        const auto& leaf = inputLeaf(ports, input_leaves[i]);
+        out << "constexpr size_t kInput_" << leafIdentifier(leaf.leaf_name)
             << " = " << i << ";\n";
     }
-    for (size_t i = 0; i < ports.outputs.size(); ++i) {
-        out << "constexpr size_t kOutput_" << sanitizeIdentifier(ports.outputs[i].name)
+    for (size_t i = 0; i < output_leaves.size(); ++i) {
+        const auto& leaf = outputLeaf(ports, output_leaves[i]);
+        out << "constexpr size_t kOutput_" << leafIdentifier(leaf.leaf_name)
             << " = " << i << ";\n";
     }
     out << "\n";
     out << "Bindings bindAll(const mate::RtlRuntimeModel& model) {\n";
     out << "    Bindings bindings;\n";
-    out << "    bindings.inputs.reserve(" << ports.inputs.size() << ");\n";
-    for (const auto& input : ports.inputs) {
+    out << "    bindings.inputs.reserve(" << input_leaves.size() << ");\n";
+    for (LeafIndex index : input_leaves) {
+        const auto& input = inputLeaf(ports, index);
         out << "    bindings.inputs.push_back(mate::dpi::bindInput(model, "
-            << cppString(input.name) << ", " << kindName(input.input_kind) << "));\n";
+            << cppString(input.leaf_name) << ", " << kindName(input.input_kind) << "));\n";
     }
-    out << "    bindings.outputs.reserve(" << ports.outputs.size() << ");\n";
-    for (const auto& output : ports.outputs) {
+    out << "    bindings.outputs.reserve(" << output_leaves.size() << ");\n";
+    for (LeafIndex index : output_leaves) {
+        const auto& output = outputLeaf(ports, index);
         out << "    bindings.outputs.push_back(mate::dpi::bindOutput(model, "
-            << cppString(output.name) << "));\n";
+            << cppString(output.leaf_name) << "));\n";
     }
     out << "    return bindings;\n";
     out << "}\n\n";
@@ -564,11 +708,13 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    return *static_cast<Context*>(raw);\n";
     out << "}\n\n";
     out << "void writeOutputs(Context& context";
-    for (const auto& output : ports.outputs) {
-        out << ",\n                  " << cppDpiType(output.type, true) << " " << output.name;
+    for (LeafIndex index : output_leaves) {
+        const auto& output = outputLeaf(ports, index);
+        out << ",\n                  " << cppDpiType(output.type, true) << " "
+            << leafIdentifier(output.leaf_name);
     }
     out << ") {\n";
-    for (const auto& output : ports.outputs) out << outputWriteCall(output);
+    for (LeafIndex index : output_leaves) out << outputWriteCall(outputLeaf(ports, index));
     out << "}\n\n";
     out << "} // namespace\n\n";
     out << "extern \"C\" {\n\n";
@@ -585,54 +731,59 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "}\n\n";
 
     auto emitFunctionHeader = [&](std::string_view name,
-                                  const std::vector<size_t>& input_indices,
+                                  const std::vector<LeafIndex>& input_indices,
                                   bool include_outputs) {
         out << "void " << config.function_prefix << "_" << name << "(void* context_handle";
-        for (size_t index : input_indices) {
-            const auto& input = ports.inputs.at(index);
-            out << ",\n                           " << cppDpiType(input.type, false) << " " << input.name;
+        for (LeafIndex index : input_indices) {
+            const auto& input = inputLeaf(ports, index);
+            out << ",\n                           " << cppDpiType(input.type, false) << " "
+                << leafIdentifier(input.leaf_name);
         }
         if (include_outputs) {
-            for (const auto& output : ports.outputs) {
-                out << ",\n                           " << cppDpiType(output.type, true) << " " << output.name;
+            for (LeafIndex index : output_leaves) {
+                const auto& output = outputLeaf(ports, index);
+                out << ",\n                           " << cppDpiType(output.type, true) << " "
+                    << leafIdentifier(output.leaf_name);
             }
         }
         out << ")";
     };
 
-    std::vector<size_t> all_inputs(ports.inputs.size());
-    for (size_t i = 0; i < all_inputs.size(); ++i) all_inputs[i] = i;
-    std::vector<size_t> data_inputs;
+    std::vector<LeafIndex> data_inputs;
     data_inputs.reserve(ports.async_inputs.size() + ports.sync_inputs.size());
     data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
     data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
-    emitFunctionHeader("init_values", all_inputs, true);
+    emitFunctionHeader("init_values", input_leaves, true);
     out << " {\n";
     out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_init_values\", [&]() {\n";
     out << "        auto& context = checkedContext(context_handle);\n";
     out << "        std::vector<mate::RuntimeInputUpdate> async_inputs;\n";
     out << "        async_inputs.reserve(" << (ports.clocks.size() + ports.resets.size() + ports.async_inputs.size()) << ");\n";
     for (size_t index : ports.clocks) {
-        const auto& input = ports.inputs.at(index);
-        out << "        async_inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
+        const auto& input = ports.inputs.at(index).leaves.front();
+        out << "        async_inputs.push_back("
+            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
     }
     for (size_t index : ports.resets) {
-        const auto& input = ports.inputs.at(index);
-        out << "        async_inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
+        const auto& input = ports.inputs.at(index).leaves.front();
+        out << "        async_inputs.push_back("
+            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
     }
-    for (size_t index : ports.async_inputs) {
-        const auto& input = ports.inputs.at(index);
-        out << "        async_inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
+    for (LeafIndex index : ports.async_inputs) {
+        const auto& input = inputLeaf(ports, index);
+        out << "        async_inputs.push_back("
+            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
     }
     out << "        std::vector<mate::RuntimeInputUpdate> sync_inputs;\n";
     out << "        sync_inputs.reserve(" << ports.sync_inputs.size() << ");\n";
-    for (size_t index : ports.sync_inputs) {
-        const auto& input = ports.inputs.at(index);
-        out << "        sync_inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
+    for (LeafIndex index : ports.sync_inputs) {
+        const auto& input = inputLeaf(ports, index);
+        out << "        sync_inputs.push_back("
+            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
     }
     out << "        mate::dpi::initializeInstance(context.instance, async_inputs, sync_inputs);\n";
     out << "        writeOutputs(context";
-    for (const auto& output : ports.outputs) out << ", " << output.name;
+    for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";
     out << "    });\n";
     out << "}\n\n";
@@ -643,13 +794,14 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "        auto& context = checkedContext(context_handle);\n";
     out << "        std::vector<mate::RuntimeInputUpdate> inputs;\n";
     out << "        inputs.reserve(" << data_inputs.size() << ");\n";
-    for (size_t index : data_inputs) {
-        const auto& input = ports.inputs.at(index);
-        out << "        inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
+    for (LeafIndex index : data_inputs) {
+        const auto& input = inputLeaf(ports, index);
+        out << "        inputs.push_back("
+            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
     }
     out << "        mate::dpi::setInputValues(context.instance, inputs);\n";
     out << "        writeOutputs(context";
-    for (const auto& output : ports.outputs) out << ", " << output.name;
+    for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";
     out << "    });\n";
     out << "}\n\n";
@@ -668,7 +820,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
         }
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             const bool active_edge = runtime_clock->edge == edge;
-            std::vector<size_t> edge_inputs;
+            std::vector<LeafIndex> edge_inputs;
             if (active_edge) {
                 edge_inputs = ports.async_inputs;
                 const auto sync_indices = syncInputsForClock(ports, clock);
@@ -681,14 +833,15 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
             out << "        auto& context = checkedContext(context_handle);\n";
             out << "        std::vector<mate::RuntimeInputUpdate> sync_inputs;\n";
             out << "        sync_inputs.reserve(" << edge_inputs.size() << ");\n";
-            for (size_t index : edge_inputs) {
-                const auto& input = ports.inputs.at(index);
-                out << "        sync_inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
+            for (LeafIndex index : edge_inputs) {
+                const auto& input = inputLeaf(ports, index);
+                out << "        sync_inputs.push_back("
+                    << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
             }
             out << "        mate::dpi::applyClockEdge(context.instance, context.bindings.inputs.at(kInput_"
-                << sanitizeIdentifier(clock.name) << "), " << cppEdge(edge) << ", sync_inputs);\n";
+                << leafIdentifier(clock.leaves.front().leaf_name) << "), " << cppEdge(edge) << ", sync_inputs);\n";
             out << "        writeOutputs(context";
-            for (const auto& output : ports.outputs) out << ", " << output.name;
+            for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
             out << ");\n";
             out << "    });\n";
             out << "}\n\n";
@@ -704,9 +857,9 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "\", [&]() {\n";
             out << "        auto& context = checkedContext(context_handle);\n";
             out << "        mate::dpi::applyResetEdge(context.instance, context.bindings.inputs.at(kInput_"
-                << sanitizeIdentifier(reset.name) << "), " << cppEdge(edge) << ");\n";
+                << leafIdentifier(reset.leaves.front().leaf_name) << "), " << cppEdge(edge) << ");\n";
             out << "        writeOutputs(context";
-            for (const auto& output : ports.outputs) out << ", " << output.name;
+            for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
             out << ");\n";
             out << "    });\n";
             out << "}\n\n";
@@ -718,8 +871,9 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
 }
 
 void emitSvImportArgs(std::ostringstream& out,
-                      const std::vector<const Port*>& inputs,
-                      const std::vector<Port>& outputs) {
+                      const std::vector<LeafIndex>& inputs,
+                      const std::vector<LeafIndex>& outputs,
+                      const ModelPorts& ports) {
     bool first = true;
     auto comma = [&]() {
         if (!first) out << ",\n";
@@ -727,44 +881,54 @@ void emitSvImportArgs(std::ostringstream& out,
     };
     comma();
     out << "        input chandle ctx";
-    for (const auto* input : inputs) {
+    for (LeafIndex index : inputs) {
+        const auto& input = inputLeaf(ports, index);
         comma();
-        out << svImportArg("input", *input, input->name);
+        out << svImportArg("input", input, leafIdentifier(input.leaf_name));
     }
-    for (const auto& output : outputs) {
+    for (LeafIndex index : outputs) {
+        const auto& output = outputLeaf(ports, index);
         comma();
-        out << svImportArg("output", output, "next_" + output.name);
+        out << svImportArg("output", output, nextOutputLeafName(output));
     }
     out << "\n";
 }
 
 void emitSvCallArgs(std::ostringstream& out,
-                    const std::vector<const Port*>& inputs,
-                    const std::vector<Port>& outputs) {
+                    const std::vector<LeafIndex>& inputs,
+                    const std::vector<LeafIndex>& outputs,
+                    const ModelPorts& ports) {
     out << "                        ctx";
-    for (const auto* input : inputs) out << ",\n                        " << svDpiInputExpr(*input);
-    for (const auto& output : outputs) out << ",\n                        next_" << output.name;
+    for (LeafIndex index : inputs) {
+        const auto& port = ports.inputs.at(index.port);
+        const auto& leaf = inputLeaf(ports, index);
+        out << ",\n                        " << svDpiInputSignal(port, leaf);
+    }
+    for (LeafIndex index : outputs) {
+        const auto& output = outputLeaf(ports, index);
+        out << ",\n                        " << nextOutputLeafName(output);
+    }
     out << "\n";
 }
 
 std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
+    const auto input_leaves = allInputLeaves(ports);
+    const auto output_leaves = allOutputLeaves(ports);
     const std::string pkg_name = config.module_name + "_pkg";
     out << "package " << pkg_name << ";\n";
     out << "    import \"DPI-C\" function chandle " << config.function_prefix << "_create_context();\n";
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_destroy(input chandle ctx);\n\n";
 
-    std::vector<const Port*> all_inputs;
-    for (const auto& input : ports.inputs) all_inputs.push_back(&input);
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_init_values(\n";
-    emitSvImportArgs(out, all_inputs, ports.outputs);
+    emitSvImportArgs(out, input_leaves, output_leaves, ports);
     out << "    );\n\n";
 
-    std::vector<const Port*> sync_inputs;
-    for (size_t index : ports.async_inputs) sync_inputs.push_back(&ports.inputs.at(index));
-    for (size_t index : ports.sync_inputs) sync_inputs.push_back(&ports.inputs.at(index));
+    std::vector<LeafIndex> sync_inputs;
+    sync_inputs.insert(sync_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
+    sync_inputs.insert(sync_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_set_input_values(\n";
-    emitSvImportArgs(out, sync_inputs, ports.outputs);
+    emitSvImportArgs(out, sync_inputs, output_leaves, ports);
     out << "    );\n\n";
 
     for (size_t clock_index : ports.clocks) {
@@ -779,18 +943,15 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
                 "mate-dpi-codegen: clock '{}' has no runtime clock domain", clock.name));
         }
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
-            std::vector<const Port*> event_inputs;
+            std::vector<LeafIndex> event_inputs;
             if (runtime_clock->edge == edge) {
-                for (size_t index : ports.async_inputs) {
-                    event_inputs.push_back(&ports.inputs.at(index));
-                }
-                for (size_t index : syncInputsForClock(ports, clock)) {
-                    event_inputs.push_back(&ports.inputs.at(index));
-                }
+                event_inputs.insert(event_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
+                const auto sync_indices = syncInputsForClock(ports, clock);
+                event_inputs.insert(event_inputs.end(), sync_indices.begin(), sync_indices.end());
             }
             out << "    import \"DPI-C\" function void " << config.function_prefix << "_"
                 << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "(\n";
-            emitSvImportArgs(out, event_inputs, ports.outputs);
+            emitSvImportArgs(out, event_inputs, output_leaves, ports);
             out << "    );\n\n";
         }
     }
@@ -800,7 +961,7 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             out << "    import \"DPI-C\" function void " << config.function_prefix << "_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "(\n";
-            emitSvImportArgs(out, {}, ports.outputs);
+            emitSvImportArgs(out, {}, output_leaves, ports);
             out << "    );\n\n";
         }
     }
@@ -811,6 +972,8 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
 
 std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
+    const auto input_leaves = allInputLeaves(ports);
+    const auto output_leaves = allOutputLeaves(ports);
     out << "module " << config.module_name << "\n";
     out << "    import " << config.module_name << "_pkg::*;\n";
     out << "(\n";
@@ -821,13 +984,16 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         out << svPortDecl("output", ports.outputs[i]) << (i + 1 == ports.outputs.size() ? "\n" : ",\n");
     }
     out << ");\n\n";
-    for (const auto& output : ports.outputs) {
-        out << "    logic " << svRange(output.type) << "next_" << output.name << ";\n";
+    for (LeafIndex index : output_leaves) {
+        const auto& output = outputLeaf(ports, index);
+        out << "    logic " << svRange(output.type) << nextOutputLeafName(output) << ";\n";
     }
-    for (const auto& input : ports.inputs) {
+    for (LeafIndex index : input_leaves) {
+        const auto& input = ports.inputs.at(index.port);
+        const auto& leaf = inputLeaf(ports, index);
         if (!input.sv_type_name) continue;
-        out << "    logic " << svRange(input.type) << svDpiInputWireName(input) << ";\n";
-        out << "    assign " << svDpiInputWireName(input) << " = " << input.name << ";\n";
+        out << "    logic " << svRange(leaf.type) << svDpiInputWireName(leaf) << ";\n";
+        out << "    assign " << svDpiInputWireName(leaf) << " = " << svInputLeafExpr(leaf) << ";\n";
     }
     out << "\n";
 
@@ -847,15 +1013,15 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         const auto& reset = ports.inputs.at(index);
         out << "        last_" << reset.name << " = " << reset.name << ";\n";
     }
-    std::vector<const Port*> all_inputs;
-    for (const auto& input : ports.inputs) all_inputs.push_back(&input);
     out << "        #0;\n";
     out << "        " << config.function_prefix << "_init_values(\n";
-    emitSvCallArgs(out, all_inputs, ports.outputs);
+    emitSvCallArgs(out, input_leaves, output_leaves, ports);
     out << "        );\n";
-    for (const auto& output : ports.outputs) {
-        out << "        " << output.name << " = "
-            << svPublicOutputExpr(output, "next_" + output.name) << ";\n";
+    for (LeafIndex index : output_leaves) {
+        const auto& port = ports.outputs.at(index.port);
+        const auto& output = outputLeaf(ports, index);
+        out << "        " << svOutputLeafExpr(output) << " = "
+            << svOutputLeafValueExpr(port, output) << ";\n";
     }
     out << "        initialized = 1'b1;\n";
     out << "    end\n\n";
@@ -866,25 +1032,32 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     out << "    end\n\n";
     if (!ports.async_inputs.empty() || !ports.sync_inputs.empty()) {
         out << "    always @(";
-        std::vector<size_t> data_inputs;
+        std::vector<LeafIndex> data_inputs;
         data_inputs.reserve(ports.async_inputs.size() + ports.sync_inputs.size());
         data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
         data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
-        for (size_t i = 0; i < data_inputs.size(); ++i) {
+        std::vector<std::string> sensitivity_ports;
+        for (LeafIndex index : data_inputs) {
+            const std::string& name = ports.inputs.at(index.port).name;
+            if (std::find(sensitivity_ports.begin(), sensitivity_ports.end(), name) ==
+                sensitivity_ports.end()) {
+                sensitivity_ports.push_back(name);
+            }
+        }
+        for (size_t i = 0; i < sensitivity_ports.size(); ++i) {
             if (i) out << " or ";
-            out << ports.inputs.at(data_inputs.at(i)).name;
+            out << sensitivity_ports.at(i);
         }
         out << ") begin\n";
         out << "        if (initialized) begin\n";
         out << "            " << config.function_prefix << "_set_input_values(\n";
-        std::vector<const Port*> event_inputs;
-        for (size_t index : ports.async_inputs) event_inputs.push_back(&ports.inputs.at(index));
-        for (size_t index : ports.sync_inputs) event_inputs.push_back(&ports.inputs.at(index));
-        emitSvCallArgs(out, event_inputs, ports.outputs);
+        emitSvCallArgs(out, data_inputs, output_leaves, ports);
         out << "            );\n";
-        for (const auto& output : ports.outputs) {
-            out << "            " << output.name << " = "
-                << svPublicOutputExpr(output, "next_" + output.name) << ";\n";
+        for (LeafIndex index : output_leaves) {
+            const auto& port = ports.outputs.at(index.port);
+            const auto& output = outputLeaf(ports, index);
+            out << "            " << svOutputLeafExpr(output) << " = "
+                << svOutputLeafValueExpr(port, output) << ";\n";
         }
         out << "        end\n";
         out << "    end\n\n";
@@ -948,9 +1121,11 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     out << "            end\n\n";
 
     auto emitCommitOutputs = [&]() {
-        for (const auto& output : ports.outputs) {
-            out << "                " << output.name << " <= "
-                << svPublicOutputExpr(output, "next_" + output.name) << ";\n";
+        for (LeafIndex index : output_leaves) {
+            const auto& port = ports.outputs.at(index.port);
+            const auto& output = outputLeaf(ports, index);
+            out << "                " << svOutputLeafExpr(output) << " <= "
+                << svOutputLeafValueExpr(port, output) << ";\n";
         }
     };
 
@@ -966,18 +1141,15 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             out << (edge == POSEDGE ? "                if" : "                else if")
                 << " (" << clock.name << " === 1'b" << (edge == POSEDGE ? "1" : "0") << ") begin\n";
-            std::vector<const Port*> event_inputs;
+            std::vector<LeafIndex> event_inputs;
             if (runtime_clock->edge == edge) {
-                for (size_t index : ports.async_inputs) {
-                    event_inputs.push_back(&ports.inputs.at(index));
-                }
-                for (size_t index : syncInputsForClock(ports, clock)) {
-                    event_inputs.push_back(&ports.inputs.at(index));
-                }
+                event_inputs.insert(event_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
+                const auto sync_indices = syncInputsForClock(ports, clock);
+                event_inputs.insert(event_inputs.end(), sync_indices.begin(), sync_indices.end());
             }
             out << "                    " << config.function_prefix << "_"
                 << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "(\n";
-            emitSvCallArgs(out, event_inputs, ports.outputs);
+            emitSvCallArgs(out, event_inputs, output_leaves, ports);
             out << "                    );\n";
             out << "                end\n";
         }
@@ -998,7 +1170,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
                 << " (" << reset.name << " === 1'b" << (edge == POSEDGE ? "1" : "0") << ") begin\n";
             out << "                    " << config.function_prefix << "_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "(\n";
-            emitSvCallArgs(out, {}, ports.outputs);
+            emitSvCallArgs(out, {}, output_leaves, ports);
             out << "                    );\n";
             out << "                end\n";
         }

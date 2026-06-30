@@ -35,6 +35,7 @@ struct ModelPorts {
     std::vector<Port> outputs;
     std::vector<size_t> clocks;
     std::vector<size_t> resets;
+    std::vector<size_t> async_inputs;
     std::vector<size_t> sync_inputs;
 };
 
@@ -234,10 +235,6 @@ ModelPorts collectPorts(const RtlRuntimeModel& model) {
             throw CompilerError(std::format(
                 "mate-dpi-codegen: input '{}' type width mismatch", node.name));
         }
-        if (input->kind == RuntimeInputKind::Async) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: input '{}' has unsupported DPI input kind", node.name));
-        }
         const size_t index = ports.inputs.size();
         ports.inputs.push_back(Port{
             .name = node.name,
@@ -248,6 +245,7 @@ ModelPorts collectPorts(const RtlRuntimeModel& model) {
         });
         if (input->kind == RuntimeInputKind::Clock) ports.clocks.push_back(index);
         else if (input->kind == RuntimeInputKind::Reset) ports.resets.push_back(index);
+        else if (input->kind == RuntimeInputKind::Async) ports.async_inputs.push_back(index);
         else if (input->kind == RuntimeInputKind::Sync) ports.sync_inputs.push_back(index);
     });
 
@@ -415,17 +413,25 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
 
     std::vector<size_t> all_inputs(ports.inputs.size());
     for (size_t i = 0; i < all_inputs.size(); ++i) all_inputs[i] = i;
+    std::vector<size_t> data_inputs;
+    data_inputs.reserve(ports.async_inputs.size() + ports.sync_inputs.size());
+    data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
+    data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
     emitFunctionHeader("init_values", all_inputs, true);
     out << " {\n";
     out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_init_values\", [&]() {\n";
     out << "        auto& context = checkedContext(context_handle);\n";
     out << "        std::vector<mate::RuntimeInputUpdate> async_inputs;\n";
-    out << "        async_inputs.reserve(" << (ports.clocks.size() + ports.resets.size()) << ");\n";
+    out << "        async_inputs.reserve(" << (ports.clocks.size() + ports.resets.size() + ports.async_inputs.size()) << ");\n";
     for (size_t index : ports.clocks) {
         const auto& input = ports.inputs.at(index);
         out << "        async_inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
     }
     for (size_t index : ports.resets) {
+        const auto& input = ports.inputs.at(index);
+        out << "        async_inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
+    }
+    for (size_t index : ports.async_inputs) {
         const auto& input = ports.inputs.at(index);
         out << "        async_inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
     }
@@ -442,13 +448,13 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    });\n";
     out << "}\n\n";
 
-    emitFunctionHeader("set_input_values", ports.sync_inputs, true);
+    emitFunctionHeader("set_input_values", data_inputs, true);
     out << " {\n";
     out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_set_input_values\", [&]() {\n";
     out << "        auto& context = checkedContext(context_handle);\n";
     out << "        std::vector<mate::RuntimeInputUpdate> inputs;\n";
-    out << "        inputs.reserve(" << ports.sync_inputs.size() << ");\n";
-    for (size_t index : ports.sync_inputs) {
+    out << "        inputs.reserve(" << data_inputs.size() << ");\n";
+    for (size_t index : data_inputs) {
         const auto& input = ports.inputs.at(index);
         out << "        inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
     }
@@ -473,16 +479,20 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
         }
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             const bool active_edge = runtime_clock->edge == edge;
-            const auto sync_indices = active_edge ? syncInputsForClock(ports, clock) : std::vector<size_t>{};
-            emitFunctionHeader(sanitizeIdentifier(clock.name) + "_" + edgeName(edge),
-                               sync_indices, true);
+            std::vector<size_t> edge_inputs;
+            if (active_edge) {
+                edge_inputs = ports.async_inputs;
+                const auto sync_indices = syncInputsForClock(ports, clock);
+                edge_inputs.insert(edge_inputs.end(), sync_indices.begin(), sync_indices.end());
+            }
+            emitFunctionHeader(sanitizeIdentifier(clock.name) + "_" + edgeName(edge), edge_inputs, true);
             out << " {\n";
             out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_"
                 << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\", [&]() {\n";
             out << "        auto& context = checkedContext(context_handle);\n";
             out << "        std::vector<mate::RuntimeInputUpdate> sync_inputs;\n";
-            out << "        sync_inputs.reserve(" << sync_indices.size() << ");\n";
-            for (size_t index : sync_indices) {
+            out << "        sync_inputs.reserve(" << edge_inputs.size() << ");\n";
+            for (size_t index : edge_inputs) {
                 const auto& input = ports.inputs.at(index);
                 out << "        sync_inputs.push_back(" << inputUpdateCall(input, input.name) << ");\n";
             }
@@ -562,6 +572,7 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     out << "    );\n\n";
 
     std::vector<const Port*> sync_inputs;
+    for (size_t index : ports.async_inputs) sync_inputs.push_back(&ports.inputs.at(index));
     for (size_t index : ports.sync_inputs) sync_inputs.push_back(&ports.inputs.at(index));
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_set_input_values(\n";
     emitSvImportArgs(out, sync_inputs, ports.outputs);
@@ -581,6 +592,9 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             std::vector<const Port*> event_inputs;
             if (runtime_clock->edge == edge) {
+                for (size_t index : ports.async_inputs) {
+                    event_inputs.push_back(&ports.inputs.at(index));
+                }
                 for (size_t index : syncInputsForClock(ports, clock)) {
                     event_inputs.push_back(&ports.inputs.at(index));
                 }
@@ -655,16 +669,21 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     out << "            " << config.function_prefix << "_destroy(ctx);\n";
     out << "        end\n";
     out << "    end\n\n";
-    if (!ports.sync_inputs.empty()) {
+    if (!ports.async_inputs.empty() || !ports.sync_inputs.empty()) {
         out << "    always @(";
-        for (size_t i = 0; i < ports.sync_inputs.size(); ++i) {
+        std::vector<size_t> data_inputs;
+        data_inputs.reserve(ports.async_inputs.size() + ports.sync_inputs.size());
+        data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
+        data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
+        for (size_t i = 0; i < data_inputs.size(); ++i) {
             if (i) out << " or ";
-            out << ports.inputs.at(ports.sync_inputs.at(i)).name;
+            out << ports.inputs.at(data_inputs.at(i)).name;
         }
         out << ") begin\n";
         out << "        if (initialized) begin\n";
         out << "            " << config.function_prefix << "_set_input_values(\n";
         std::vector<const Port*> event_inputs;
+        for (size_t index : ports.async_inputs) event_inputs.push_back(&ports.inputs.at(index));
         for (size_t index : ports.sync_inputs) event_inputs.push_back(&ports.inputs.at(index));
         emitSvCallArgs(out, event_inputs, ports.outputs);
         out << "            );\n";
@@ -752,6 +771,9 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
                 << " (" << clock.name << " === 1'b" << (edge == POSEDGE ? "1" : "0") << ") begin\n";
             std::vector<const Port*> event_inputs;
             if (runtime_clock->edge == edge) {
+                for (size_t index : ports.async_inputs) {
+                    event_inputs.push_back(&ports.inputs.at(index));
+                }
                 for (size_t index : syncInputsForClock(ports, clock)) {
                     event_inputs.push_back(&ports.inputs.at(index));
                 }

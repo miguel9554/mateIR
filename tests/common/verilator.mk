@@ -43,13 +43,8 @@ GEN_MODEL_CPP = $(DPI_GEN_DIR)/$(MODULE_NAME)_model.cpp
 GEN_STAMP   = $(DPI_GEN_DIR)/.stamp
 
 MATE_LIBS = \
-	$(abspath $(BUILD_DIR)/libmate-abi-interpreter.a) \
-	$(abspath $(BUILD_DIR)/libmate-rtl-runtime-compiler.a) \
-	$(abspath $(BUILD_DIR)/libmate-systemverilog-frontend.a) \
-	$(abspath $(BUILD_DIR)/libmate-rtl-runtime.a) \
-	$(abspath $(BUILD_DIR)/libmate-mateir.a) \
-	$(abspath $(BUILD_DIR)/external/yaml-cpp/libyaml-cpp.a) \
-	/opt/slang/lib/libsvlang.a \
+	$(abspath $(BUILD_DIR)/libmate-abi-native.a) \
+	$(abspath $(BUILD_DIR)/libmate-sim-value.a) \
 	/usr/local/lib/libfmt.a
 
 MATE_CPPFLAGS = \

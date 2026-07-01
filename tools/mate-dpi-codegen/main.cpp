@@ -1712,6 +1712,7 @@ struct NativeFlopCommitCode {
     // name per domain.
     std::vector<std::string> reset_apply_fn_names;
     std::vector<std::string> clock_commit_fn_names;
+    std::string flops_init_fn_name;
 };
 
 // Emits, per clock/reset domain, native FlopD->FlopQ commit and reset-apply
@@ -1803,16 +1804,48 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
         out << "}\n\n";
     }
 
+    // Applies FlopsInitial to every flop Q leaf in declaration order, mirroring
+    // MateIRRuntime::initFlops (src/sim/runtime.cpp).
+    result.flops_init_fn_name = "initFlops";
+    out << "void " << result.flops_init_fn_name
+        << "(std::span<mate::SimValue> storage, MateFlopsInitial mode, std::mt19937_64& rng) {\n";
+    out << "    switch (mode) {\n";
+    out << "        case MATE_FLOPS_INITIAL_RANDOM:\n";
+    for (const auto& flop : rt.flops) {
+        for (const auto& leaf : flop.leaves) {
+            out << "            storage[" << flopQStorageIndex(leaf.q_node) << "] = mate::SimValue::random("
+                << leaf.type.width << ", " << boolLiteral(leaf.type.isSigned()) << ", rng);\n";
+        }
+    }
+    out << "            break;\n";
+    out << "        case MATE_FLOPS_INITIAL_ZERO:\n";
+    for (const auto& flop : rt.flops) {
+        for (const auto& leaf : flop.leaves) {
+            out << "            storage[" << flopQStorageIndex(leaf.q_node) << "] = mate::SimValue::zero("
+                << leaf.type.width << ", " << boolLiteral(leaf.type.isSigned()) << ");\n";
+        }
+    }
+    out << "            break;\n";
+    out << "        case MATE_FLOPS_INITIAL_ONE:\n";
+    for (const auto& flop : rt.flops) {
+        for (const auto& leaf : flop.leaves) {
+            out << "            storage[" << flopQStorageIndex(leaf.q_node) << "] = mate::SimValue::ones("
+                << leaf.type.width << ", " << boolLiteral(leaf.type.isSigned()) << ");\n";
+        }
+    }
+    out << "            break;\n";
+    out << "    }\n";
+    out << "}\n\n";
+
     out << "} // namespace\n\n";
     result.cpp_text = out.str();
     return result;
 }
 
-std::string makeInterpreterModelCpp(const Config& config,
-                                    const ModelPorts& ports,
-                                    const RtlRuntimeModel& model) {
+std::string makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
-    out << "#include \"abi/abi_interpreter.h\"\n\n";
+    out << "#include \"abi/abi_native.h\"\n\n";
+    out << "#include <random>\n";
     out << "#include <stdexcept>\n";
     out << "#include <vector>\n\n";
     const NativeCombinationalCode native_code = makeNativeCombinationalCpp(model);
@@ -1820,28 +1853,6 @@ std::string makeInterpreterModelCpp(const Config& config,
     const NativeFlopCommitCode flop_commit_code = makeNativeFlopCommitCpp(model);
     out << flop_commit_code.cpp_text;
     out << "extern \"C\" MateStatusCode mate_model_create(const MateModel** out_model, MateStatus* status) {\n";
-    out << "    mate::abi::InterpreterModelConfig config;\n";
-    out << "    config.top_module = " << cppString(config.top_module) << ";\n";
-    out << "    config.source_files = {";
-    for (size_t i = 0; i < config.sources.size(); ++i) {
-        if (i) out << ", ";
-        out << cppString(std::filesystem::absolute(config.sources[i]).string());
-    }
-    out << "};\n";
-    out << "    config.domain_files = {";
-    for (size_t i = 0; i < config.domains.size(); ++i) {
-        if (i) out << ", ";
-        out << cppString(std::filesystem::absolute(config.domains[i]).string());
-    }
-    out << "};\n";
-    out << "    config.parameters = {";
-    size_t param_index = 0;
-    for (const auto& [key, value] : config.parameters) {
-        if (param_index++) out << ", ";
-        out << "{" << cppString(key) << ", " << value << "}";
-    }
-    out << "};\n";
-    out << "\n";
     out << "    mate::abi::GeneratedModelMetadata metadata;\n";
     out << "    metadata.inputs = {\n";
     for (LeafIndex index : allInputLeaves(ports)) {
@@ -1916,8 +1927,9 @@ std::string makeInterpreterModelCpp(const Config& config,
         out << "&" << flop_commit_code.clock_commit_fn_names[i];
     }
     out << "};\n";
+    out << "    metadata.flops_init = &" << flop_commit_code.flops_init_fn_name << ";\n";
     out << "\n";
-    out << "    return mate::abi::createInterpreterModel(config, metadata, out_model, status);\n";
+    out << "    return mate::abi::createNativeModel(metadata, out_model, status);\n";
     out << "}\n";
     return out.str();
 }
@@ -1952,7 +1964,7 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(config.out_dir);
         writeFile(config.out_dir / (config.module_name + ".cpp"), makeCpp(config, ports, model));
         writeFile(config.out_dir / (config.top_module + "_model.cpp"),
-                  makeInterpreterModelCpp(config, ports, model));
+                  makeNativeModelCpp(ports, model));
         writeFile(config.out_dir / (config.module_name + "_pkg.sv"), makeSvPkg(config, ports, model));
         writeFile(config.out_dir / (config.module_name + ".sv"), makeSv(config, ports, model));
     } catch (const CompilerError& e) {

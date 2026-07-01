@@ -58,20 +58,46 @@ Phase-1 validation:
 
 ## Current State
 
-Phase 1, Phase 2A, Phase 2B, Phase 2C, and Phase 2D are complete.
+Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, and Phase 2E are complete.
 
 Current architecture:
 
 - Public ABI: `src/abi/mate_model_abi.h`.
-- Private interpreter bridge: `src/abi/abi_interpreter.h` and
-  `src/abi/abi_interpreter.cpp`.
+- Shared, frontend-free metadata types: `src/abi/generated_model_metadata.h`
+  (`GeneratedInputMetadata`, `GeneratedOutputMetadata`, `GeneratedClockMetadata`,
+  `GeneratedResetMetadata`, `GeneratedStorageMetadata`,
+  `GeneratedCombinationalEvaluateFn`, `GeneratedResetApplyFn`,
+  `GeneratedClockCommitFn`, `GeneratedFlopsInitFn`, `GeneratedModelMetadata`).
+  This header only includes `mate_model_abi.h` and `sim/sim_value.h` — no
+  mateir/frontend/slang — and is shared by both ABI backends below.
+- Two ABI backends, same public entry points (`mate_model_create`,
+  `mate_apply_clock`, ...), never linked into the same binary:
+  - **Native backend**: `src/abi/abi_native.h` + `src/abi/abi_native.cpp`
+    (library `mate-abi-native`, depends only on `mate-sim-value`). Builds
+    `MateModel`/`MateInstance` purely from `GeneratedModelMetadata` — no
+    `RtlRuntimeModel`/`RtlRuntimeInstance`, no SV compilation, ever. This is
+    the backend linked into DPI simulation binaries
+    (`tests/common/verilator.mk`'s `MATE_LIBS`).
+  - **Interpreter backend**: `src/abi/abi_interpreter.h` +
+    `src/abi/abi_interpreter.cpp` (library `mate-abi-interpreter`, depends on
+    `mate-rtl-runtime-compiler` → frontend/slang/yaml-cpp). Compiles SV via
+    `compileRtlRuntimeModel` inside `mate_model_create`/`createInterpreterModel`.
+    Kept for the (currently unused) interpreter-only `createInterpreterModel`
+    path; not exercised by generated code or the DPI link anymore.
+- `mate-sim-value` (`src/sim/sim_value.{h,cpp}`) was split out of
+  `mate-rtl-runtime` specifically so the native backend could depend on
+  `SimValue` without pulling in `mate-mateir` (and, transitively via its
+  private link to `slang::slang`, slang itself) at DPI link time.
 - Generated DPI glue: `<module>_dpi.cpp`.
   - Includes only `abi/mate_model_abi.h` and `svdpi.h`.
   - Uses opaque `MateModel` / `MateInstance`, integer handles, status codes,
     clock/reset handles, and raw `uint64_t` word buffers.
-- Generated phase-2 model file: `<module>_model.cpp`.
-  - Implements model-specific `mate_model_create`.
-  - Embeds source/domain/parameter config for the interpreter.
+  - Unchanged by Phase 2E — it never referenced the interpreter directly.
+- Generated model file: `<module>_model.cpp` (`makeNativeModelCpp` in
+  `tools/mate-dpi-codegen/main.cpp`).
+  - `#include "abi/abi_native.h"` (not `abi_interpreter.h` — dropped in 2E
+    along with the `InterpreterModelConfig`/source-file/domain-file/parameter
+    embedding it used to build, since there is no SV to compile anymore).
   - Emits static generated ABI metadata tables for inputs, outputs, clocks,
     and resets.
   - Emits native straight-line combinational evaluation
@@ -85,9 +111,7 @@ Current architecture:
     - Every intermediate DFG node value is backed by a per-instance
       `temporaries` scratch span (sized to the total node count), not a
       local C++ variable, so values are addressable across chunk function
-      boundaries. See `GeneratedCombinationalEvaluateFn` in
-      `src/abi/abi_interpreter.h` and `MateInstance::native_temporaries` in
-      `src/abi/abi_interpreter.cpp`.
+      boundaries.
     - Flop D/Q and other runtime-observable storage still flows through the
       existing `storage` span; `temporaries` is purely a codegen-internal
       concept with no interpreter-side counterpart to validate against.
@@ -100,64 +124,61 @@ Current architecture:
       signal straight out of `inputs[]`, no persisted "reset active" flag) —
       this reproduces `MateIRRuntime::applyClockDomain`'s async-reset-wins
       priority (src/sim/runtime.cpp) without any interpreter-side map lookup.
-- `abi_interpreter.cpp` currently:
-  - compiles SV into `RtlRuntimeModel`,
-  - validates generated ABI metadata against runtime metadata,
-  - stores generated ABI metadata in `MateModel`,
-  - resolves ABI handles from generated metadata,
-  - maps ABI handles to runtime ids,
-  - `mate_apply_clock`/`mate_apply_reset`/`mate_set_input`
-    (src/abi/abi_interpreter.cpp, `applyNativeClockEdge`/
-    `applyNativeResetEdge`/native branch of `mate_set_input`) go fully native
-    when a generated `evaluate_combinational` is present: they drive the
-    clock/reset/input signal directly into `native_inputs`, call the
-    generated `clock_commit`/`reset_apply` function for the relevant domain,
-    and re-run `evaluate_combinational` — `RtlRuntimeInstance` is not touched
-    in this path at all, so no interpreter scheduling map is in the per-edge
-    hot path.
-    - **All three** ABI entry points that can run between/around clock edges
-      had to move to this native-only branch together, not just the two
-      clock/reset ones. `mate_set_input` originally still called
-      `RtlRuntimeInstance::setInputValues` and then
-      `refreshNativeStorage`/`refreshObservableStorage`, which unconditionally
-      pulls FlopQ back from the interpreter. Once a native clock/reset edge
-      commits a flop, `RtlRuntimeInstance`'s own copy of that flop is stale
-      (its `applyClockEdge`/`applyResetEdge` are no longer being called), so
-      that pull silently overwrote the freshly-committed native FlopQ value
-      with the stale interpreter one on the next `mate_set_input` call. This
-      caused ~half of regression to fail with flop outputs stuck at their
-      initial/reset value after the first input change following a clock
-      edge — caught by `python tests/regression.py --mode verilator-dpi`
-      (not `make regression`, which does not exercise this path the same
-      way). Any future new ABI entry point that reads/writes instance state
-      must be audited for the same trap: once `evaluate_combinational` is
-      present, no code path may pull observable state from
-      `RtlRuntimeInstance` except the one-time `mate_instance_init` pull
-      below.
-  - `mate_instance_init` still delegates fully to `RtlRuntimeInstance`
-    (`FlopsInitial` application + reset-at-power-up) and pulls the result into
-    native storage once via `refreshRuntimeBackedNativeState`. This is
-    intentional: init is not a hot path, and reusing the interpreter here
-    avoids duplicating `FlopsInitial::Random` RNG semantics in codegen for no
-    performance benefit. `RtlRuntimeInstance` becomes otherwise unused for the
-    rest of a native model's lifetime (removing it entirely is Phase 2E).
-  - Falls back to the old fully-interpreted path (`RtlRuntimeInstance` drives
-    everything, native storage is refreshed by reading back through
-    `getObservable`) when no generated `evaluate_combinational` is present —
-    used by the interpreter-only `createInterpreterModel` overload.
+  - `makeNativeFlopCommitCpp` also emits `initFlops(storage, mode, rng)`
+    (`GeneratedFlopsInitFn`): applies `MateFlopsInitial` to every flop Q leaf
+    in declaration order, mirroring `MateIRRuntime::initFlops`. Only the
+    `ZERO` mode is exercised by generated testbenches today (`gen_tb.py`
+    hardcodes `MATE_FLOPS_INITIAL_ZERO` at `mate_instance_init` time), but all
+    three modes are implemented for API completeness.
+- `abi_native.cpp` (the backend actually linked into DPI sims):
+  - `mate_model_create`/`createNativeModel` build `MateModel` directly from
+    `GeneratedModelMetadata`, with no second data source to cross-validate
+    against (unlike the interpreter backend, which validated generated
+    metadata against a compiled `RtlRuntimeModel`). Correctness now rests
+    entirely on the codegen tool being correct — acceptable since metadata and
+    native code are always generated together by the same tool run.
+  - `mate_instance_init` applies `flops_init` for the requested
+    `MateFlopsInitial` mode, writes the async/sync input updates straight into
+    `native_inputs`, then applies `reset_apply` for every reset domain that
+    reads active given those now-set inputs (mirrors
+    `MateIRRuntime::initializeInputsAndEvaluate`'s reset-at-power-up), then
+    evaluates combinational logic once.
+  - `mate_apply_clock`/`mate_apply_reset`/`mate_set_input` are unconditionally
+    native (there is no interpreter fallback in this file at all) — same
+    logic as the native branches added to `abi_interpreter.cpp` in Phase 2D,
+    ported over.
+  - Low-level word/SimValue packing helpers (`wordsToSimValue`,
+    `copyWordsToStorage`, `simValueToStorage`, `storageToWords`, `wordCount`,
+    `guard`/`setOk`/`setError`) are intentionally duplicated from
+    `abi_interpreter.cpp` rather than shared: the interpreter version is keyed
+    on `mate::Type` (mateir), and sharing it here would have pulled mateir
+    back into the native link. The native version uses plain
+    `(int32_t width, bool is_signed)` pairs instead.
+- `tests/common/verilator.mk`'s `MATE_LIBS` (used by every DPI test) now
+  links only `libmate-abi-native.a`, `libmate-sim-value.a`, and
+  `libfmt.a` — `libmate-abi-interpreter.a`, `libmate-rtl-runtime-compiler.a`,
+  `libmate-systemverilog-frontend.a`, `libmate-rtl-runtime.a`,
+  `libmate-mateir.a`, `yaml-cpp`, and slang are gone from the DPI simulation
+  link entirely (verified via the generated `Vtb.mk`'s link line, not just by
+  inspecting the Makefile template). `mate-dpi-codegen` (the offline codegen
+  tool) is unaffected and still links the full frontend/slang to compile SV
+  and produce `<module>_model.cpp`/metadata in the first place — that's a
+  build-time tool dependency, not a simulation-time one.
 
-Last clean validation for Phase 2D:
+Last clean validation for Phase 2E:
 
 - `scripts/docker-run.sh make dev`
 - `scripts/docker-run.sh make -C tests/ibex_core/work/verilator clean simulate DPI=1`
-  (~5.5 minutes end-to-end, down from ~10 minutes in Phase 2C now that
-  per-cycle flop commit no longer walks the interpreter)
+  (~5.4 minutes end-to-end, same ballpark as Phase 2D — no measurable
+  regression or improvement from dropping the interpreter link, as expected
+  since Phase 2D had already removed the interpreter from the hot path)
 - `scripts/docker-run.sh python tests/regression.py --mode verilator-dpi`
   (the actual regression entry point; `make regression` does not reliably
   exercise the same DPI path)
-- Full regression result: `126/126 passed` (`tests/regression_tests.txt`
+- Full regression result: `126/126 passed` under `--mode verilator-dpi`,
+  `138/138 passed` under `make regression` (`tests/regression_tests.txt`
   currently excludes `ibex_core` for run-time reasons; verified separately
-  above).
+  above). Passed on the first attempt with the reduced link.
 
 ## Phase 2: Native Generated Model
 

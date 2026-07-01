@@ -116,11 +116,14 @@ set(SYSTEMVERILOG_FRONTEND_SOURCES
     src/frontends/systemverilog/unresolved.cpp
 )
 
+set(SIM_VALUE_SOURCES
+    src/sim/sim_value.cpp
+)
+
 set(RTL_RUNTIME_SOURCES
     src/sim/runtime.cpp
     src/sim/runtime_model.cpp
     src/sim/runtime_metadata.cpp
-    src/sim/sim_value.cpp
 )
 
 set(RTL_RUNTIME_COMPILER_SOURCES
@@ -133,6 +136,10 @@ set(DPI_SUPPORT_SOURCES
 
 set(ABI_INTERPRETER_SOURCES
     src/abi/abi_interpreter.cpp
+)
+
+set(ABI_NATIVE_SOURCES
+    src/abi/abi_native.cpp
 )
 
 set(VECTOR_SIMULATOR_SOURCES
@@ -157,9 +164,13 @@ target_link_libraries(mate-systemverilog-frontend
 )
 mate_configure_project_target(mate-systemverilog-frontend)
 
+add_library(mate-sim-value STATIC ${SIM_VALUE_SOURCES})
+target_include_directories(mate-sim-value PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+mate_configure_project_target(mate-sim-value)
+
 add_library(mate-rtl-runtime STATIC ${RTL_RUNTIME_SOURCES})
 target_include_directories(mate-rtl-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mate-rtl-runtime PUBLIC mate-mateir)
+target_link_libraries(mate-rtl-runtime PUBLIC mate-mateir mate-sim-value)
 mate_configure_project_target(mate-rtl-runtime)
 
 add_library(mate-rtl-runtime-compiler STATIC ${RTL_RUNTIME_COMPILER_SOURCES})
@@ -184,6 +195,16 @@ target_include_directories(mate-abi-interpreter PUBLIC
 )
 target_link_libraries(mate-abi-interpreter PUBLIC mate-rtl-runtime-compiler)
 mate_configure_project_target(mate-abi-interpreter)
+
+# No mateir/frontend/yaml-cpp/slang dependency by design: this is the ABI
+# backend linked into DPI simulation binaries (tests/common/verilator.mk),
+# and Phase 2E requires those to be absent from that link.
+add_library(mate-abi-native STATIC ${ABI_NATIVE_SOURCES})
+target_include_directories(mate-abi-native PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(mate-abi-native PUBLIC mate-sim-value)
+mate_configure_project_target(mate-abi-native)
 
 add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)
 target_include_directories(mate-vcd-tracer PUBLIC

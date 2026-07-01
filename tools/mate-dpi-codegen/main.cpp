@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -434,6 +435,83 @@ std::string generatedStorageKindName(RuntimeObservableKind kind) {
     throw CompilerError("mate-dpi-codegen: unknown runtime observable kind");
 }
 
+std::string simValueFromTypeExpr(int64_t value, const Type& type) {
+    if (type.width <= 0) {
+        throw CompilerError("mate-dpi-codegen: generated expression has invalid width");
+    }
+    return std::format("mate::SimValue::fromI64({}, {}, {})",
+                       value,
+                       type.width,
+                       type.isSigned() ? "true" : "false");
+}
+
+std::string boolLiteral(bool value) {
+    return value ? "true" : "false";
+}
+
+std::vector<const DFGNode*> topoOrder(const DFG& dfg) {
+    std::map<const DFGNode*, int> in_degree;
+    std::map<const DFGNode*, std::vector<const DFGNode*>> successors;
+    for (const auto& node : dfg.nodes) {
+        in_degree[node.get()] = 0;
+    }
+    for (const auto& node : dfg.nodes) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
+            in_degree[node.get()]++;
+            successors[input.node].push_back(node.get());
+        });
+    }
+
+    std::queue<const DFGNode*> ready;
+    for (const auto& [node, degree] : in_degree) {
+        if (degree == 0) ready.push(node);
+    }
+
+    std::vector<const DFGNode*> order;
+    order.reserve(dfg.nodes.size());
+    while (!ready.empty()) {
+        const DFGNode* node = ready.front();
+        ready.pop();
+        order.push_back(node);
+        for (const DFGNode* successor : successors[node]) {
+            if (--in_degree[successor] == 0) ready.push(successor);
+        }
+    }
+    if (order.size() != dfg.nodes.size()) {
+        throw CompilerError("mate-dpi-codegen: topological sort failed for generated model");
+    }
+    return order;
+}
+
+const RuntimeObservableMetadata* observableForNode(const RtlRuntimeModel& model,
+                                                   const DFGNode* node,
+                                                   RuntimeObservableKind kind) {
+    auto it = model.metadata().observables_by_node.find(node);
+    if (it == model.metadata().observables_by_node.end()) return nullptr;
+    for (RuntimeObservableId id : it->second) {
+        const auto& observable = model.metadata().observables.at(id.value);
+        if (observable.kind == kind) return &observable;
+    }
+    return nullptr;
+}
+
+std::optional<size_t> storageIndexForObservable(const RtlRuntimeModel& model,
+                                                const DFGNode* node,
+                                                RuntimeObservableKind kind) {
+    const auto* observable = observableForNode(model, node, kind);
+    if (!observable) return std::nullopt;
+    size_t index = 0;
+    for (const auto& candidate : model.metadata().observables) {
+        if (candidate.kind == RuntimeObservableKind::Input ||
+            candidate.kind == RuntimeObservableKind::Output) {
+            continue;
+        }
+        if (candidate.id == observable->id) return index;
+        ++index;
+    }
+    throw CompilerError("mate-dpi-codegen: observable storage index was not found");
+}
+
 void validateDpiSupportedPort(const ModuleNode& node) {
     if (node.binding.aggregate_leaves.empty()) {
         throw CompilerError(std::format(
@@ -594,11 +672,11 @@ ModelPorts collectPorts(const RtlRuntimeModel& model, const SvSurfaceFacts& sv_f
 }
 
 const PortLeaf& inputLeaf(const ModelPorts& ports, LeafIndex index) {
-    return ports.inputs.at(index.port).leaves.at(index.leaf);
+    return ports.inputs[index.port].leaves.at(index.leaf);
 }
 
 const PortLeaf& outputLeaf(const ModelPorts& ports, LeafIndex index) {
-    return ports.outputs.at(index.port).leaves.at(index.leaf);
+    return ports.outputs[index.port].leaves.at(index.leaf);
 }
 
 std::vector<LeafIndex> allInputLeaves(const ModelPorts& ports) {
@@ -660,12 +738,12 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
             << " = " << i << ";\n";
     }
     for (size_t i = 0; i < ports.clocks.size(); ++i) {
-        const auto& clock = ports.inputs.at(ports.clocks[i]);
+        const auto& clock = ports.inputs[ports.clocks[i]];
         out << "constexpr size_t kClock_" << leafIdentifier(clock.leaves.front().leaf_name)
             << " = " << i << ";\n";
     }
     for (size_t i = 0; i < ports.resets.size(); ++i) {
-        const auto& reset = ports.inputs.at(ports.resets[i]);
+        const auto& reset = ports.inputs[ports.resets[i]];
         out << "constexpr size_t kReset_" << leafIdentifier(reset.leaves.front().leaf_name)
             << " = " << i << ";\n";
     }
@@ -791,14 +869,14 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
             << cppString(output.leaf_name) << "), \"output\", " << cppString(output.leaf_name) << ");\n";
     }
     for (size_t i = 0; i < ports.clocks.size(); ++i) {
-        const auto& clock = ports.inputs.at(ports.clocks[i]);
+        const auto& clock = ports.inputs[ports.clocks[i]];
         const auto& leaf = clock.leaves.front();
         const std::string ident = leafIdentifier(leaf.leaf_name);
         out << "    context->clocks.at(kClock_" << ident << ") = checkedHandle(mate_clock_id(context->model, "
             << cppString(leaf.leaf_name) << "), \"clock\", " << cppString(leaf.leaf_name) << ");\n";
     }
     for (size_t i = 0; i < ports.resets.size(); ++i) {
-        const auto& reset = ports.inputs.at(ports.resets[i]);
+        const auto& reset = ports.inputs[ports.resets[i]];
         const auto& leaf = reset.leaves.front();
         const std::string ident = leafIdentifier(leaf.leaf_name);
         out << "    context->resets.at(kReset_" << ident << ") = checkedHandle(mate_reset_id(context->model, "
@@ -907,12 +985,12 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "}\n\n";
 
     for (size_t clock_index : ports.clocks) {
-        const auto& clock = ports.inputs.at(clock_index);
+        const auto& clock = ports.inputs[clock_index];
         const auto runtime_clock = std::find_if(
             model.metadata().clocks.begin(), model.metadata().clocks.end(),
             [&](const RuntimeClockMetadata& metadata) {
-                return ports.inputs.at(clock_index).clock_domain &&
-                       metadata.domain_id == *ports.inputs.at(clock_index).clock_domain;
+                return ports.inputs[clock_index].clock_domain &&
+                       metadata.domain_id == *ports.inputs[clock_index].clock_domain;
             });
         if (runtime_clock == model.metadata().clocks.end()) {
             throw CompilerError(std::format(
@@ -943,7 +1021,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     }
 
     for (size_t reset_index : ports.resets) {
-        const auto& reset = ports.inputs.at(reset_index);
+        const auto& reset = ports.inputs[reset_index];
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             emitFunctionHeader(sanitizeIdentifier(reset.name) + "_" + edgeName(edge), {}, true);
             out << " {\n";
@@ -994,7 +1072,7 @@ void emitSvCallArgs(std::ostringstream& out,
                     const ModelPorts& ports) {
     out << "                        ctx";
     for (LeafIndex index : inputs) {
-        const auto& port = ports.inputs.at(index.port);
+        const auto& port = ports.inputs[index.port];
         const auto& leaf = inputLeaf(ports, index);
         out << ",\n                        " << svDpiInputSignal(port, leaf);
     }
@@ -1026,7 +1104,7 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     out << "    );\n\n";
 
     for (size_t clock_index : ports.clocks) {
-        const auto& clock = ports.inputs.at(clock_index);
+        const auto& clock = ports.inputs[clock_index];
         const auto runtime_clock = std::find_if(
             model.metadata().clocks.begin(), model.metadata().clocks.end(),
             [&](const RuntimeClockMetadata& metadata) {
@@ -1051,7 +1129,7 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     }
 
     for (size_t reset_index : ports.resets) {
-        const auto& reset = ports.inputs.at(reset_index);
+        const auto& reset = ports.inputs[reset_index];
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             out << "    import \"DPI-C\" function void " << config.function_prefix << "_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "(\n";
@@ -1083,7 +1161,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         out << "    logic " << svRange(output.type) << nextOutputLeafName(output) << ";\n";
     }
     for (LeafIndex index : input_leaves) {
-        const auto& input = ports.inputs.at(index.port);
+        const auto& input = ports.inputs[index.port];
         const auto& leaf = inputLeaf(ports, index);
         if (!input.sv_type_name) continue;
         out << "    logic " << svRange(leaf.type) << svDpiInputWireName(leaf) << ";\n";
@@ -1093,18 +1171,18 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
 
     out << "    chandle ctx;\n";
     out << "    logic initialized;\n";
-    for (size_t index : ports.clocks) out << "    logic last_" << ports.inputs.at(index).name << ";\n";
-    for (size_t index : ports.resets) out << "    logic last_" << ports.inputs.at(index).name << ";\n";
+    for (size_t index : ports.clocks) out << "    logic last_" << ports.inputs[index].name << ";\n";
+    for (size_t index : ports.resets) out << "    logic last_" << ports.inputs[index].name << ";\n";
     out << "\n";
     out << "    initial begin\n";
     out << "        ctx = " << config.function_prefix << "_create_context();\n";
     out << "        initialized = 1'b0;\n";
     for (size_t index : ports.clocks) {
-        const auto& clock = ports.inputs.at(index);
+        const auto& clock = ports.inputs[index];
         out << "        last_" << clock.name << " = " << clock.name << ";\n";
     }
     for (size_t index : ports.resets) {
-        const auto& reset = ports.inputs.at(index);
+        const auto& reset = ports.inputs[index];
         out << "        last_" << reset.name << " = " << reset.name << ";\n";
     }
     out << "        #0;\n";
@@ -1112,7 +1190,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     emitSvCallArgs(out, input_leaves, output_leaves, ports);
     out << "        );\n";
     for (LeafIndex index : output_leaves) {
-        const auto& port = ports.outputs.at(index.port);
+        const auto& port = ports.outputs[index.port];
         const auto& output = outputLeaf(ports, index);
         out << "        " << svOutputLeafExpr(output) << " = "
             << svOutputLeafValueExpr(port, output) << ";\n";
@@ -1132,7 +1210,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
         std::vector<std::string> sensitivity_ports;
         for (LeafIndex index : data_inputs) {
-            const std::string& name = ports.inputs.at(index.port).name;
+            const std::string& name = ports.inputs[index.port].name;
             if (std::find(sensitivity_ports.begin(), sensitivity_ports.end(), name) ==
                 sensitivity_ports.end()) {
                 sensitivity_ports.push_back(name);
@@ -1148,7 +1226,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         emitSvCallArgs(out, data_inputs, output_leaves, ports);
         out << "            );\n";
         for (LeafIndex index : output_leaves) {
-            const auto& port = ports.outputs.at(index.port);
+            const auto& port = ports.outputs[index.port];
             const auto& output = outputLeaf(ports, index);
             out << "            " << svOutputLeafExpr(output) << " = "
                 << svOutputLeafValueExpr(port, output) << ";\n";
@@ -1161,46 +1239,46 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     for (size_t index : ports.clocks) {
         if (!first_event) out << " or ";
         first_event = false;
-        out << ports.inputs.at(index).name;
+        out << ports.inputs[index].name;
     }
     for (size_t index : ports.resets) {
         if (!first_event) out << " or ";
         first_event = false;
-        out << ports.inputs.at(index).name;
+        out << ports.inputs[index].name;
     }
     out << ") begin\n";
     for (size_t index : ports.clocks) {
-        const auto& clock = ports.inputs.at(index);
+        const auto& clock = ports.inputs[index];
         out << "        logic " << clock.name << "_changed;\n";
     }
     for (size_t index : ports.resets) {
-        const auto& reset = ports.inputs.at(index);
+        const auto& reset = ports.inputs[index];
         out << "        logic " << reset.name << "_changed;\n";
     }
     out << "\n";
     for (size_t index : ports.clocks) {
-        const auto& clock = ports.inputs.at(index);
+        const auto& clock = ports.inputs[index];
         out << "        " << clock.name << "_changed = (" << clock.name << " !== last_" << clock.name << ");\n";
     }
     for (size_t index : ports.resets) {
-        const auto& reset = ports.inputs.at(index);
+        const auto& reset = ports.inputs[index];
         out << "        " << reset.name << "_changed = (" << reset.name << " !== last_" << reset.name << ");\n";
     }
     out << "\n";
     out << "        if (!initialized) begin\n";
     for (size_t index : ports.clocks) {
-        const auto& clock = ports.inputs.at(index);
+        const auto& clock = ports.inputs[index];
         out << "            if (" << clock.name << "_changed) last_" << clock.name << " = " << clock.name << ";\n";
     }
     for (size_t index : ports.resets) {
-        const auto& reset = ports.inputs.at(index);
+        const auto& reset = ports.inputs[index];
         out << "            if (" << reset.name << "_changed) last_" << reset.name << " = " << reset.name << ";\n";
     }
     out << "        end else begin\n";
 
     auto emitCommitOutputs = [&]() {
         for (LeafIndex index : output_leaves) {
-            const auto& port = ports.outputs.at(index.port);
+            const auto& port = ports.outputs[index.port];
             const auto& output = outputLeaf(ports, index);
             out << "                " << svOutputLeafExpr(output) << " <= "
                 << svOutputLeafValueExpr(port, output) << ";\n";
@@ -1208,7 +1286,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     };
 
     for (size_t clock_index : ports.clocks) {
-        const auto& clock = ports.inputs.at(clock_index);
+        const auto& clock = ports.inputs[clock_index];
         const auto runtime_clock = std::find_if(
             model.metadata().clocks.begin(), model.metadata().clocks.end(),
             [&](const RuntimeClockMetadata& metadata) {
@@ -1240,7 +1318,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     }
 
     for (size_t reset_index : ports.resets) {
-        const auto& reset = ports.inputs.at(reset_index);
+        const auto& reset = ports.inputs[reset_index];
         out << "            if (" << reset.name << "_changed) begin\n";
         out << "                last_" << reset.name << " = " << reset.name << ";\n";
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
@@ -1283,11 +1361,311 @@ int generatedResetIdForDomain(const RtlRuntimeModel& model, ResetId domain) {
     return -1;
 }
 
+std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
+    if (!model.top().dfg) {
+        throw CompilerError("mate-dpi-codegen: top module has no DFG");
+    }
+
+    std::ostringstream out;
+    const auto order = topoOrder(*model.top().dfg);
+    std::map<const DFGNode*, std::string> value_expr;
+
+    auto checkedType = [&](const DFGNode* node) -> const Type& {
+        if (!node || !node->type || node->type->width <= 0) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: DFG node '{}' has no resolved type",
+                node ? node->str() : "<null>"));
+        }
+        return *node->type;
+    };
+
+    auto nodeVar = [](const DFGNode* node) {
+        return std::format("v_{}", node->debug_id);
+    };
+
+    auto nodeValue = [&](const DFGNode* node) -> std::string {
+        auto it = value_expr.find(node);
+        if (it == value_expr.end()) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: generated value for node '{}' is not available",
+                node->str()));
+        }
+        return it->second;
+    };
+
+    auto maskExpr = [&](const std::string& expr, const DFGNode* node) {
+        const auto& type = checkedType(node);
+        return std::format("maskToWidth({}, {}, {})",
+                           expr,
+                           type.width,
+                           boolLiteral(type.isSigned()));
+    };
+
+    auto binaryExpr = [&](const DFGNode* node, std::string_view op_name) {
+        auto inputs = node->binaryInputs();
+        return std::format("{}.{}({})",
+                           nodeValue(inputs.lhs.node),
+                           op_name,
+                           nodeValue(inputs.rhs.node));
+    };
+
+    out << "namespace {\n\n";
+    out << "mate::SimValue maskToWidth(const mate::SimValue& value, int width, bool is_signed) {\n";
+    out << "    return value.resized(width, is_signed);\n";
+    out << "}\n\n";
+    out << "mate::SimValue boolValue(bool value) {\n";
+    out << "    return mate::SimValue::fromU64(value ? 1 : 0, 1, false);\n";
+    out << "}\n\n";
+    out << "void evaluateCombinational(std::span<const mate::SimValue> inputs,\n";
+    out << "                           std::span<mate::SimValue> outputs,\n";
+    out << "                           std::span<mate::SimValue> storage) {\n";
+
+    for (const DFGNode* node : order) {
+        const DFGOp kind = node->kind();
+        const auto& type = checkedType(node);
+        const std::string var = nodeVar(node);
+
+        if (kind == DFGOp::INPUT) {
+            if (const auto* input = model.metadata().findInput(node->name)) {
+                value_expr[node] = std::format("inputs[{}]", input->id.value);
+                continue;
+            }
+            if (auto storage_index = storageIndexForObservable(
+                    model, node, RuntimeObservableKind::FlopQ)) {
+                value_expr[node] = std::format("storage[{}]", *storage_index);
+                continue;
+            }
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: INPUT node '{}' is neither top input nor flop Q",
+                node->str()));
+        }
+
+        if (kind == DFGOp::CONST) {
+            value_expr[node] = simValueFromTypeExpr(node->constValue(), type);
+            continue;
+        }
+
+        if (kind == DFGOp::X) {
+            // Phase 2C keeps X deterministic in generated combinational code.
+            value_expr[node] = std::format("mate::SimValue::zero({}, {})",
+                                           type.width,
+                                           boolLiteral(type.isSigned()));
+            continue;
+        }
+
+        std::string expr;
+        switch (kind) {
+            case DFGOp::SIGNAL:
+            case DFGOp::OUTPUT:
+                if (auto driver = node->driver()) {
+                    expr = nodeValue(driver->node);
+                } else {
+                    throw CompilerError(std::format(
+                        "mate-dpi-codegen: driven node '{}' has no driver", node->str()));
+                }
+                break;
+
+            case DFGOp::ADD:
+            case DFGOp::SUB:
+            case DFGOp::MUL: {
+                auto inputs = node->binaryInputs();
+                const bool is_signed =
+                    checkedType(inputs.lhs.node).isSigned() &&
+                    checkedType(inputs.rhs.node).isSigned();
+                const char* op =
+                    kind == DFGOp::ADD ? "add" : (kind == DFGOp::SUB ? "sub" : "mul");
+                expr = std::format("{}.resized({}, {}).{}({}.resized({}, {}))",
+                                   nodeValue(inputs.lhs.node),
+                                   type.width,
+                                   boolLiteral(is_signed),
+                                   op,
+                                   nodeValue(inputs.rhs.node),
+                                   type.width,
+                                   boolLiteral(is_signed));
+                break;
+            }
+
+            case DFGOp::EQ:
+                expr = std::format("boolValue({})", binaryExpr(node, "eq"));
+                break;
+            case DFGOp::LT:
+            case DFGOp::LE:
+            case DFGOp::GT:
+            case DFGOp::GE: {
+                auto inputs = node->binaryInputs();
+                const bool is_signed =
+                    checkedType(inputs.lhs.node).isSigned() &&
+                    checkedType(inputs.rhs.node).isSigned();
+                const std::string less = is_signed
+                    ? std::format("{}.signedLt({})",
+                                  nodeValue(inputs.lhs.node),
+                                  nodeValue(inputs.rhs.node))
+                    : std::format("{}.unsignedLt({})",
+                                  nodeValue(inputs.lhs.node),
+                                  nodeValue(inputs.rhs.node));
+                const std::string reverse_less = is_signed
+                    ? std::format("{}.signedLt({})",
+                                  nodeValue(inputs.rhs.node),
+                                  nodeValue(inputs.lhs.node))
+                    : std::format("{}.unsignedLt({})",
+                                  nodeValue(inputs.rhs.node),
+                                  nodeValue(inputs.lhs.node));
+                if (kind == DFGOp::LT) {
+                    expr = std::format("boolValue({})", less);
+                } else if (kind == DFGOp::LE) {
+                    expr = std::format("boolValue(({}) || {}.eq({}))",
+                                       less,
+                                       nodeValue(inputs.lhs.node),
+                                       nodeValue(inputs.rhs.node));
+                } else if (kind == DFGOp::GT) {
+                    expr = std::format("boolValue({})", reverse_less);
+                } else {
+                    expr = std::format("boolValue(!({}))", less);
+                }
+                break;
+            }
+
+            case DFGOp::SHL:
+                expr = std::format("{}.shl({}.lowU64())",
+                                   nodeValue(node->binaryInputs().lhs.node),
+                                   nodeValue(node->binaryInputs().rhs.node));
+                break;
+            case DFGOp::SHR:
+                expr = std::format("{}.shr({}.lowU64(), false)",
+                                   nodeValue(node->binaryInputs().lhs.node),
+                                   nodeValue(node->binaryInputs().rhs.node));
+                break;
+            case DFGOp::ASR:
+                expr = std::format("{}.shr({}.lowU64(), true)",
+                                   nodeValue(node->binaryInputs().lhs.node),
+                                   nodeValue(node->binaryInputs().rhs.node));
+                break;
+
+            case DFGOp::MUX: {
+                expr = "[&]() -> mate::SimValue {\n";
+                expr += std::format("        const int64_t selector = static_cast<int64_t>({}.lowU64());\n",
+                                    nodeValue(node->muxSelector().node));
+                expr += "        switch (selector) {\n";
+                for (size_t i = 0; i < node->muxArmCount(); ++i) {
+                    expr += std::format("            case {}: return {};\n",
+                                        node->muxArmValue(i),
+                                        nodeValue(node->muxArmData(i).node));
+                }
+                expr += "            default: throw std::runtime_error(\"Mate native model: MUX selector has no matching arm\");\n";
+                expr += "        }\n";
+                expr += "    }()";
+                break;
+            }
+
+            case DFGOp::UNARY_NEGATE:
+                expr = std::format("{}.negated()", nodeValue(node->unaryInputs().operand.node));
+                break;
+            case DFGOp::BITWISE_NOT:
+                expr = std::format("{}.bitwiseNot()", nodeValue(node->unaryInputs().operand.node));
+                break;
+            case DFGOp::BITWISE_AND:
+                expr = binaryExpr(node, "bitwiseAnd");
+                break;
+            case DFGOp::BITWISE_OR:
+                expr = binaryExpr(node, "bitwiseOr");
+                break;
+            case DFGOp::BITWISE_XOR:
+                expr = binaryExpr(node, "bitwiseXor");
+                break;
+            case DFGOp::BITWISE_XNOR:
+                expr = binaryExpr(node, "bitwiseXnor");
+                break;
+            case DFGOp::REDUCTION_AND:
+                expr = std::format("boolValue({}.reductionAnd())",
+                                   nodeValue(node->unaryInputs().operand.node));
+                break;
+            case DFGOp::REDUCTION_NAND:
+                expr = std::format("boolValue(!{}.reductionAnd())",
+                                   nodeValue(node->unaryInputs().operand.node));
+                break;
+            case DFGOp::REDUCTION_OR:
+                expr = std::format("boolValue({}.reductionOr())",
+                                   nodeValue(node->unaryInputs().operand.node));
+                break;
+            case DFGOp::REDUCTION_NOR:
+                expr = std::format("boolValue(!{}.reductionOr())",
+                                   nodeValue(node->unaryInputs().operand.node));
+                break;
+            case DFGOp::REDUCTION_XOR:
+                expr = std::format("boolValue({}.reductionXor())",
+                                   nodeValue(node->unaryInputs().operand.node));
+                break;
+            case DFGOp::REDUCTION_XNOR:
+                expr = std::format("boolValue(!{}.reductionXor())",
+                                   nodeValue(node->unaryInputs().operand.node));
+                break;
+
+            case DFGOp::SLICE: {
+                auto slice = node->sliceInputs();
+                if (slice.high.node->kind() != DFGOp::CONST ||
+                    slice.low.node->kind() != DFGOp::CONST) {
+                    throw CompilerError(std::format(
+                        "mate-dpi-codegen: SLICE node '{}' has non-constant bounds",
+                        node->str()));
+                }
+                auto resolved = resolveSliceRange(*slice.source.node,
+                                                  slice.high.node->constValue(),
+                                                  slice.low.node->constValue());
+                expr = std::format("{}.slice({}, {})",
+                                   nodeValue(slice.source.node),
+                                   resolved.internal_high,
+                                   resolved.internal_low);
+                break;
+            }
+
+            case DFGOp::CONCAT: {
+                expr = "[&]() -> mate::SimValue {\n";
+                expr += "        std::vector<mate::SimValue> parts;\n";
+                expr += std::format("        parts.reserve({});\n", node->concatParts().size());
+                for (const auto& part : node->concatParts()) {
+                    expr += std::format("        parts.push_back({});\n", nodeValue(part.node));
+                }
+                expr += "        return mate::SimValue::concat(std::span<const mate::SimValue>(parts.data(), parts.size()));\n";
+                expr += "    }()";
+                break;
+            }
+
+            case DFGOp::INPUT:
+            case DFGOp::CONST:
+            case DFGOp::X:
+                throw CompilerError("mate-dpi-codegen: source node reached expression switch");
+        }
+
+        out << "    mate::SimValue " << var << " = " << maskExpr(expr, node) << ";\n";
+        value_expr[node] = var;
+
+        if (auto storage_index = storageIndexForObservable(
+                model, node, RuntimeObservableKind::Internal)) {
+            out << "    storage[" << *storage_index << "] = " << var << ";\n";
+        }
+        if (auto storage_index = storageIndexForObservable(
+                model, node, RuntimeObservableKind::FlopD)) {
+            out << "    storage[" << *storage_index << "] = " << var << ";\n";
+        }
+    }
+
+    for (const auto& output : model.metadata().output_leaves) {
+        out << "    outputs[" << output.id.value << "] = "
+            << maskExpr(nodeValue(output.node), output.node) << ";\n";
+    }
+    out << "}\n\n";
+    out << "} // namespace\n\n";
+    return out.str();
+}
+
 std::string makeInterpreterModelCpp(const Config& config,
                                     const ModelPorts& ports,
                                     const RtlRuntimeModel& model) {
     std::ostringstream out;
     out << "#include \"abi/abi_interpreter.h\"\n\n";
+    out << "#include <stdexcept>\n";
+    out << "#include <vector>\n\n";
+    out << makeNativeCombinationalCpp(model);
     out << "extern \"C\" MateStatusCode mate_model_create(const MateModel** out_model, MateStatus* status) {\n";
     out << "    mate::abi::InterpreterModelConfig config;\n";
     out << "    config.top_module = " << cppString(config.top_module) << ";\n";
@@ -1369,6 +1747,7 @@ std::string makeInterpreterModelCpp(const Config& config,
             << (observable.type.isSigned() ? "true" : "false") << "},\n";
     }
     out << "    };\n";
+    out << "    metadata.evaluate_combinational = &evaluateCombinational;\n";
     out << "\n";
     out << "    return mate::abi::createInterpreterModel(config, metadata, out_model, status);\n";
     out << "}\n";

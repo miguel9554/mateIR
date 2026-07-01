@@ -80,6 +80,7 @@ struct MateModel {
     std::vector<AbiStorageSlot> input_storage;
     std::vector<AbiStorageSlot> output_storage;
     std::vector<AbiStorageSlot> observable_storage;
+    mate::abi::GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
 };
 
 struct MateInstance {
@@ -88,6 +89,9 @@ struct MateInstance {
     std::vector<std::vector<uint64_t>> input_words;
     std::vector<std::vector<uint64_t>> output_words;
     std::vector<std::vector<uint64_t>> observable_words;
+    std::vector<mate::SimValue> native_inputs;
+    std::vector<mate::SimValue> native_outputs;
+    std::vector<mate::SimValue> native_storage;
 };
 
 namespace {
@@ -300,10 +304,38 @@ std::vector<std::vector<uint64_t>> allocateStorage(const std::vector<AbiStorageS
     return storage;
 }
 
+std::vector<mate::SimValue> allocateSimStorage(const std::vector<AbiStorageSlot>& slots) {
+    std::vector<mate::SimValue> storage;
+    storage.reserve(slots.size());
+    for (const auto& slot : slots) {
+        storage.push_back(mate::SimValue::zero(slot.type.width, slot.type.isSigned()));
+    }
+    return storage;
+}
+
+void copyNativeOutputsToWordStorage(MateInstance& instance) {
+    for (const auto& output : instance.model->outputs) {
+        simValueToStorage(output.leaf_name,
+                          instance.native_outputs.at(output.storage_index),
+                          instance.output_words.at(output.storage_index));
+    }
+}
+
+void copyNativeObservablesToWordStorage(MateInstance& instance) {
+    for (size_t i = 0; i < instance.model->observable_storage.size(); ++i) {
+        const auto& slot = instance.model->observable_storage.at(i);
+        simValueToStorage(slot.full_path,
+                          instance.native_storage.at(i),
+                          instance.observable_words.at(i));
+    }
+}
+
 void refreshOutputStorage(MateInstance& instance) {
     for (const auto& output : instance.model->outputs) {
+        instance.native_outputs.at(output.storage_index) =
+            instance.runtime->getOutput(output.runtime_id);
         auto& storage = instance.output_words.at(output.storage_index);
-        simValueToStorage(output.leaf_name, instance.runtime->getOutput(output.runtime_id), storage);
+        simValueToStorage(output.leaf_name, instance.native_outputs.at(output.storage_index), storage);
     }
 }
 
@@ -314,15 +346,27 @@ void refreshObservableStorage(MateInstance& instance) {
             throw mate::CompilerError(std::format(
                 "Mate ABI: native storage '{}' has no runtime observable", slot.full_path));
         }
-        simValueToStorage(slot.full_path,
-                          instance.runtime->getObservable(*slot.observable_id),
-                          instance.observable_words.at(i));
+        instance.native_storage.at(i) = instance.runtime->getObservable(*slot.observable_id);
+        simValueToStorage(slot.full_path, instance.native_storage.at(i), instance.observable_words.at(i));
     }
 }
 
 void refreshNativeStorage(MateInstance& instance) {
+    if (instance.model->evaluate_combinational) {
+        instance.model->evaluate_combinational(instance.native_inputs,
+                                               instance.native_outputs,
+                                               instance.native_storage);
+        copyNativeOutputsToWordStorage(instance);
+        copyNativeObservablesToWordStorage(instance);
+        return;
+    }
     refreshOutputStorage(instance);
     refreshObservableStorage(instance);
+}
+
+void refreshRuntimeBackedNativeState(MateInstance& instance) {
+    refreshObservableStorage(instance);
+    refreshNativeStorage(instance);
 }
 
 std::vector<mate::RuntimeInputUpdate> convertUpdates(const MateModel& model,
@@ -365,6 +409,7 @@ std::vector<mate::RuntimeInputUpdate> convertAndStoreUpdates(MateInstance& insta
         const MateInputUpdate& update = updates[i];
         const auto& input =
             instance.model->inputs.at(static_cast<size_t>(update.input_id));
+        instance.native_inputs.at(input.storage_index) = out.at(static_cast<size_t>(i)).value;
         copyWordsToStorage("input",
                            input.leaf_name,
                            input.type,
@@ -704,6 +749,7 @@ void populateGeneratedMetadata(MateModel& model,
     model.input_storage = buildInputStorage(generated_metadata);
     model.output_storage = buildOutputStorage(generated_metadata);
     model.observable_storage = buildObservableStorage(model.runtime_model, generated_metadata);
+    model.evaluate_combinational = generated_metadata.evaluate_combinational;
 }
 
 } // namespace
@@ -726,7 +772,7 @@ MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
         options.top_domain_mode = config.top_domain_mode;
 
         std::unique_ptr<MateModel> model(
-            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}});
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}, nullptr});
         populateGeneratedMetadata(*model, generated_metadata);
         *out_model = model.release();
     });
@@ -747,7 +793,7 @@ MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
         options.top_domain_mode = config.top_domain_mode;
 
         std::unique_ptr<MateModel> model(
-            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}});
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}, nullptr});
         const GeneratedModelMetadata generated_metadata = metadataFromRuntime(model->runtime_model);
         populateGeneratedMetadata(*model, generated_metadata);
         *out_model = model.release();
@@ -780,6 +826,9 @@ MateStatusCode mate_instance_create(const MateModel* model,
         instance->input_words = allocateStorage(checked_model.input_storage);
         instance->output_words = allocateStorage(checked_model.output_storage);
         instance->observable_words = allocateStorage(checked_model.observable_storage);
+        instance->native_inputs = allocateSimStorage(checked_model.input_storage);
+        instance->native_outputs = allocateSimStorage(checked_model.output_storage);
+        instance->native_storage = allocateSimStorage(checked_model.observable_storage);
         *out_instance = instance.release();
     });
 }
@@ -805,7 +854,7 @@ MateStatusCode mate_instance_init(MateInstance* instance,
         checked.runtime->initializeInputsAndEvaluate(
             convertAndStoreUpdates(checked, async_inputs, async_count),
             convertAndStoreUpdates(checked, sync_inputs, sync_count));
-        refreshNativeStorage(checked);
+        refreshRuntimeBackedNativeState(checked);
     });
 }
 
@@ -947,7 +996,7 @@ MateStatusCode mate_apply_clock(MateInstance* instance,
             checked.model->clocks.at(static_cast<size_t>(clock_id)).domain_id,
             toRuntimeEdge(edge),
             convertAndStoreUpdates(checked, updates_before_edge, update_count));
-        refreshNativeStorage(checked);
+        refreshRuntimeBackedNativeState(checked);
     });
 }
 
@@ -963,7 +1012,7 @@ MateStatusCode mate_apply_reset(MateInstance* instance,
         checked.runtime->applyResetEdge(
             checked.model->resets.at(static_cast<size_t>(reset_id)).domain_id,
             toRuntimeEdge(edge));
-        refreshNativeStorage(checked);
+        refreshRuntimeBackedNativeState(checked);
     });
 }
 

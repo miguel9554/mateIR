@@ -2,9 +2,11 @@
 
 #include "abi/mate_model_abi.h"
 #include "frontends/frontend.h"
+#include "sim/sim_value.h"
 
 #include <cstdint>
 #include <map>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -58,12 +60,18 @@ struct GeneratedStorageMetadata {
     bool is_signed = false;
 };
 
+using GeneratedCombinationalEvaluateFn = void (*)(
+    std::span<const mate::SimValue> inputs,
+    std::span<mate::SimValue> outputs,
+    std::span<mate::SimValue> storage);
+
 struct GeneratedModelMetadata {
     std::vector<GeneratedInputMetadata> inputs;
     std::vector<GeneratedOutputMetadata> outputs;
     std::vector<GeneratedClockMetadata> clocks;
     std::vector<GeneratedResetMetadata> resets;
     std::vector<GeneratedStorageMetadata> storage;
+    GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
 };
 
 MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,

@@ -131,6 +131,10 @@ set(DPI_SUPPORT_SOURCES
     src/dpi/dpi_support.cpp
 )
 
+set(ABI_INTERPRETER_SOURCES
+    src/abi/abi_interpreter.cpp
+)
+
 set(VECTOR_SIMULATOR_SOURCES
     tools/mate-vector-simulator/simulator_consumer.cpp
     tools/mate-vector-simulator/simulator.cpp
@@ -173,6 +177,13 @@ target_include_directories(mate-dpi-support PUBLIC
 )
 target_link_libraries(mate-dpi-support PUBLIC mate-rtl-runtime-compiler)
 mate_configure_project_target(mate-dpi-support)
+
+add_library(mate-abi-interpreter STATIC ${ABI_INTERPRETER_SOURCES})
+target_include_directories(mate-abi-interpreter PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(mate-abi-interpreter PUBLIC mate-rtl-runtime-compiler)
+mate_configure_project_target(mate-abi-interpreter)
 
 add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)
 target_include_directories(mate-vcd-tracer PUBLIC

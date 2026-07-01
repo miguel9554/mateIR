@@ -400,34 +400,12 @@ std::string cppDpiType(const Type& type, bool output) {
     return output ? "svLogicVecVal*" : "const svLogicVecVal*";
 }
 
-std::string inputUpdateCall(const PortLeaf& leaf, std::string_view argument) {
-    if (leaf.type.width == 1) {
-        return std::format("mate::dpi::scalarInputUpdate(context.bindings.inputs.at(kInput_{}), {})",
-                           leafIdentifier(leaf.leaf_name), argument);
-    }
-    return std::format("mate::dpi::vectorInputUpdate(context.bindings.inputs.at(kInput_{}), {})",
-                       leafIdentifier(leaf.leaf_name), argument);
+int abiWordCount(const Type& type) {
+    return (type.width + 63) / 64;
 }
 
-std::string outputWriteCall(const PortLeaf& leaf) {
-    if (leaf.type.width == 1) {
-        return std::format(
-            "    mate::dpi::writeScalarOutput(context.instance, context.bindings.outputs.at(kOutput_{}), {});\n",
-            leafIdentifier(leaf.leaf_name), leafIdentifier(leaf.leaf_name));
-    }
-    return std::format(
-        "    mate::dpi::writeVectorOutput(context.instance, context.bindings.outputs.at(kOutput_{}), {});\n",
-        leafIdentifier(leaf.leaf_name), leafIdentifier(leaf.leaf_name));
-}
-
-std::string kindName(RuntimeInputKind kind) {
-    switch (kind) {
-        case RuntimeInputKind::Async: return "mate::RuntimeInputKind::Async";
-        case RuntimeInputKind::Sync: return "mate::RuntimeInputKind::Sync";
-        case RuntimeInputKind::Clock: return "mate::RuntimeInputKind::Clock";
-        case RuntimeInputKind::Reset: return "mate::RuntimeInputKind::Reset";
-    }
-    throw CompilerError("mate-dpi-codegen: unknown runtime input kind");
+std::string edgeAbiName(edge_t edge) {
+    return edge == POSEDGE ? "MATE_EDGE_POSEDGE" : "MATE_EDGE_NEGEDGE";
 }
 
 void validateDpiSupportedPort(const ModuleNode& node) {
@@ -632,24 +610,19 @@ std::string edgeName(edge_t edge) {
     return edge == POSEDGE ? "posedge" : "negedge";
 }
 
-std::string cppEdge(edge_t edge) {
-    return edge == POSEDGE ? "mate::POSEDGE" : "mate::NEGEDGE";
-}
-
 std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
     const auto input_leaves = allInputLeaves(ports);
     const auto output_leaves = allOutputLeaves(ports);
-    out << "#include \"dpi/dpi_support.h\"\n\n";
+    out << "#include \"abi/mate_model_abi.h\"\n";
+    out << "#include \"svdpi.h\"\n\n";
+    out << "#include <array>\n";
+    out << "#include <cstdint>\n";
+    out << "#include <cstdio>\n";
+    out << "#include <cstdlib>\n";
     out << "#include <memory>\n";
-    out << "#include <string>\n";
-    out << "#include <utility>\n";
-    out << "#include <vector>\n\n";
+    out << "#include <utility>\n\n";
     out << "namespace {\n\n";
-    out << "struct Bindings {\n";
-    out << "    std::vector<mate::dpi::DpiInputBinding> inputs;\n";
-    out << "    std::vector<mate::dpi::DpiOutputBinding> outputs;\n";
-    out << "};\n\n";
     for (size_t i = 0; i < input_leaves.size(); ++i) {
         const auto& leaf = inputLeaf(ports, input_leaves[i]);
         out << "constexpr size_t kInput_" << leafIdentifier(leaf.leaf_name)
@@ -660,58 +633,92 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
         out << "constexpr size_t kOutput_" << leafIdentifier(leaf.leaf_name)
             << " = " << i << ";\n";
     }
+    for (size_t i = 0; i < ports.clocks.size(); ++i) {
+        const auto& clock = ports.inputs.at(ports.clocks[i]);
+        out << "constexpr size_t kClock_" << leafIdentifier(clock.leaves.front().leaf_name)
+            << " = " << i << ";\n";
+    }
+    for (size_t i = 0; i < ports.resets.size(); ++i) {
+        const auto& reset = ports.inputs.at(ports.resets[i]);
+        out << "constexpr size_t kReset_" << leafIdentifier(reset.leaves.front().leaf_name)
+            << " = " << i << ";\n";
+    }
     out << "\n";
-    out << "Bindings bindAll(const mate::RtlRuntimeModel& model) {\n";
-    out << "    Bindings bindings;\n";
-    out << "    bindings.inputs.reserve(" << input_leaves.size() << ");\n";
-    for (LeafIndex index : input_leaves) {
-        const auto& input = inputLeaf(ports, index);
-        out << "    bindings.inputs.push_back(mate::dpi::bindInput(model, "
-            << cppString(input.leaf_name) << ", " << kindName(input.input_kind) << "));\n";
-    }
-    out << "    bindings.outputs.reserve(" << output_leaves.size() << ");\n";
-    for (LeafIndex index : output_leaves) {
-        const auto& output = outputLeaf(ports, index);
-        out << "    bindings.outputs.push_back(mate::dpi::bindOutput(model, "
-            << cppString(output.leaf_name) << "));\n";
-    }
-    out << "    return bindings;\n";
+    out << "[[noreturn]] void failDpiCall(const char* function_name, const char* message) {\n";
+    out << "    std::fprintf(stderr, \"Mate DPI fatal in %s: %s\\n\", function_name, message ? message : \"unknown error\");\n";
+    out << "    std::fflush(stderr);\n";
+    out << "    std::abort();\n";
+    out << "}\n\n";
+    out << "void check(MateStatusCode code, const MateStatus& status, const char* function_name) {\n";
+    out << "    if (code != MATE_STATUS_OK) failDpiCall(function_name, status.message);\n";
+    out << "}\n\n";
+    out << "int32_t checkedHandle(int32_t id, const char* kind, const char* name) {\n";
+    out << "    if (id >= 0) return id;\n";
+    out << "    std::fprintf(stderr, \"Mate DPI fatal: %s '%s' was not found\\n\", kind, name);\n";
+    out << "    std::fflush(stderr);\n";
+    out << "    std::abort();\n";
+    out << "}\n\n";
+    out << "uint64_t packScalarInput(const char* name, svLogic value) {\n";
+    out << "    if (value == sv_0) return 0;\n";
+    out << "    if (value == sv_1) return 1;\n";
+    out << "    std::fprintf(stderr, \"Mate DPI fatal: input '%s' received unsupported 4-state scalar value %d\\n\", name, static_cast<int>(value));\n";
+    out << "    std::fflush(stderr);\n";
+    out << "    std::abort();\n";
+    out << "}\n\n";
+    out << "template <int Width>\n";
+    out << "void packVectorInput(const char* name, const svLogicVecVal* value, std::array<uint64_t, (Width + 63) / 64>& out) {\n";
+    out << "    if (!value) failDpiCall(\"packVectorInput\", \"null input vector pointer\");\n";
+    out << "    out.fill(0);\n";
+    out << "    constexpr int kSvWords = (Width + 31) / 32;\n";
+    out << "    for (int word = 0; word < kSvWords; ++word) {\n";
+    out << "        if (value[word].bval != 0) {\n";
+    out << "            std::fprintf(stderr, \"Mate DPI fatal: input '%s' received unsupported 4-state bits in word %d\\n\", name, word);\n";
+    out << "            std::fflush(stderr);\n";
+    out << "            std::abort();\n";
+    out << "        }\n";
+    out << "        const uint32_t aval = value[word].aval;\n";
+    out << "        for (int bit = 0; bit < 32; ++bit) {\n";
+    out << "            const int global_bit = word * 32 + bit;\n";
+    out << "            if (global_bit >= Width) break;\n";
+    out << "            if (((aval >> bit) & 1U) != 0) out[global_bit / 64] |= uint64_t{1} << (global_bit % 64);\n";
+    out << "        }\n";
+    out << "    }\n";
+    out << "}\n\n";
+    out << "void unpackScalarOutput(const uint64_t* words, svLogic* out) {\n";
+    out << "    if (!out) failDpiCall(\"unpackScalarOutput\", \"null output scalar pointer\");\n";
+    out << "    *out = (words[0] & 1ULL) ? sv_1 : sv_0;\n";
+    out << "}\n\n";
+    out << "template <int Width>\n";
+    out << "void unpackVectorOutput(const uint64_t* words, svLogicVecVal* out) {\n";
+    out << "    if (!out) failDpiCall(\"unpackVectorOutput\", \"null output vector pointer\");\n";
+    out << "    constexpr int kSvWords = (Width + 31) / 32;\n";
+    out << "    for (int word = 0; word < kSvWords; ++word) {\n";
+    out << "        uint32_t aval = 0;\n";
+    out << "        for (int bit = 0; bit < 32; ++bit) {\n";
+    out << "            const int global_bit = word * 32 + bit;\n";
+    out << "            if (global_bit >= Width) break;\n";
+    out << "            if ((words[global_bit / 64] & (uint64_t{1} << (global_bit % 64))) != 0) aval |= 1U << bit;\n";
+    out << "        }\n";
+    out << "        out[word].aval = aval;\n";
+    out << "        out[word].bval = 0;\n";
+    out << "    }\n";
     out << "}\n\n";
     out << "struct Context {\n";
-    out << "    mate::dpi::DpiInstanceContext instance;\n";
-    out << "    Bindings bindings;\n\n";
-    out << "    explicit Context(std::shared_ptr<const mate::dpi::DpiCompiledModel> model)\n";
-    out << "        : instance(std::move(model), " << cppString(config.module_name) << "),\n";
-    out << "          bindings(bindAll(instance.model())) {}\n";
+    out << "    const MateModel* model = nullptr;\n";
+    out << "    MateInstance* instance = nullptr;\n";
+    out << "    std::array<int32_t, " << input_leaves.size() << "> inputs{};\n";
+    out << "    std::array<int32_t, " << output_leaves.size() << "> outputs{};\n";
+    out << "    std::array<int32_t, " << ports.clocks.size() << "> clocks{};\n";
+    out << "    std::array<int32_t, " << ports.resets.size() << "> resets{};\n";
+    out << "\n";
+    out << "    ~Context() {\n";
+    out << "        MateStatus status{};\n";
+    out << "        if (instance) (void)mate_instance_destroy(instance, &status);\n";
+    out << "        if (model) (void)mate_model_destroy(model, &status);\n";
+    out << "    }\n";
     out << "};\n\n";
-    out << "mate::dpi::DpiCompileConfig compileConfig() {\n";
-    out << "    mate::dpi::DpiCompileConfig config;\n";
-    out << "    config.top_module = " << cppString(config.top_module) << ";\n";
-    out << "    config.source_files = {";
-    for (size_t i = 0; i < config.sources.size(); ++i) {
-        if (i) out << ", ";
-        out << cppString(std::filesystem::absolute(config.sources[i]).string());
-    }
-    out << "};\n";
-    out << "    config.domain_files = {";
-    for (size_t i = 0; i < config.domains.size(); ++i) {
-        if (i) out << ", ";
-        out << cppString(std::filesystem::absolute(config.domains[i]).string());
-    }
-    out << "};\n";
-    out << "    config.parameters = {";
-    size_t param_index = 0;
-    for (const auto& [key, value] : config.parameters) {
-        if (param_index++) out << ", ";
-        out << "{" << cppString(key) << ", " << value << "}";
-    }
-    out << "};\n";
-    out << "    config.flops_initial = mate::FlopsInitial::AllZeros;\n";
-    out << "    config.top_domain_mode = mate::TopDomainMode::Yaml;\n";
-    out << "    return config;\n";
-    out << "}\n\n";
     out << "Context& checkedContext(void* raw) {\n";
-    out << "    if (!raw) throw mate::CompilerError(" << cppString(config.module_name + " DPI received null context handle") << ");\n";
+    out << "    if (!raw) failDpiCall(\"checkedContext\", " << cppString(config.module_name + " DPI received null context handle") << ");\n";
     out << "    return *static_cast<Context*>(raw);\n";
     out << "}\n\n";
     out << "void writeOutputs(Context& context";
@@ -721,20 +728,60 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
             << leafIdentifier(output.leaf_name);
     }
     out << ") {\n";
-    for (LeafIndex index : output_leaves) out << outputWriteCall(outputLeaf(ports, index));
+    out << "    MateStatus status{};\n";
+    for (LeafIndex index : output_leaves) {
+        const auto& output = outputLeaf(ports, index);
+        const std::string ident = leafIdentifier(output.leaf_name);
+        out << "    std::array<uint64_t, " << abiWordCount(output.type) << "> words_" << ident << "{};\n";
+        out << "    check(mate_get_output(context.instance, context.outputs.at(kOutput_" << ident
+            << "), words_" << ident << ".data(), static_cast<int32_t>(words_" << ident
+            << ".size()), &status), status, \"mate_get_output\");\n";
+        if (output.type.width == 1) {
+            out << "    unpackScalarOutput(words_" << ident << ".data(), " << ident << ");\n";
+        } else {
+            out << "    unpackVectorOutput<" << output.type.width << ">(words_" << ident
+                << ".data(), " << ident << ");\n";
+        }
+    }
     out << "}\n\n";
     out << "} // namespace\n\n";
     out << "extern \"C\" {\n\n";
     out << "void* " << config.function_prefix << "_create_context() {\n";
-    out << "    return mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_create_context\", [&]() -> void* {\n";
-    out << "        auto context = std::make_unique<Context>(mate::dpi::getOrCreateCompiledModel(compileConfig()));\n";
-    out << "        return context.release();\n";
-    out << "    });\n";
+    out << "    MateStatus status{};\n";
+    out << "    auto context = std::make_unique<Context>();\n";
+    out << "    check(mate_model_create(&context->model, &status), status, \"" << config.function_prefix << "_create_context\");\n";
+    out << "    check(mate_instance_create(context->model, " << cppString(config.module_name)
+        << ", &context->instance, &status), status, \"" << config.function_prefix << "_create_context\");\n";
+    for (LeafIndex index : input_leaves) {
+        const auto& input = inputLeaf(ports, index);
+        const std::string ident = leafIdentifier(input.leaf_name);
+        out << "    context->inputs.at(kInput_" << ident << ") = checkedHandle(mate_input_id(context->model, "
+            << cppString(input.leaf_name) << "), \"input\", " << cppString(input.leaf_name) << ");\n";
+    }
+    for (LeafIndex index : output_leaves) {
+        const auto& output = outputLeaf(ports, index);
+        const std::string ident = leafIdentifier(output.leaf_name);
+        out << "    context->outputs.at(kOutput_" << ident << ") = checkedHandle(mate_output_id(context->model, "
+            << cppString(output.leaf_name) << "), \"output\", " << cppString(output.leaf_name) << ");\n";
+    }
+    for (size_t i = 0; i < ports.clocks.size(); ++i) {
+        const auto& clock = ports.inputs.at(ports.clocks[i]);
+        const auto& leaf = clock.leaves.front();
+        const std::string ident = leafIdentifier(leaf.leaf_name);
+        out << "    context->clocks.at(kClock_" << ident << ") = checkedHandle(mate_clock_id(context->model, "
+            << cppString(leaf.leaf_name) << "), \"clock\", " << cppString(leaf.leaf_name) << ");\n";
+    }
+    for (size_t i = 0; i < ports.resets.size(); ++i) {
+        const auto& reset = ports.inputs.at(ports.resets[i]);
+        const auto& leaf = reset.leaves.front();
+        const std::string ident = leafIdentifier(leaf.leaf_name);
+        out << "    context->resets.at(kReset_" << ident << ") = checkedHandle(mate_reset_id(context->model, "
+            << cppString(leaf.leaf_name) << "), \"reset\", " << cppString(leaf.leaf_name) << ");\n";
+    }
+    out << "    return context.release();\n";
     out << "}\n\n";
     out << "void " << config.function_prefix << "_destroy(void* context_handle) {\n";
-    out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_destroy\", [&]() {\n";
-    out << "        delete static_cast<Context*>(context_handle);\n";
-    out << "    });\n";
+    out << "    delete static_cast<Context*>(context_handle);\n";
     out << "}\n\n";
 
     auto emitFunctionHeader = [&](std::string_view name,
@@ -760,57 +807,77 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     data_inputs.reserve(ports.async_inputs.size() + ports.sync_inputs.size());
     data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
     data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
+
+    auto emitPackLeaf = [&](const PortLeaf& input, std::string_view argument) {
+        const std::string ident = leafIdentifier(input.leaf_name);
+        out << "        std::array<uint64_t, " << abiWordCount(input.type) << "> words_" << ident << "{};\n";
+        if (input.type.width == 1) {
+            out << "        words_" << ident << "[0] = packScalarInput("
+                << cppString(input.leaf_name) << ", " << argument << ");\n";
+        } else {
+            out << "        packVectorInput<" << input.type.width << ">("
+                << cppString(input.leaf_name) << ", " << argument << ", words_" << ident << ");\n";
+        }
+    };
+
+    auto emitUpdateArrayWithCount = [&](std::string_view name, const std::vector<LeafIndex>& indices) {
+        if (indices.empty()) {
+            out << "        const MateInputUpdate* " << name << " = nullptr;\n";
+            out << "        const int32_t " << name << "_count = 0;\n";
+            return;
+        }
+        for (LeafIndex index : indices) {
+            const auto& input = inputLeaf(ports, index);
+            emitPackLeaf(input, leafIdentifier(input.leaf_name));
+        }
+        out << "        MateInputUpdate " << name << "[] = {\n";
+        for (LeafIndex index : indices) {
+            const auto& input = inputLeaf(ports, index);
+            const std::string ident = leafIdentifier(input.leaf_name);
+            out << "            MateInputUpdate{context.inputs.at(kInput_" << ident
+                << "), words_" << ident << ".data(), static_cast<int32_t>(words_" << ident << ".size())},\n";
+        }
+        out << "        };\n";
+        out << "        const int32_t " << name << "_count = static_cast<int32_t>(sizeof(" << name << ") / sizeof(" << name << "[0]));\n";
+    };
+
     emitFunctionHeader("init_values", input_leaves, true);
     out << " {\n";
-    out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_init_values\", [&]() {\n";
     out << "        auto& context = checkedContext(context_handle);\n";
-    out << "        std::vector<mate::RuntimeInputUpdate> async_inputs;\n";
-    out << "        async_inputs.reserve(" << (ports.clocks.size() + ports.resets.size() + ports.async_inputs.size()) << ");\n";
+    out << "        MateStatus status{};\n";
+    std::vector<LeafIndex> init_async_inputs;
     for (size_t index : ports.clocks) {
-        const auto& input = ports.inputs.at(index).leaves.front();
-        out << "        async_inputs.push_back("
-            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
+        init_async_inputs.push_back(LeafIndex{.port = index, .leaf = 0});
     }
     for (size_t index : ports.resets) {
-        const auto& input = ports.inputs.at(index).leaves.front();
-        out << "        async_inputs.push_back("
-            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
+        init_async_inputs.push_back(LeafIndex{.port = index, .leaf = 0});
     }
     for (LeafIndex index : ports.async_inputs) {
-        const auto& input = inputLeaf(ports, index);
-        out << "        async_inputs.push_back("
-            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
+        init_async_inputs.push_back(index);
     }
-    out << "        std::vector<mate::RuntimeInputUpdate> sync_inputs;\n";
-    out << "        sync_inputs.reserve(" << ports.sync_inputs.size() << ");\n";
-    for (LeafIndex index : ports.sync_inputs) {
-        const auto& input = inputLeaf(ports, index);
-        out << "        sync_inputs.push_back("
-            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
-    }
-    out << "        mate::dpi::initializeInstance(context.instance, async_inputs, sync_inputs);\n";
+    emitUpdateArrayWithCount("async_updates", init_async_inputs);
+    emitUpdateArrayWithCount("sync_updates", ports.sync_inputs);
+    out << "        check(mate_instance_init(context.instance, MATE_FLOPS_INITIAL_ZERO, 0, async_updates, async_updates_count, sync_updates, sync_updates_count, &status), status, \"" << config.function_prefix << "_init_values\");\n";
     out << "        writeOutputs(context";
     for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";
-    out << "    });\n";
     out << "}\n\n";
 
     emitFunctionHeader("set_input_values", data_inputs, true);
     out << " {\n";
-    out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_set_input_values\", [&]() {\n";
     out << "        auto& context = checkedContext(context_handle);\n";
-    out << "        std::vector<mate::RuntimeInputUpdate> inputs;\n";
-    out << "        inputs.reserve(" << data_inputs.size() << ");\n";
+    out << "        MateStatus status{};\n";
     for (LeafIndex index : data_inputs) {
         const auto& input = inputLeaf(ports, index);
-        out << "        inputs.push_back("
-            << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
+        const std::string ident = leafIdentifier(input.leaf_name);
+        emitPackLeaf(input, ident);
+        out << "        check(mate_set_input(context.instance, context.inputs.at(kInput_" << ident
+            << "), words_" << ident << ".data(), static_cast<int32_t>(words_" << ident
+            << ".size()), &status), status, \"" << config.function_prefix << "_set_input_values\");\n";
     }
-    out << "        mate::dpi::setInputValues(context.instance, inputs);\n";
     out << "        writeOutputs(context";
     for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";
-    out << "    });\n";
     out << "}\n\n";
 
     for (size_t clock_index : ports.clocks) {
@@ -835,22 +902,16 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
             }
             emitFunctionHeader(sanitizeIdentifier(clock.name) + "_" + edgeName(edge), edge_inputs, true);
             out << " {\n";
-            out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_"
-                << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\", [&]() {\n";
             out << "        auto& context = checkedContext(context_handle);\n";
-            out << "        std::vector<mate::RuntimeInputUpdate> sync_inputs;\n";
-            out << "        sync_inputs.reserve(" << edge_inputs.size() << ");\n";
-            for (LeafIndex index : edge_inputs) {
-                const auto& input = inputLeaf(ports, index);
-                out << "        sync_inputs.push_back("
-                    << inputUpdateCall(input, leafIdentifier(input.leaf_name)) << ");\n";
-            }
-            out << "        mate::dpi::applyClockEdge(context.instance, context.bindings.inputs.at(kInput_"
-                << leafIdentifier(clock.leaves.front().leaf_name) << "), " << cppEdge(edge) << ", sync_inputs);\n";
+            out << "        MateStatus status{};\n";
+            emitUpdateArrayWithCount("edge_updates", edge_inputs);
+            out << "        check(mate_apply_clock(context.instance, context.clocks.at(kClock_"
+                << leafIdentifier(clock.leaves.front().leaf_name) << "), " << edgeAbiName(edge)
+                << ", edge_updates, edge_updates_count, &status), status, \"" << config.function_prefix << "_"
+                << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\");\n";
             out << "        writeOutputs(context";
             for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
             out << ");\n";
-            out << "    });\n";
             out << "}\n\n";
         }
     }
@@ -860,15 +921,15 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             emitFunctionHeader(sanitizeIdentifier(reset.name) + "_" + edgeName(edge), {}, true);
             out << " {\n";
-            out << "    mate::dpi::withDpiErrorBoundary(\"" << config.function_prefix << "_"
-                << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "\", [&]() {\n";
             out << "        auto& context = checkedContext(context_handle);\n";
-            out << "        mate::dpi::applyResetEdge(context.instance, context.bindings.inputs.at(kInput_"
-                << leafIdentifier(reset.leaves.front().leaf_name) << "), " << cppEdge(edge) << ");\n";
+            out << "        MateStatus status{};\n";
+            out << "        check(mate_apply_reset(context.instance, context.resets.at(kReset_"
+                << leafIdentifier(reset.leaves.front().leaf_name) << "), " << edgeAbiName(edge)
+                << ", &status), status, \"" << config.function_prefix << "_"
+                << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "\");\n";
             out << "        writeOutputs(context";
             for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
             out << ");\n";
-            out << "    });\n";
             out << "}\n\n";
         }
     }
@@ -1178,6 +1239,36 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     return out.str();
 }
 
+std::string makeInterpreterModelCpp(const Config& config) {
+    std::ostringstream out;
+    out << "#include \"abi/abi_interpreter.h\"\n\n";
+    out << "extern \"C\" MateStatusCode mate_model_create(const MateModel** out_model, MateStatus* status) {\n";
+    out << "    mate::abi::InterpreterModelConfig config;\n";
+    out << "    config.top_module = " << cppString(config.top_module) << ";\n";
+    out << "    config.source_files = {";
+    for (size_t i = 0; i < config.sources.size(); ++i) {
+        if (i) out << ", ";
+        out << cppString(std::filesystem::absolute(config.sources[i]).string());
+    }
+    out << "};\n";
+    out << "    config.domain_files = {";
+    for (size_t i = 0; i < config.domains.size(); ++i) {
+        if (i) out << ", ";
+        out << cppString(std::filesystem::absolute(config.domains[i]).string());
+    }
+    out << "};\n";
+    out << "    config.parameters = {";
+    size_t param_index = 0;
+    for (const auto& [key, value] : config.parameters) {
+        if (param_index++) out << ", ";
+        out << "{" << cppString(key) << ", " << value << "}";
+    }
+    out << "};\n";
+    out << "    return mate::abi::createInterpreterModel(config, out_model, status);\n";
+    out << "}\n";
+    return out.str();
+}
+
 void writeFile(const std::filesystem::path& path, const std::string& text) {
     std::ofstream file(path);
     if (!file) {
@@ -1207,6 +1298,8 @@ int main(int argc, char** argv) {
 
         std::filesystem::create_directories(config.out_dir);
         writeFile(config.out_dir / (config.module_name + ".cpp"), makeCpp(config, ports, model));
+        writeFile(config.out_dir / (config.top_module + "_model.cpp"),
+                  makeInterpreterModelCpp(config));
         writeFile(config.out_dir / (config.module_name + "_pkg.sv"), makeSvPkg(config, ports, model));
         writeFile(config.out_dir / (config.module_name + ".sv"), makeSv(config, ports, model));
     } catch (const CompilerError& e) {

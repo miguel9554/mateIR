@@ -39,10 +39,11 @@ DPI_GEN_DIR = $(RTL_GEN_DIR)
 GEN_SV_PKG  = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi_pkg.sv
 GEN_SV      = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi.sv
 GEN_CPP     = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi.cpp
+GEN_MODEL_CPP = $(DPI_GEN_DIR)/$(MODULE_NAME)_model.cpp
 GEN_STAMP   = $(DPI_GEN_DIR)/.stamp
 
 MATE_LIBS = \
-	$(abspath $(BUILD_DIR)/libmate-dpi-support.a) \
+	$(abspath $(BUILD_DIR)/libmate-abi-interpreter.a) \
 	$(abspath $(BUILD_DIR)/libmate-rtl-runtime-compiler.a) \
 	$(abspath $(BUILD_DIR)/libmate-systemverilog-frontend.a) \
 	$(abspath $(BUILD_DIR)/libmate-rtl-runtime.a) \
@@ -81,9 +82,9 @@ $(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate-dpi-codegen | prep
 		$(RTL_SRCS)
 	touch $(GEN_STAMP)
 
-$(GEN_SV_PKG) $(GEN_SV) $(GEN_CPP): $(GEN_STAMP)
+$(GEN_SV_PKG) $(GEN_SV) $(GEN_CPP) $(GEN_MODEL_CPP): $(GEN_STAMP)
 
-$(OUT): $(GEN_DIR)/tb.sv $(GEN_CPP) $(MATE_LIBS) | prep
+$(OUT): $(GEN_DIR)/tb.sv $(GEN_CPP) $(GEN_MODEL_CPP) $(MATE_LIBS) | prep
 	rm -rf obj_dir
 	verilator --trace --timing --cc --exe --build --main \
 		$(VERILATOR_WARNS) \
@@ -93,7 +94,8 @@ $(OUT): $(GEN_DIR)/tb.sv $(GEN_CPP) $(MATE_LIBS) | prep
 		-LDFLAGS '$(MATE_LIBS)' \
 		$(SRCS) \
 		$(DPI_TIME_C) \
-		$(GEN_CPP)
+		$(GEN_CPP) \
+		$(GEN_MODEL_CPP)
 
 clean:
 	rm -rf obj_dir $(WAVES) $(DPI_GEN_DIR)

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <format>
 #include <memory>
+#include <optional>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -20,6 +21,8 @@ using mate::abi::GeneratedInputMetadata;
 using mate::abi::GeneratedModelMetadata;
 using mate::abi::GeneratedOutputMetadata;
 using mate::abi::GeneratedResetMetadata;
+using mate::abi::GeneratedStorageKind;
+using mate::abi::GeneratedStorageMetadata;
 
 struct AbiInput {
     std::string leaf_name;
@@ -28,12 +31,14 @@ struct AbiInput {
     MateInputKind kind = MATE_INPUT_ASYNC;
     int32_t clock_id = -1;
     int32_t reset_id = -1;
+    size_t storage_index = 0;
 };
 
 struct AbiOutput {
     std::string leaf_name;
     mate::RuntimeOutputId runtime_id;
     mate::Type type;
+    size_t storage_index = 0;
 };
 
 struct AbiClock {
@@ -48,6 +53,22 @@ struct AbiReset {
     mate::ResetId domain_id = mate::InvalidResetId;
 };
 
+enum class AbiStorageKind {
+    Input,
+    Output,
+    Temporary,
+    FlopD,
+    FlopQ,
+};
+
+struct AbiStorageSlot {
+    AbiStorageKind kind = AbiStorageKind::Temporary;
+    std::string full_path;
+    std::string leaf_name;
+    mate::Type type;
+    std::optional<mate::RuntimeObservableId> observable_id;
+};
+
 } // namespace
 
 struct MateModel {
@@ -56,11 +77,17 @@ struct MateModel {
     std::vector<AbiOutput> outputs;
     std::vector<AbiClock> clocks;
     std::vector<AbiReset> resets;
+    std::vector<AbiStorageSlot> input_storage;
+    std::vector<AbiStorageSlot> output_storage;
+    std::vector<AbiStorageSlot> observable_storage;
 };
 
 struct MateInstance {
     const MateModel* model = nullptr;
     std::unique_ptr<mate::RtlRuntimeInstance> runtime;
+    std::vector<std::vector<uint64_t>> input_words;
+    std::vector<std::vector<uint64_t>> output_words;
+    std::vector<std::vector<uint64_t>> observable_words;
 };
 
 namespace {
@@ -187,6 +214,22 @@ mate::SimValue wordsToSimValue(const mate::Type& type,
     return value;
 }
 
+void copyWordsToStorage(const char* role,
+                        const std::string& leaf_name,
+                        const mate::Type& type,
+                        const uint64_t* words,
+                        int32_t nwords,
+                        std::vector<uint64_t>& storage) {
+    validateWords(role, leaf_name.c_str(), words, nwords, type.width);
+    const int32_t expected = wordCount(type.width);
+    if (storage.size() != static_cast<size_t>(expected)) {
+        throw mate::CompilerError(std::format(
+            "Mate ABI: storage for {} '{}' expected {} words, has {}",
+            role, leaf_name, expected, storage.size()));
+    }
+    std::copy(words, words + nwords, storage.begin());
+}
+
 void simValueToWords(const std::string& leaf_name,
                      const mate::SimValue& value,
                      uint64_t* words,
@@ -211,6 +254,75 @@ void simValueToWords(const std::string& leaf_name,
             }
         }
     }
+}
+
+void simValueToStorage(const std::string& leaf_name,
+                       const mate::SimValue& value,
+                       std::vector<uint64_t>& storage) {
+    const int32_t expected = wordCount(value.width());
+    if (storage.size() != static_cast<size_t>(expected)) {
+        throw mate::CompilerError(std::format(
+            "Mate ABI: storage for '{}' expected {} words for width {}, has {}",
+            leaf_name, expected, value.width(), storage.size()));
+    }
+    simValueToWords(leaf_name, value, storage.data(), expected);
+}
+
+void storageToWords(const std::string& leaf_name,
+                    const std::vector<uint64_t>& storage,
+                    int32_t width,
+                    uint64_t* words,
+                    int32_t nwords) {
+    if (!words) {
+        throw mate::CompilerError(std::format(
+            "Mate ABI: output '{}' word pointer is null", leaf_name));
+    }
+    const int32_t expected = wordCount(width);
+    if (nwords != expected) {
+        throw mate::CompilerError(std::format(
+            "Mate ABI: output '{}' expected {} words for width {}, got {}",
+            leaf_name, expected, width, nwords));
+    }
+    if (storage.size() != static_cast<size_t>(expected)) {
+        throw mate::CompilerError(std::format(
+            "Mate ABI: output '{}' storage expected {} words, has {}",
+            leaf_name, expected, storage.size()));
+    }
+    std::copy(storage.begin(), storage.end(), words);
+}
+
+std::vector<std::vector<uint64_t>> allocateStorage(const std::vector<AbiStorageSlot>& slots) {
+    std::vector<std::vector<uint64_t>> storage;
+    storage.reserve(slots.size());
+    for (const auto& slot : slots) {
+        storage.emplace_back(static_cast<size_t>(wordCount(slot.type.width)), uint64_t{0});
+    }
+    return storage;
+}
+
+void refreshOutputStorage(MateInstance& instance) {
+    for (const auto& output : instance.model->outputs) {
+        auto& storage = instance.output_words.at(output.storage_index);
+        simValueToStorage(output.leaf_name, instance.runtime->getOutput(output.runtime_id), storage);
+    }
+}
+
+void refreshObservableStorage(MateInstance& instance) {
+    for (size_t i = 0; i < instance.model->observable_storage.size(); ++i) {
+        const auto& slot = instance.model->observable_storage.at(i);
+        if (!slot.observable_id) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: native storage '{}' has no runtime observable", slot.full_path));
+        }
+        simValueToStorage(slot.full_path,
+                          instance.runtime->getObservable(*slot.observable_id),
+                          instance.observable_words.at(i));
+    }
+}
+
+void refreshNativeStorage(MateInstance& instance) {
+    refreshOutputStorage(instance);
+    refreshObservableStorage(instance);
 }
 
 std::vector<mate::RuntimeInputUpdate> convertUpdates(const MateModel& model,
@@ -240,6 +352,25 @@ std::vector<mate::RuntimeInputUpdate> convertUpdates(const MateModel& model,
                                      update.words,
                                      update.nwords),
         });
+    }
+    return out;
+}
+
+std::vector<mate::RuntimeInputUpdate> convertAndStoreUpdates(MateInstance& instance,
+                                                             const MateInputUpdate* updates,
+                                                             int32_t count) {
+    std::vector<mate::RuntimeInputUpdate> out =
+        convertUpdates(*instance.model, updates, count);
+    for (int32_t i = 0; i < count; ++i) {
+        const MateInputUpdate& update = updates[i];
+        const auto& input =
+            instance.model->inputs.at(static_cast<size_t>(update.input_id));
+        copyWordsToStorage("input",
+                           input.leaf_name,
+                           input.type,
+                           update.words,
+                           update.nwords,
+                           instance.input_words.at(input.storage_index));
     }
     return out;
 }
@@ -313,6 +444,27 @@ GeneratedModelMetadata metadataFromRuntime(const mate::RtlRuntimeModel& model) {
         metadata.resets.push_back(GeneratedResetMetadata{
             .display_name = reset.display_name,
             .source_leaf_name = source.leaf_name,
+        });
+    }
+
+    metadata.storage.reserve(runtime_metadata.observables.size());
+    for (const auto& observable : runtime_metadata.observables) {
+        if (observable.kind == mate::RuntimeObservableKind::Input ||
+            observable.kind == mate::RuntimeObservableKind::Output) {
+            continue;
+        }
+        GeneratedStorageKind kind = GeneratedStorageKind::Temporary;
+        if (observable.kind == mate::RuntimeObservableKind::FlopD) {
+            kind = GeneratedStorageKind::FlopD;
+        } else if (observable.kind == mate::RuntimeObservableKind::FlopQ) {
+            kind = GeneratedStorageKind::FlopQ;
+        }
+        metadata.storage.push_back(GeneratedStorageMetadata{
+            .kind = kind,
+            .full_path = observable.full_path,
+            .leaf_name = observable.leaf_name,
+            .width = observable.type.width,
+            .is_signed = observable.type.isSigned(),
         });
     }
 
@@ -393,7 +545,8 @@ std::vector<AbiInput> buildInputs(const mate::RtlRuntimeModel& runtime_model,
                                   const GeneratedModelMetadata& generated_metadata) {
     std::vector<AbiInput> inputs;
     inputs.reserve(generated_metadata.inputs.size());
-    for (const auto& generated : generated_metadata.inputs) {
+    for (size_t storage_index = 0; storage_index < generated_metadata.inputs.size(); ++storage_index) {
+        const auto& generated = generated_metadata.inputs.at(storage_index);
         validateClockResetReference("input", generated.leaf_name, generated.clock_id,
                                     generated_metadata.clocks.size());
         validateClockResetReference("input", generated.leaf_name, generated.reset_id,
@@ -418,6 +571,7 @@ std::vector<AbiInput> buildInputs(const mate::RtlRuntimeModel& runtime_model,
             .kind = generated.kind,
             .clock_id = generated.clock_id,
             .reset_id = generated.reset_id,
+            .storage_index = storage_index,
         });
     }
     return inputs;
@@ -427,7 +581,8 @@ std::vector<AbiOutput> buildOutputs(const mate::RtlRuntimeModel& runtime_model,
                                     const GeneratedModelMetadata& generated_metadata) {
     std::vector<AbiOutput> outputs;
     outputs.reserve(generated_metadata.outputs.size());
-    for (const auto& generated : generated_metadata.outputs) {
+    for (size_t storage_index = 0; storage_index < generated_metadata.outputs.size(); ++storage_index) {
+        const auto& generated = generated_metadata.outputs.at(storage_index);
         const auto* runtime_output = runtime_model.findOutput(generated.leaf_name);
         if (!runtime_output) {
             throw mate::CompilerError(std::format(
@@ -444,9 +599,100 @@ std::vector<AbiOutput> buildOutputs(const mate::RtlRuntimeModel& runtime_model,
             .leaf_name = std::string(generated.leaf_name),
             .runtime_id = runtime_output->id,
             .type = runtime_output->type,
+            .storage_index = storage_index,
         });
     }
     return outputs;
+}
+
+AbiStorageKind toAbiStorageKind(GeneratedStorageKind kind) {
+    switch (kind) {
+        case GeneratedStorageKind::Temporary: return AbiStorageKind::Temporary;
+        case GeneratedStorageKind::FlopD: return AbiStorageKind::FlopD;
+        case GeneratedStorageKind::FlopQ: return AbiStorageKind::FlopQ;
+    }
+    throw mate::CompilerError("Mate ABI: unknown generated storage kind");
+}
+
+GeneratedStorageKind generatedStorageKind(mate::RuntimeObservableKind kind) {
+    switch (kind) {
+        case mate::RuntimeObservableKind::Internal: return GeneratedStorageKind::Temporary;
+        case mate::RuntimeObservableKind::FlopD: return GeneratedStorageKind::FlopD;
+        case mate::RuntimeObservableKind::FlopQ: return GeneratedStorageKind::FlopQ;
+        case mate::RuntimeObservableKind::Input:
+        case mate::RuntimeObservableKind::Output:
+            throw mate::CompilerError("Mate ABI: top-level I/O observable is not native storage metadata");
+    }
+    throw mate::CompilerError("Mate ABI: unknown runtime observable kind");
+}
+
+std::vector<AbiStorageSlot> buildInputStorage(const GeneratedModelMetadata& generated_metadata) {
+    std::vector<AbiStorageSlot> storage;
+    storage.reserve(generated_metadata.inputs.size());
+    for (const auto& input : generated_metadata.inputs) {
+        storage.push_back(AbiStorageSlot{
+            .kind = AbiStorageKind::Input,
+            .full_path = std::string(input.leaf_name),
+            .leaf_name = std::string(input.leaf_name),
+            .type = mate::Type::makeInteger(input.width, input.is_signed),
+            .observable_id = std::nullopt,
+        });
+    }
+    return storage;
+}
+
+std::vector<AbiStorageSlot> buildOutputStorage(const GeneratedModelMetadata& generated_metadata) {
+    std::vector<AbiStorageSlot> storage;
+    storage.reserve(generated_metadata.outputs.size());
+    for (const auto& output : generated_metadata.outputs) {
+        storage.push_back(AbiStorageSlot{
+            .kind = AbiStorageKind::Output,
+            .full_path = std::string(output.leaf_name),
+            .leaf_name = std::string(output.leaf_name),
+            .type = mate::Type::makeInteger(output.width, output.is_signed),
+            .observable_id = std::nullopt,
+        });
+    }
+    return storage;
+}
+
+std::vector<AbiStorageSlot> buildObservableStorage(
+    const mate::RtlRuntimeModel& runtime_model,
+    const GeneratedModelMetadata& generated_metadata) {
+    const auto& runtime_metadata = runtime_model.metadata();
+    std::vector<AbiStorageSlot> storage;
+    storage.reserve(generated_metadata.storage.size());
+    for (const auto& generated : generated_metadata.storage) {
+        auto it = runtime_metadata.observable_by_full_path.find(std::string(generated.full_path));
+        if (it == runtime_metadata.observable_by_full_path.end()) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: generated native storage '{}' does not exist in runtime metadata",
+                generated.full_path));
+        }
+        const auto& observable = runtime_metadata.observables.at(it->second.value);
+        if (observable.kind == mate::RuntimeObservableKind::Input ||
+            observable.kind == mate::RuntimeObservableKind::Output) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: generated native storage '{}' must not duplicate top-level I/O",
+                generated.full_path));
+        }
+        if (generatedStorageKind(observable.kind) != generated.kind ||
+            observable.leaf_name != generated.leaf_name ||
+            observable.type.width != generated.width ||
+            observable.type.isSigned() != generated.is_signed) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: generated native storage '{}' metadata does not match runtime metadata",
+                generated.full_path));
+        }
+        storage.push_back(AbiStorageSlot{
+            .kind = toAbiStorageKind(generated.kind),
+            .full_path = std::string(generated.full_path),
+            .leaf_name = std::string(generated.leaf_name),
+            .type = observable.type,
+            .observable_id = observable.id,
+        });
+    }
+    return storage;
 }
 
 void populateGeneratedMetadata(MateModel& model,
@@ -455,6 +701,9 @@ void populateGeneratedMetadata(MateModel& model,
     model.resets = buildResets(model.runtime_model, generated_metadata);
     model.inputs = buildInputs(model.runtime_model, generated_metadata);
     model.outputs = buildOutputs(model.runtime_model, generated_metadata);
+    model.input_storage = buildInputStorage(generated_metadata);
+    model.output_storage = buildOutputStorage(generated_metadata);
+    model.observable_storage = buildObservableStorage(model.runtime_model, generated_metadata);
 }
 
 } // namespace
@@ -477,7 +726,7 @@ MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
         options.top_domain_mode = config.top_domain_mode;
 
         std::unique_ptr<MateModel> model(
-            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}});
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}});
         populateGeneratedMetadata(*model, generated_metadata);
         *out_model = model.release();
     });
@@ -498,7 +747,7 @@ MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
         options.top_domain_mode = config.top_domain_mode;
 
         std::unique_ptr<MateModel> model(
-            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}});
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}});
         const GeneratedModelMetadata generated_metadata = metadataFromRuntime(model->runtime_model);
         populateGeneratedMetadata(*model, generated_metadata);
         *out_model = model.release();
@@ -528,6 +777,9 @@ MateStatusCode mate_instance_create(const MateModel* model,
         instance->model = &checked_model;
         instance->runtime = checked_model.runtime_model.createInstance(
             instance_name ? std::string(instance_name) : checked_model.runtime_model.top().name);
+        instance->input_words = allocateStorage(checked_model.input_storage);
+        instance->output_words = allocateStorage(checked_model.output_storage);
+        instance->observable_words = allocateStorage(checked_model.observable_storage);
         *out_instance = instance.release();
     });
 }
@@ -551,8 +803,9 @@ MateStatusCode mate_instance_init(MateInstance* instance,
         std::mt19937_64 rng(seed);
         checked.runtime->initialize(toRuntimeFlopsInitial(flops_initial), rng);
         checked.runtime->initializeInputsAndEvaluate(
-            convertUpdates(*checked.model, async_inputs, async_count),
-            convertUpdates(*checked.model, sync_inputs, sync_count));
+            convertAndStoreUpdates(checked, async_inputs, async_count),
+            convertAndStoreUpdates(checked, sync_inputs, sync_count));
+        refreshNativeStorage(checked);
     });
 }
 
@@ -664,11 +917,18 @@ MateStatusCode mate_set_input(MateInstance* instance,
             throw mate::CompilerError(std::format("Mate ABI: invalid input handle {}", input_id));
         }
         const auto& input = checked.model->inputs.at(static_cast<size_t>(input_id));
+        copyWordsToStorage("input",
+                           input.leaf_name,
+                           input.type,
+                           words,
+                           nwords,
+                           checked.input_words.at(input.storage_index));
         mate::RuntimeInputUpdate update{
             .input = input.runtime_id,
             .value = wordsToSimValue(input.type, input.leaf_name, words, nwords),
         };
         checked.runtime->setInputValues(std::span<const mate::RuntimeInputUpdate>(&update, 1));
+        refreshNativeStorage(checked);
     });
 }
 
@@ -686,7 +946,8 @@ MateStatusCode mate_apply_clock(MateInstance* instance,
         checked.runtime->applyClockEdge(
             checked.model->clocks.at(static_cast<size_t>(clock_id)).domain_id,
             toRuntimeEdge(edge),
-            convertUpdates(*checked.model, updates_before_edge, update_count));
+            convertAndStoreUpdates(checked, updates_before_edge, update_count));
+        refreshNativeStorage(checked);
     });
 }
 
@@ -702,6 +963,7 @@ MateStatusCode mate_apply_reset(MateInstance* instance,
         checked.runtime->applyResetEdge(
             checked.model->resets.at(static_cast<size_t>(reset_id)).domain_id,
             toRuntimeEdge(edge));
+        refreshNativeStorage(checked);
     });
 }
 
@@ -716,10 +978,11 @@ MateStatusCode mate_get_output(const MateInstance* instance,
             throw mate::CompilerError(std::format("Mate ABI: invalid output handle {}", output_id));
         }
         const auto& output = checked.model->outputs.at(static_cast<size_t>(output_id));
-        simValueToWords(output.leaf_name,
-                        checked.runtime->getOutput(output.runtime_id),
-                        words,
-                        nwords);
+        storageToWords(output.leaf_name,
+                       checked.output_words.at(output.storage_index),
+                       output.type.width,
+                       words,
+                       nwords);
     });
 }
 

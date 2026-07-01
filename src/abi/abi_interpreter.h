@@ -44,11 +44,26 @@ struct GeneratedResetMetadata {
     std::string_view source_leaf_name;
 };
 
+enum class GeneratedStorageKind {
+    Temporary,
+    FlopD,
+    FlopQ,
+};
+
+struct GeneratedStorageMetadata {
+    GeneratedStorageKind kind = GeneratedStorageKind::Temporary;
+    std::string_view full_path;
+    std::string_view leaf_name;
+    int32_t width = 0;
+    bool is_signed = false;
+};
+
 struct GeneratedModelMetadata {
     std::vector<GeneratedInputMetadata> inputs;
     std::vector<GeneratedOutputMetadata> outputs;
     std::vector<GeneratedClockMetadata> clocks;
     std::vector<GeneratedResetMetadata> resets;
+    std::vector<GeneratedStorageMetadata> storage;
 };
 
 MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,

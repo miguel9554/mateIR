@@ -418,6 +418,22 @@ std::string abiInputKindName(RuntimeInputKind kind) {
     throw CompilerError("mate-dpi-codegen: unknown runtime input kind");
 }
 
+std::string generatedStorageKindName(RuntimeObservableKind kind) {
+    switch (kind) {
+        case RuntimeObservableKind::Internal:
+            return "mate::abi::GeneratedStorageKind::Temporary";
+        case RuntimeObservableKind::FlopD:
+            return "mate::abi::GeneratedStorageKind::FlopD";
+        case RuntimeObservableKind::FlopQ:
+            return "mate::abi::GeneratedStorageKind::FlopQ";
+        case RuntimeObservableKind::Input:
+        case RuntimeObservableKind::Output:
+            throw CompilerError(
+                "mate-dpi-codegen: top-level I/O observables are not native storage entries");
+    }
+    throw CompilerError("mate-dpi-codegen: unknown runtime observable kind");
+}
+
 void validateDpiSupportedPort(const ModuleNode& node) {
     if (node.binding.aggregate_leaves.empty()) {
         throw CompilerError(std::format(
@@ -1337,6 +1353,20 @@ std::string makeInterpreterModelCpp(const Config& config,
         out << "        mate::abi::GeneratedResetMetadata{"
             << cppString(reset.display_name) << ", "
             << cppString(source.leaf_name) << "},\n";
+    }
+    out << "    };\n";
+    out << "    metadata.storage = {\n";
+    for (const auto& observable : model.metadata().observables) {
+        if (observable.kind == RuntimeObservableKind::Input ||
+            observable.kind == RuntimeObservableKind::Output) {
+            continue;
+        }
+        out << "        mate::abi::GeneratedStorageMetadata{"
+            << generatedStorageKindName(observable.kind) << ", "
+            << cppString(observable.full_path) << ", "
+            << cppString(observable.leaf_name) << ", "
+            << observable.type.width << ", "
+            << (observable.type.isSigned() ? "true" : "false") << "},\n";
     }
     out << "    };\n";
     out << "\n";

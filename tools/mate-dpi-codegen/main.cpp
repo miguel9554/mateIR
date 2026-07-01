@@ -1379,8 +1379,8 @@ std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
         return *node->type;
     };
 
-    auto nodeVar = [](const DFGNode* node) {
-        return std::format("v_{}", node->debug_id);
+    auto nodeVar = [](size_t topo_index) {
+        return std::format("v_{}", topo_index);
     };
 
     auto nodeValue = [&](const DFGNode* node) -> std::string {
@@ -1409,21 +1409,42 @@ std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
                            nodeValue(inputs.rhs.node));
     };
 
+    auto compareIsSigned = [&](const DFGNode* lhs, const DFGNode* rhs) {
+        return checkedType(lhs).isSigned() && checkedType(rhs).isSigned();
+    };
+
     out << "namespace {\n\n";
+    out << "int nodeWidth(int width) {\n";
+    out << "    if (width <= 0) {\n";
+    out << "        throw std::runtime_error(\"Mate native model: unresolved node width\");\n";
+    out << "    }\n";
+    out << "    return width;\n";
+    out << "}\n\n";
     out << "mate::SimValue maskToWidth(const mate::SimValue& value, int width, bool is_signed) {\n";
     out << "    return value.resized(width, is_signed);\n";
     out << "}\n\n";
     out << "mate::SimValue boolValue(bool value) {\n";
     out << "    return mate::SimValue::fromU64(value ? 1 : 0, 1, false);\n";
     out << "}\n\n";
+    out << "mate::SimValue widenForArithmetic(const mate::SimValue& value,\n";
+    out << "                                      bool operand_signed,\n";
+    out << "                                      bool other_signed,\n";
+    out << "                                      int result_width) {\n";
+    out << "    const bool is_signed = operand_signed && other_signed;\n";
+    out << "    return value.resized(nodeWidth(result_width), is_signed);\n";
+    out << "}\n\n";
+    out << "bool useSignedCompare(bool lhs_signed, bool rhs_signed) {\n";
+    out << "    return lhs_signed && rhs_signed;\n";
+    out << "}\n\n";
     out << "void evaluateCombinational(std::span<const mate::SimValue> inputs,\n";
     out << "                           std::span<mate::SimValue> outputs,\n";
     out << "                           std::span<mate::SimValue> storage) {\n";
 
-    for (const DFGNode* node : order) {
+    for (size_t topo_index = 0; topo_index < order.size(); ++topo_index) {
+        const DFGNode* node = order[topo_index];
         const DFGOp kind = node->kind();
         const auto& type = checkedType(node);
-        const std::string var = nodeVar(node);
+        const std::string var = nodeVar(topo_index);
 
         if (kind == DFGOp::INPUT) {
             if (const auto* input = model.metadata().findInput(node->name)) {
@@ -1469,19 +1490,18 @@ std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
             case DFGOp::SUB:
             case DFGOp::MUL: {
                 auto inputs = node->binaryInputs();
-                const bool is_signed =
-                    checkedType(inputs.lhs.node).isSigned() &&
-                    checkedType(inputs.rhs.node).isSigned();
                 const char* op =
                     kind == DFGOp::ADD ? "add" : (kind == DFGOp::SUB ? "sub" : "mul");
-                expr = std::format("{}.resized({}, {}).{}({}.resized({}, {}))",
+                expr = std::format("widenForArithmetic({}, {}, {}, {}).{}(widenForArithmetic({}, {}, {}, {}))",
                                    nodeValue(inputs.lhs.node),
+                                   boolLiteral(checkedType(inputs.lhs.node).isSigned()),
+                                   boolLiteral(checkedType(inputs.rhs.node).isSigned()),
                                    type.width,
-                                   boolLiteral(is_signed),
                                    op,
                                    nodeValue(inputs.rhs.node),
-                                   type.width,
-                                   boolLiteral(is_signed));
+                                   boolLiteral(checkedType(inputs.rhs.node).isSigned()),
+                                   boolLiteral(checkedType(inputs.lhs.node).isSigned()),
+                                   type.width);
                 break;
             }
 
@@ -1493,9 +1513,7 @@ std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
             case DFGOp::GT:
             case DFGOp::GE: {
                 auto inputs = node->binaryInputs();
-                const bool is_signed =
-                    checkedType(inputs.lhs.node).isSigned() &&
-                    checkedType(inputs.rhs.node).isSigned();
+                const bool is_signed = compareIsSigned(inputs.lhs.node, inputs.rhs.node);
                 const std::string less = is_signed
                     ? std::format("{}.signedLt({})",
                                   nodeValue(inputs.lhs.node),

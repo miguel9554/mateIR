@@ -353,6 +353,7 @@ void refreshObservableStorage(MateInstance& instance) {
 
 void refreshNativeStorage(MateInstance& instance) {
     if (instance.model->evaluate_combinational) {
+        refreshObservableStorage(instance);
         instance.model->evaluate_combinational(instance.native_inputs,
                                                instance.native_outputs,
                                                instance.native_storage);
@@ -365,7 +366,6 @@ void refreshNativeStorage(MateInstance& instance) {
 }
 
 void refreshRuntimeBackedNativeState(MateInstance& instance) {
-    refreshObservableStorage(instance);
     refreshNativeStorage(instance);
 }
 
@@ -976,6 +976,7 @@ MateStatusCode mate_set_input(MateInstance* instance,
             .input = input.runtime_id,
             .value = wordsToSimValue(input.type, input.leaf_name, words, nwords),
         };
+        checked.native_inputs.at(input.storage_index) = update.value;
         checked.runtime->setInputValues(std::span<const mate::RuntimeInputUpdate>(&update, 1));
         refreshNativeStorage(checked);
     });

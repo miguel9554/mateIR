@@ -58,7 +58,7 @@ Phase-1 validation:
 
 ## Current State
 
-Phase 1, Phase 2A, Phase 2B, and Phase 2C are complete.
+Phase 1, Phase 2A, Phase 2B, Phase 2C, and Phase 2D are complete.
 
 Current architecture:
 
@@ -91,26 +91,73 @@ Current architecture:
     - Flop D/Q and other runtime-observable storage still flows through the
       existing `storage` span; `temporaries` is purely a codegen-internal
       concept with no interpreter-side counterpart to validate against.
+  - Emits, per clock domain, a native `applyClockDomainN(inputs, storage)`
+    FlopD -> FlopQ commit function, and per reset domain, a native
+    `applyResetDomainN(storage)` reset-value-apply function. See
+    `makeNativeFlopCommitCpp` in `tools/mate-dpi-codegen/main.cpp`.
+    - A clock domain's commit skips a flop if any of its reset domains is
+      currently at its active level (checked by reading that domain's source
+      signal straight out of `inputs[]`, no persisted "reset active" flag) —
+      this reproduces `MateIRRuntime::applyClockDomain`'s async-reset-wins
+      priority (src/sim/runtime.cpp) without any interpreter-side map lookup.
 - `abi_interpreter.cpp` currently:
   - compiles SV into `RtlRuntimeModel`,
   - validates generated ABI metadata against runtime metadata,
   - stores generated ABI metadata in `MateModel`,
   - resolves ABI handles from generated metadata,
   - maps ABI handles to runtime ids,
-  - refreshes FlopQ/Internal/FlopD storage from `RtlRuntimeInstance` before
-    calling the generated `evaluate_combinational`,
-  - delegates clock edges, reset edges, and flop commit to
-    `RtlRuntimeInstance` (native clock/reset commit is Phase 2D's job).
+  - `mate_apply_clock`/`mate_apply_reset`/`mate_set_input`
+    (src/abi/abi_interpreter.cpp, `applyNativeClockEdge`/
+    `applyNativeResetEdge`/native branch of `mate_set_input`) go fully native
+    when a generated `evaluate_combinational` is present: they drive the
+    clock/reset/input signal directly into `native_inputs`, call the
+    generated `clock_commit`/`reset_apply` function for the relevant domain,
+    and re-run `evaluate_combinational` — `RtlRuntimeInstance` is not touched
+    in this path at all, so no interpreter scheduling map is in the per-edge
+    hot path.
+    - **All three** ABI entry points that can run between/around clock edges
+      had to move to this native-only branch together, not just the two
+      clock/reset ones. `mate_set_input` originally still called
+      `RtlRuntimeInstance::setInputValues` and then
+      `refreshNativeStorage`/`refreshObservableStorage`, which unconditionally
+      pulls FlopQ back from the interpreter. Once a native clock/reset edge
+      commits a flop, `RtlRuntimeInstance`'s own copy of that flop is stale
+      (its `applyClockEdge`/`applyResetEdge` are no longer being called), so
+      that pull silently overwrote the freshly-committed native FlopQ value
+      with the stale interpreter one on the next `mate_set_input` call. This
+      caused ~half of regression to fail with flop outputs stuck at their
+      initial/reset value after the first input change following a clock
+      edge — caught by `python tests/regression.py --mode verilator-dpi`
+      (not `make regression`, which does not exercise this path the same
+      way). Any future new ABI entry point that reads/writes instance state
+      must be audited for the same trap: once `evaluate_combinational` is
+      present, no code path may pull observable state from
+      `RtlRuntimeInstance` except the one-time `mate_instance_init` pull
+      below.
+  - `mate_instance_init` still delegates fully to `RtlRuntimeInstance`
+    (`FlopsInitial` application + reset-at-power-up) and pulls the result into
+    native storage once via `refreshRuntimeBackedNativeState`. This is
+    intentional: init is not a hot path, and reusing the interpreter here
+    avoids duplicating `FlopsInitial::Random` RNG semantics in codegen for no
+    performance benefit. `RtlRuntimeInstance` becomes otherwise unused for the
+    rest of a native model's lifetime (removing it entirely is Phase 2E).
+  - Falls back to the old fully-interpreted path (`RtlRuntimeInstance` drives
+    everything, native storage is refreshed by reading back through
+    `getObservable`) when no generated `evaluate_combinational` is present —
+    used by the interpreter-only `createInterpreterModel` overload.
 
-Last clean validation for Phase 2C:
+Last clean validation for Phase 2D:
 
 - `scripts/docker-run.sh make dev`
 - `scripts/docker-run.sh make -C tests/ibex_core/work/verilator clean simulate DPI=1`
-  (~10 minutes end-to-end; dominated by compiling the generated
-  `ibex_core_model.cpp`; previously did not finish at all with a single flat
-  `evaluateCombinational`)
-- `scripts/docker-run.sh make regression`
-- Full regression result: `139/139 passed`.
+  (~5.5 minutes end-to-end, down from ~10 minutes in Phase 2C now that
+  per-cycle flop commit no longer walks the interpreter)
+- `scripts/docker-run.sh python tests/regression.py --mode verilator-dpi`
+  (the actual regression entry point; `make regression` does not reliably
+  exercise the same DPI path)
+- Full regression result: `126/126 passed` (`tests/regression_tests.txt`
+  currently excludes `ibex_core` for run-time reasons; verified separately
+  above).
 
 ## Phase 2: Native Generated Model
 

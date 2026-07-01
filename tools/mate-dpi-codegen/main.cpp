@@ -1706,6 +1706,108 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     return NativeCombinationalCode{out.str(), order.size()};
 }
 
+struct NativeFlopCommitCode {
+    std::string cpp_text;
+    // Parallel to model.metadata().resets / .clocks, one generated function
+    // name per domain.
+    std::vector<std::string> reset_apply_fn_names;
+    std::vector<std::string> clock_commit_fn_names;
+};
+
+// Emits, per clock/reset domain, native FlopD->FlopQ commit and reset-apply
+// functions mirroring MateIRRuntime::applyClockDomain/applyResetDomain
+// (src/sim/runtime.cpp): a clock domain's commit skips any flop for which one
+// of its reset domains currently reads at its active level (async reset
+// priority), and a reset domain broadcasts the flop's reset value to every Q
+// leaf.
+NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
+    const auto& rt = model.metadata();
+    std::ostringstream out;
+    NativeFlopCommitCode result;
+
+    auto flopQStorageIndex = [&](const DFGNode* node) {
+        auto index = storageIndexForObservable(model, node, RuntimeObservableKind::FlopQ);
+        if (!index) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: flop Q leaf '{}' has no FlopQ storage slot", node->str()));
+        }
+        return *index;
+    };
+    auto flopDStorageIndex = [&](const DFGNode* node) {
+        auto index = storageIndexForObservable(model, node, RuntimeObservableKind::FlopD);
+        if (!index) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: flop D leaf '{}' has no FlopD storage slot", node->str()));
+        }
+        return *index;
+    };
+    auto resetMetadataForDomain = [&](ResetId id) -> const RuntimeResetMetadata& {
+        for (const auto& reset : rt.resets) {
+            if (reset.domain_id == id) return reset;
+        }
+        throw CompilerError(std::format(
+            "mate-dpi-codegen: reset domain {} has no runtime metadata", id.value));
+    };
+
+    out << "namespace {\n\n";
+
+    for (size_t reset_index = 0; reset_index < rt.resets.size(); ++reset_index) {
+        const auto& reset_meta = rt.resets[reset_index];
+        const std::string fn_name = std::format("applyResetDomain{}", reset_index);
+        result.reset_apply_fn_names.push_back(fn_name);
+        out << "void " << fn_name << "(std::span<mate::SimValue> storage) {\n";
+        auto flop_it = rt.flops_by_reset.find(reset_meta.domain_id);
+        if (flop_it != rt.flops_by_reset.end()) {
+            for (RuntimeFlopId flop_id : flop_it->second) {
+                const auto& flop = rt.flops.at(flop_id.value);
+                if (!flop.reset_value.has_value()) continue;
+                for (const auto& leaf : flop.leaves) {
+                    out << "    storage[" << flopQStorageIndex(leaf.q_node) << "] = "
+                        << simValueFromTypeExpr(flop.reset_value.value(), leaf.type) << ";\n";
+                }
+            }
+        }
+        out << "}\n\n";
+    }
+
+    for (size_t clock_index = 0; clock_index < rt.clocks.size(); ++clock_index) {
+        const auto& clock_meta = rt.clocks[clock_index];
+        const std::string fn_name = std::format("applyClockDomain{}", clock_index);
+        result.clock_commit_fn_names.push_back(fn_name);
+        out << "void " << fn_name
+            << "(std::span<const mate::SimValue> inputs, std::span<mate::SimValue> storage) {\n";
+        auto flop_it = rt.flops_by_clock.find(clock_meta.domain_id);
+        if (flop_it != rt.flops_by_clock.end()) {
+            for (RuntimeFlopId flop_id : flop_it->second) {
+                const auto& flop = rt.flops.at(flop_id.value);
+                std::string guard_expr;
+                for (ResetId reset_id : flop.reset_domains.ids) {
+                    const auto& reset_meta = resetMetadataForDomain(reset_id);
+                    const bool active_level_is_one = (reset_meta.active_edge == POSEDGE);
+                    const std::string term = std::format(
+                        "((inputs[{}].lowU64() != 0) == {})",
+                        reset_meta.source_input.value,
+                        active_level_is_one ? "true" : "false");
+                    guard_expr += guard_expr.empty() ? term : (" || " + term);
+                }
+                out << "    ";
+                if (!guard_expr.empty()) out << "if (!(" << guard_expr << ")) ";
+                out << "{\n";
+                for (const auto& leaf : flop.leaves) {
+                    out << "        storage[" << flopQStorageIndex(leaf.q_node) << "] = storage["
+                        << flopDStorageIndex(leaf.d_node) << "];\n";
+                }
+                out << "    }\n";
+            }
+        }
+        out << "}\n\n";
+    }
+
+    out << "} // namespace\n\n";
+    result.cpp_text = out.str();
+    return result;
+}
+
 std::string makeInterpreterModelCpp(const Config& config,
                                     const ModelPorts& ports,
                                     const RtlRuntimeModel& model) {
@@ -1715,6 +1817,8 @@ std::string makeInterpreterModelCpp(const Config& config,
     out << "#include <vector>\n\n";
     const NativeCombinationalCode native_code = makeNativeCombinationalCpp(model);
     out << native_code.cpp_text;
+    const NativeFlopCommitCode flop_commit_code = makeNativeFlopCommitCpp(model);
+    out << flop_commit_code.cpp_text;
     out << "extern \"C\" MateStatusCode mate_model_create(const MateModel** out_model, MateStatus* status) {\n";
     out << "    mate::abi::InterpreterModelConfig config;\n";
     out << "    config.top_module = " << cppString(config.top_module) << ";\n";
@@ -1771,7 +1875,8 @@ std::string makeInterpreterModelCpp(const Config& config,
         const auto& source = model.metadata().input_leaves.at(clock.source_input.value);
         out << "        mate::abi::GeneratedClockMetadata{"
             << cppString(clock.display_name) << ", "
-            << cppString(source.leaf_name) << "},\n";
+            << cppString(source.leaf_name) << ", "
+            << edgeAbiName(clock.edge) << "},\n";
     }
     out << "    };\n";
     out << "    metadata.resets = {\n";
@@ -1779,7 +1884,8 @@ std::string makeInterpreterModelCpp(const Config& config,
         const auto& source = model.metadata().input_leaves.at(reset.source_input.value);
         out << "        mate::abi::GeneratedResetMetadata{"
             << cppString(reset.display_name) << ", "
-            << cppString(source.leaf_name) << "},\n";
+            << cppString(source.leaf_name) << ", "
+            << edgeAbiName(reset.active_edge) << "},\n";
     }
     out << "    };\n";
     out << "    metadata.storage = {\n";
@@ -1798,6 +1904,18 @@ std::string makeInterpreterModelCpp(const Config& config,
     out << "    };\n";
     out << "    metadata.evaluate_combinational = &evaluateCombinational;\n";
     out << "    metadata.temporaries_count = " << native_code.temporaries_count << ";\n";
+    out << "    metadata.reset_apply = {";
+    for (size_t i = 0; i < flop_commit_code.reset_apply_fn_names.size(); ++i) {
+        if (i) out << ", ";
+        out << "&" << flop_commit_code.reset_apply_fn_names[i];
+    }
+    out << "};\n";
+    out << "    metadata.clock_commit = {";
+    for (size_t i = 0; i < flop_commit_code.clock_commit_fn_names.size(); ++i) {
+        if (i) out << ", ";
+        out << "&" << flop_commit_code.clock_commit_fn_names[i];
+    }
+    out << "};\n";
     out << "\n";
     out << "    return mate::abi::createInterpreterModel(config, metadata, out_model, status);\n";
     out << "}\n";

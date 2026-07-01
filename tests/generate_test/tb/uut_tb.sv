@@ -23,6 +23,12 @@ module uut_tb(
     end
 
     // ----------------------------------------------------------------
+    // Deterministic pseudo-random source (LFSR from tb_pkg)
+    // ----------------------------------------------------------------
+    logic [31:0] lfsr;
+    initial lfsr = 32'hDEADBEEF;
+
+    // ----------------------------------------------------------------
     // Stimulus
     // ----------------------------------------------------------------
     always @(posedge _if.clk) begin
@@ -40,7 +46,8 @@ module uut_tb(
         //          g_parity (xor_reduce instances), g_any_default OR-tree
         repeat (20) begin
             @(posedge _if.clk) begin
-                _if.data_in <= $urandom;
+                lfsr = tb_pkg::next_lfsr(lfsr);
+                _if.data_in <= lfsr;
                 _if.lane_en <= 4'b1111;
             end
         end
@@ -49,7 +56,8 @@ module uut_tb(
         for (int c = 0; c < NUM_LANES; c++) begin
             repeat (5) begin
                 @(posedge _if.clk) begin
-                    _if.data_in <= $urandom;
+                    lfsr = tb_pkg::next_lfsr(lfsr);
+                    _if.data_in <= lfsr;
                     _if.lane_en <= 1 << c;
                 end
             end
@@ -83,8 +91,10 @@ module uut_tb(
         // Phase 7: wide random sweep — exercises all generate paths together
         repeat (50) begin
             @(posedge _if.clk) begin
-                _if.data_in <= $urandom;
-                _if.lane_en <= $urandom % 16;
+                lfsr = tb_pkg::next_lfsr(lfsr);
+                _if.data_in <= lfsr;
+                lfsr = tb_pkg::next_lfsr(lfsr);
+                _if.lane_en <= lfsr % 16;
             end
         end
 

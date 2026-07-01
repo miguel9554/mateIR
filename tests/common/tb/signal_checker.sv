@@ -13,7 +13,10 @@ module signal_checker
 
     always @(posedge clk) begin
         if (a === b) pass_count++;
-        else         fail_count++;
+        else begin
+            fail_count++;
+            $display("[%0t]   %s: %s mismatch a=%p b=%p", $realtime, NAME, red("MISMATCH"), a, b);
+        end
     end
 
     final begin

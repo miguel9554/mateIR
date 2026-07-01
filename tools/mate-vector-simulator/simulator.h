@@ -37,6 +37,11 @@ struct AsyncEvent {
     SimValue value;
 };
 
+struct SyncInputTransition {
+    std::vector<RuntimeInputUpdate> before_edge;
+    std::vector<RuntimeInputUpdate> after_edge;
+};
+
 class Simulator {
 public:
     Simulator(const RtlRuntimeModel& model, const SimConfig& config);
@@ -71,7 +76,7 @@ private:
     // Testbench methods
     void buildTimeline();
     void loadSyncInputs();
-    std::vector<RuntimeInputUpdate> collectPostClockSyncInputs(ClockId active_clock);
+    SyncInputTransition collectClockSyncInputTransition(ClockId active_clock);
     std::optional<edge_t> updateAsyncInputAndDetectEdge(const RuntimeInputUpdate& update,
                                                         int64_t time_ns);
     bool isClockOrResetSource(const std::string& leaf_name) const;

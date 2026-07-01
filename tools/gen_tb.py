@@ -259,6 +259,27 @@ def port_type_str(port: Port, use_resolved: bool = False) -> str:
     return ' '.join(parts)
 
 
+def single_unpacked_indices(unpacked_dims: str) -> list[int]:
+    """Return declaration-order indices for a simple one-dimensional unpacked range."""
+    if not unpacked_dims or unpacked_dims.count('[') != 1:
+        return []
+    text = unpacked_dims.strip()
+    if not text.startswith('[') or not text.endswith(']'):
+        return []
+    body = text[1:-1].strip()
+    if ':' in body:
+        left_text, right_text = [part.strip() for part in body.split(':', 1)]
+        if not re.fullmatch(r'-?\d+', left_text) or not re.fullmatch(r'-?\d+', right_text):
+            return []
+        left = int(left_text)
+        right = int(right_text)
+        step = 1 if left <= right else -1
+        return list(range(left, right + step, step))
+    if not re.fullmatch(r'\d+', body):
+        return []
+    return list(range(int(body)))
+
+
 @dataclass
 class DomainConfig:
     module_name: str
@@ -424,7 +445,7 @@ def gen_uut_if(module: ModuleInfo) -> str:
     return '\n'.join(lines)
 
 
-def gen_tb(module: ModuleInfo) -> str:
+def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     lines = []
     has_params = len(module.parameters) > 0
 
@@ -435,6 +456,9 @@ def gen_tb(module: ModuleInfo) -> str:
         lines.append(f'module tb {import_clause};')
     else:
         lines.append('module tb;')
+    dpi_val = '1' if include_dpi else '0'
+    lines.append(f'    localparam bit INCLUDE_DPI_MODULE = {dpi_val};')
+    lines.append('    localparam bit INCLUDE_UUT_RECORDER = !INCLUDE_DPI_MODULE;')
 
     inputs = [p for p in module.ports if p.direction == 'input']
     outputs = [p for p in module.ports if p.direction == 'output']
@@ -499,9 +523,119 @@ def gen_tb(module: ModuleInfo) -> str:
     else:
         lines.append(f'    {module.name} uut(.*);')
     lines.append('    uut_tb uut_tb(.*);')
-    lines.append('    uut_recorder u_recorder(.*);')
+    lines.append('    if (INCLUDE_UUT_RECORDER) begin : g_recorder')
+    lines.append('        uut_recorder u_recorder(.*);')
+    lines.append('    end')
     lines.append('    tb_common u_tb_common();')
+
+    # DPI conditional block
     lines.append('')
+    lines.append('    if (INCLUDE_DPI_MODULE) begin : g_dpi')
+    if has_params:
+        lines.append('        uut_if#(')
+        param_conns = []
+        for p in module.parameters:
+            param_conns.append(f'            .{p.name}({p.name})')
+        lines.append(',\n'.join(param_conns))
+        lines.append('        ) dpi_if();')
+    else:
+        lines.append('        uut_if dpi_if();')
+    lines.append('')
+    lines.append(f'        {module.name}_dpi dpi_uut(')
+    port_conns = [f'            .{p.name}(dpi_if.{p.name})' for p in module.ports]
+    lines.append(',\n'.join(port_conns))
+    lines.append('        );')
+    lines.append('')
+    lines.append('        uut_tb dpi_tb(._if(dpi_if));')
+    lines.append('')
+    lines.append('        checker_dpi u_checker(')
+    lines.append('            .dpi_if(dpi_if),')
+    lines.append('            .rtl_if(_if)')
+    lines.append('        );')
+    lines.append('    end')
+
+    lines.append('')
+    lines.append('endmodule')
+    lines.append('')
+
+    return '\n'.join(lines)
+
+
+def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
+    lines = []
+    primary_clk = list(domains.clock_domains.keys())[0]
+
+    # Build checker entries: (port, leaf_name_or_None, leaf_type_or_None)
+    entries: list[tuple[Port, str | None, str | None]] = []
+    for port in module.ports:
+        if port.direction != 'output':
+            continue
+        if port.unpacked_dims:
+            indices = single_unpacked_indices(port.unpacked_dims)
+            if not indices or port.struct_leaves:
+                continue
+            type_str = port_type_str(port, use_resolved=True)
+            for index in indices:
+                entries.append((port, f'[{index}]', type_str))
+            continue
+        if port.struct_leaves:
+            for leaf_name, leaf_type in port.struct_leaves:
+                entries.append((port, leaf_name, leaf_type))
+        else:
+            entries.append((port, None, None))
+
+    n = len(entries)
+
+    all_imports = ['import tb_pkg::*;'] + list(module.imports)
+
+    lines.append('module checker_dpi')
+    for imp in all_imports:
+        lines.append(f'    {imp}')
+    lines.append('(')
+    lines.append('    uut_if.master dpi_if,')
+    lines.append('    uut_if.master rtl_if')
+    lines.append(');')
+    lines.append(f'    localparam int N = {n};')
+    lines.append('    int fails[N];')
+    lines.append('')
+
+    for i, (port, leaf_name, leaf_type) in enumerate(entries):
+        if leaf_name is not None:
+            leaf_suffix = (
+                leaf_name.replace('.', '_')
+                .replace('[', '_')
+                .replace(']', '')
+                .replace(':', '_')
+                .strip('_')
+            )
+            if leaf_name.startswith('['):
+                sig_name = f'{port.name}{leaf_name}'
+            else:
+                sig_name = f'{port.name}.{leaf_name}'
+            inst = f'u_{port.name}_{leaf_suffix}'
+            type_str = leaf_type
+        else:
+            sig_name = port.name
+            inst = f'u_{port.name}'
+            type_str = port_type_str(port, use_resolved=True)
+        lines.append(
+            f'    signal_checker #(.TYPE({type_str}), .NAME("{sig_name}")) {inst}'
+            f' (.clk(rtl_if.{primary_clk}), .a(dpi_if.{sig_name}), .b(rtl_if.{sig_name}),'
+            f' .fail_count(fails[{i}]));'
+        )
+
+    lines.append('')
+    lines.append('    final begin')
+    lines.append('        int total_fail;')
+    lines.append('        total_fail = 0;')
+    lines.append('        foreach (fails[i]) total_fail += fails[i];')
+    lines.append('        if (total_fail != 0) begin')
+    lines.append('            $display("[%0t] %s", $realtime, red($sformatf("FAIL: DPI and RTL mismatched (%0d total failures)", total_fail)));')
+    lines.append('            $fatal(1);')
+    lines.append('        end else begin')
+    lines.append('            $display("[%0t] %s", $realtime, green("PASS: 100% match between DPI and RTL"));')
+    lines.append('        end')
+    lines.append('    end')
     lines.append('endmodule')
     lines.append('')
 
@@ -616,11 +750,13 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
 
 
 def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <module_name>", file=sys.stderr)
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('module_name')
+    parser.add_argument('--dpi', action='store_true', help='Set INCLUDE_DPI_MODULE=1 in tb.sv')
+    args = parser.parse_args()
 
-    module_name = sys.argv[1]
+    module_name = args.module_name
     project_root = Path(__file__).resolve().parent.parent
 
     rtl_dir = project_root / 'tests' / module_name / 'rtl'
@@ -641,9 +777,15 @@ def main():
     domains = load_domains(domains_path, port_names)
     validate(module, domains)
 
-    (output_dir / 'uut_if.sv').write_text(gen_uut_if(module))
-    (output_dir / 'tb.sv').write_text(gen_tb(module))
-    (output_dir / 'uut_recorder.sv').write_text(gen_recorder(module, domains))
+    def write(path: Path, content: str) -> None:
+        if path.exists() and path.read_text() == content:
+            return
+        path.write_text(content)
+
+    write(output_dir / 'uut_if.sv', gen_uut_if(module))
+    write(output_dir / 'tb.sv', gen_tb(module, include_dpi=args.dpi))
+    write(output_dir / 'uut_recorder.sv', gen_recorder(module, domains))
+    write(output_dir / 'checker_dpi.sv', gen_dpi_checker(module, domains))
 
     print(f"Generated testbench files in {output_dir}")
 

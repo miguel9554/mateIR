@@ -127,6 +127,10 @@ set(RTL_RUNTIME_COMPILER_SOURCES
     src/sim/runtime_compiler.cpp
 )
 
+set(DPI_SUPPORT_SOURCES
+    src/dpi/dpi_support.cpp
+)
+
 set(VECTOR_SIMULATOR_SOURCES
     tools/mate-vector-simulator/simulator_consumer.cpp
     tools/mate-vector-simulator/simulator.cpp
@@ -161,6 +165,14 @@ target_link_libraries(mate-rtl-runtime-compiler PUBLIC
     mate-rtl-runtime
 )
 mate_configure_project_target(mate-rtl-runtime-compiler)
+
+add_library(mate-dpi-support STATIC ${DPI_SUPPORT_SOURCES})
+target_include_directories(mate-dpi-support PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/slang/external/ieee1800
+)
+target_link_libraries(mate-dpi-support PUBLIC mate-rtl-runtime-compiler)
+mate_configure_project_target(mate-dpi-support)
 
 add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)
 target_include_directories(mate-vcd-tracer PUBLIC
@@ -205,6 +217,11 @@ target_link_libraries(mate-vector-simulator PRIVATE
     mate-vector-simulator-lib
 )
 mate_configure_project_target(mate-vector-simulator)
+
+add_executable(mate-dpi-codegen tools/mate-dpi-codegen/main.cpp)
+target_include_directories(mate-dpi-codegen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-dpi-codegen PRIVATE mate-rtl-runtime-compiler slang::slang)
+mate_configure_project_target(mate-dpi-codegen)
 
 # Print build configuration
 message(STATUS "")

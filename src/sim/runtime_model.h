@@ -28,9 +28,10 @@ public:
     void initialize(FlopsInitial mode, std::mt19937_64& rng);
     void initializeInputsAndEvaluate(std::span<const RuntimeInputUpdate> async_inputs,
                                      std::span<const RuntimeInputUpdate> sync_inputs);
+    void setInputValues(std::span<const RuntimeInputUpdate> inputs);
     void applyClockEdge(ClockId clock,
                         edge_t edge,
-                        std::span<const RuntimeInputUpdate> sync_inputs);
+                        std::span<const RuntimeInputUpdate> inputs_before_edge);
     void applyResetEdge(ResetId reset, edge_t edge);
     void applyAsyncSignalEdge(RuntimeInputId input, const SimValue& value);
 

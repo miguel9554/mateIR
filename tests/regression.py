@@ -19,6 +19,9 @@ GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"
 
+RUN_MODE_VALIDATE = "validate"
+RUN_MODE_VERILATOR_DPI = "verilator-dpi"
+
 
 def load_test_cases():
     """Load test cases from the manifest.
@@ -84,19 +87,77 @@ def load_test_cases():
     return cases
 
 
-def run_clean(name):
-    """Run make clean for a test case. Returns nothing."""
-    work_dir = TESTS_DIR / name / "work" / "validate"
+def filter_cases_by_name(cases, names):
+    """Filter cases to the requested test names."""
+    if not names:
+        return cases
+
+    requested = set(names)
+    selected = [case for case in cases if case["name"] in requested]
+    found = {case["name"] for case in selected}
+    missing = sorted(requested - found)
+    if missing:
+        raise RuntimeError(f"unknown test name(s): {', '.join(missing)}")
+    return selected
+
+
+def select_cases_for_mode(cases, run_mode):
+    """Return the cases that can be run by the requested mode."""
+    if run_mode == RUN_MODE_VALIDATE:
+        return cases
+    if run_mode != RUN_MODE_VERILATOR_DPI:
+        raise RuntimeError(f"unknown run mode '{run_mode}'")
+    return [
+        case
+        for case in cases
+        if case["kind"] != "validate"
+        or (TESTS_DIR / case["name"] / "work" / "verilator").is_dir()
+    ]
+
+
+def run_clean(name, run_mode):
+    """Run make clean for a test case in the work dir used by run_mode."""
+    if run_mode == RUN_MODE_VERILATOR_DPI:
+        work_dir = TESTS_DIR / name / "work" / "verilator"
+        # DPI=1 selects the clean recipe that also removes the generated DPI dir.
+        clean_cmd = ["make", "clean", "DPI=1"]
+    else:
+        work_dir = TESTS_DIR / name / "work" / "validate"
+        clean_cmd = ["make", "clean"]
     subprocess.run(
-        ["make", "clean"],
+        clean_cmd,
         cwd=work_dir,
         capture_output=True,
         text=True,
     )
 
 
-def run_validate(name, build_target):
+def run_validate(name, build_target, run_mode):
     """Run a PASS test's specialized script or default validation recipe."""
+    if run_mode == RUN_MODE_VERILATOR_DPI:
+        work_dir = TESTS_DIR / name / "work" / "verilator"
+        result = subprocess.run(
+            ["make", "simulate", "DPI=1", "DPI_BUILD_TARGET=noop"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+        )
+        output = result.stdout + result.stderr
+        # The Verilator DPI harness reports a value mismatch via $fatal(1) in a
+        # `final` block, which does NOT set a non-zero process exit code, so the
+        # `make` return code only reflects build/elaboration failures. Judge the
+        # actual DPI-vs-RTL comparison by the checker's sentinel line instead.
+        if result.returncode != 0:
+            return False, output
+        if "DPI and RTL mismatched" in output:
+            return False, output
+        if "PASS: 100% match" not in output:
+            return False, output + (
+                "\n[regression] DPI checker PASS sentinel not found; "
+                "treating as failure.\n"
+            )
+        return True, output
+
     static_work_dir = TESTS_DIR / name / "work" / "static"
     regression_script = static_work_dir / "regression.sh"
     if regression_script.exists():
@@ -202,12 +263,14 @@ def run_expected_failure(name, expected, simulator):
     return ok, output
 
 
-def run_case(case, build_target, simulator):
+def run_case(case, build_target, simulator, run_mode):
     """Run a single test case. Returns (name, ok, output)."""
     name = case["name"]
     if case["kind"] == "validate":
-        # run_clean(name)
-        ok, output = run_validate(name, build_target)
+        if run_mode not in {RUN_MODE_VALIDATE, RUN_MODE_VERILATOR_DPI}:
+            raise RuntimeError(f"unknown run mode '{run_mode}'")
+        run_clean(name, run_mode)
+        ok, output = run_validate(name, build_target, run_mode)
     else:
         ok, output = run_expected_failure(name, case["expected_error"], simulator)
     return name, ok, output
@@ -228,11 +291,33 @@ def main():
         default="dev",
         help="Build preset to use for mate and helper tools (default: dev)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=(RUN_MODE_VALIDATE, RUN_MODE_VERILATOR_DPI),
+        default=RUN_MODE_VALIDATE,
+        help=(
+            "Per-PASS-test command mode. 'validate' runs the validate target; "
+            "'verilator-dpi' runs make simulate DPI=1 in "
+            "tests/<test>/work/verilator/ (default: validate)"
+        ),
+    )
+    parser.add_argument(
+        "--test",
+        action="append",
+        dest="tests",
+        help="Run only the named manifest test. May be passed more than once.",
+    )
     args = parser.parse_args()
     simulator = REPO_ROOT / "build" / args.build / "mate"
 
     try:
         cases = load_test_cases()
+    except RuntimeError as exc:
+        print(f"{RED}{exc}{RESET}")
+        sys.exit(1)
+    try:
+        cases = filter_cases_by_name(cases, args.tests)
+        cases = select_cases_for_mode(cases, args.mode)
     except RuntimeError as exc:
         print(f"{RED}{exc}{RESET}")
         sys.exit(1)
@@ -270,7 +355,7 @@ def main():
     total = len(cases)
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
-            executor.submit(run_case, case, args.build, simulator): case
+            executor.submit(run_case, case, args.build, simulator, args.mode): case
             for case in cases
         }
         for future in as_completed(futures):

@@ -1,11 +1,11 @@
 module_name: general_features_test
 resets:
-  rst_n:
+  i_rst_n:
     polarity: negative
 clock_domains:
-  clk:
+  i_clk:
     polarity: posedge
     inputs_outputs:
-    - data
-    - idx
-    - base
+    - i_data
+    - i_idx
+    - i_base

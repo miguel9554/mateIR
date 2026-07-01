@@ -1,0 +1,12 @@
+module_name: continuous_partial_vector_read
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+    - pop_i
+    - pushed_bits_i

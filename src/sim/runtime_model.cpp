@@ -30,11 +30,15 @@ void RtlRuntimeInstance::initializeInputsAndEvaluate(
     runtime_.initializeInputsAndEvaluate(async_inputs, sync_inputs);
 }
 
+void RtlRuntimeInstance::setInputValues(std::span<const RuntimeInputUpdate> inputs) {
+    runtime_.setInputValues(inputs);
+}
+
 void RtlRuntimeInstance::applyClockEdge(
     ClockId clock,
     edge_t edge,
-    std::span<const RuntimeInputUpdate> sync_inputs) {
-    runtime_.applyClockEdge(clock, edge, sync_inputs);
+    std::span<const RuntimeInputUpdate> inputs_before_edge) {
+    runtime_.applyClockEdge(clock, edge, inputs_before_edge);
 }
 
 void RtlRuntimeInstance::applyResetEdge(ResetId reset, edge_t edge) {

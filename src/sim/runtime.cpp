@@ -120,26 +120,45 @@ void MateIRRuntime::initializeInputsAndEvaluate(
     updateOutputs();
 }
 
+void MateIRRuntime::setInputValues(std::span<const RuntimeInputUpdate> inputs) {
+    for (const auto& update : inputs) {
+        setInputValue(update.input, update.value);
+    }
+    updateOutputs();
+}
+
 void MateIRRuntime::applyClockEdge(
     ClockId clock,
     edge_t edge,
-    std::span<const RuntimeInputUpdate> sync_inputs) {
+    std::span<const RuntimeInputUpdate> inputs_before_edge) {
     validateClockEdge(clock, edge);
     const RuntimeInputId source = clockSourceInput(clock);
     const auto& input_metadata = metadata_.input_leaves.at(source.value);
     setAsyncInputValue(input_metadata.leaf_name, sourceValueForEdge(source, edge));
 
-    if (edge == ir_.clocks.at(clock.value).edge) {
-        applyClockDomain(clock);
-    } else if (!sync_inputs.empty()) {
+    const bool active_edge = edge == ir_.clocks.at(clock.value).edge;
+    if (!active_edge && !inputs_before_edge.empty()) {
         throw CompilerError(std::format(
-            "Simulator runtime: inactive {} on clock domain '{}' cannot advance sync inputs",
+            "Simulator runtime: inactive {} on clock domain '{}' cannot sample inputs",
             edgeName(edge), ir_.clocks.at(clock.value).display_name));
     }
 
-    for (const auto& update : sync_inputs) {
-        validateSyncUpdateForClock(clock, update);
-        setSyncInput(update.input, update.value);
+    for (const auto& update : inputs_before_edge) {
+        if (update.input == source) continue;
+        if (update.input.value >= metadata_.input_leaves.size()) {
+            throw CompilerError(std::format(
+                "Simulator runtime: invalid input handle {}", update.input.value));
+        }
+        const auto& update_metadata = metadata_.input_leaves.at(update.input.value);
+        if (update_metadata.kind == RuntimeInputKind::Sync) {
+            validateSyncUpdateForClock(clock, update);
+        }
+        setInputValue(update.input, update.value);
+    }
+
+    if (active_edge) {
+        evaluateCombinational();
+        applyClockDomain(clock);
     }
     updateOutputs();
 }
@@ -197,6 +216,27 @@ void MateIRRuntime::setSyncInput(RuntimeInputId input, const SimValue& value) {
             input_metadata.leaf_name));
     }
     setTopInputValue(input_metadata.leaf_name, value);
+}
+
+void MateIRRuntime::setInputValue(RuntimeInputId input, const SimValue& value) {
+    if (input.value >= metadata_.input_leaves.size()) {
+        throw CompilerError(std::format(
+            "Simulator runtime: invalid input handle {}", input.value));
+    }
+    const auto& input_metadata = metadata_.input_leaves.at(input.value);
+    if (input_metadata.kind == RuntimeInputKind::Async ||
+        input_metadata.kind == RuntimeInputKind::Clock ||
+        input_metadata.kind == RuntimeInputKind::Reset) {
+        setAsyncInputValue(input_metadata.leaf_name, value);
+        return;
+    }
+    if (input_metadata.kind == RuntimeInputKind::Sync) {
+        setTopInputValue(input_metadata.leaf_name, value);
+        return;
+    }
+    throw CompilerError(std::format(
+        "Simulator runtime: input '{}' has unknown input kind",
+        input_metadata.leaf_name));
 }
 
 void MateIRRuntime::updateOutputs() {
@@ -719,6 +759,14 @@ SimValue MateIRRuntime::evaluateNode(const DFGNode* node) {
             const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
             const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
             SimValue result = lhs.shl(rhs.lowU64());
+            emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
+            return result;
+        }
+        case DFGOp::SHR: {
+            auto inputs = node->binaryInputs();
+            const SimValue& lhs = checkedGetRef(inputs.lhs.node, node);
+            const SimValue& rhs = checkedGetRef(inputs.rhs.node, node);
+            SimValue result = lhs.shr(rhs.lowU64(), false);
             emitTrace({{"lhs", lhs}, {"rhs", rhs}}, result);
             return result;
         }

@@ -3,6 +3,8 @@ FROM mate-verilator:latest
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
+    clang-18 \
+    cmake \
     curl \
     flex \
     bison \

@@ -9,10 +9,12 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <queue>
 #include <random>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -351,27 +353,33 @@ void Simulator::loadSyncInputs() {
 // Sync input advancement
 // ============================================================================
 
-std::vector<RuntimeInputUpdate> Simulator::collectPostClockSyncInputs(ClockId active_clock) {
-    std::vector<RuntimeInputUpdate> updates;
+SyncInputTransition Simulator::collectClockSyncInputTransition(ClockId active_clock) {
+    SyncInputTransition transition;
     for (auto& [name, pos] : sync_input_pos_) {
         auto clk_it = sync_input_clock_.find(name);
         if (clk_it == sync_input_clock_.end() || clk_it->second != active_clock)
             continue;
 
-        if (pos + 1 < sync_input_data_[name].size()) {
-            pos++;
-        }
         const auto* input = runtime_metadata_.findInput(name);
         if (!input) {
             throw CompilerError(std::format(
                 "Simulator: sync input '{}' has no runtime handle", name));
         }
-        updates.push_back(RuntimeInputUpdate{
+        const auto& data = sync_input_data_[name];
+        transition.before_edge.push_back(RuntimeInputUpdate{
             .input = input->id,
-            .value = sync_input_data_[name][pos],
+            .value = data[pos],
+        });
+
+        if (pos + 1 < data.size()) {
+            pos++;
+        }
+        transition.after_edge.push_back(RuntimeInputUpdate{
+            .input = input->id,
+            .value = data[pos],
         });
     }
-    return updates;
+    return transition;
 }
 
 bool Simulator::isClockOrResetSource(const std::string& leaf_name) const {
@@ -735,14 +743,14 @@ void Simulator::run() {
             }
         }
 
-        std::vector<RuntimeInputUpdate> async_updates;
-        std::set<std::string> seen_signals;
+        // Build a map from signal name to last event, so duplicate timestamps keep the last value.
+        std::map<std::string, const AsyncEvent*> last_event_for_signal;
         for (const auto* evt : batch) {
-            if (!seen_signals.insert(evt->signal_name).second) {
-                throw CompilerError(std::format(
-                    "Simulator: async input '{}' has multiple events at time {}",
-                    evt->signal_name, batch_time));
-            }
+            last_event_for_signal[evt->signal_name] = evt;
+        }
+
+        std::vector<RuntimeInputUpdate> async_updates;
+        for (const auto& [name, evt] : last_event_for_signal) {
             const auto* input = runtime_metadata_.findInput(evt->signal_name);
             if (!input) {
                 throw CompilerError(std::format(
@@ -780,13 +788,17 @@ void Simulator::run() {
             if (is_clock_source) {
                 if (!edge.has_value()) continue;
                 for (ClockId clock_id : clock_it->second) {
-                    std::vector<RuntimeInputUpdate> sync_updates;
+                    SyncInputTransition sync_transition;
                     if (*edge == ir_.clocks.at(clock_id.value).edge) {
-                        sync_updates = collectPostClockSyncInputs(clock_id);
+                        sync_transition = collectClockSyncInputTransition(clock_id);
                         timestamp_had_active_clock_edge = true;
                     }
                     runtime_trace_time_ns_ = batch_time;
-                    runtime_->applyClockEdge(clock_id, *edge, sync_updates);
+                    runtime_->applyClockEdge(clock_id, *edge,
+                                             sync_transition.before_edge);
+                    if (!sync_transition.after_edge.empty()) {
+                        runtime_->setInputValues(sync_transition.after_edge);
+                    }
                 }
                 continue;
             }
@@ -805,7 +817,7 @@ void Simulator::run() {
                     "Simulator: input '{}' cannot be driven as a plain async signal",
                     leaf_name));
             }
-            runtime_->applyAsyncSignalEdge(update.input, update.value);
+            runtime_->setInputValues(std::span<const RuntimeInputUpdate>(&update, 1));
         }
         emitPassiveTraceEvents(batch_time);
 

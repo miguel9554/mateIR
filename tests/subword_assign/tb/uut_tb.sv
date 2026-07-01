@@ -2,9 +2,14 @@ module uut_tb (
     uut_if.master _if
 );
 
+    // Deterministic pseudo-random source (LFSR from tb_pkg)
+    logic [31:0] lfsr;
+
     initial begin
-        _if.clk = $random();
-        _if.subword_in = $random();
+        lfsr = 32'hDEADBEEF;
+        _if.clk = 0;
+        lfsr = tb_pkg::next_lfsr(lfsr);
+        _if.subword_in = lfsr;
     end
 
     always begin
@@ -17,7 +22,8 @@ module uut_tb (
     end
 
     always @(posedge _if.clk) begin
-        _if.subword_in <= $random;
+        lfsr = tb_pkg::next_lfsr(lfsr);
+        _if.subword_in <= lfsr;
     end
 
 endmodule

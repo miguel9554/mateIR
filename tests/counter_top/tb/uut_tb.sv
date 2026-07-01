@@ -3,7 +3,7 @@ module uut_tb(
 );
     // initial values
     initial begin
-        _if.clk = $random();
+        _if.clk = 0;
     end
 
     // Clock gen

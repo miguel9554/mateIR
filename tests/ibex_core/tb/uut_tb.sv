@@ -34,6 +34,12 @@ initial begin
 end
 
 // -----------------------------------------------------------------------
+// Deterministic pseudo-random source (LFSR from tb_pkg)
+// -----------------------------------------------------------------------
+logic [31:0] lfsr;
+initial lfsr = 32'hDEADBEEF;
+
+// -----------------------------------------------------------------------
 // All synchronous stimulus — clk_i domain
 // -----------------------------------------------------------------------
 always @(posedge _if.clk_i) begin
@@ -55,24 +61,32 @@ always @(posedge _if.clk_i) begin
     // ------------------------------------------------------------------
     _if.instr_gnt_i    <= _if.instr_req_o;
     _if.instr_rvalid_i <= _if.instr_gnt_i;
-    _if.instr_rdata_i  <= $urandom();
+    lfsr = tb_pkg::next_lfsr(lfsr);
+    _if.instr_rdata_i  <= lfsr;
 
     // ------------------------------------------------------------------
     // Data memory handshake  (same single-cycle grant policy)
     // ------------------------------------------------------------------
     _if.data_gnt_i    <= _if.data_req_o;
     _if.data_rvalid_i <= _if.data_gnt_i;
-    _if.data_rdata_i  <= $urandom();
+    lfsr = tb_pkg::next_lfsr(lfsr);
+    _if.data_rdata_i  <= lfsr;
 
     // Register file ECC read ports — random data back to core
-    _if.rf_rdata_a_ecc_i <= $urandom();
-    _if.rf_rdata_b_ecc_i <= $urandom();
+    lfsr = tb_pkg::next_lfsr(lfsr);
+    _if.rf_rdata_a_ecc_i <= lfsr;
+    lfsr = tb_pkg::next_lfsr(lfsr);
+    _if.rf_rdata_b_ecc_i <= lfsr;
 
     // Sparse random interrupts to generate output activity
-    _if.irq_software_i <= ($urandom_range(0, 999) == 0);
-    _if.irq_timer_i    <= ($urandom_range(0, 999) == 0);
-    _if.irq_external_i <= ($urandom_range(0, 499) == 0);
-    _if.irq_fast_i     <= ($urandom_range(0, 199) == 0) ? 15'($urandom()) : 15'h0;
+    lfsr = tb_pkg::next_lfsr(lfsr);
+    _if.irq_software_i <= ((lfsr % 1000) == 0);
+    lfsr = tb_pkg::next_lfsr(lfsr);
+    _if.irq_timer_i    <= ((lfsr % 1000) == 0);
+    lfsr = tb_pkg::next_lfsr(lfsr);
+    _if.irq_external_i <= ((lfsr % 500) == 0);
+    lfsr = tb_pkg::next_lfsr(lfsr);
+    _if.irq_fast_i     <= ((lfsr % 200) == 0) ? 15'(tb_pkg::next_lfsr(lfsr)) : 15'h0;
 end
 
 endmodule

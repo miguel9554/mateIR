@@ -42,9 +42,10 @@ public:
     void initialize(FlopsInitial mode, std::mt19937_64& rng);
     void initializeInputsAndEvaluate(std::span<const RuntimeInputUpdate> async_inputs,
                                      std::span<const RuntimeInputUpdate> sync_inputs);
+    void setInputValues(std::span<const RuntimeInputUpdate> inputs);
     void applyClockEdge(ClockId clock,
                         edge_t edge,
-                        std::span<const RuntimeInputUpdate> sync_inputs);
+                        std::span<const RuntimeInputUpdate> inputs_before_edge);
     void applyResetEdge(ResetId reset, edge_t edge);
     void applyAsyncSignalEdge(RuntimeInputId input, const SimValue& value);
 
@@ -99,6 +100,7 @@ private:
     void initFlops(FlopsInitial mode, std::mt19937_64& rng);
     void initializeAsyncInput(RuntimeInputId input, const SimValue& value);
     void setSyncInput(RuntimeInputId input, const SimValue& value);
+    void setInputValue(RuntimeInputId input, const SimValue& value);
     void updateOutputs();
     std::set<ResetId> activeResetDomains() const;
     void validateSyncUpdateForClock(ClockId clock_id, const RuntimeInputUpdate& update) const;

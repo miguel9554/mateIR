@@ -7,6 +7,7 @@
 apb_gpio PASS
 array_indexing PASS
 dynamic_lhs_bitselect PASS
+dpi_unpacked_array_ports PASS
 body_import_header_leak_fail FAIL Parameter 'WIDTH' not found in context
 axi_spi_slave PASS
 cdc_sidecar_async_sync_pass PASS
@@ -16,6 +17,7 @@ cdc_sidecar_missing_fail FAIL without a declared synchronizer
 cdc_sidecar_unknown_flop_fail FAIL unknown synchronizer flop
 const_only_dynamic_fail FAIL DIV operation requires constant operands
 const_only_ops PASS
+continuous_partial_vector_read PASS
 cordic PASS
 counter_top PASS
 cross_module_async_to_sync_fail FAIL samples Async input without a declared synchronizer
@@ -123,6 +125,7 @@ struct_flop_reset PASS
 union_typedef_fail FAIL union types are not supported
 submodule_output_bitselect_partial PASS
 submodule_multi_output_partial PASS
+undriven_packed_bits_fail FAIL Undriven bits for packed target 'bus'
 subword_assign PASS
 task_func_test PASS
 uart PASS
@@ -138,4 +141,5 @@ casez_unique0_fail FAIL unique0 modifiers are not supported on case
 packed_struct_conv PASS
 ibex_compressed_decoder PASS
 arithmetic_ops PASS
+shift_operator_matrix PASS
 ibex_core PASS

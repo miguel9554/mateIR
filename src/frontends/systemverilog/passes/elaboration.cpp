@@ -913,6 +913,70 @@ static void sortSlices(PartialTargetState& state) {
               });
 }
 
+static std::string formatMissingPackedRanges(const std::vector<std::pair<int64_t, int64_t>>& ranges) {
+    std::vector<std::string> parts;
+    parts.reserve(ranges.size());
+    for (const auto& [low, high] : ranges) {
+        if (low == high) {
+            parts.push_back(std::format("[{}]", low));
+        } else {
+            parts.push_back(std::format("[{}:{}]", high, low));
+        }
+    }
+
+    std::string result;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i != 0) result += ", ";
+        result += parts[i];
+    }
+    return result;
+}
+
+static void validatePartialTargetFullyDriven(const std::string& targetName,
+                                             const PartialTargetState& state) {
+    if (state.type.width <= 0) return;
+
+    std::vector<bool> driven(static_cast<size_t>(state.type.width), false);
+    std::optional<SourceLoc> firstLoc;
+    for (const auto& slice : state.slices) {
+        if (!firstLoc && slice.loc) firstLoc = slice.loc;
+        if (slice.low < 0 || slice.high < slice.low || slice.high >= state.type.width) {
+            throw CompilerError(
+                std::format("Partial write for packed target '{}' has invalid range [{}:{}] for width {}",
+                            targetName, slice.high, slice.low, state.type.width),
+                slice.loc);
+        }
+        for (int64_t bit = slice.low; bit <= slice.high; ++bit) {
+            driven[static_cast<size_t>(bit)] = true;
+        }
+    }
+
+    std::vector<std::pair<int64_t, int64_t>> missing;
+    int64_t bit = state.type.width - 1;
+    while (bit >= 0) {
+        if (driven[static_cast<size_t>(bit)]) {
+            --bit;
+            continue;
+        }
+        int64_t high = bit;
+        while (bit >= 0 && !driven[static_cast<size_t>(bit)]) --bit;
+        missing.push_back({bit + 1, high});
+    }
+
+    if (!missing.empty()) {
+        throw CompilerError(
+            std::format("Undriven bits for packed target '{}': {}",
+                        targetName, formatMissingPackedRanges(missing)),
+            firstLoc);
+    }
+}
+
+static void validatePartialTargetsFullyDriven(const PartialDriverMap& partialDrivers) {
+    for (const auto& [targetName, state] : partialDrivers) {
+        validatePartialTargetFullyDriven(targetName, state);
+    }
+}
+
 static bool partialStatesEqual(const PartialTargetState& lhs, const PartialTargetState& rhs) {
     auto sameLoc = [](const std::optional<SourceLoc>& a, const std::optional<SourceLoc>& b) {
         if (a.has_value() != b.has_value()) return false;
@@ -956,16 +1020,40 @@ static DFGNode* materializePartialTarget(ResolutionContext& ctx,
                                          const std::optional<SourceLoc>& loc) {
     sortSlices(state);
     std::vector<DFGNode*> parts;
-    parts.reserve(state.slices.size());
+    parts.reserve(static_cast<size_t>(state.type.width));
+    DFGNode* targetNode = lookupTargetNode(ctx, targetName);
+
+    auto makeRetainedSlice = [&](int64_t low, int64_t high) -> DFGNode* {
+        DFGNode* retained = nullptr;
+        if (targetNode) {
+            retained = ctx.graph.slice(targetNode, ctx.graph.constant(high), ctx.graph.constant(low));
+        } else {
+            retained = ctx.graph.x(Type::makeInteger(static_cast<int>(high - low + 1), state.type.isSigned()));
+        }
+        retained->type = Type::makeInteger(static_cast<int>(high - low + 1), state.type.isSigned());
+        if (loc) retained->loc = *loc;
+        return retained;
+    };
+
+    int64_t nextHigh = state.type.width - 1;
     for (const auto& slice : state.slices) {
+        if (slice.high < 0 || slice.low > nextHigh) continue;
+        if (slice.high < nextHigh) {
+            parts.push_back(makeRetainedSlice(slice.high + 1, nextHigh));
+        }
         parts.push_back(slice.expr);
+        nextHigh = slice.low - 1;
+    }
+    if (nextHigh >= 0) {
+        parts.push_back(makeRetainedSlice(0, nextHigh));
     }
     DFGNode* driver = nullptr;
     if (!parts.empty()) {
         driver = ctx.graph.concat(parts);
+        driver->type = state.type;
         if (loc) driver->loc = *loc;
         connectDriver(ctx, targetName, driver);
-    } else if (auto* node = lookupTargetNode(ctx, targetName)) {
+    } else if (auto* node = targetNode) {
         node->clearDriver();
     }
     return driver;
@@ -3751,12 +3839,44 @@ static ExprValue buildExprValue(
             return total;
         }
         if (node->kind() == DFGOp::ADD || node->kind() == DFGOp::SUB ||
-            node->kind() == DFGOp::MUL) {
+            node->kind() == DFGOp::MUL ||
+            node->kind() == DFGOp::BITWISE_AND ||
+            node->kind() == DFGOp::BITWISE_OR ||
+            node->kind() == DFGOp::BITWISE_XOR ||
+            node->kind() == DFGOp::BITWISE_XNOR) {
             auto inputs = node->binaryInputs();
             int lw = self(self, inputs.lhs.node);
             int rw = self(self, inputs.rhs.node);
             if (lw <= 0 || rw <= 0) return 0;
             return std::max(lw, rw);
+        }
+        if (node->kind() == DFGOp::SHL || node->kind() == DFGOp::SHR ||
+            node->kind() == DFGOp::ASR) {
+            return self(self, node->binaryInputs().lhs.node);
+        }
+        if (node->kind() == DFGOp::BITWISE_NOT ||
+            node->kind() == DFGOp::UNARY_NEGATE) {
+            return self(self, node->unaryInputs().operand.node);
+        }
+        if (node->kind() == DFGOp::EQ || node->kind() == DFGOp::LT ||
+            node->kind() == DFGOp::LE || node->kind() == DFGOp::GT ||
+            node->kind() == DFGOp::GE ||
+            node->kind() == DFGOp::REDUCTION_AND ||
+            node->kind() == DFGOp::REDUCTION_NAND ||
+            node->kind() == DFGOp::REDUCTION_OR ||
+            node->kind() == DFGOp::REDUCTION_NOR ||
+            node->kind() == DFGOp::REDUCTION_XOR ||
+            node->kind() == DFGOp::REDUCTION_XNOR) {
+            return 1;
+        }
+        if (node->kind() == DFGOp::MUX) {
+            int width = 0;
+            for (size_t i = 0; i < node->muxArmCount(); ++i) {
+                int armWidth = self(self, node->muxArmData(i).node);
+                if (armWidth <= 0) return 0;
+                width = std::max(width, armWidth);
+            }
+            return width;
         }
         if (node->kind() == DFGOp::SIGNAL) {
             auto drv = node->driver();
@@ -3770,7 +3890,8 @@ static ExprValue buildExprValue(
         bool makeSigned = castExpr.signing.valueText() == "signed";
         ExprValue inner = buildScalarExprValue(castExpr.inner->expression, ctx);
         int knownWidth = computeKnownWidth(computeKnownWidth, inner.scalar);
-        Type newType = Type::makeInteger(inner.type.width, makeSigned,
+        int castWidth = knownWidth > 0 ? knownWidth : inner.type.width;
+        Type newType = Type::makeInteger(castWidth, makeSigned,
                                         inner.type.packed_dims, inner.type.unpacked_dims);
         if (inner.scalar->kind() == DFGOp::CONST) {
             inner.scalar->type = newType;
@@ -3802,7 +3923,8 @@ static ExprValue buildExprValue(
                 const auto* arg = singleOrderedSystemFunctionArg(invocation, sysName);
                 ExprValue inner = buildScalarExprValue(arg, ctx);
                 int knownWidth = computeKnownWidth(computeKnownWidth, inner.scalar);
-                Type newType = Type::makeInteger(inner.type.width, makeSigned,
+                int castWidth = knownWidth > 0 ? knownWidth : inner.type.width;
+                Type newType = Type::makeInteger(castWidth, makeSigned,
                                                 inner.type.packed_dims, inner.type.unpacked_dims);
                 if (inner.scalar->kind() == DFGOp::CONST) {
                     inner.scalar->type = newType;
@@ -5158,7 +5280,16 @@ static DFGNode* buildExprScalarImpl(
             return node;
         }
 
-        case SyntaxKind::LogicalShiftRightExpression:
+        case SyntaxKind::LogicalShiftRightExpression: {
+            auto& binary = expr->as<BinaryExpressionSyntax>();
+            auto loc = resolveSourceLoc(*expr, ctx.sm);
+            auto lhs = buildScalarExprValue(binary.left, ctx);
+            rejectFrontendEnum(lhs, "SHR", loc);
+            auto* node = ctx.graph.shr(lhs.scalar, buildExprDFG(binary.right, ctx));
+            node->loc = loc;
+            return node;
+        }
+
         case SyntaxKind::ArithmeticShiftRightExpression: {
             auto& binary = expr->as<BinaryExpressionSyntax>();
             auto loc = resolveSourceLoc(*expr, ctx.sm);
@@ -8974,6 +9105,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
     }
 
+    validatePartialTargetsFullyDriven(resCtx.partial_drivers);
     rebuildModuleNodeIndexRecursively(resolved);
     return resolved;
 }

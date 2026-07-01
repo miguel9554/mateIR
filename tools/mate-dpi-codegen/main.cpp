@@ -408,6 +408,16 @@ std::string edgeAbiName(edge_t edge) {
     return edge == POSEDGE ? "MATE_EDGE_POSEDGE" : "MATE_EDGE_NEGEDGE";
 }
 
+std::string abiInputKindName(RuntimeInputKind kind) {
+    switch (kind) {
+        case RuntimeInputKind::Async: return "MATE_INPUT_ASYNC";
+        case RuntimeInputKind::Sync: return "MATE_INPUT_SYNC";
+        case RuntimeInputKind::Clock: return "MATE_INPUT_CLOCK";
+        case RuntimeInputKind::Reset: return "MATE_INPUT_RESET";
+    }
+    throw CompilerError("mate-dpi-codegen: unknown runtime input kind");
+}
+
 void validateDpiSupportedPort(const ModuleNode& node) {
     if (node.binding.aggregate_leaves.empty()) {
         throw CompilerError(std::format(
@@ -1239,7 +1249,27 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     return out.str();
 }
 
-std::string makeInterpreterModelCpp(const Config& config) {
+int generatedClockIdForDomain(const RtlRuntimeModel& model, ClockId domain) {
+    for (size_t i = 0; i < model.metadata().clocks.size(); ++i) {
+        if (model.metadata().clocks[i].domain_id == domain) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+int generatedResetIdForDomain(const RtlRuntimeModel& model, ResetId domain) {
+    for (size_t i = 0; i < model.metadata().resets.size(); ++i) {
+        if (model.metadata().resets[i].domain_id == domain) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+std::string makeInterpreterModelCpp(const Config& config,
+                                    const ModelPorts& ports,
+                                    const RtlRuntimeModel& model) {
     std::ostringstream out;
     out << "#include \"abi/abi_interpreter.h\"\n\n";
     out << "extern \"C\" MateStatusCode mate_model_create(const MateModel** out_model, MateStatus* status) {\n";
@@ -1264,7 +1294,53 @@ std::string makeInterpreterModelCpp(const Config& config) {
         out << "{" << cppString(key) << ", " << value << "}";
     }
     out << "};\n";
-    out << "    return mate::abi::createInterpreterModel(config, out_model, status);\n";
+    out << "\n";
+    out << "    mate::abi::GeneratedModelMetadata metadata;\n";
+    out << "    metadata.inputs = {\n";
+    for (LeafIndex index : allInputLeaves(ports)) {
+        const auto& input = inputLeaf(ports, index);
+        const int clock_id = input.clock_domain
+            ? generatedClockIdForDomain(model, *input.clock_domain)
+            : -1;
+        const int reset_id = input.reset_domain
+            ? generatedResetIdForDomain(model, *input.reset_domain)
+            : -1;
+        out << "        mate::abi::GeneratedInputMetadata{"
+            << cppString(input.leaf_name) << ", "
+            << input.type.width << ", "
+            << (input.type.isSigned() ? "true" : "false") << ", "
+            << abiInputKindName(input.input_kind) << ", "
+            << clock_id << ", "
+            << reset_id << "},\n";
+    }
+    out << "    };\n";
+    out << "    metadata.outputs = {\n";
+    for (LeafIndex index : allOutputLeaves(ports)) {
+        const auto& output = outputLeaf(ports, index);
+        out << "        mate::abi::GeneratedOutputMetadata{"
+            << cppString(output.leaf_name) << ", "
+            << output.type.width << ", "
+            << (output.type.isSigned() ? "true" : "false") << "},\n";
+    }
+    out << "    };\n";
+    out << "    metadata.clocks = {\n";
+    for (const auto& clock : model.metadata().clocks) {
+        const auto& source = model.metadata().input_leaves.at(clock.source_input.value);
+        out << "        mate::abi::GeneratedClockMetadata{"
+            << cppString(clock.display_name) << ", "
+            << cppString(source.leaf_name) << "},\n";
+    }
+    out << "    };\n";
+    out << "    metadata.resets = {\n";
+    for (const auto& reset : model.metadata().resets) {
+        const auto& source = model.metadata().input_leaves.at(reset.source_input.value);
+        out << "        mate::abi::GeneratedResetMetadata{"
+            << cppString(reset.display_name) << ", "
+            << cppString(source.leaf_name) << "},\n";
+    }
+    out << "    };\n";
+    out << "\n";
+    out << "    return mate::abi::createInterpreterModel(config, metadata, out_model, status);\n";
     out << "}\n";
     return out.str();
 }
@@ -1299,7 +1375,7 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(config.out_dir);
         writeFile(config.out_dir / (config.module_name + ".cpp"), makeCpp(config, ports, model));
         writeFile(config.out_dir / (config.top_module + "_model.cpp"),
-                  makeInterpreterModelCpp(config));
+                  makeInterpreterModelCpp(config, ports, model));
         writeFile(config.out_dir / (config.module_name + "_pkg.sv"), makeSvPkg(config, ports, model));
         writeFile(config.out_dir / (config.module_name + ".sv"), makeSv(config, ports, model));
     } catch (const CompilerError& e) {

@@ -10,10 +10,52 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
+
+namespace {
+
+using mate::abi::GeneratedClockMetadata;
+using mate::abi::GeneratedInputMetadata;
+using mate::abi::GeneratedModelMetadata;
+using mate::abi::GeneratedOutputMetadata;
+using mate::abi::GeneratedResetMetadata;
+
+struct AbiInput {
+    std::string leaf_name;
+    mate::RuntimeInputId runtime_id;
+    mate::Type type;
+    MateInputKind kind = MATE_INPUT_ASYNC;
+    int32_t clock_id = -1;
+    int32_t reset_id = -1;
+};
+
+struct AbiOutput {
+    std::string leaf_name;
+    mate::RuntimeOutputId runtime_id;
+    mate::Type type;
+};
+
+struct AbiClock {
+    std::string display_name;
+    std::string source_leaf_name;
+    mate::ClockId domain_id = mate::InvalidClockId;
+};
+
+struct AbiReset {
+    std::string display_name;
+    std::string source_leaf_name;
+    mate::ResetId domain_id = mate::InvalidResetId;
+};
+
+} // namespace
 
 struct MateModel {
     mate::RtlRuntimeModel runtime_model;
+    std::vector<AbiInput> inputs;
+    std::vector<AbiOutput> outputs;
+    std::vector<AbiClock> clocks;
+    std::vector<AbiReset> resets;
 };
 
 struct MateInstance {
@@ -183,17 +225,16 @@ std::vector<mate::RuntimeInputUpdate> convertUpdates(const MateModel& model,
 
     std::vector<mate::RuntimeInputUpdate> out;
     out.reserve(static_cast<size_t>(count));
-    const auto& inputs = model.runtime_model.metadata().input_leaves;
     for (int32_t i = 0; i < count; ++i) {
         const MateInputUpdate& update = updates[i];
         if (update.input_id < 0 ||
-            static_cast<size_t>(update.input_id) >= inputs.size()) {
+            static_cast<size_t>(update.input_id) >= model.inputs.size()) {
             throw mate::CompilerError(std::format(
                 "Mate ABI: invalid input handle {}", update.input_id));
         }
-        const auto& metadata = inputs.at(static_cast<size_t>(update.input_id));
+        const auto& metadata = model.inputs.at(static_cast<size_t>(update.input_id));
         out.push_back(mate::RuntimeInputUpdate{
-            .input = metadata.id,
+            .input = metadata.runtime_id,
             .value = wordsToSimValue(metadata.type,
                                      metadata.leaf_name,
                                      update.words,
@@ -203,39 +244,244 @@ std::vector<mate::RuntimeInputUpdate> convertUpdates(const MateModel& model,
     return out;
 }
 
-MatePortInfo inputInfo(const MateModel& model, const mate::RuntimeInputLeafMetadata& input) {
-    MatePortInfo info{
-        .id = static_cast<int32_t>(input.id.value),
+MatePortInfo inputInfo(int32_t id, const AbiInput& input) {
+    return MatePortInfo{
+        .id = id,
         .width = input.type.width,
         .nwords = wordCount(input.type.width),
         .is_signed = input.type.isSigned() ? 1 : 0,
-        .kind = toAbiInputKind(input.kind),
-        .clock_id = -1,
-        .reset_id = -1,
+        .kind = input.kind,
+        .clock_id = input.clock_id,
+        .reset_id = input.reset_id,
     };
-    const auto& metadata = model.runtime_model.metadata();
-    if (input.clock_domain) {
-        for (const auto& clock : metadata.clocks) {
-            if (clock.domain_id == *input.clock_domain) {
-                info.clock_id = static_cast<int32_t>(clock.id.value);
+}
+
+GeneratedModelMetadata metadataFromRuntime(const mate::RtlRuntimeModel& model) {
+    GeneratedModelMetadata metadata;
+    const auto& runtime_metadata = model.metadata();
+    metadata.inputs.reserve(runtime_metadata.input_leaves.size());
+    for (const auto& input : runtime_metadata.input_leaves) {
+        int32_t clock_id = -1;
+        int32_t reset_id = -1;
+        if (input.clock_domain) {
+            for (const auto& clock : runtime_metadata.clocks) {
+                if (clock.domain_id == *input.clock_domain) {
+                    clock_id = static_cast<int32_t>(clock.id.value);
+                    break;
+                }
+            }
+        }
+        if (input.reset_domain) {
+            for (const auto& reset : runtime_metadata.resets) {
+                if (reset.domain_id == *input.reset_domain) {
+                    reset_id = static_cast<int32_t>(reset.id.value);
+                    break;
+                }
+            }
+        }
+        metadata.inputs.push_back(GeneratedInputMetadata{
+            .leaf_name = input.leaf_name,
+            .width = input.type.width,
+            .is_signed = input.type.isSigned(),
+            .kind = toAbiInputKind(input.kind),
+            .clock_id = clock_id,
+            .reset_id = reset_id,
+        });
+    }
+
+    metadata.outputs.reserve(runtime_metadata.output_leaves.size());
+    for (const auto& output : runtime_metadata.output_leaves) {
+        metadata.outputs.push_back(GeneratedOutputMetadata{
+            .leaf_name = output.leaf_name,
+            .width = output.type.width,
+            .is_signed = output.type.isSigned(),
+        });
+    }
+
+    metadata.clocks.reserve(runtime_metadata.clocks.size());
+    for (const auto& clock : runtime_metadata.clocks) {
+        const auto& source = runtime_metadata.input_leaves.at(clock.source_input.value);
+        metadata.clocks.push_back(GeneratedClockMetadata{
+            .display_name = clock.display_name,
+            .source_leaf_name = source.leaf_name,
+        });
+    }
+
+    metadata.resets.reserve(runtime_metadata.resets.size());
+    for (const auto& reset : runtime_metadata.resets) {
+        const auto& source = runtime_metadata.input_leaves.at(reset.source_input.value);
+        metadata.resets.push_back(GeneratedResetMetadata{
+            .display_name = reset.display_name,
+            .source_leaf_name = source.leaf_name,
+        });
+    }
+
+    return metadata;
+}
+
+void validateClockResetReference(const char* role,
+                                 std::string_view leaf_name,
+                                 int32_t id,
+                                 size_t count) {
+    if (id == -1) return;
+    if (id < 0 || static_cast<size_t>(id) >= count) {
+        throw mate::CompilerError(std::format(
+            "Mate ABI: generated {} '{}' references invalid domain id {}",
+            role, leaf_name, id));
+    }
+}
+
+std::vector<AbiClock> buildClocks(const mate::RtlRuntimeModel& runtime_model,
+                                  const GeneratedModelMetadata& generated_metadata) {
+    const auto& runtime_metadata = runtime_model.metadata();
+    std::vector<AbiClock> clocks;
+    clocks.reserve(generated_metadata.clocks.size());
+    for (const auto& generated : generated_metadata.clocks) {
+        const mate::RuntimeClockMetadata* runtime_clock = nullptr;
+        for (const auto& clock : runtime_metadata.clocks) {
+            const auto& source = runtime_metadata.input_leaves.at(clock.source_input.value);
+            if (clock.display_name == generated.display_name &&
+                source.leaf_name == generated.source_leaf_name) {
+                runtime_clock = &clock;
                 break;
             }
         }
+        if (!runtime_clock) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: generated clock '{}' sourced by '{}' does not match runtime metadata",
+                generated.display_name, generated.source_leaf_name));
+        }
+        clocks.push_back(AbiClock{
+            .display_name = std::string(generated.display_name),
+            .source_leaf_name = std::string(generated.source_leaf_name),
+            .domain_id = runtime_clock->domain_id,
+        });
     }
-    if (input.reset_domain) {
-        for (const auto& reset : metadata.resets) {
-            if (reset.domain_id == *input.reset_domain) {
-                info.reset_id = static_cast<int32_t>(reset.id.value);
+    return clocks;
+}
+
+std::vector<AbiReset> buildResets(const mate::RtlRuntimeModel& runtime_model,
+                                  const GeneratedModelMetadata& generated_metadata) {
+    const auto& runtime_metadata = runtime_model.metadata();
+    std::vector<AbiReset> resets;
+    resets.reserve(generated_metadata.resets.size());
+    for (const auto& generated : generated_metadata.resets) {
+        const mate::RuntimeResetMetadata* runtime_reset = nullptr;
+        for (const auto& reset : runtime_metadata.resets) {
+            const auto& source = runtime_metadata.input_leaves.at(reset.source_input.value);
+            if (reset.display_name == generated.display_name &&
+                source.leaf_name == generated.source_leaf_name) {
+                runtime_reset = &reset;
                 break;
             }
         }
+        if (!runtime_reset) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: generated reset '{}' sourced by '{}' does not match runtime metadata",
+                generated.display_name, generated.source_leaf_name));
+        }
+        resets.push_back(AbiReset{
+            .display_name = std::string(generated.display_name),
+            .source_leaf_name = std::string(generated.source_leaf_name),
+            .domain_id = runtime_reset->domain_id,
+        });
     }
-    return info;
+    return resets;
+}
+
+std::vector<AbiInput> buildInputs(const mate::RtlRuntimeModel& runtime_model,
+                                  const GeneratedModelMetadata& generated_metadata) {
+    std::vector<AbiInput> inputs;
+    inputs.reserve(generated_metadata.inputs.size());
+    for (const auto& generated : generated_metadata.inputs) {
+        validateClockResetReference("input", generated.leaf_name, generated.clock_id,
+                                    generated_metadata.clocks.size());
+        validateClockResetReference("input", generated.leaf_name, generated.reset_id,
+                                    generated_metadata.resets.size());
+        const auto* runtime_input = runtime_model.findInput(generated.leaf_name);
+        if (!runtime_input) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: generated input '{}' does not exist in runtime metadata",
+                generated.leaf_name));
+        }
+        if (runtime_input->type.width != generated.width ||
+            runtime_input->type.isSigned() != generated.is_signed ||
+            toAbiInputKind(runtime_input->kind) != generated.kind) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: generated input '{}' metadata does not match runtime metadata",
+                generated.leaf_name));
+        }
+        inputs.push_back(AbiInput{
+            .leaf_name = std::string(generated.leaf_name),
+            .runtime_id = runtime_input->id,
+            .type = runtime_input->type,
+            .kind = generated.kind,
+            .clock_id = generated.clock_id,
+            .reset_id = generated.reset_id,
+        });
+    }
+    return inputs;
+}
+
+std::vector<AbiOutput> buildOutputs(const mate::RtlRuntimeModel& runtime_model,
+                                    const GeneratedModelMetadata& generated_metadata) {
+    std::vector<AbiOutput> outputs;
+    outputs.reserve(generated_metadata.outputs.size());
+    for (const auto& generated : generated_metadata.outputs) {
+        const auto* runtime_output = runtime_model.findOutput(generated.leaf_name);
+        if (!runtime_output) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: generated output '{}' does not exist in runtime metadata",
+                generated.leaf_name));
+        }
+        if (runtime_output->type.width != generated.width ||
+            runtime_output->type.isSigned() != generated.is_signed) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: generated output '{}' metadata does not match runtime metadata",
+                generated.leaf_name));
+        }
+        outputs.push_back(AbiOutput{
+            .leaf_name = std::string(generated.leaf_name),
+            .runtime_id = runtime_output->id,
+            .type = runtime_output->type,
+        });
+    }
+    return outputs;
+}
+
+void populateGeneratedMetadata(MateModel& model,
+                               const GeneratedModelMetadata& generated_metadata) {
+    model.clocks = buildClocks(model.runtime_model, generated_metadata);
+    model.resets = buildResets(model.runtime_model, generated_metadata);
+    model.inputs = buildInputs(model.runtime_model, generated_metadata);
+    model.outputs = buildOutputs(model.runtime_model, generated_metadata);
 }
 
 } // namespace
 
 namespace mate::abi {
+
+MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
+                                      const GeneratedModelMetadata& generated_metadata,
+                                      const MateModel** out_model,
+                                      MateStatus* status) {
+    return guard(status, [&]() {
+        if (!out_model) throw CompilerError("Mate ABI: model output pointer is null");
+
+        SystemVerilogFrontend frontend;
+        FrontendOptions options;
+        options.source_files = config.source_files;
+        options.top_module = config.top_module;
+        options.domain_files = config.domain_files;
+        options.parameters = config.parameters;
+        options.top_domain_mode = config.top_domain_mode;
+
+        std::unique_ptr<MateModel> model(
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}});
+        populateGeneratedMetadata(*model, generated_metadata);
+        *out_model = model.release();
+    });
+}
 
 MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
                                       const MateModel** out_model,
@@ -251,7 +497,11 @@ MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
         options.parameters = config.parameters;
         options.top_domain_mode = config.top_domain_mode;
 
-        *out_model = new MateModel{compileRtlRuntimeModel(frontend, options)};
+        std::unique_ptr<MateModel> model(
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}});
+        const GeneratedModelMetadata generated_metadata = metadataFromRuntime(model->runtime_model);
+        populateGeneratedMetadata(*model, generated_metadata);
+        *out_model = model.release();
     });
 }
 
@@ -308,9 +558,12 @@ MateStatusCode mate_instance_init(MateInstance* instance,
 
 int32_t mate_input_id(const MateModel* model, const char* leaf_name) {
     try {
-        const auto* input = checkedModel(model).runtime_model.findInput(
-            leaf_name ? std::string_view(leaf_name) : std::string_view());
-        return input ? static_cast<int32_t>(input->id.value) : -1;
+        if (!leaf_name) return -1;
+        const auto& inputs = checkedModel(model).inputs;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            if (inputs[i].leaf_name == leaf_name) return static_cast<int32_t>(i);
+        }
+        return -1;
     } catch (...) {
         return -1;
     }
@@ -318,9 +571,12 @@ int32_t mate_input_id(const MateModel* model, const char* leaf_name) {
 
 int32_t mate_output_id(const MateModel* model, const char* leaf_name) {
     try {
-        const auto* output = checkedModel(model).runtime_model.findOutput(
-            leaf_name ? std::string_view(leaf_name) : std::string_view());
-        return output ? static_cast<int32_t>(output->id.value) : -1;
+        if (!leaf_name) return -1;
+        const auto& outputs = checkedModel(model).outputs;
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            if (outputs[i].leaf_name == leaf_name) return static_cast<int32_t>(i);
+        }
+        return -1;
     } catch (...) {
         return -1;
     }
@@ -329,17 +585,13 @@ int32_t mate_output_id(const MateModel* model, const char* leaf_name) {
 int32_t mate_clock_id(const MateModel* model, const char* display_or_leaf_name) {
     try {
         if (!display_or_leaf_name) return -1;
-        const MateModel& checked = checkedModel(model);
-        const auto& metadata = checked.runtime_model.metadata();
-        for (const auto& clock : metadata.clocks) {
+        const auto& clocks = checkedModel(model).clocks;
+        for (size_t i = 0; i < clocks.size(); ++i) {
+            const auto& clock = clocks[i];
             if (clock.display_name == display_or_leaf_name) {
-                return static_cast<int32_t>(clock.id.value);
+                return static_cast<int32_t>(i);
             }
-            const auto& source = metadata.input_leaves.at(clock.source_input.value);
-            if (source.leaf_name == display_or_leaf_name ||
-                source.port_name == display_or_leaf_name) {
-                return static_cast<int32_t>(clock.id.value);
-            }
+            if (clock.source_leaf_name == display_or_leaf_name) return static_cast<int32_t>(i);
         }
         return -1;
     } catch (...) {
@@ -350,17 +602,13 @@ int32_t mate_clock_id(const MateModel* model, const char* display_or_leaf_name) 
 int32_t mate_reset_id(const MateModel* model, const char* display_or_leaf_name) {
     try {
         if (!display_or_leaf_name) return -1;
-        const MateModel& checked = checkedModel(model);
-        const auto& metadata = checked.runtime_model.metadata();
-        for (const auto& reset : metadata.resets) {
+        const auto& resets = checkedModel(model).resets;
+        for (size_t i = 0; i < resets.size(); ++i) {
+            const auto& reset = resets[i];
             if (reset.display_name == display_or_leaf_name) {
-                return static_cast<int32_t>(reset.id.value);
+                return static_cast<int32_t>(i);
             }
-            const auto& source = metadata.input_leaves.at(reset.source_input.value);
-            if (source.leaf_name == display_or_leaf_name ||
-                source.port_name == display_or_leaf_name) {
-                return static_cast<int32_t>(reset.id.value);
-            }
+            if (reset.source_leaf_name == display_or_leaf_name) return static_cast<int32_t>(i);
         }
         return -1;
     } catch (...) {
@@ -375,11 +623,10 @@ MateStatusCode mate_input_info(const MateModel* model,
     return guard(status, [&]() {
         const MateModel& checked = checkedModel(model);
         if (!out_info) throw mate::CompilerError("Mate ABI: input info output pointer is null");
-        const auto& inputs = checked.runtime_model.metadata().input_leaves;
-        if (input_id < 0 || static_cast<size_t>(input_id) >= inputs.size()) {
+        if (input_id < 0 || static_cast<size_t>(input_id) >= checked.inputs.size()) {
             throw mate::CompilerError(std::format("Mate ABI: invalid input handle {}", input_id));
         }
-        *out_info = inputInfo(checked, inputs.at(static_cast<size_t>(input_id)));
+        *out_info = inputInfo(input_id, checked.inputs.at(static_cast<size_t>(input_id)));
     });
 }
 
@@ -390,13 +637,12 @@ MateStatusCode mate_output_info(const MateModel* model,
     return guard(status, [&]() {
         const MateModel& checked = checkedModel(model);
         if (!out_info) throw mate::CompilerError("Mate ABI: output info output pointer is null");
-        const auto& outputs = checked.runtime_model.metadata().output_leaves;
-        if (output_id < 0 || static_cast<size_t>(output_id) >= outputs.size()) {
+        if (output_id < 0 || static_cast<size_t>(output_id) >= checked.outputs.size()) {
             throw mate::CompilerError(std::format("Mate ABI: invalid output handle {}", output_id));
         }
-        const auto& output = outputs.at(static_cast<size_t>(output_id));
+        const auto& output = checked.outputs.at(static_cast<size_t>(output_id));
         *out_info = MatePortInfo{
-            .id = static_cast<int32_t>(output.id.value),
+            .id = output_id,
             .width = output.type.width,
             .nwords = wordCount(output.type.width),
             .is_signed = output.type.isSigned() ? 1 : 0,
@@ -414,13 +660,12 @@ MateStatusCode mate_set_input(MateInstance* instance,
                               MateStatus* status) {
     return guard(status, [&]() {
         MateInstance& checked = checkedInstance(instance);
-        const auto& inputs = checked.model->runtime_model.metadata().input_leaves;
-        if (input_id < 0 || static_cast<size_t>(input_id) >= inputs.size()) {
+        if (input_id < 0 || static_cast<size_t>(input_id) >= checked.model->inputs.size()) {
             throw mate::CompilerError(std::format("Mate ABI: invalid input handle {}", input_id));
         }
-        const auto& input = inputs.at(static_cast<size_t>(input_id));
+        const auto& input = checked.model->inputs.at(static_cast<size_t>(input_id));
         mate::RuntimeInputUpdate update{
-            .input = input.id,
+            .input = input.runtime_id,
             .value = wordsToSimValue(input.type, input.leaf_name, words, nwords),
         };
         checked.runtime->setInputValues(std::span<const mate::RuntimeInputUpdate>(&update, 1));
@@ -435,12 +680,11 @@ MateStatusCode mate_apply_clock(MateInstance* instance,
                                 MateStatus* status) {
     return guard(status, [&]() {
         MateInstance& checked = checkedInstance(instance);
-        const auto& clocks = checked.model->runtime_model.metadata().clocks;
-        if (clock_id < 0 || static_cast<size_t>(clock_id) >= clocks.size()) {
+        if (clock_id < 0 || static_cast<size_t>(clock_id) >= checked.model->clocks.size()) {
             throw mate::CompilerError(std::format("Mate ABI: invalid clock handle {}", clock_id));
         }
         checked.runtime->applyClockEdge(
-            clocks.at(static_cast<size_t>(clock_id)).domain_id,
+            checked.model->clocks.at(static_cast<size_t>(clock_id)).domain_id,
             toRuntimeEdge(edge),
             convertUpdates(*checked.model, updates_before_edge, update_count));
     });
@@ -452,12 +696,11 @@ MateStatusCode mate_apply_reset(MateInstance* instance,
                                 MateStatus* status) {
     return guard(status, [&]() {
         MateInstance& checked = checkedInstance(instance);
-        const auto& resets = checked.model->runtime_model.metadata().resets;
-        if (reset_id < 0 || static_cast<size_t>(reset_id) >= resets.size()) {
+        if (reset_id < 0 || static_cast<size_t>(reset_id) >= checked.model->resets.size()) {
             throw mate::CompilerError(std::format("Mate ABI: invalid reset handle {}", reset_id));
         }
         checked.runtime->applyResetEdge(
-            resets.at(static_cast<size_t>(reset_id)).domain_id,
+            checked.model->resets.at(static_cast<size_t>(reset_id)).domain_id,
             toRuntimeEdge(edge));
     });
 }
@@ -469,13 +712,12 @@ MateStatusCode mate_get_output(const MateInstance* instance,
                                MateStatus* status) {
     return guard(status, [&]() {
         const MateInstance& checked = checkedInstance(instance);
-        const auto& outputs = checked.model->runtime_model.metadata().output_leaves;
-        if (output_id < 0 || static_cast<size_t>(output_id) >= outputs.size()) {
+        if (output_id < 0 || static_cast<size_t>(output_id) >= checked.model->outputs.size()) {
             throw mate::CompilerError(std::format("Mate ABI: invalid output handle {}", output_id));
         }
-        const auto& output = outputs.at(static_cast<size_t>(output_id));
+        const auto& output = checked.model->outputs.at(static_cast<size_t>(output_id));
         simValueToWords(output.leaf_name,
-                        checked.runtime->getOutput(output.id),
+                        checked.runtime->getOutput(output.runtime_id),
                         words,
                         nwords);
     });

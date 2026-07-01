@@ -16,6 +16,8 @@ RTL_PKGS     = $(shell find -L $(RTL_DIR) -path $(RTL_GEN_DIR) -prune -o -type f
 RTL_SRCS     = $(RTL_PKGS) $(shell find -L $(RTL_DIR) -path $(RTL_GEN_DIR) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print | grep -v "_pkg.sv")
 DPI_DIR      = $(TB_DIR)/dpi
 TB_SRCS      = $(shell find -L $(TB_DIR) \( -path $(GEN_DIR) -o -path $(DPI_DIR) \) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print)
+# Wall-clock time DPI helper, used by tb_common for simulation-speed reporting.
+DPI_TIME_C   = $(TB_DIR)/common/dpi_time.c
 GEN_SRCS     = $(shell find -L $(GEN_DIR) -type f \( -name "*.v" -o -name "*.sv" \) 2>/dev/null)
 DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 TOP_MODULE   = tb
@@ -90,6 +92,7 @@ $(OUT): $(GEN_DIR)/tb.sv $(GEN_CPP) $(MATE_LIBS) | prep
 		-CFLAGS '$(MATE_CPPFLAGS)' \
 		-LDFLAGS '$(MATE_LIBS)' \
 		$(SRCS) \
+		$(DPI_TIME_C) \
 		$(GEN_CPP)
 
 clean:
@@ -109,16 +112,19 @@ $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/chec
 $(OUT): $(SRCS) $(GEN_DIR)/tb.sv
 	rm -rf obj_dir
 	verilator --trace --binary --x-initial unique --main-top-name TOP \
-		$(VERILATOR_WARNS) --top $(TOP_MODULE) -I$(RTL_DIR) $(SRCS)
+		$(VERILATOR_WARNS) --top $(TOP_MODULE) -I$(RTL_DIR) $(SRCS) $(DPI_TIME_C)
 
 clean:
 	rm -rf obj_dir $(WAVES)
 
 endif
 
+# Extra +plusargs for the sim run, e.g. PLUSARGS=+PROGRESS_STEP_NS=500
+PLUSARGS ?=
+
 $(WAVES): $(OUT) force
 	mkdir -p $(CUSTOM_SIM_DIR)/stimuli
-	./obj_dir/V$(TOP_MODULE) +WAVES=$(WAVES) $(SEED_ARG)
+	./obj_dir/V$(TOP_MODULE) +WAVES=$(WAVES) $(SEED_ARG) $(PLUSARGS)
 
 simulate:
 	$(MAKE) $(WAVES)

@@ -68,7 +68,7 @@ prep: force
 $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv: $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi $(MODULE_NAME)
 
-$(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) | prep
+$(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate-dpi-codegen | prep
 	mkdir -p $(DPI_GEN_DIR)
 	$(BUILD_DIR)/mate-dpi-codegen \
 		--top $(MODULE_NAME) \

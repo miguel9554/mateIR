@@ -115,11 +115,17 @@ def select_cases_for_mode(cases, run_mode):
     ]
 
 
-def run_clean(name):
-    """Run make clean for a test case. Returns nothing."""
-    work_dir = TESTS_DIR / name / "work" / "validate"
+def run_clean(name, run_mode):
+    """Run make clean for a test case in the work dir used by run_mode."""
+    if run_mode == RUN_MODE_VERILATOR_DPI:
+        work_dir = TESTS_DIR / name / "work" / "verilator"
+        # DPI=1 selects the clean recipe that also removes the generated DPI dir.
+        clean_cmd = ["make", "clean", "DPI=1"]
+    else:
+        work_dir = TESTS_DIR / name / "work" / "validate"
+        clean_cmd = ["make", "clean"]
     subprocess.run(
-        ["make", "clean"],
+        clean_cmd,
         cwd=work_dir,
         capture_output=True,
         text=True,
@@ -137,7 +143,20 @@ def run_validate(name, build_target, run_mode):
             text=True,
         )
         output = result.stdout + result.stderr
-        return result.returncode == 0, output
+        # The Verilator DPI harness reports a value mismatch via $fatal(1) in a
+        # `final` block, which does NOT set a non-zero process exit code, so the
+        # `make` return code only reflects build/elaboration failures. Judge the
+        # actual DPI-vs-RTL comparison by the checker's sentinel line instead.
+        if result.returncode != 0:
+            return False, output
+        if "DPI and RTL mismatched" in output:
+            return False, output
+        if "PASS: 100% match" not in output:
+            return False, output + (
+                "\n[regression] DPI checker PASS sentinel not found; "
+                "treating as failure.\n"
+            )
+        return True, output
 
     static_work_dir = TESTS_DIR / name / "work" / "static"
     regression_script = static_work_dir / "regression.sh"
@@ -248,9 +267,9 @@ def run_case(case, build_target, simulator, run_mode):
     """Run a single test case. Returns (name, ok, output)."""
     name = case["name"]
     if case["kind"] == "validate":
-        # run_clean(name)
         if run_mode not in {RUN_MODE_VALIDATE, RUN_MODE_VERILATOR_DPI}:
             raise RuntimeError(f"unknown run mode '{run_mode}'")
+        run_clean(name, run_mode)
         ok, output = run_validate(name, build_target, run_mode)
     else:
         ok, output = run_expected_failure(name, case["expected_error"], simulator)

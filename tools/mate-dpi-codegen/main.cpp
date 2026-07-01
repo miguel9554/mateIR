@@ -1361,7 +1361,18 @@ int generatedResetIdForDomain(const RtlRuntimeModel& model, ResetId domain) {
     return -1;
 }
 
-std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
+struct NativeCombinationalCode {
+    std::string cpp_text;
+    size_t temporaries_count = 0;
+};
+
+// Splitting the topo order into fixed-size chunks keeps each generated
+// function's statement count bounded. A single flat function over a large
+// design's full node count (hundreds of thousands of statements/locals) makes
+// C++ compiler register allocation and instruction scheduling blow up.
+constexpr size_t kCombinationalChunkSize = 50;
+
+NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
     if (!model.top().dfg) {
         throw CompilerError("mate-dpi-codegen: top module has no DFG");
     }
@@ -1377,10 +1388,6 @@ std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
                 node ? node->str() : "<null>"));
         }
         return *node->type;
-    };
-
-    auto nodeVar = [](size_t topo_index) {
-        return std::format("v_{}", topo_index);
     };
 
     auto nodeValue = [&](const DFGNode* node) -> std::string {
@@ -1436,15 +1443,30 @@ std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
     out << "bool useSignedCompare(bool lhs_signed, bool rhs_signed) {\n";
     out << "    return lhs_signed && rhs_signed;\n";
     out << "}\n\n";
-    out << "void evaluateCombinational(std::span<const mate::SimValue> inputs,\n";
-    out << "                           std::span<mate::SimValue> outputs,\n";
-    out << "                           std::span<mate::SimValue> storage) {\n";
 
-    for (size_t topo_index = 0; topo_index < order.size(); ++topo_index) {
+    constexpr std::string_view kChunkParams =
+        "std::span<const mate::SimValue> inputs,\n"
+        "                           std::span<mate::SimValue> outputs,\n"
+        "                           std::span<mate::SimValue> storage,\n"
+        "                           std::span<mate::SimValue> temporaries";
+
+    const size_t chunk_count =
+        order.empty() ? 0 : (order.size() + kCombinationalChunkSize - 1) / kCombinationalChunkSize;
+    auto chunkFnName = [](size_t chunk_index) {
+        return std::format("evaluateCombinationalChunk{}", chunk_index);
+    };
+
+    for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
+        const size_t begin = chunk_index * kCombinationalChunkSize;
+        const size_t end = std::min(begin + kCombinationalChunkSize, order.size());
+
+        out << "void " << chunkFnName(chunk_index) << "(" << kChunkParams << ") {\n";
+
+    for (size_t topo_index = begin; topo_index < end; ++topo_index) {
         const DFGNode* node = order[topo_index];
         const DFGOp kind = node->kind();
         const auto& type = checkedType(node);
-        const std::string var = nodeVar(topo_index);
+        const std::string var = std::format("temporaries[{}]", topo_index);
 
         if (kind == DFGOp::INPUT) {
             if (const auto* input = model.metadata().findInput(node->name)) {
@@ -1654,7 +1676,7 @@ std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
                 throw CompilerError("mate-dpi-codegen: source node reached expression switch");
         }
 
-        out << "    mate::SimValue " << var << " = " << maskExpr(expr, node) << ";\n";
+        out << "    " << var << " = " << maskExpr(expr, node) << ";\n";
         value_expr[node] = var;
 
         if (auto storage_index = storageIndexForObservable(
@@ -1667,13 +1689,21 @@ std::string makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
         }
     }
 
+        out << "}\n\n";
+    }
+
+    out << "void evaluateCombinational(" << kChunkParams << ") {\n";
+    for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
+        out << "    " << chunkFnName(chunk_index)
+            << "(inputs, outputs, storage, temporaries);\n";
+    }
     for (const auto& output : model.metadata().output_leaves) {
         out << "    outputs[" << output.id.value << "] = "
             << maskExpr(nodeValue(output.node), output.node) << ";\n";
     }
     out << "}\n\n";
     out << "} // namespace\n\n";
-    return out.str();
+    return NativeCombinationalCode{out.str(), order.size()};
 }
 
 std::string makeInterpreterModelCpp(const Config& config,
@@ -1683,7 +1713,8 @@ std::string makeInterpreterModelCpp(const Config& config,
     out << "#include \"abi/abi_interpreter.h\"\n\n";
     out << "#include <stdexcept>\n";
     out << "#include <vector>\n\n";
-    out << makeNativeCombinationalCpp(model);
+    const NativeCombinationalCode native_code = makeNativeCombinationalCpp(model);
+    out << native_code.cpp_text;
     out << "extern \"C\" MateStatusCode mate_model_create(const MateModel** out_model, MateStatus* status) {\n";
     out << "    mate::abi::InterpreterModelConfig config;\n";
     out << "    config.top_module = " << cppString(config.top_module) << ";\n";
@@ -1766,6 +1797,7 @@ std::string makeInterpreterModelCpp(const Config& config,
     }
     out << "    };\n";
     out << "    metadata.evaluate_combinational = &evaluateCombinational;\n";
+    out << "    metadata.temporaries_count = " << native_code.temporaries_count << ";\n";
     out << "\n";
     out << "    return mate::abi::createInterpreterModel(config, metadata, out_model, status);\n";
     out << "}\n";

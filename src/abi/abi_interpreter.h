@@ -63,7 +63,8 @@ struct GeneratedStorageMetadata {
 using GeneratedCombinationalEvaluateFn = void (*)(
     std::span<const mate::SimValue> inputs,
     std::span<mate::SimValue> outputs,
-    std::span<mate::SimValue> storage);
+    std::span<mate::SimValue> storage,
+    std::span<mate::SimValue> temporaries);
 
 struct GeneratedModelMetadata {
     std::vector<GeneratedInputMetadata> inputs;
@@ -72,6 +73,10 @@ struct GeneratedModelMetadata {
     std::vector<GeneratedResetMetadata> resets;
     std::vector<GeneratedStorageMetadata> storage;
     GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
+    // Scratch slots for intermediate DFG node values, private to the generated
+    // combinational evaluator. Not part of runtime-observable metadata: these
+    // values have no interpreter-side counterpart to validate against.
+    size_t temporaries_count = 0;
 };
 
 MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,

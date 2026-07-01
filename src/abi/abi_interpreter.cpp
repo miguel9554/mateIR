@@ -81,6 +81,7 @@ struct MateModel {
     std::vector<AbiStorageSlot> output_storage;
     std::vector<AbiStorageSlot> observable_storage;
     mate::abi::GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
+    size_t temporaries_count = 0;
 };
 
 struct MateInstance {
@@ -92,6 +93,7 @@ struct MateInstance {
     std::vector<mate::SimValue> native_inputs;
     std::vector<mate::SimValue> native_outputs;
     std::vector<mate::SimValue> native_storage;
+    std::vector<mate::SimValue> native_temporaries;
 };
 
 namespace {
@@ -356,7 +358,8 @@ void refreshNativeStorage(MateInstance& instance) {
         refreshObservableStorage(instance);
         instance.model->evaluate_combinational(instance.native_inputs,
                                                instance.native_outputs,
-                                               instance.native_storage);
+                                               instance.native_storage,
+                                               instance.native_temporaries);
         copyNativeOutputsToWordStorage(instance);
         copyNativeObservablesToWordStorage(instance);
         return;
@@ -750,6 +753,7 @@ void populateGeneratedMetadata(MateModel& model,
     model.output_storage = buildOutputStorage(generated_metadata);
     model.observable_storage = buildObservableStorage(model.runtime_model, generated_metadata);
     model.evaluate_combinational = generated_metadata.evaluate_combinational;
+    model.temporaries_count = generated_metadata.temporaries_count;
 }
 
 } // namespace
@@ -772,7 +776,7 @@ MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
         options.top_domain_mode = config.top_domain_mode;
 
         std::unique_ptr<MateModel> model(
-            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}, nullptr});
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}, nullptr, 0});
         populateGeneratedMetadata(*model, generated_metadata);
         *out_model = model.release();
     });
@@ -793,7 +797,7 @@ MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
         options.top_domain_mode = config.top_domain_mode;
 
         std::unique_ptr<MateModel> model(
-            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}, nullptr});
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}, nullptr, 0});
         const GeneratedModelMetadata generated_metadata = metadataFromRuntime(model->runtime_model);
         populateGeneratedMetadata(*model, generated_metadata);
         *out_model = model.release();
@@ -829,6 +833,7 @@ MateStatusCode mate_instance_create(const MateModel* model,
         instance->native_inputs = allocateSimStorage(checked_model.input_storage);
         instance->native_outputs = allocateSimStorage(checked_model.output_storage);
         instance->native_storage = allocateSimStorage(checked_model.observable_storage);
+        instance->native_temporaries.resize(checked_model.temporaries_count);
         *out_instance = instance.release();
     });
 }

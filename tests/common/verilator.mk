@@ -45,7 +45,7 @@ MATE_LIBS = \
 	$(abspath $(BUILD_DIR)/libmate-systemverilog-frontend.a) \
 	$(abspath $(BUILD_DIR)/libmate-rtl-runtime.a) \
 	$(abspath $(BUILD_DIR)/libmate-mateir.a) \
-	$(abspath $(PROJECT_ROOT)/build/external/yaml-cpp/libyaml-cpp.a) \
+	$(abspath $(BUILD_DIR)/external/yaml-cpp/libyaml-cpp.a) \
 	/opt/slang/lib/libsvlang.a \
 	/usr/local/lib/libfmt.a
 

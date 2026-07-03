@@ -1,6 +1,4 @@
-.PHONY: all build dev debug sanitized release ensure-debug-slang test regression gdb clean noop
-
-REGRESSION_BUILD_TARGET ?= dev
+.PHONY: all build dev debug sanitized release ensure-debug-slang gdb clean noop
 
 all: dev
 
@@ -27,11 +25,6 @@ sanitized:
 release:
 	cmake --preset release
 	cmake --build --preset release --parallel
-
-test: regression
-
-regression:
-	python tests/regression.py --build $(REGRESSION_BUILD_TARGET)
 
 gdb: debug
 	gdb --args ./build/debug/mate $(source)

@@ -58,7 +58,6 @@ Build:
 - `make dev`
 - `make sanitized`
 - `make debug`
-- `make regression`
 
 Per-test:
 - `make -C tests/<name>/work/validate validate`
@@ -66,9 +65,26 @@ Per-test:
 - `make -C tests/<name>/work/custom-sim simulate`
 
 Regression uses:
-- `tests/regression.py`
+- `python tests/regression.py`
 - `tests/check_dfg_api_surface.py`
 - `tests/check_module_node_api_surface.py`
+
+Regression has two mutually exclusive `--mode` values for PASS tests
+(`--mode` default is `validate`):
+- `validate` (default): runs `make validate` in `tests/<name>/work/validate`,
+  the custom vector-based simulator compared against a VCD reference. Judged
+  by the `make` process exit code.
+- `verilator-dpi`: runs `make simulate DPI=1` in `tests/<name>/work/verilator`,
+  which builds the generated native DPI model and compares it against
+  Verilator/RTL. Only applies to tests that have a `work/verilator` dir;
+  others are skipped in this mode. The DPI checker's mismatch signal is a
+  `$fatal(1)` inside a `final` block, which does not set a non-zero process
+  exit code, so pass/fail is judged by scanning stdout/stderr for the
+  `PASS: 100% match` sentinel (or a `DPI and RTL mismatched` line), not the
+  `make` return code.
+
+`make regression` was removed; run `python tests/regression.py` directly
+(add `--mode verilator-dpi` for the DPI path).
 
 ## Important files
 

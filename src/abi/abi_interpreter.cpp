@@ -84,10 +84,6 @@ struct MateModel {
     std::vector<AbiStorageSlot> input_storage;
     std::vector<AbiStorageSlot> output_storage;
     std::vector<AbiStorageSlot> observable_storage;
-    mate::abi::GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
-    size_t temporaries_count = 0;
-    std::vector<mate::abi::GeneratedResetApplyFn> reset_apply;
-    std::vector<mate::abi::GeneratedClockCommitFn> clock_commit;
 };
 
 struct MateInstance {
@@ -96,10 +92,6 @@ struct MateInstance {
     std::vector<std::vector<uint64_t>> input_words;
     std::vector<std::vector<uint64_t>> output_words;
     std::vector<std::vector<uint64_t>> observable_words;
-    std::vector<mate::SimValue> native_inputs;
-    std::vector<mate::SimValue> native_outputs;
-    std::vector<mate::SimValue> native_storage;
-    std::vector<mate::SimValue> native_temporaries;
 };
 
 namespace {
@@ -172,10 +164,6 @@ MateEdge toAbiEdge(mate::edge_t edge) {
         case mate::NEGEDGE: return MATE_EDGE_NEGEDGE;
     }
     throw mate::CompilerError(std::format("Mate ABI: invalid runtime edge {}", static_cast<int>(edge)));
-}
-
-mate::SimValue sourceValueForEdge(const mate::Type& type, MateEdge edge) {
-    return mate::SimValue::fromU64(edge == MATE_EDGE_POSEDGE ? 1 : 0, type.width, type.isSigned());
 }
 
 mate::FlopsInitial toRuntimeFlopsInitial(MateFlopsInitial initial) {
@@ -324,38 +312,11 @@ std::vector<std::vector<uint64_t>> allocateStorage(const std::vector<AbiStorageS
     return storage;
 }
 
-std::vector<mate::SimValue> allocateSimStorage(const std::vector<AbiStorageSlot>& slots) {
-    std::vector<mate::SimValue> storage;
-    storage.reserve(slots.size());
-    for (const auto& slot : slots) {
-        storage.push_back(mate::SimValue::zero(slot.type.width, slot.type.isSigned()));
-    }
-    return storage;
-}
-
-void copyNativeOutputsToWordStorage(MateInstance& instance) {
-    for (const auto& output : instance.model->outputs) {
-        simValueToStorage(output.leaf_name,
-                          instance.native_outputs.at(output.storage_index),
-                          instance.output_words.at(output.storage_index));
-    }
-}
-
-void copyNativeObservablesToWordStorage(MateInstance& instance) {
-    for (size_t i = 0; i < instance.model->observable_storage.size(); ++i) {
-        const auto& slot = instance.model->observable_storage.at(i);
-        simValueToStorage(slot.full_path,
-                          instance.native_storage.at(i),
-                          instance.observable_words.at(i));
-    }
-}
-
 void refreshOutputStorage(MateInstance& instance) {
     for (const auto& output : instance.model->outputs) {
-        instance.native_outputs.at(output.storage_index) =
-            instance.runtime->getOutput(output.runtime_id);
+        const mate::SimValue value = instance.runtime->getOutput(output.runtime_id);
         auto& storage = instance.output_words.at(output.storage_index);
-        simValueToStorage(output.leaf_name, instance.native_outputs.at(output.storage_index), storage);
+        simValueToStorage(output.leaf_name, value, storage);
     }
 }
 
@@ -366,106 +327,18 @@ void refreshObservableStorage(MateInstance& instance) {
             throw mate::CompilerError(std::format(
                 "Mate ABI: native storage '{}' has no runtime observable", slot.full_path));
         }
-        instance.native_storage.at(i) = instance.runtime->getObservable(*slot.observable_id);
-        simValueToStorage(slot.full_path, instance.native_storage.at(i), instance.observable_words.at(i));
+        const mate::SimValue value = instance.runtime->getObservable(*slot.observable_id);
+        simValueToStorage(slot.full_path, value, instance.observable_words.at(i));
     }
 }
 
 void refreshNativeStorage(MateInstance& instance) {
-    if (instance.model->evaluate_combinational) {
-        refreshObservableStorage(instance);
-        instance.model->evaluate_combinational(instance.native_inputs,
-                                               instance.native_outputs,
-                                               instance.native_storage,
-                                               instance.native_temporaries);
-        copyNativeOutputsToWordStorage(instance);
-        copyNativeObservablesToWordStorage(instance);
-        return;
-    }
     refreshOutputStorage(instance);
     refreshObservableStorage(instance);
 }
 
 void refreshRuntimeBackedNativeState(MateInstance& instance) {
     refreshNativeStorage(instance);
-}
-
-// Fully native clock-edge application: drives the clock source signal, applies
-// sync-input updates on the active edge, re-evaluates combinational logic so
-// the flop commit sees fresh D values, commits FlopD -> FlopQ for this clock
-// domain, then re-evaluates once more so outputs reflect the new FlopQ state.
-// Mirrors MateIRRuntime::applyClockEdge (src/sim/runtime.cpp) without going
-// through the interpreter's per-cycle scheduling maps.
-void applyNativeClockEdge(MateInstance& instance,
-                          size_t clock_id,
-                          const AbiClock& clock,
-                          MateEdge edge,
-                          const MateInputUpdate* updates_before_edge,
-                          int32_t update_count) {
-    const bool active_edge = (edge == clock.active_edge);
-    if (!active_edge && update_count > 0) {
-        throw mate::CompilerError(std::format(
-            "Mate ABI: inactive edge on clock domain '{}' cannot sample inputs",
-            clock.display_name));
-    }
-
-    instance.native_inputs.at(clock.source_storage_index) =
-        sourceValueForEdge(instance.model->inputs.at(clock.source_storage_index).type, edge);
-
-    if (update_count < 0) {
-        throw mate::CompilerError(std::format("Mate ABI: negative update count {}", update_count));
-    }
-    if (update_count > 0 && !updates_before_edge) {
-        throw mate::CompilerError("Mate ABI: update pointer is null");
-    }
-    for (int32_t i = 0; i < update_count; ++i) {
-        const MateInputUpdate& update = updates_before_edge[i];
-        if (update.input_id < 0 ||
-            static_cast<size_t>(update.input_id) >= instance.model->inputs.size()) {
-            throw mate::CompilerError(std::format(
-                "Mate ABI: invalid input handle {}", update.input_id));
-        }
-        const AbiInput& input = instance.model->inputs.at(static_cast<size_t>(update.input_id));
-        if (input.storage_index == clock.source_storage_index) continue;
-        if (input.kind == MATE_INPUT_SYNC && input.clock_id != static_cast<int32_t>(clock_id)) {
-            throw mate::CompilerError(std::format(
-                "Mate ABI: sync input '{}' does not belong to active clock domain {}",
-                input.leaf_name, clock_id));
-        }
-        const mate::SimValue value =
-            wordsToSimValue(input.type, input.leaf_name, update.words, update.nwords);
-        instance.native_inputs.at(input.storage_index) = value;
-        copyWordsToStorage("input", input.leaf_name, input.type, update.words, update.nwords,
-                           instance.input_words.at(input.storage_index));
-    }
-
-    if (active_edge) {
-        instance.model->evaluate_combinational(instance.native_inputs, instance.native_outputs,
-                                               instance.native_storage, instance.native_temporaries);
-        instance.model->clock_commit.at(clock_id)(instance.native_inputs, instance.native_storage);
-    }
-    instance.model->evaluate_combinational(instance.native_inputs, instance.native_outputs,
-                                           instance.native_storage, instance.native_temporaries);
-    copyNativeOutputsToWordStorage(instance);
-    copyNativeObservablesToWordStorage(instance);
-}
-
-// Fully native reset-edge application: drives the reset source signal and, on
-// the active edge, applies reset values to this domain's FlopQ storage.
-// Mirrors MateIRRuntime::applyResetEdge (src/sim/runtime.cpp).
-void applyNativeResetEdge(MateInstance& instance,
-                          size_t reset_id,
-                          const AbiReset& reset,
-                          MateEdge edge) {
-    instance.native_inputs.at(reset.source_storage_index) =
-        sourceValueForEdge(instance.model->inputs.at(reset.source_storage_index).type, edge);
-    if (edge == reset.active_edge) {
-        instance.model->reset_apply.at(reset_id)(instance.native_storage);
-    }
-    instance.model->evaluate_combinational(instance.native_inputs, instance.native_outputs,
-                                           instance.native_storage, instance.native_temporaries);
-    copyNativeOutputsToWordStorage(instance);
-    copyNativeObservablesToWordStorage(instance);
 }
 
 std::vector<mate::RuntimeInputUpdate> convertUpdates(const MateModel& model,
@@ -508,7 +381,6 @@ std::vector<mate::RuntimeInputUpdate> convertAndStoreUpdates(MateInstance& insta
         const MateInputUpdate& update = updates[i];
         const auto& input =
             instance.model->inputs.at(static_cast<size_t>(update.input_id));
-        instance.native_inputs.at(input.storage_index) = out.at(static_cast<size_t>(i)).value;
         copyWordsToStorage("input",
                            input.leaf_name,
                            input.type,
@@ -876,28 +748,6 @@ void populateGeneratedMetadata(MateModel& model,
     model.input_storage = buildInputStorage(generated_metadata);
     model.output_storage = buildOutputStorage(generated_metadata);
     model.observable_storage = buildObservableStorage(model.runtime_model, generated_metadata);
-    model.evaluate_combinational = generated_metadata.evaluate_combinational;
-    model.temporaries_count = generated_metadata.temporaries_count;
-    model.reset_apply = generated_metadata.reset_apply;
-    model.clock_commit = generated_metadata.clock_commit;
-    if (model.evaluate_combinational) {
-        if (model.reset_apply.size() != model.resets.size()) {
-            throw mate::CompilerError(std::format(
-                "Mate ABI: generated model has {} reset-apply functions but {} reset domains",
-                model.reset_apply.size(), model.resets.size()));
-        }
-        if (model.clock_commit.size() != model.clocks.size()) {
-            throw mate::CompilerError(std::format(
-                "Mate ABI: generated model has {} clock-commit functions but {} clock domains",
-                model.clock_commit.size(), model.clocks.size()));
-        }
-        for (const auto& fn : model.reset_apply) {
-            if (!fn) throw mate::CompilerError("Mate ABI: generated model has a null reset-apply function");
-        }
-        for (const auto& fn : model.clock_commit) {
-            if (!fn) throw mate::CompilerError("Mate ABI: generated model has a null clock-commit function");
-        }
-    }
 }
 
 } // namespace
@@ -920,7 +770,7 @@ MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
         options.top_domain_mode = config.top_domain_mode;
 
         std::unique_ptr<MateModel> model(
-            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}, nullptr, 0, {}, {}});
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}});
         populateGeneratedMetadata(*model, generated_metadata);
         *out_model = model.release();
     });
@@ -941,7 +791,7 @@ MateStatusCode createInterpreterModel(const InterpreterModelConfig& config,
         options.top_domain_mode = config.top_domain_mode;
 
         std::unique_ptr<MateModel> model(
-            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}, nullptr, 0, {}, {}});
+            new MateModel{compileRtlRuntimeModel(frontend, options), {}, {}, {}, {}, {}, {}, {}});
         const GeneratedModelMetadata generated_metadata = metadataFromRuntime(model->runtime_model);
         populateGeneratedMetadata(*model, generated_metadata);
         *out_model = model.release();
@@ -974,10 +824,6 @@ MateStatusCode mate_instance_create(const MateModel* model,
         instance->input_words = allocateStorage(checked_model.input_storage);
         instance->output_words = allocateStorage(checked_model.output_storage);
         instance->observable_words = allocateStorage(checked_model.observable_storage);
-        instance->native_inputs = allocateSimStorage(checked_model.input_storage);
-        instance->native_outputs = allocateSimStorage(checked_model.output_storage);
-        instance->native_storage = allocateSimStorage(checked_model.observable_storage);
-        instance->native_temporaries.resize(checked_model.temporaries_count);
         *out_instance = instance.release();
     });
 }
@@ -1122,19 +968,6 @@ MateStatusCode mate_set_input(MateInstance* instance,
                            nwords,
                            checked.input_words.at(input.storage_index));
         const mate::SimValue value = wordsToSimValue(input.type, input.leaf_name, words, nwords);
-        checked.native_inputs.at(input.storage_index) = value;
-        if (checked.model->evaluate_combinational) {
-            // Fully native: do not touch RtlRuntimeInstance here. Once any
-            // native clock/reset edge has committed a flop, the interpreter's
-            // own flop state is stale, so refreshNativeStorage's interpreter
-            // pull (refreshObservableStorage) would clobber native FlopQ
-            // storage with outdated values.
-            checked.model->evaluate_combinational(checked.native_inputs, checked.native_outputs,
-                                                  checked.native_storage, checked.native_temporaries);
-            copyNativeOutputsToWordStorage(checked);
-            copyNativeObservablesToWordStorage(checked);
-            return;
-        }
         mate::RuntimeInputUpdate update{.input = input.runtime_id, .value = value};
         checked.runtime->setInputValues(std::span<const mate::RuntimeInputUpdate>(&update, 1));
         refreshNativeStorage(checked);
@@ -1149,15 +982,6 @@ MateStatusCode mate_set_inputs(MateInstance* instance,
         MateInstance& checked = checkedInstance(instance);
         const std::vector<mate::RuntimeInputUpdate> runtime_updates =
             convertAndStoreUpdates(checked, updates, update_count);
-        if (checked.model->evaluate_combinational) {
-            // Fully native: do not touch RtlRuntimeInstance here (see
-            // mate_set_input above).
-            checked.model->evaluate_combinational(checked.native_inputs, checked.native_outputs,
-                                                  checked.native_storage, checked.native_temporaries);
-            copyNativeOutputsToWordStorage(checked);
-            copyNativeObservablesToWordStorage(checked);
-            return;
-        }
         checked.runtime->setInputValues(runtime_updates);
         refreshNativeStorage(checked);
     });
@@ -1175,11 +999,6 @@ MateStatusCode mate_apply_clock(MateInstance* instance,
             throw mate::CompilerError(std::format("Mate ABI: invalid clock handle {}", clock_id));
         }
         const AbiClock& clock = checked.model->clocks.at(static_cast<size_t>(clock_id));
-        if (checked.model->evaluate_combinational) {
-            applyNativeClockEdge(checked, static_cast<size_t>(clock_id), clock, edge,
-                                 updates_before_edge, update_count);
-            return;
-        }
         checked.runtime->applyClockEdge(
             clock.domain_id,
             toRuntimeEdge(edge),
@@ -1198,10 +1017,6 @@ MateStatusCode mate_apply_reset(MateInstance* instance,
             throw mate::CompilerError(std::format("Mate ABI: invalid reset handle {}", reset_id));
         }
         const AbiReset& reset = checked.model->resets.at(static_cast<size_t>(reset_id));
-        if (checked.model->evaluate_combinational) {
-            applyNativeResetEdge(checked, static_cast<size_t>(reset_id), reset, edge);
-            return;
-        }
         checked.runtime->applyResetEdge(reset.domain_id, toRuntimeEdge(edge));
         refreshRuntimeBackedNativeState(checked);
     });

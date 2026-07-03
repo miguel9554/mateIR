@@ -253,6 +253,15 @@ struct FixedValue {
         return wordops::reductionXor(w, kWords, Width);
     }
 
+    template <int TotalWidth, typename Part>
+    static void appendConcatPart(FixedValue<TotalWidth, false>& result,
+                                 int& dst,
+                                 const Part& part) {
+        dst -= Part::width;
+        wordops::copyBits(result.w, result.kWords, TotalWidth, dst,
+                          part.w, Part::kWords, Part::width, 0, Part::width);
+    }
+
     template <typename... Parts>
     static auto concat(const Parts&... parts) {
         static_assert(sizeof...(Parts) > 0, "FixedValue concat requires at least one part");
@@ -261,12 +270,7 @@ struct FixedValue {
         constexpr int TotalWidth = (Parts::width + ...);
         FixedValue<TotalWidth, false> result;
         int dst = TotalWidth;
-        auto append = [&]<typename Part>(const Part& part) {
-            dst -= Part::width;
-            wordops::copyBits(result.w, result.kWords, TotalWidth, dst,
-                              part.w, Part::kWords, Part::width, 0, Part::width);
-        };
-        (append(parts), ...);
+        (appendConcatPart<TotalWidth>(result, dst, parts), ...);
         result.maskTopWord();
         return result;
     }

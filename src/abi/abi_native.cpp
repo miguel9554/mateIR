@@ -1,5 +1,6 @@
 #include "abi/abi_native.h"
 
+#include "sim/word_ops.h"
 #include "util/source_loc.h"
 
 #include <algorithm>
@@ -19,11 +20,7 @@
 // linked into DPI simulation binaries.
 //
 // See src/abi/abi_interpreter.cpp for the interpreter-backed twin of this
-// file (used for models without a native evaluate_combinational). The two
-// intentionally duplicate some low-level word/SimValue plumbing rather than
-// share it, since abi_interpreter.cpp's version is keyed on mate::Type (which
-// pulls in mateir), and pulling that in here would defeat the point of this
-// file.
+// file. The native path intentionally stays on raw word storage.
 
 namespace {
 
@@ -34,6 +31,7 @@ using mate::abi::GeneratedOutputMetadata;
 using mate::abi::GeneratedResetMetadata;
 using mate::abi::GeneratedStorageKind;
 using mate::abi::GeneratedStorageMetadata;
+using mate::abi::NativeWordSlot;
 
 struct AbiInput {
     std::string leaf_name;
@@ -83,8 +81,8 @@ struct MateModel {
     std::vector<AbiStorageSlot> input_storage;
     std::vector<AbiStorageSlot> output_storage;
     std::vector<AbiStorageSlot> observable_storage;
+    std::vector<AbiStorageSlot> spill_storage;
     mate::abi::GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
-    size_t temporaries_count = 0;
     std::vector<mate::abi::GeneratedResetApplyFn> reset_apply;
     std::vector<mate::abi::GeneratedClockCommitFn> clock_commit;
     mate::abi::GeneratedFlopsInitFn flops_init = nullptr;
@@ -95,10 +93,11 @@ struct MateInstance {
     std::vector<std::vector<uint64_t>> input_words;
     std::vector<std::vector<uint64_t>> output_words;
     std::vector<std::vector<uint64_t>> observable_words;
-    std::vector<mate::SimValue> native_inputs;
-    std::vector<mate::SimValue> native_outputs;
-    std::vector<mate::SimValue> native_storage;
-    std::vector<mate::SimValue> native_temporaries;
+    std::vector<std::vector<uint64_t>> spill_words;
+    std::vector<NativeWordSlot> input_slots;
+    std::vector<NativeWordSlot> output_slots;
+    std::vector<NativeWordSlot> observable_slots;
+    std::vector<NativeWordSlot> spill_slots;
 };
 
 namespace {
@@ -155,10 +154,6 @@ const MateInstance& checkedInstance(const MateInstance* instance) {
     return *instance;
 }
 
-mate::SimValue sourceValueForEdge(int32_t width, bool is_signed, MateEdge edge) {
-    return mate::SimValue::fromU64(edge == MATE_EDGE_POSEDGE ? 1 : 0, width, is_signed);
-}
-
 void validateWords(const char* role,
                    const char* leaf_name,
                    const uint64_t* words,
@@ -183,23 +178,6 @@ void validateWords(const char* role,
     }
 }
 
-mate::SimValue wordsToSimValue(int32_t width,
-                               bool is_signed,
-                               const std::string& leaf_name,
-                               const uint64_t* words,
-                               int32_t nwords) {
-    validateWords("input", leaf_name.c_str(), words, nwords, width);
-    mate::SimValue value = mate::SimValue::zero(width, is_signed);
-    for (int32_t word = 0; word < nwords; ++word) {
-        for (int32_t bit = 0; bit < 64; ++bit) {
-            const int32_t global_bit = word * 64 + bit;
-            if (global_bit >= width) break;
-            value.setBit(global_bit, ((words[word] >> bit) & 1ULL) != 0);
-        }
-    }
-    return value;
-}
-
 void copyWordsToStorage(const char* role,
                         const std::string& leaf_name,
                         int32_t width,
@@ -214,44 +192,6 @@ void copyWordsToStorage(const char* role,
             role, leaf_name, expected, storage.size()));
     }
     std::copy(words, words + nwords, storage.begin());
-}
-
-void simValueToWords(const std::string& leaf_name,
-                     const mate::SimValue& value,
-                     uint64_t* words,
-                     int32_t nwords) {
-    if (!words) {
-        throw mate::CompilerError(std::format(
-            "Mate ABI: output '{}' word pointer is null", leaf_name));
-    }
-    const int32_t expected = wordCount(value.width());
-    if (nwords != expected) {
-        throw mate::CompilerError(std::format(
-            "Mate ABI: output '{}' expected {} words for width {}, got {}",
-            leaf_name, expected, value.width(), nwords));
-    }
-    std::fill(words, words + nwords, uint64_t{0});
-    for (int32_t word = 0; word < nwords; ++word) {
-        for (int32_t bit = 0; bit < 64; ++bit) {
-            const int32_t global_bit = word * 64 + bit;
-            if (global_bit >= value.width()) break;
-            if (value.getBit(global_bit)) {
-                words[word] |= uint64_t{1} << bit;
-            }
-        }
-    }
-}
-
-void simValueToStorage(const std::string& leaf_name,
-                       const mate::SimValue& value,
-                       std::vector<uint64_t>& storage) {
-    const int32_t expected = wordCount(value.width());
-    if (storage.size() != static_cast<size_t>(expected)) {
-        throw mate::CompilerError(std::format(
-            "Mate ABI: storage for '{}' expected {} words for width {}, has {}",
-            leaf_name, expected, value.width(), storage.size()));
-    }
-    simValueToWords(leaf_name, value, storage.data(), expected);
 }
 
 void storageToWords(const std::string& leaf_name,
@@ -277,6 +217,25 @@ void storageToWords(const std::string& leaf_name,
     std::copy(storage.begin(), storage.end(), words);
 }
 
+void setStorageFromEdge(const AbiStorageSlot& slot, MateEdge edge, std::vector<uint64_t>& storage) {
+    const int32_t expected = wordCount(slot.width);
+    if (storage.size() != static_cast<size_t>(expected)) {
+        throw mate::CompilerError(std::format(
+            "Mate ABI: input '{}' expected {} words, has {}",
+            slot.leaf_name, expected, storage.size()));
+    }
+    std::fill(storage.begin(), storage.end(), uint64_t{0});
+    if (edge == MATE_EDGE_POSEDGE && !storage.empty()) storage[0] = 1;
+    mate::wordops::maskTopWord(storage.data(), storage.size(), slot.width);
+}
+
+bool storageActiveLevel(const std::vector<uint64_t>& storage, const AbiStorageSlot& slot, MateEdge active_edge) {
+    if (storage.empty()) {
+        throw mate::CompilerError(std::format("Mate ABI: input '{}' has no storage", slot.leaf_name));
+    }
+    return ((storage[0] & 1ULL) != 0) == (active_edge == MATE_EDGE_POSEDGE);
+}
+
 std::vector<std::vector<uint64_t>> allocateStorage(const std::vector<AbiStorageSlot>& slots) {
     std::vector<std::vector<uint64_t>> storage;
     storage.reserve(slots.size());
@@ -286,37 +245,21 @@ std::vector<std::vector<uint64_t>> allocateStorage(const std::vector<AbiStorageS
     return storage;
 }
 
-std::vector<mate::SimValue> allocateSimStorage(const std::vector<AbiStorageSlot>& slots) {
-    std::vector<mate::SimValue> storage;
-    storage.reserve(slots.size());
-    for (const auto& slot : slots) {
-        storage.push_back(mate::SimValue::zero(slot.width, slot.is_signed));
+std::vector<NativeWordSlot> makeWordSlots(std::vector<std::vector<uint64_t>>& storage) {
+    std::vector<NativeWordSlot> slots;
+    slots.reserve(storage.size());
+    for (auto& words : storage) {
+        slots.push_back(NativeWordSlot{
+            .words = words.data(),
+            .nwords = static_cast<int32_t>(words.size()),
+        });
     }
-    return storage;
-}
-
-void copyNativeOutputsToWordStorage(MateInstance& instance) {
-    for (const auto& output : instance.model->outputs) {
-        simValueToStorage(output.leaf_name,
-                          instance.native_outputs.at(output.storage_index),
-                          instance.output_words.at(output.storage_index));
-    }
-}
-
-void copyNativeObservablesToWordStorage(MateInstance& instance) {
-    for (size_t i = 0; i < instance.model->observable_storage.size(); ++i) {
-        const auto& slot = instance.model->observable_storage.at(i);
-        simValueToStorage(slot.full_path,
-                          instance.native_storage.at(i),
-                          instance.observable_words.at(i));
-    }
+    return slots;
 }
 
 void evaluateAndPublish(MateInstance& instance) {
-    instance.model->evaluate_combinational(instance.native_inputs, instance.native_outputs,
-                                           instance.native_storage, instance.native_temporaries);
-    copyNativeOutputsToWordStorage(instance);
-    copyNativeObservablesToWordStorage(instance);
+    instance.model->evaluate_combinational(instance.input_slots, instance.output_slots,
+                                           instance.observable_slots, instance.spill_slots);
 }
 
 // Mirrors MateIRRuntime::applyClockEdge (src/sim/runtime.cpp): drive the
@@ -338,8 +281,8 @@ void applyClockEdge(MateInstance& instance,
     }
 
     const AbiInput& source = instance.model->inputs.at(clock.source_storage_index);
-    instance.native_inputs.at(clock.source_storage_index) =
-        sourceValueForEdge(source.width, source.is_signed, edge);
+    setStorageFromEdge(instance.model->input_storage.at(source.storage_index), edge,
+                       instance.input_words.at(source.storage_index));
 
     if (update_count < 0) {
         throw mate::CompilerError(std::format("Mate ABI: negative update count {}", update_count));
@@ -361,17 +304,14 @@ void applyClockEdge(MateInstance& instance,
                 "Mate ABI: sync input '{}' does not belong to active clock domain {}",
                 input.leaf_name, clock_id));
         }
-        const mate::SimValue value =
-            wordsToSimValue(input.width, input.is_signed, input.leaf_name, update.words, update.nwords);
-        instance.native_inputs.at(input.storage_index) = value;
         copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
                            instance.input_words.at(input.storage_index));
     }
 
     if (active_edge) {
-        instance.model->evaluate_combinational(instance.native_inputs, instance.native_outputs,
-                                               instance.native_storage, instance.native_temporaries);
-        instance.model->clock_commit.at(clock_id)(instance.native_inputs, instance.native_storage);
+        instance.model->evaluate_combinational(instance.input_slots, instance.output_slots,
+                                               instance.observable_slots, instance.spill_slots);
+        instance.model->clock_commit.at(clock_id)(instance.input_slots, instance.observable_slots);
     }
     evaluateAndPublish(instance);
 }
@@ -381,17 +321,19 @@ void applyClockEdge(MateInstance& instance,
 // domain's FlopQ storage.
 void applyResetEdge(MateInstance& instance, size_t reset_id, const AbiReset& reset, MateEdge edge) {
     const AbiInput& source = instance.model->inputs.at(reset.source_storage_index);
-    instance.native_inputs.at(reset.source_storage_index) =
-        sourceValueForEdge(source.width, source.is_signed, edge);
+    setStorageFromEdge(instance.model->input_storage.at(source.storage_index), edge,
+                       instance.input_words.at(source.storage_index));
     if (edge == reset.active_edge) {
-        instance.model->reset_apply.at(reset_id)(instance.native_storage);
+        instance.model->reset_apply.at(reset_id)(instance.observable_slots);
     }
     evaluateAndPublish(instance);
 }
 
 bool resetDomainActive(const MateInstance& instance, const AbiReset& reset) {
-    const mate::SimValue& value = instance.native_inputs.at(reset.source_storage_index);
-    return (value.lowU64() != 0) == (reset.active_edge == MATE_EDGE_POSEDGE);
+    const AbiInput& source = instance.model->inputs.at(reset.source_storage_index);
+    return storageActiveLevel(instance.input_words.at(source.storage_index),
+                              instance.model->input_storage.at(source.storage_index),
+                              reset.active_edge);
 }
 
 void applyRawInputUpdates(MateInstance& instance, const MateInputUpdate* updates, int32_t count) {
@@ -409,9 +351,6 @@ void applyRawInputUpdates(MateInstance& instance, const MateInputUpdate* updates
                 "Mate ABI: invalid input handle {}", update.input_id));
         }
         const AbiInput& input = instance.model->inputs.at(static_cast<size_t>(update.input_id));
-        const mate::SimValue value =
-            wordsToSimValue(input.width, input.is_signed, input.leaf_name, update.words, update.nwords);
-        instance.native_inputs.at(input.storage_index) = value;
         copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
                            instance.input_words.at(input.storage_index));
     }
@@ -560,6 +499,20 @@ std::vector<AbiStorageSlot> buildObservableStorage(const GeneratedModelMetadata&
     return storage;
 }
 
+std::vector<AbiStorageSlot> buildSpillStorage(const GeneratedModelMetadata& generated_metadata) {
+    std::vector<AbiStorageSlot> storage;
+    storage.reserve(generated_metadata.spill_storage.size());
+    for (const auto& generated : generated_metadata.spill_storage) {
+        storage.push_back(AbiStorageSlot{
+            .full_path = std::string(generated.full_path),
+            .leaf_name = std::string(generated.leaf_name),
+            .width = generated.width,
+            .is_signed = generated.is_signed,
+        });
+    }
+    return storage;
+}
+
 void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& generated_metadata) {
     if (!generated_metadata.evaluate_combinational) {
         throw mate::CompilerError(
@@ -576,8 +529,8 @@ void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& g
     model.input_storage = buildInputStorage(generated_metadata);
     model.output_storage = buildOutputStorage(generated_metadata);
     model.observable_storage = buildObservableStorage(generated_metadata);
+    model.spill_storage = buildSpillStorage(generated_metadata);
     model.evaluate_combinational = generated_metadata.evaluate_combinational;
-    model.temporaries_count = generated_metadata.temporaries_count;
     model.reset_apply = generated_metadata.reset_apply;
     model.clock_commit = generated_metadata.clock_commit;
     model.flops_init = generated_metadata.flops_init;
@@ -638,10 +591,11 @@ MateStatusCode mate_instance_create(const MateModel* model,
         instance->input_words = allocateStorage(checked_model.input_storage);
         instance->output_words = allocateStorage(checked_model.output_storage);
         instance->observable_words = allocateStorage(checked_model.observable_storage);
-        instance->native_inputs = allocateSimStorage(checked_model.input_storage);
-        instance->native_outputs = allocateSimStorage(checked_model.output_storage);
-        instance->native_storage = allocateSimStorage(checked_model.observable_storage);
-        instance->native_temporaries.resize(checked_model.temporaries_count);
+        instance->spill_words = allocateStorage(checked_model.spill_storage);
+        instance->input_slots = makeWordSlots(instance->input_words);
+        instance->output_slots = makeWordSlots(instance->output_words);
+        instance->observable_slots = makeWordSlots(instance->observable_words);
+        instance->spill_slots = makeWordSlots(instance->spill_words);
         *out_instance = instance.release();
     });
 }
@@ -663,7 +617,7 @@ MateStatusCode mate_instance_init(MateInstance* instance,
     return guard(status, [&]() {
         MateInstance& checked = checkedInstance(instance);
         std::mt19937_64 rng(seed);
-        checked.model->flops_init(checked.native_storage, flops_initial, rng);
+        checked.model->flops_init(checked.observable_slots, flops_initial, rng);
         applyRawInputUpdates(checked, async_inputs, async_count);
         applyRawInputUpdates(checked, sync_inputs, sync_count);
         // Reset-at-power-up: mirrors MateIRRuntime::initializeInputsAndEvaluate,
@@ -672,7 +626,7 @@ MateStatusCode mate_instance_init(MateInstance* instance,
         for (size_t i = 0; i < checked.model->resets.size(); ++i) {
             const AbiReset& reset = checked.model->resets.at(i);
             if (resetDomainActive(checked, reset)) {
-                checked.model->reset_apply.at(i)(checked.native_storage);
+                checked.model->reset_apply.at(i)(checked.observable_slots);
             }
         }
         evaluateAndPublish(checked);
@@ -789,8 +743,6 @@ MateStatusCode mate_set_input(MateInstance* instance,
         const auto& input = checked.model->inputs.at(static_cast<size_t>(input_id));
         copyWordsToStorage("input", input.leaf_name, input.width, words, nwords,
                            checked.input_words.at(input.storage_index));
-        checked.native_inputs.at(input.storage_index) =
-            wordsToSimValue(input.width, input.is_signed, input.leaf_name, words, nwords);
         evaluateAndPublish(checked);
     });
 }

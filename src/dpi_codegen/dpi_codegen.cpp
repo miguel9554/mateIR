@@ -353,14 +353,17 @@ std::string generatedStorageKindName(RuntimeObservableKind kind) {
     throw CompilerError("mate-dpi-codegen: unknown runtime observable kind");
 }
 
-std::string simValueFromTypeExpr(int64_t value, const Type& type) {
+std::string fixedValueType(const Type& type) {
     if (type.width <= 0) {
-        throw CompilerError("mate-dpi-codegen: generated expression has invalid width");
+        throw CompilerError("mate-dpi-codegen: generated FixedValue has invalid width");
     }
-    return std::format("mate::SimValue::fromI64({}, {}, {})",
-                       value,
+    return std::format("mate::FixedValue<{}, {}>",
                        type.width,
                        type.isSigned() ? "true" : "false");
+}
+
+std::string fixedValueFromTypeExpr(int64_t value, const Type& type) {
+    return std::format("{}::fromI64({})", fixedValueType(type), value);
 }
 
 std::string boolLiteral(bool value) {
@@ -1291,11 +1294,9 @@ struct NativeCombinationalCode {
     // extern prototypes for every evaluateCombinationalChunkN, to embed in
     // the main model.cpp so the dispatcher can call them.
     std::string chunk_declarations;
-    // The small evaluateCombinational() dispatcher (anonymous namespace,
-    // including its own copy of the maskToWidth/etc. helpers it needs for
-    // the final output-write statements) to embed in the main model.cpp.
+    // The small evaluateCombinational() dispatcher to embed in model.cpp.
     std::string dispatcher_text;
-    size_t temporaries_count = 0;
+    std::vector<const DFGNode*> spill_nodes;
 };
 
 // Splitting the topo order into cost-bounded chunks keeps each generated
@@ -1342,7 +1343,6 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     }
 
     const auto order = topoOrder(*model.top().dfg);
-    std::map<const DFGNode*, std::string> value_expr;
 
     auto checkedType = [&](const DFGNode* node) -> const Type& {
         if (!node || !node->type || node->type->width <= 0) {
@@ -1353,65 +1353,15 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         return *node->type;
     };
 
-    auto nodeValue = [&](const DFGNode* node) -> std::string {
-        auto it = value_expr.find(node);
-        if (it == value_expr.end()) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: generated value for node '{}' is not available",
-                node->str()));
-        }
-        return it->second;
-    };
-
-    auto maskExpr = [&](const std::string& expr, const DFGNode* node) {
-        const auto& type = checkedType(node);
-        return std::format("maskToWidth({}, {}, {})",
-                           expr,
-                           type.width,
-                           boolLiteral(type.isSigned()));
-    };
-
-    auto binaryExpr = [&](const DFGNode* node, std::string_view op_name) {
-        auto inputs = node->binaryInputs();
-        return std::format("{}.{}({})",
-                           nodeValue(inputs.lhs.node),
-                           op_name,
-                           nodeValue(inputs.rhs.node));
-    };
-
     auto compareIsSigned = [&](const DFGNode* lhs, const DFGNode* rhs) {
         return checkedType(lhs).isSigned() && checkedType(rhs).isSigned();
     };
 
-    std::ostringstream helpers_out;
-    helpers_out << "int nodeWidth(int width) {\n";
-    helpers_out << "    if (width <= 0) {\n";
-    helpers_out << "        throw std::runtime_error(\"Mate native model: unresolved node width\");\n";
-    helpers_out << "    }\n";
-    helpers_out << "    return width;\n";
-    helpers_out << "}\n\n";
-    helpers_out << "mate::SimValue maskToWidth(const mate::SimValue& value, int width, bool is_signed) {\n";
-    helpers_out << "    return value.resized(width, is_signed);\n";
-    helpers_out << "}\n\n";
-    helpers_out << "mate::SimValue boolValue(bool value) {\n";
-    helpers_out << "    return mate::SimValue::fromU64(value ? 1 : 0, 1, false);\n";
-    helpers_out << "}\n\n";
-    helpers_out << "mate::SimValue widenForArithmetic(const mate::SimValue& value,\n";
-    helpers_out << "                                      bool operand_signed,\n";
-    helpers_out << "                                      bool other_signed,\n";
-    helpers_out << "                                      int result_width) {\n";
-    helpers_out << "    const bool is_signed = operand_signed && other_signed;\n";
-    helpers_out << "    return value.resized(nodeWidth(result_width), is_signed);\n";
-    helpers_out << "}\n\n";
-    helpers_out << "bool useSignedCompare(bool lhs_signed, bool rhs_signed) {\n";
-    helpers_out << "    return lhs_signed && rhs_signed;\n";
-    helpers_out << "}\n\n";
-
     constexpr std::string_view kChunkParams =
-        "std::span<const mate::SimValue> inputs,\n"
-        "                           std::span<mate::SimValue> outputs,\n"
-        "                           std::span<mate::SimValue> storage,\n"
-        "                           std::span<mate::SimValue> temporaries";
+        "std::span<const mate::abi::NativeWordSlot> inputs,\n"
+        "                           std::span<mate::abi::NativeWordSlot> outputs,\n"
+        "                           std::span<mate::abi::NativeWordSlot> storage,\n"
+        "                           std::span<mate::abi::NativeWordSlot> spills";
 
     // Chunk boundaries: walk the topo order accumulating combinationalNodeCost,
     // closing a chunk once accumulated cost reaches the budget. A single node
@@ -1439,6 +1389,65 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         return std::format("evaluateCombinationalChunk{}", chunk_index);
     };
 
+    std::map<const DFGNode*, size_t> topo_index_for_node;
+    std::map<const DFGNode*, size_t> chunk_index_for_node;
+    for (size_t chunk_index = 0; chunk_index < chunk_ranges.size(); ++chunk_index) {
+        const auto [begin, end] = chunk_ranges[chunk_index];
+        for (size_t i = begin; i < end; ++i) {
+            topo_index_for_node[order[i]] = i;
+            chunk_index_for_node[order[i]] = chunk_index;
+        }
+    }
+
+    std::map<const DFGNode*, std::vector<const DFGNode*>> users;
+    for (const auto& node : model.top().dfg->nodes) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
+            users[input.node].push_back(node.get());
+        });
+    }
+
+    std::map<const DFGNode*, std::vector<size_t>> output_indices_for_node;
+    for (const auto& output : model.metadata().output_leaves) {
+        output_indices_for_node[output.node].push_back(output.id.value);
+    }
+
+    std::map<const DFGNode*, size_t> spill_index_for_node;
+    std::vector<const DFGNode*> spill_nodes;
+    auto needs_spill = [&](const DFGNode* node) {
+        const DFGOp kind = node->kind();
+        if (kind == DFGOp::INPUT || kind == DFGOp::CONST || kind == DFGOp::X) return false;
+        const size_t node_chunk = chunk_index_for_node.at(node);
+        for (const DFGNode* user : users[node]) {
+            if (chunk_index_for_node.at(user) != node_chunk) return true;
+        }
+        return false;
+    };
+    for (const DFGNode* node : order) {
+        if (!needs_spill(node)) continue;
+        spill_index_for_node[node] = spill_nodes.size();
+        spill_nodes.push_back(node);
+    }
+
+    auto localName = [&](const DFGNode* node) {
+        return std::format("t{}", topo_index_for_node.at(node));
+    };
+
+    auto resizeExpr = [&](const std::string& expr, const Type& type) {
+        return std::format("({}).resized<{}, {}>()",
+                           expr,
+                           type.width,
+                           boolLiteral(type.isSigned()));
+    };
+
+    auto loadExpr = [&](std::string_view slots_name, size_t index, const Type& type) {
+        return std::format("{}::fromWords({}[{}].words, {}[{}].nwords)",
+                           fixedValueType(type),
+                           slots_name,
+                           index,
+                           slots_name,
+                           index);
+    };
+
     const size_t file_count = nativeCombinationalFileCount(chunk_count);
     // Chunk *files* still need their own size-based bin-packing on top of the
     // cost-aware chunk boundaries above: even with cost-bounded chunks, wildly
@@ -1453,236 +1462,267 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
         const auto [begin, end] = chunk_ranges[chunk_index];
         std::ostringstream out;
+        std::map<const DFGNode*, std::string> local_value_expr;
+
+        auto nodeValue = [&](const DFGNode* node) -> std::string {
+            auto local_it = local_value_expr.find(node);
+            if (local_it != local_value_expr.end()) return local_it->second;
+
+            const auto& type = checkedType(node);
+            if (node->kind() == DFGOp::INPUT) {
+                if (const auto* input = model.metadata().findInput(node->name)) {
+                    return loadExpr("inputs", input->id.value, type);
+                }
+                if (auto storage_index = storageIndexForObservable(
+                        model, node, RuntimeObservableKind::FlopQ)) {
+                    return loadExpr("storage", *storage_index, type);
+                }
+            }
+            if (node->kind() == DFGOp::CONST) {
+                return fixedValueFromTypeExpr(node->constValue(), type);
+            }
+            if (node->kind() == DFGOp::X) {
+                return std::format("{}::zero()", fixedValueType(type));
+            }
+            if (auto spill_it = spill_index_for_node.find(node); spill_it != spill_index_for_node.end()) {
+                return loadExpr("spills", spill_it->second, type);
+            }
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: generated value for node '{}' is not available in chunk {}",
+                node->str(), chunk_index));
+        };
+
+        auto binaryExpr = [&](const DFGNode* node, std::string_view op_name) {
+            auto inputs = node->binaryInputs();
+            return std::format("{}.{}({})",
+                               nodeValue(inputs.lhs.node),
+                               op_name,
+                               nodeValue(inputs.rhs.node));
+        };
 
         declarations_out << "extern void " << chunkFnName(chunk_index) << "(" << kChunkParams << ");\n";
         out << "void " << chunkFnName(chunk_index) << "(" << kChunkParams << ") {\n";
 
-    for (size_t topo_index = begin; topo_index < end; ++topo_index) {
-        const DFGNode* node = order[topo_index];
-        const DFGOp kind = node->kind();
-        const auto& type = checkedType(node);
-        const std::string var = std::format("temporaries[{}]", topo_index);
+        for (size_t topo_index = begin; topo_index < end; ++topo_index) {
+            const DFGNode* node = order[topo_index];
+            const DFGOp kind = node->kind();
+            const auto& type = checkedType(node);
 
-        if (kind == DFGOp::INPUT) {
-            if (const auto* input = model.metadata().findInput(node->name)) {
-                value_expr[node] = std::format("inputs[{}]", input->id.value);
+            if (kind == DFGOp::INPUT || kind == DFGOp::CONST || kind == DFGOp::X) {
                 continue;
+            }
+
+            std::string expr;
+            switch (kind) {
+                case DFGOp::SIGNAL:
+                case DFGOp::OUTPUT:
+                    if (auto driver = node->driver()) {
+                        expr = nodeValue(driver->node);
+                    } else {
+                        throw CompilerError(std::format(
+                            "mate-dpi-codegen: driven node '{}' has no driver", node->str()));
+                    }
+                    break;
+
+                case DFGOp::ADD:
+                case DFGOp::SUB:
+                case DFGOp::MUL: {
+                    auto inputs = node->binaryInputs();
+                    const char* op =
+                        kind == DFGOp::ADD ? "add" : (kind == DFGOp::SUB ? "sub" : "mul");
+                    const bool lhs_signed =
+                        checkedType(inputs.lhs.node).isSigned() && checkedType(inputs.rhs.node).isSigned();
+                    const bool rhs_signed =
+                        checkedType(inputs.rhs.node).isSigned() && checkedType(inputs.lhs.node).isSigned();
+                    expr = std::format("{}.resized<{}, {}>().{}({}.resized<{}, {}>())",
+                                       nodeValue(inputs.lhs.node),
+                                       type.width,
+                                       boolLiteral(lhs_signed),
+                                       op,
+                                       nodeValue(inputs.rhs.node),
+                                       type.width,
+                                       boolLiteral(rhs_signed));
+                    break;
+                }
+
+                case DFGOp::EQ:
+                    expr = std::format("mate::FixedValue<1, false>::fromU64({} ? 1 : 0)",
+                                       binaryExpr(node, "eq"));
+                    break;
+                case DFGOp::LT:
+                case DFGOp::LE:
+                case DFGOp::GT:
+                case DFGOp::GE: {
+                    auto inputs = node->binaryInputs();
+                    const bool is_signed = compareIsSigned(inputs.lhs.node, inputs.rhs.node);
+                    const std::string less = is_signed
+                        ? std::format("{}.signedLt({})",
+                                      nodeValue(inputs.lhs.node),
+                                      nodeValue(inputs.rhs.node))
+                        : std::format("{}.unsignedLt({})",
+                                      nodeValue(inputs.lhs.node),
+                                      nodeValue(inputs.rhs.node));
+                    const std::string reverse_less = is_signed
+                        ? std::format("{}.signedLt({})",
+                                      nodeValue(inputs.rhs.node),
+                                      nodeValue(inputs.lhs.node))
+                        : std::format("{}.unsignedLt({})",
+                                      nodeValue(inputs.rhs.node),
+                                      nodeValue(inputs.lhs.node));
+                    if (kind == DFGOp::LT) {
+                        expr = std::format("mate::FixedValue<1, false>::fromU64(({}) ? 1 : 0)", less);
+                    } else if (kind == DFGOp::LE) {
+                        expr = std::format("mate::FixedValue<1, false>::fromU64((({}) || {}.eq({})) ? 1 : 0)",
+                                           less,
+                                           nodeValue(inputs.lhs.node),
+                                           nodeValue(inputs.rhs.node));
+                    } else if (kind == DFGOp::GT) {
+                        expr = std::format("mate::FixedValue<1, false>::fromU64(({}) ? 1 : 0)", reverse_less);
+                    } else {
+                        expr = std::format("mate::FixedValue<1, false>::fromU64(!({}) ? 1 : 0)", less);
+                    }
+                    break;
+                }
+
+                case DFGOp::SHL:
+                    expr = std::format("{}.shl({}.lowU64())",
+                                       nodeValue(node->binaryInputs().lhs.node),
+                                       nodeValue(node->binaryInputs().rhs.node));
+                    break;
+                case DFGOp::SHR:
+                    expr = std::format("{}.shr({}.lowU64(), false)",
+                                       nodeValue(node->binaryInputs().lhs.node),
+                                       nodeValue(node->binaryInputs().rhs.node));
+                    break;
+                case DFGOp::ASR:
+                    expr = std::format("{}.shr({}.lowU64(), true)",
+                                       nodeValue(node->binaryInputs().lhs.node),
+                                       nodeValue(node->binaryInputs().rhs.node));
+                    break;
+
+                case DFGOp::MUX: {
+                    expr = std::format("[&]() -> {} {{\n", fixedValueType(type));
+                    expr += std::format("        const int64_t selector = static_cast<int64_t>({}.lowU64());\n",
+                                        nodeValue(node->muxSelector().node));
+                    expr += "        switch (selector) {\n";
+                    for (size_t i = 0; i < node->muxArmCount(); ++i) {
+                        expr += std::format("            case {}: return {};\n",
+                                            node->muxArmValue(i),
+                                            resizeExpr(nodeValue(node->muxArmData(i).node), type));
+                    }
+                    expr += "            default: throw std::runtime_error(\"Mate native model: MUX selector has no matching arm\");\n";
+                    expr += "        }\n";
+                    expr += "    }()";
+                    break;
+                }
+
+                case DFGOp::UNARY_NEGATE:
+                    expr = std::format("{}.negated()", nodeValue(node->unaryInputs().operand.node));
+                    break;
+                case DFGOp::BITWISE_NOT:
+                    expr = std::format("{}.bitwiseNot()", nodeValue(node->unaryInputs().operand.node));
+                    break;
+                case DFGOp::BITWISE_AND:
+                    expr = binaryExpr(node, "bitwiseAnd");
+                    break;
+                case DFGOp::BITWISE_OR:
+                    expr = binaryExpr(node, "bitwiseOr");
+                    break;
+                case DFGOp::BITWISE_XOR:
+                    expr = binaryExpr(node, "bitwiseXor");
+                    break;
+                case DFGOp::BITWISE_XNOR:
+                    expr = binaryExpr(node, "bitwiseXnor");
+                    break;
+                case DFGOp::REDUCTION_AND:
+                    expr = std::format("mate::FixedValue<1, false>::fromU64({}.reductionAnd() ? 1 : 0)",
+                                       nodeValue(node->unaryInputs().operand.node));
+                    break;
+                case DFGOp::REDUCTION_NAND:
+                    expr = std::format("mate::FixedValue<1, false>::fromU64(!{}.reductionAnd() ? 1 : 0)",
+                                       nodeValue(node->unaryInputs().operand.node));
+                    break;
+                case DFGOp::REDUCTION_OR:
+                    expr = std::format("mate::FixedValue<1, false>::fromU64({}.reductionOr() ? 1 : 0)",
+                                       nodeValue(node->unaryInputs().operand.node));
+                    break;
+                case DFGOp::REDUCTION_NOR:
+                    expr = std::format("mate::FixedValue<1, false>::fromU64(!{}.reductionOr() ? 1 : 0)",
+                                       nodeValue(node->unaryInputs().operand.node));
+                    break;
+                case DFGOp::REDUCTION_XOR:
+                    expr = std::format("mate::FixedValue<1, false>::fromU64({}.reductionXor() ? 1 : 0)",
+                                       nodeValue(node->unaryInputs().operand.node));
+                    break;
+                case DFGOp::REDUCTION_XNOR:
+                    expr = std::format("mate::FixedValue<1, false>::fromU64(!{}.reductionXor() ? 1 : 0)",
+                                       nodeValue(node->unaryInputs().operand.node));
+                    break;
+
+                case DFGOp::SLICE: {
+                    auto slice = node->sliceInputs();
+                    if (slice.high.node->kind() != DFGOp::CONST ||
+                        slice.low.node->kind() != DFGOp::CONST) {
+                        throw CompilerError(std::format(
+                            "mate-dpi-codegen: SLICE node '{}' has non-constant bounds",
+                            node->str()));
+                    }
+                    auto resolved = resolveSliceRange(*slice.source.node,
+                                                      slice.high.node->constValue(),
+                                                      slice.low.node->constValue());
+                    expr = std::format("{}.slice<{}, {}>()",
+                                       nodeValue(slice.source.node),
+                                       resolved.internal_high,
+                                       resolved.internal_low);
+                    break;
+                }
+
+                case DFGOp::CONCAT: {
+                    std::vector<std::string> parts;
+                    for (const auto& part : node->concatParts()) {
+                        parts.push_back(nodeValue(part.node));
+                    }
+                    std::string args;
+                    for (size_t i = 0; i < parts.size(); ++i) {
+                        if (i) args += ", ";
+                        args += parts[i];
+                    }
+                    expr = std::format("mate::FixedValue<{}, false>::concat({})", type.width, args);
+                    break;
+                }
+
+                case DFGOp::INPUT:
+                case DFGOp::CONST:
+                case DFGOp::X:
+                    throw CompilerError("mate-dpi-codegen: source node reached expression switch");
+            }
+
+            const std::string var = localName(node);
+            out << "    const auto " << var << " = " << resizeExpr(expr, type) << ";\n";
+            local_value_expr[node] = var;
+
+            if (auto storage_index = storageIndexForObservable(
+                    model, node, RuntimeObservableKind::Internal)) {
+                out << "    " << var << ".copyToWords(storage[" << *storage_index
+                    << "].words, storage[" << *storage_index << "].nwords);\n";
             }
             if (auto storage_index = storageIndexForObservable(
-                    model, node, RuntimeObservableKind::FlopQ)) {
-                value_expr[node] = std::format("storage[{}]", *storage_index);
-                continue;
+                    model, node, RuntimeObservableKind::FlopD)) {
+                out << "    " << var << ".copyToWords(storage[" << *storage_index
+                    << "].words, storage[" << *storage_index << "].nwords);\n";
             }
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: INPUT node '{}' is neither top input nor flop Q",
-                node->str()));
-        }
-
-        if (kind == DFGOp::CONST) {
-            value_expr[node] = simValueFromTypeExpr(node->constValue(), type);
-            continue;
-        }
-
-        if (kind == DFGOp::X) {
-            // Phase 2C keeps X deterministic in generated combinational code.
-            value_expr[node] = std::format("mate::SimValue::zero({}, {})",
-                                           type.width,
-                                           boolLiteral(type.isSigned()));
-            continue;
-        }
-
-        std::string expr;
-        switch (kind) {
-            case DFGOp::SIGNAL:
-            case DFGOp::OUTPUT:
-                if (auto driver = node->driver()) {
-                    expr = nodeValue(driver->node);
-                } else {
-                    throw CompilerError(std::format(
-                        "mate-dpi-codegen: driven node '{}' has no driver", node->str()));
+            if (auto output_it = output_indices_for_node.find(node);
+                output_it != output_indices_for_node.end()) {
+                for (size_t output_index : output_it->second) {
+                    out << "    " << var << ".copyToWords(outputs[" << output_index
+                        << "].words, outputs[" << output_index << "].nwords);\n";
                 }
-                break;
-
-            case DFGOp::ADD:
-            case DFGOp::SUB:
-            case DFGOp::MUL: {
-                auto inputs = node->binaryInputs();
-                const char* op =
-                    kind == DFGOp::ADD ? "add" : (kind == DFGOp::SUB ? "sub" : "mul");
-                expr = std::format("widenForArithmetic({}, {}, {}, {}).{}(widenForArithmetic({}, {}, {}, {}))",
-                                   nodeValue(inputs.lhs.node),
-                                   boolLiteral(checkedType(inputs.lhs.node).isSigned()),
-                                   boolLiteral(checkedType(inputs.rhs.node).isSigned()),
-                                   type.width,
-                                   op,
-                                   nodeValue(inputs.rhs.node),
-                                   boolLiteral(checkedType(inputs.rhs.node).isSigned()),
-                                   boolLiteral(checkedType(inputs.lhs.node).isSigned()),
-                                   type.width);
-                break;
             }
-
-            case DFGOp::EQ:
-                expr = std::format("boolValue({})", binaryExpr(node, "eq"));
-                break;
-            case DFGOp::LT:
-            case DFGOp::LE:
-            case DFGOp::GT:
-            case DFGOp::GE: {
-                auto inputs = node->binaryInputs();
-                const bool is_signed = compareIsSigned(inputs.lhs.node, inputs.rhs.node);
-                const std::string less = is_signed
-                    ? std::format("{}.signedLt({})",
-                                  nodeValue(inputs.lhs.node),
-                                  nodeValue(inputs.rhs.node))
-                    : std::format("{}.unsignedLt({})",
-                                  nodeValue(inputs.lhs.node),
-                                  nodeValue(inputs.rhs.node));
-                const std::string reverse_less = is_signed
-                    ? std::format("{}.signedLt({})",
-                                  nodeValue(inputs.rhs.node),
-                                  nodeValue(inputs.lhs.node))
-                    : std::format("{}.unsignedLt({})",
-                                  nodeValue(inputs.rhs.node),
-                                  nodeValue(inputs.lhs.node));
-                if (kind == DFGOp::LT) {
-                    expr = std::format("boolValue({})", less);
-                } else if (kind == DFGOp::LE) {
-                    expr = std::format("boolValue(({}) || {}.eq({}))",
-                                       less,
-                                       nodeValue(inputs.lhs.node),
-                                       nodeValue(inputs.rhs.node));
-                } else if (kind == DFGOp::GT) {
-                    expr = std::format("boolValue({})", reverse_less);
-                } else {
-                    expr = std::format("boolValue(!({}))", less);
-                }
-                break;
+            if (auto spill_it = spill_index_for_node.find(node); spill_it != spill_index_for_node.end()) {
+                out << "    " << var << ".copyToWords(spills[" << spill_it->second
+                    << "].words, spills[" << spill_it->second << "].nwords);\n";
             }
-
-            case DFGOp::SHL:
-                expr = std::format("{}.shl({}.lowU64())",
-                                   nodeValue(node->binaryInputs().lhs.node),
-                                   nodeValue(node->binaryInputs().rhs.node));
-                break;
-            case DFGOp::SHR:
-                expr = std::format("{}.shr({}.lowU64(), false)",
-                                   nodeValue(node->binaryInputs().lhs.node),
-                                   nodeValue(node->binaryInputs().rhs.node));
-                break;
-            case DFGOp::ASR:
-                expr = std::format("{}.shr({}.lowU64(), true)",
-                                   nodeValue(node->binaryInputs().lhs.node),
-                                   nodeValue(node->binaryInputs().rhs.node));
-                break;
-
-            case DFGOp::MUX: {
-                expr = "[&]() -> mate::SimValue {\n";
-                expr += std::format("        const int64_t selector = static_cast<int64_t>({}.lowU64());\n",
-                                    nodeValue(node->muxSelector().node));
-                expr += "        switch (selector) {\n";
-                for (size_t i = 0; i < node->muxArmCount(); ++i) {
-                    expr += std::format("            case {}: return {};\n",
-                                        node->muxArmValue(i),
-                                        nodeValue(node->muxArmData(i).node));
-                }
-                expr += "            default: throw std::runtime_error(\"Mate native model: MUX selector has no matching arm\");\n";
-                expr += "        }\n";
-                expr += "    }()";
-                break;
-            }
-
-            case DFGOp::UNARY_NEGATE:
-                expr = std::format("{}.negated()", nodeValue(node->unaryInputs().operand.node));
-                break;
-            case DFGOp::BITWISE_NOT:
-                expr = std::format("{}.bitwiseNot()", nodeValue(node->unaryInputs().operand.node));
-                break;
-            case DFGOp::BITWISE_AND:
-                expr = binaryExpr(node, "bitwiseAnd");
-                break;
-            case DFGOp::BITWISE_OR:
-                expr = binaryExpr(node, "bitwiseOr");
-                break;
-            case DFGOp::BITWISE_XOR:
-                expr = binaryExpr(node, "bitwiseXor");
-                break;
-            case DFGOp::BITWISE_XNOR:
-                expr = binaryExpr(node, "bitwiseXnor");
-                break;
-            case DFGOp::REDUCTION_AND:
-                expr = std::format("boolValue({}.reductionAnd())",
-                                   nodeValue(node->unaryInputs().operand.node));
-                break;
-            case DFGOp::REDUCTION_NAND:
-                expr = std::format("boolValue(!{}.reductionAnd())",
-                                   nodeValue(node->unaryInputs().operand.node));
-                break;
-            case DFGOp::REDUCTION_OR:
-                expr = std::format("boolValue({}.reductionOr())",
-                                   nodeValue(node->unaryInputs().operand.node));
-                break;
-            case DFGOp::REDUCTION_NOR:
-                expr = std::format("boolValue(!{}.reductionOr())",
-                                   nodeValue(node->unaryInputs().operand.node));
-                break;
-            case DFGOp::REDUCTION_XOR:
-                expr = std::format("boolValue({}.reductionXor())",
-                                   nodeValue(node->unaryInputs().operand.node));
-                break;
-            case DFGOp::REDUCTION_XNOR:
-                expr = std::format("boolValue(!{}.reductionXor())",
-                                   nodeValue(node->unaryInputs().operand.node));
-                break;
-
-            case DFGOp::SLICE: {
-                auto slice = node->sliceInputs();
-                if (slice.high.node->kind() != DFGOp::CONST ||
-                    slice.low.node->kind() != DFGOp::CONST) {
-                    throw CompilerError(std::format(
-                        "mate-dpi-codegen: SLICE node '{}' has non-constant bounds",
-                        node->str()));
-                }
-                auto resolved = resolveSliceRange(*slice.source.node,
-                                                  slice.high.node->constValue(),
-                                                  slice.low.node->constValue());
-                expr = std::format("{}.slice({}, {})",
-                                   nodeValue(slice.source.node),
-                                   resolved.internal_high,
-                                   resolved.internal_low);
-                break;
-            }
-
-            case DFGOp::CONCAT: {
-                expr = "[&]() -> mate::SimValue {\n";
-                expr += "        std::vector<mate::SimValue> parts;\n";
-                expr += std::format("        parts.reserve({});\n", node->concatParts().size());
-                for (const auto& part : node->concatParts()) {
-                    expr += std::format("        parts.push_back({});\n", nodeValue(part.node));
-                }
-                expr += "        return mate::SimValue::concat(std::span<const mate::SimValue>(parts.data(), parts.size()));\n";
-                expr += "    }()";
-                break;
-            }
-
-            case DFGOp::INPUT:
-            case DFGOp::CONST:
-            case DFGOp::X:
-                throw CompilerError("mate-dpi-codegen: source node reached expression switch");
         }
-
-        out << "    " << var << " = " << maskExpr(expr, node) << ";\n";
-        value_expr[node] = var;
-
-        if (auto storage_index = storageIndexForObservable(
-                model, node, RuntimeObservableKind::Internal)) {
-            out << "    storage[" << *storage_index << "] = " << var << ";\n";
-        }
-        if (auto storage_index = storageIndexForObservable(
-                model, node, RuntimeObservableKind::FlopD)) {
-            out << "    storage[" << *storage_index << "] = " << var << ";\n";
-        }
-    }
 
         out << "}\n\n";
         chunk_texts[chunk_index] = out.str();
@@ -1694,10 +1734,10 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     // chunk-index ranges aren't good enough.
     std::vector<std::ostringstream> file_streams(std::max<size_t>(file_count, 1));
     for (auto& stream : file_streams) {
-        stream << "#include \"sim/sim_value.h\"\n";
+        stream << "#include \"abi/generated_model_metadata.h\"\n";
+        stream << "#include \"sim/fixed_value.h\"\n";
         stream << "#include <span>\n";
         stream << "#include <stdexcept>\n\n";
-        stream << "namespace {\n\n" << helpers_out.str() << "} // namespace\n\n";
     }
     std::vector<size_t> file_sizes(file_streams.size(), 0);
     std::vector<size_t> chunk_by_size(chunk_count);
@@ -1714,15 +1754,10 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
 
     std::ostringstream dispatcher_out;
     dispatcher_out << "namespace {\n\n";
-    dispatcher_out << helpers_out.str();
     dispatcher_out << "void evaluateCombinational(" << kChunkParams << ") {\n";
     for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
         dispatcher_out << "    " << chunkFnName(chunk_index)
-                       << "(inputs, outputs, storage, temporaries);\n";
-    }
-    for (const auto& output : model.metadata().output_leaves) {
-        dispatcher_out << "    outputs[" << output.id.value << "] = "
-                       << maskExpr(nodeValue(output.node), output.node) << ";\n";
+                       << "(inputs, outputs, storage, spills);\n";
     }
     dispatcher_out << "}\n\n";
     dispatcher_out << "} // namespace\n\n";
@@ -1730,7 +1765,7 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     NativeCombinationalCode result;
     result.chunk_declarations = declarations_out.str();
     result.dispatcher_text = dispatcher_out.str();
-    result.temporaries_count = order.size();
+    result.spill_nodes = std::move(spill_nodes);
     for (size_t i = 0; i < file_streams.size(); ++i) {
         result.chunk_files.push_back(NativeCombinationalChunkFile{i, file_streams[i].str()});
     }
@@ -1787,15 +1822,16 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
         const auto& reset_meta = rt.resets[reset_index];
         const std::string fn_name = std::format("applyResetDomain{}", reset_index);
         result.reset_apply_fn_names.push_back(fn_name);
-        out << "void " << fn_name << "(std::span<mate::SimValue> storage) {\n";
+        out << "void " << fn_name << "(std::span<mate::abi::NativeWordSlot> storage) {\n";
         auto flop_it = rt.flops_by_reset.find(reset_meta.domain_id);
         if (flop_it != rt.flops_by_reset.end()) {
             for (RuntimeFlopId flop_id : flop_it->second) {
                 const auto& flop = rt.flops.at(flop_id.value);
                 if (!flop.reset_value.has_value()) continue;
                 for (const auto& leaf : flop.leaves) {
-                    out << "    storage[" << flopQStorageIndex(leaf.q_node) << "] = "
-                        << simValueFromTypeExpr(flop.reset_value.value(), leaf.type) << ";\n";
+                    out << "    " << fixedValueFromTypeExpr(flop.reset_value.value(), leaf.type)
+                        << ".copyToWords(storage[" << flopQStorageIndex(leaf.q_node)
+                        << "].words, storage[" << flopQStorageIndex(leaf.q_node) << "].nwords);\n";
                 }
             }
         }
@@ -1807,7 +1843,7 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
         const std::string fn_name = std::format("applyClockDomain{}", clock_index);
         result.clock_commit_fn_names.push_back(fn_name);
         out << "void " << fn_name
-            << "(std::span<const mate::SimValue> inputs, std::span<mate::SimValue> storage) {\n";
+            << "(std::span<const mate::abi::NativeWordSlot> inputs, std::span<mate::abi::NativeWordSlot> storage) {\n";
         auto flop_it = rt.flops_by_clock.find(clock_meta.domain_id);
         if (flop_it != rt.flops_by_clock.end()) {
             for (RuntimeFlopId flop_id : flop_it->second) {
@@ -1817,7 +1853,8 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
                     const auto& reset_meta = resetMetadataForDomain(reset_id);
                     const bool active_level_is_one = (reset_meta.active_edge == POSEDGE);
                     const std::string term = std::format(
-                        "((inputs[{}].lowU64() != 0) == {})",
+                        "(((inputs[{}].nwords > 0 && (inputs[{}].words[0] & 1ULL) != 0)) == {})",
+                        reset_meta.source_input.value,
                         reset_meta.source_input.value,
                         active_level_is_one ? "true" : "false");
                     guard_expr += guard_expr.empty() ? term : (" || " + term);
@@ -1826,8 +1863,11 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
                 if (!guard_expr.empty()) out << "if (!(" << guard_expr << ")) ";
                 out << "{\n";
                 for (const auto& leaf : flop.leaves) {
-                    out << "        storage[" << flopQStorageIndex(leaf.q_node) << "] = storage["
-                        << flopDStorageIndex(leaf.d_node) << "];\n";
+                    out << "        mate::wordops::copyBits(storage[" << flopQStorageIndex(leaf.q_node)
+                        << "].words, storage[" << flopQStorageIndex(leaf.q_node) << "].nwords, "
+                        << leaf.type.width << ", 0, storage[" << flopDStorageIndex(leaf.d_node)
+                        << "].words, storage[" << flopDStorageIndex(leaf.d_node) << "].nwords, "
+                        << leaf.type.width << ", 0, " << leaf.type.width << ");\n";
                 }
                 out << "    }\n";
             }
@@ -1839,29 +1879,35 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
     // MateIRRuntime::initFlops (src/sim/runtime.cpp).
     result.flops_init_fn_name = "initFlops";
     out << "void " << result.flops_init_fn_name
-        << "(std::span<mate::SimValue> storage, MateFlopsInitial mode, std::mt19937_64& rng) {\n";
+        << "(std::span<mate::abi::NativeWordSlot> storage, MateFlopsInitial mode, std::mt19937_64& rng) {\n";
     out << "    switch (mode) {\n";
     out << "        case MATE_FLOPS_INITIAL_RANDOM:\n";
     for (const auto& flop : rt.flops) {
         for (const auto& leaf : flop.leaves) {
-            out << "            storage[" << flopQStorageIndex(leaf.q_node) << "] = mate::SimValue::random("
-                << leaf.type.width << ", " << boolLiteral(leaf.type.isSigned()) << ", rng);\n";
+            out << "            for (int32_t i = 0; i < storage[" << flopQStorageIndex(leaf.q_node)
+                << "].nwords; ++i) storage[" << flopQStorageIndex(leaf.q_node)
+                << "].words[i] = rng();\n";
+            out << "            mate::wordops::maskTopWord(storage[" << flopQStorageIndex(leaf.q_node)
+                << "].words, static_cast<size_t>(storage[" << flopQStorageIndex(leaf.q_node)
+                << "].nwords), " << leaf.type.width << ");\n";
         }
     }
     out << "            break;\n";
     out << "        case MATE_FLOPS_INITIAL_ZERO:\n";
     for (const auto& flop : rt.flops) {
         for (const auto& leaf : flop.leaves) {
-            out << "            storage[" << flopQStorageIndex(leaf.q_node) << "] = mate::SimValue::zero("
-                << leaf.type.width << ", " << boolLiteral(leaf.type.isSigned()) << ");\n";
+            out << "            mate::wordops::clear(storage[" << flopQStorageIndex(leaf.q_node)
+                << "].words, static_cast<size_t>(storage[" << flopQStorageIndex(leaf.q_node)
+                << "].nwords));\n";
         }
     }
     out << "            break;\n";
     out << "        case MATE_FLOPS_INITIAL_ONE:\n";
     for (const auto& flop : rt.flops) {
         for (const auto& leaf : flop.leaves) {
-            out << "            storage[" << flopQStorageIndex(leaf.q_node) << "] = mate::SimValue::ones("
-                << leaf.type.width << ", " << boolLiteral(leaf.type.isSigned()) << ");\n";
+            out << "            mate::wordops::fillOnes(storage[" << flopQStorageIndex(leaf.q_node)
+                << "].words, static_cast<size_t>(storage[" << flopQStorageIndex(leaf.q_node)
+                << "].nwords), " << leaf.type.width << ");\n";
         }
     }
     out << "            break;\n";
@@ -1881,6 +1927,8 @@ struct NativeModelCode {
 NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
     out << "#include \"abi/abi_native.h\"\n\n";
+    out << "#include \"sim/fixed_value.h\"\n";
+    out << "#include \"sim/word_ops.h\"\n\n";
     out << "#include <random>\n";
     out << "#include <span>\n";
     out << "#include <stdexcept>\n";
@@ -1952,8 +2000,19 @@ NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeMode
             << (observable.type.isSigned() ? "true" : "false") << "},\n";
     }
     out << "    };\n";
+    out << "    metadata.spill_storage = {\n";
+    for (size_t i = 0; i < native_code.spill_nodes.size(); ++i) {
+        const DFGNode* node = native_code.spill_nodes[i];
+        const auto& type = *node->type;
+        out << "        mate::abi::GeneratedStorageMetadata{"
+            << "mate::abi::GeneratedStorageKind::Temporary, "
+            << cppString(std::format("__spill_{}", i)) << ", "
+            << cppString(std::format("__spill_{}", i)) << ", "
+            << type.width << ", "
+            << (type.isSigned() ? "true" : "false") << "},\n";
+    }
+    out << "    };\n";
     out << "    metadata.evaluate_combinational = &evaluateCombinational;\n";
-    out << "    metadata.temporaries_count = " << native_code.temporaries_count << ";\n";
     out << "    metadata.reset_apply = {";
     for (size_t i = 0; i < flop_commit_code.reset_apply_fn_names.size(); ++i) {
         if (i) out << ", ";

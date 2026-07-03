@@ -7,7 +7,7 @@ Canonical builds:
 - `make dev`
 - `make sanitized`
 - `make debug`
-- `make regression`
+- `python tests/regression.py`
 
 Important:
 - regression expects `build/sanitized/mate`

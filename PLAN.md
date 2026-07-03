@@ -160,9 +160,9 @@ Current architecture:
   `libmate-systemverilog-frontend.a`, `libmate-rtl-runtime.a`,
   `libmate-mateir.a`, `yaml-cpp`, and slang are gone from the DPI simulation
   link entirely (verified via the generated `Vtb.mk`'s link line, not just by
-  inspecting the Makefile template). `mate-dpi-codegen` (the offline codegen
-  tool) is unaffected and still links the full frontend/slang to compile SV
-  and produce `<module>_model.cpp`/metadata in the first place — that's a
+  inspecting the Makefile template). The codegen step itself (`mate --dpi-lib`,
+  see below) is unaffected and still links the full frontend/slang to compile
+  SV and produce `<module>_model.cpp`/metadata in the first place — that's a
   build-time tool dependency, not a simulation-time one.
 
 Last clean validation for Phase 2E:
@@ -179,6 +179,59 @@ Last clean validation for Phase 2E:
   `138/138 passed` under `make regression` (`tests/regression_tests.txt`
   currently excludes `ibex_core` for run-time reasons; verified separately
   above). Passed on the first attempt with the reduced link.
+
+## Post-2E: `mate --dpi-lib` — Compiled-Library Packaging
+
+Phase 2E made the DPI simulation link frontend/slang-free, but the consuming
+simulator (Verilator) still compiled `<module>_dpi.cpp`/`<module>_model.cpp`
+itself, which meant any SV simulator wanting to integrate a generated model
+needed to know mate's own include paths, C++ standard, and which of mate's
+static libraries to link. The actual integration boundary for "any simulator
+wanting to use mate" should be: hand over SV wrapper files, get back one
+compiled library, done.
+
+What changed:
+
+- The former standalone `tools/mate-dpi-codegen` binary is gone. Its codegen
+  logic moved into `src/dpi_codegen/dpi_codegen.{h,cpp}` (function
+  `generateDpiCodegen`) and is now a mode of the main `mate` binary:
+  `mate --dpi-lib --top <module> --domains <file> --output-dir <dir>
+  --module-name <name> --function-prefix <prefix> <source files...>`. This
+  reuses `mate`'s existing frontend compile (the same `mateir`/`RtlRuntimeModel`
+  already built for `--simulate`/`--analyze`) rather than compiling SV twice.
+- New: `mate --dpi-lib` also compiles the generated `<module>_dpi.cpp` and
+  `<top_module>_model.cpp` and combines their object files with the object
+  members of caller-specified static libraries (`--dpi-link-libs`, typically
+  `libmate-abi-native.a` + `libmate-sim-value.a`) into **one** self-contained
+  output static library (`--dpi-out-lib`), via `src/dpi_codegen/dpi_lib_link.{h,cpp}`
+  (`linkDpiLib`). Compilation and archiving are done by shelling out to
+  `$CXX`/`$AR` (`--cxx`/`--ar`, default `c++`/`ar`); library objects are
+  extracted into per-archive temp subdirectories (to avoid member-name
+  collisions across input libraries) before being folded into the final `ar
+  rcs` invocation.
+- `svdpi.h` comes from `external/slang/external/ieee1800/svdpi.h` — the
+  vendored IEEE 1800 LRM standard DPI header, not a Verilator-specific one —
+  so compiling the generated glue doesn't require any particular target
+  simulator's own headers.
+- `tests/common/verilator.mk` now calls `$(BUILD_DIR)/mate --dpi-lib ...`
+  instead of `$(BUILD_DIR)/mate-dpi-codegen ...`, and Verilator's build no
+  longer takes `$(GEN_CPP)`/`$(GEN_MODEL_CPP)` as extra sources or needs
+  `-CFLAGS` at all — it only adds the two generated `.sv` files to its SV
+  sources and links the one produced `$(DPI_LIB)` via `-LDFLAGS`.
+- Static library only, for now (per explicit decision) — a `.so` output
+  (closer to the `-sv_lib` dynamic-loading convention used by VCS/Xcelium/
+  Questa) is a natural follow-up once this path is validated further, but is
+  out of scope here.
+
+Validation: `arithmetic_ops` end-to-end via a manual `mate --dpi-lib` +
+`make simulate DPI=1` invocation (confirmed the produced `.a` has exactly the
+expected four object members: `dpi.o`, `model.o`, `abi_native.cpp.o`,
+`sim_value.cpp.o`, and that Verilator's own link line references only that
+one `.a`), then full regression: `126/126 passed` under
+`python tests/regression.py --mode verilator-dpi`, `138/138 passed` under
+`make regression`, and `ibex_core` separately at 100% DPI-vs-RTL match — now
+in **~2.3 minutes** end-to-end (down from ~5.4 minutes), since Verilator's own
+build no longer compiles the large generated `model.cpp` itself.
 
 ## Phase 2: Native Generated Model
 

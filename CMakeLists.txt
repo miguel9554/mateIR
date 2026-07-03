@@ -227,7 +227,7 @@ target_include_directories(mate-static-analysis PUBLIC ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(mate-static-analysis PUBLIC mate-mateir)
 mate_configure_project_target(mate-static-analysis)
 
-add_executable(mate src/main.cpp)
+add_executable(mate src/main.cpp src/dpi_codegen/dpi_codegen.cpp src/dpi_codegen/dpi_lib_link.cpp)
 target_include_directories(mate PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/mate-vector-simulator
@@ -236,6 +236,7 @@ target_link_libraries(mate PRIVATE
     mate-rtl-runtime-compiler
     mate-static-analysis
     mate-vector-simulator-lib
+    slang::slang
 )
 mate_configure_project_target(mate)
 
@@ -249,11 +250,6 @@ target_link_libraries(mate-vector-simulator PRIVATE
     mate-vector-simulator-lib
 )
 mate_configure_project_target(mate-vector-simulator)
-
-add_executable(mate-dpi-codegen tools/mate-dpi-codegen/main.cpp)
-target_include_directories(mate-dpi-codegen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mate-dpi-codegen PRIVATE mate-rtl-runtime-compiler slang::slang)
-mate_configure_project_target(mate-dpi-codegen)
 
 # Print build configuration
 message(STATUS "")

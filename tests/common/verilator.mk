@@ -38,19 +38,16 @@ DPI_BUILD_TARGET ?= dev
 DPI_GEN_DIR = $(RTL_GEN_DIR)
 GEN_SV_PKG  = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi_pkg.sv
 GEN_SV      = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi.sv
-GEN_CPP     = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi.cpp
-GEN_MODEL_CPP = $(DPI_GEN_DIR)/$(MODULE_NAME)_model.cpp
+DPI_LIB     = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi.a
 GEN_STAMP   = $(DPI_GEN_DIR)/.stamp
 
-MATE_LIBS = \
-	$(abspath $(BUILD_DIR)/libmate-abi-native.a) \
-	$(abspath $(BUILD_DIR)/libmate-sim-value.a) \
-	/usr/local/lib/libfmt.a
-
-MATE_CPPFLAGS = \
-	-std=c++20 \
-	-I$(abspath $(PROJECT_ROOT)/src) \
-	-I$(abspath $(PROJECT_ROOT)/external/slang/external/ieee1800)
+# mate --dpi-lib compiles the generated DPI glue/model into one self-contained
+# static library; Verilator only needs to link it, not compile any of our
+# C++ itself. These are the only two things that step needs to know about our
+# tree: where svdpi.h/our headers live, and which of our own static libraries
+# to fold into the output archive.
+DPI_INCLUDE_DIRS = $(abspath $(PROJECT_ROOT)/src),$(abspath $(PROJECT_ROOT)/external/slang/external/ieee1800)
+DPI_LINK_LIBS = $(abspath $(BUILD_DIR)/libmate-abi-native.a),$(abspath $(BUILD_DIR)/libmate-sim-value.a)
 
 SRCS = $(RTL_SRCS) $(TB_SRCS) $(GEN_SRCS) $(GEN_SV_PKG) $(GEN_SV)
 
@@ -66,31 +63,32 @@ prep: force
 $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv: $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi $(MODULE_NAME)
 
-$(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate-dpi-codegen | prep
+$(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate | prep
 	mkdir -p $(DPI_GEN_DIR)
-	$(BUILD_DIR)/mate-dpi-codegen \
+	$(BUILD_DIR)/mate \
+		--dpi-lib \
 		--top $(MODULE_NAME) \
 		--domains $(DOMAINS_YAML) \
-		--out-dir $(DPI_GEN_DIR) \
+		--output-dir $(DPI_GEN_DIR) \
 		--module-name $(MODULE_NAME)_dpi \
 		--function-prefix mate_$(MODULE_NAME) \
+		--dpi-out-lib $(DPI_LIB) \
+		--dpi-include-dirs $(DPI_INCLUDE_DIRS) \
+		--dpi-link-libs $(DPI_LINK_LIBS) \
 		$(RTL_SRCS)
 	touch $(GEN_STAMP)
 
-$(GEN_SV_PKG) $(GEN_SV) $(GEN_CPP) $(GEN_MODEL_CPP): $(GEN_STAMP)
+$(GEN_SV_PKG) $(GEN_SV) $(DPI_LIB): $(GEN_STAMP)
 
-$(OUT): $(GEN_DIR)/tb.sv $(GEN_CPP) $(GEN_MODEL_CPP) $(MATE_LIBS) | prep
+$(OUT): $(GEN_DIR)/tb.sv $(DPI_LIB) | prep
 	rm -rf obj_dir
 	verilator --trace --timing --cc --exe --build --main \
 		$(VERILATOR_WARNS) \
 		--top-module $(TOP_MODULE) \
 		-I$(RTL_DIR) \
-		-CFLAGS '$(MATE_CPPFLAGS)' \
-		-LDFLAGS '$(MATE_LIBS)' \
+		-LDFLAGS '$(abspath $(DPI_LIB))' \
 		$(SRCS) \
-		$(DPI_TIME_C) \
-		$(GEN_CPP) \
-		$(GEN_MODEL_CPP)
+		$(DPI_TIME_C)
 
 clean:
 	rm -rf obj_dir $(WAVES) $(DPI_GEN_DIR)

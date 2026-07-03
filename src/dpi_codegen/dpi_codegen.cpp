@@ -1,7 +1,8 @@
-#include "frontends/systemverilog/systemverilog_frontend.h"
+#include "dpi_codegen/dpi_codegen.h"
+
 #include "frontends/systemverilog/passes/extractor.h"
 #include "mateir/module.h"
-#include "sim/runtime_compiler.h"
+#include "sim/runtime_model.h"
 #include "util/source_loc.h"
 
 #include "slang/syntax/SyntaxTree.h"
@@ -62,96 +63,11 @@ struct ModelPorts {
     std::vector<LeafIndex> sync_inputs;
 };
 
-struct Config {
-    std::string top_module;
-    std::vector<std::string> sources;
-    std::vector<std::string> domains;
-    std::map<std::string, int64_t> parameters;
-    std::filesystem::path out_dir;
-    std::string module_name;
-    std::string function_prefix;
-};
+using Config = DpiCodegenConfig;
 
 struct SvSurfaceFacts {
     std::map<std::string, std::string> port_type_names;
 };
-
-[[noreturn]] void usage(const char* prog) {
-    std::cerr
-        << "Usage: " << prog
-        << " --top <module> --domains <file> --out-dir <dir>"
-        << " --module-name <sv-module> --function-prefix <prefix>"
-        << " [--params K=V,K=V] <source1.v> [source2.v ...]\n";
-    std::exit(1);
-}
-
-std::vector<std::string> splitComma(const std::string& text) {
-    std::vector<std::string> result;
-    std::istringstream in(text);
-    std::string token;
-    while (std::getline(in, token, ',')) {
-        if (!token.empty()) result.push_back(token);
-    }
-    return result;
-}
-
-void parseParams(const std::string& text, std::map<std::string, int64_t>& out) {
-    for (const auto& entry : splitComma(text)) {
-        const auto eq = entry.find('=');
-        if (eq == std::string::npos || eq == 0 || eq + 1 == entry.size()) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: --params entry '{}' must be KEY=VALUE", entry));
-        }
-        out[entry.substr(0, eq)] = std::stoll(entry.substr(eq + 1));
-    }
-}
-
-Config parseArgs(int argc, char** argv) {
-    Config config;
-    std::string params;
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        auto needValue = [&](std::string_view option) -> std::string {
-            if (i + 1 >= argc) {
-                throw CompilerError(std::format(
-                    "mate-dpi-codegen: {} requires an argument", option));
-            }
-            return argv[++i];
-        };
-
-        if (arg == "--top") {
-            config.top_module = needValue(arg);
-        } else if (arg == "--domains") {
-            while (i + 1 < argc && argv[i + 1][0] != '-') {
-                std::string_view next(argv[i + 1]);
-                if (!next.ends_with(".yaml") && !next.ends_with(".yml")) break;
-                config.domains.push_back(argv[++i]);
-            }
-            if (config.domains.empty()) {
-                throw CompilerError("mate-dpi-codegen: --domains requires at least one YAML file");
-            }
-        } else if (arg == "--out-dir") {
-            config.out_dir = needValue(arg);
-        } else if (arg == "--module-name") {
-            config.module_name = needValue(arg);
-        } else if (arg == "--function-prefix") {
-            config.function_prefix = needValue(arg);
-        } else if (arg == "--params") {
-            params = needValue(arg);
-        } else if (!arg.empty() && arg[0] == '-') {
-            throw CompilerError(std::format("mate-dpi-codegen: unknown option '{}'", arg));
-        } else {
-            config.sources.push_back(arg);
-        }
-    }
-
-    if (!params.empty()) parseParams(params, config.parameters);
-    if (config.top_module.empty() || config.sources.empty() || config.domains.empty() ||
-        config.out_dir.empty() || config.module_name.empty() || config.function_prefix.empty()) {
-        usage(argv[0]);
-    }
-    return config;
-}
 
 std::string sanitizeIdentifier(std::string_view text) {
     std::string out;
@@ -1945,34 +1861,18 @@ void writeFile(const std::filesystem::path& path, const std::string& text) {
 
 } // namespace
 
-int main(int argc, char** argv) {
-    try {
-        Config config = parseArgs(argc, argv);
+namespace mate {
 
-        FrontendOptions options;
-        options.source_files = config.sources;
-        options.top_module = config.top_module;
-        options.domain_files = config.domains;
-        options.parameters = config.parameters;
-        options.top_domain_mode = TopDomainMode::Yaml;
+void generateDpiCodegen(const DpiCodegenConfig& config, const RtlRuntimeModel& model) {
+    SvSurfaceFacts sv_facts = collectSvSurfaceFacts(config);
+    ModelPorts ports = collectPorts(model, sv_facts);
 
-        SystemVerilogFrontend frontend;
-        RtlRuntimeModel model = compileRtlRuntimeModel(frontend, options);
-        SvSurfaceFacts sv_facts = collectSvSurfaceFacts(config);
-        ModelPorts ports = collectPorts(model, sv_facts);
-
-        std::filesystem::create_directories(config.out_dir);
-        writeFile(config.out_dir / (config.module_name + ".cpp"), makeCpp(config, ports, model));
-        writeFile(config.out_dir / (config.top_module + "_model.cpp"),
-                  makeNativeModelCpp(ports, model));
-        writeFile(config.out_dir / (config.module_name + "_pkg.sv"), makeSvPkg(config, ports, model));
-        writeFile(config.out_dir / (config.module_name + ".sv"), makeSv(config, ports, model));
-    } catch (const CompilerError& e) {
-        std::cerr << "ERROR: " << e.what() << "\n";
-        return 1;
-    } catch (const std::exception& e) {
-        std::cerr << "ERROR: " << e.what() << "\n";
-        return 1;
-    }
-    return 0;
+    std::filesystem::create_directories(config.out_dir);
+    writeFile(config.out_dir / (config.module_name + ".cpp"), makeCpp(config, ports, model));
+    writeFile(config.out_dir / (config.top_module + "_model.cpp"),
+              makeNativeModelCpp(ports, model));
+    writeFile(config.out_dir / (config.module_name + "_pkg.sv"), makeSvPkg(config, ports, model));
+    writeFile(config.out_dir / (config.module_name + ".sv"), makeSv(config, ports, model));
 }
+
+} // namespace mate

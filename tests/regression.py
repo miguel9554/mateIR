@@ -14,6 +14,7 @@ REPO_ROOT = TESTS_DIR.parent
 MANIFEST = TESTS_DIR / "regression_tests.txt"
 DFG_API_GUARD = TESTS_DIR / "check_dfg_api_surface.py"
 MODULE_NODE_API_GUARD = TESTS_DIR / "check_module_node_api_surface.py"
+FIXED_VALUE_DIFF_TEST = "mate-fixed-value-diff-test"
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -201,6 +202,18 @@ def ensure_simulator(build_target):
     return result.returncode == 0, output
 
 
+def run_fixed_value_diff_test(build_target):
+    """Run the FixedValue-vs-SimValue differential test binary."""
+    test_binary = REPO_ROOT / "build" / build_target / FIXED_VALUE_DIFF_TEST
+    result = subprocess.run(
+        [str(test_binary)],
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+    return result.returncode == 0, output
+
+
 def run_dfg_api_guard():
     """Run source-level API guard checks before build/test."""
     result = subprocess.run(
@@ -344,6 +357,13 @@ def main():
     ok, output = ensure_simulator(args.build)
     if not ok:
         print(f"{RED}Failed to build simulator{RESET}")
+        print(output)
+        sys.exit(1)
+
+    print("Running FixedValue differential test...", flush=True)
+    ok, output = run_fixed_value_diff_test(args.build)
+    if not ok:
+        print(f"{RED}FixedValue differential test failed{RESET}")
         print(output)
         sys.exit(1)
 

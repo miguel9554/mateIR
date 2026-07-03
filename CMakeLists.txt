@@ -255,6 +255,11 @@ target_link_libraries(mate-vector-simulator PRIVATE
 )
 mate_configure_project_target(mate-vector-simulator)
 
+add_executable(mate-fixed-value-diff-test tests/unit/fixed_value_diff_test.cpp)
+target_include_directories(mate-fixed-value-diff-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-fixed-value-diff-test PRIVATE mate-sim-value)
+mate_configure_project_target(mate-fixed-value-diff-test)
+
 # Print build configuration
 message(STATUS "")
 message(STATUS "Mate Configuration:")

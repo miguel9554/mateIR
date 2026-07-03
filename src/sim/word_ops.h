@@ -8,7 +8,7 @@
 
 namespace mate::wordops {
 
-inline size_t wordCount(int width) {
+constexpr size_t wordCount(int width) {
     return width <= 0 ? 0 : static_cast<size_t>((width + 63) / 64);
 }
 

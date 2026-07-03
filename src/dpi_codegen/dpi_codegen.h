@@ -24,6 +24,17 @@ struct DpiCodegenConfig {
     std::string function_prefix;
 };
 
-void generateDpiCodegen(const DpiCodegenConfig& config, const RtlRuntimeModel& model);
+struct DpiCodegenOutput {
+    // <module_name>.cpp: stable DPI glue, talks only to abi/mate_model_abi.h.
+    std::filesystem::path dpi_cpp;
+    // <top_module>_model.cpp plus, for large designs, one or more
+    // <top_module>_model_chunk_N.cpp sibling files so the combinational
+    // evaluator's independent chunk functions can be compiled as separate
+    // translation units in parallel (see src/dpi_codegen/dpi_lib_link.h).
+    // All of these must be compiled and archived together.
+    std::vector<std::filesystem::path> model_cpps;
+};
+
+DpiCodegenOutput generateDpiCodegen(const DpiCodegenConfig& config, const RtlRuntimeModel& model);
 
 } // namespace mate

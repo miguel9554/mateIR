@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <format>
+#include <future>
 #include <vector>
 
 namespace {
@@ -87,14 +88,28 @@ std::vector<std::filesystem::path> extractArchiveObjects(
 namespace mate {
 
 void linkDpiLib(const DpiLibLinkConfig& config) {
-    const std::filesystem::path dpi_source = config.out_dir / (config.module_name + ".cpp");
-    const std::filesystem::path model_source = config.out_dir / (config.top_module + "_model.cpp");
+    if (config.sources.empty()) {
+        throw CompilerError("mate --dpi-lib: no source files to compile");
+    }
 
+    // Every source is an independent translation unit (that's the whole
+    // point of splitting the generated combinational evaluator across
+    // multiple files), so compile them concurrently rather than one process
+    // at a time.
+    std::vector<std::future<std::filesystem::path>> pending;
+    pending.reserve(config.sources.size());
+    for (const auto& source : config.sources) {
+        pending.push_back(std::async(std::launch::async, compileToObject, std::cref(config),
+                                     std::cref(source)));
+    }
     std::vector<std::filesystem::path> objects;
-    objects.push_back(compileToObject(config, dpi_source));
-    objects.push_back(compileToObject(config, model_source));
+    objects.reserve(pending.size());
+    for (auto& future : pending) {
+        objects.push_back(future.get());
+    }
 
-    const std::filesystem::path extract_root = config.out_dir / ".mate_dpi_lib_tmp";
+    const std::filesystem::path extract_root =
+        config.out_lib.parent_path() / ".mate_dpi_lib_tmp";
     std::filesystem::remove_all(extract_root);
     for (size_t i = 0; i < config.link_libs.size(); ++i) {
         auto extracted = extractArchiveObjects(config, config.link_libs[i], extract_root, i);

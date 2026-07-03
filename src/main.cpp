@@ -368,13 +368,14 @@ int main(int argc, char** argv) {
             dpiConfig.out_dir = outputDir;
             dpiConfig.module_name = moduleName;
             dpiConfig.function_prefix = functionPrefix;
-            generateDpiCodegen(dpiConfig, runtimeModel);
+            DpiCodegenOutput codegenOutput = generateDpiCodegen(dpiConfig, runtimeModel);
 
             std::cout << "Compiling into " << dpiOutLibStr << "...\n";
             DpiLibLinkConfig linkConfig;
-            linkConfig.out_dir = outputDir;
-            linkConfig.module_name = moduleName;
-            linkConfig.top_module = topModule;
+            linkConfig.sources.push_back(codegenOutput.dpi_cpp);
+            linkConfig.sources.insert(linkConfig.sources.end(),
+                                      codegenOutput.model_cpps.begin(),
+                                      codegenOutput.model_cpps.end());
             linkConfig.out_lib = dpiOutLibStr;
             linkConfig.cxx = cxxPath;
             linkConfig.ar = arPath;

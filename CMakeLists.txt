@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 project(Mate VERSION 0.1.0 LANGUAGES CXX)
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # Set C++20 standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -237,6 +240,7 @@ target_link_libraries(mate PRIVATE
     mate-static-analysis
     mate-vector-simulator-lib
     slang::slang
+    Threads::Threads
 )
 mate_configure_project_target(mate)
 

@@ -233,6 +233,53 @@ one `.a`), then full regression: `126/126 passed` under
 in **~2.3 minutes** end-to-end (down from ~5.4 minutes), since Verilator's own
 build no longer compiles the large generated `model.cpp` itself.
 
+### Follow-up: parallel chunk-file compilation
+
+`mate --dpi-lib` doing the compile itself (instead of leaving it to
+Verilator's own single-invocation build) opened up a further win: the
+combinational evaluator's `evaluateCombinationalChunkN` functions
+(`kCombinationalChunkSize` = 50 nodes/function, see Phase 2C) are
+independent — but they were all still emitted into one `<top_module>_model.cpp`
+translation unit, so one `c++ -c` process compiled all of them sequentially on
+one core regardless of that independence.
+
+`makeNativeCombinationalCpp` (`src/dpi_codegen/dpi_codegen.cpp`) now splits
+the chunk functions across `nativeCombinationalFileCount(chunk_count)`
+sibling files, `<top_module>_model_chunk_N.cpp`, targeting
+`2 * std::thread::hardware_concurrency()` files (capped at `chunk_count` so
+small designs don't get more files than functions):
+
+- Each chunk file gets its own private copy of the small
+  `nodeWidth`/`maskToWidth`/`boolValue`/`widenForArithmetic`/`useSignedCompare`
+  helpers (in an anonymous namespace — internal linkage, no ODR conflict
+  across files), and defines its subset of `evaluateCombinationalChunkN` at
+  **external** linkage (not anonymous-namespace) so the dispatcher in the main
+  `<top_module>_model.cpp` can call them across translation units.
+- The main `<top_module>_model.cpp` gets `extern` prototypes for every chunk
+  function plus the small `evaluateCombinational()` dispatcher (still
+  anonymous-namespace, still same-TU as `mate_model_create` so `&evaluateCombinational`
+  resolves) — it also needs its own copy of the helpers, since the
+  dispatcher's final output-write statements call `maskToWidth` directly.
+- `DpiCodegenOutput::model_cpps` now carries the full list of generated model
+  translation units (main + all chunk files); `DpiLibLinkConfig::sources`
+  takes that full list instead of deriving two hardcoded paths from
+  `module_name`/`top_module`.
+- `dpi_lib_link.cpp`'s `linkDpiLib` compiles every source concurrently via
+  `std::async(std::launch::async, ...)` per file rather than sequentially,
+  then archives all resulting objects (plus the extracted `mate-abi-native`/
+  `mate-sim-value` members) into the same single output `.a` as before —
+  the caller-facing contract (`mate --dpi-lib` in, one `.a` out) is unchanged.
+  Needs `Threads::Threads` linked into `mate` (added to `CMakeLists.txt`).
+
+Validation: `arithmetic_ops` manual run confirmed 4 chunk files (on the local
+14-core dev machine, `2*nproc` capped by actual chunk count) plus
+`dpi.o`/`model.o`/`abi_native.cpp.o`/`sim_value.cpp.o` in the final archive,
+and 100% DPI-vs-RTL match. Full regression: `126/126` under `--mode verilator-dpi`,
+`138/138` under `make regression`. `ibex_core` (30 generated `.cpp` files: 28
+chunk files + dpi.cpp + model.cpp) end-to-end in **~1m41s**, down from ~2.3
+minutes before parallel compilation and ~5.4 minutes before `mate --dpi-lib`
+existed at all.
+
 ## Phase 2: Native Generated Model
 
 Replace `<module>_model.cpp` with native generated code implementing the same ABI.

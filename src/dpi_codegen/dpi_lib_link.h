@@ -12,9 +12,10 @@
 namespace mate {
 
 struct DpiLibLinkConfig {
-    std::filesystem::path out_dir;
-    std::string module_name;  // <module_name>.cpp
-    std::string top_module;   // <top_module>_model.cpp
+    // Every .cpp file to compile into out_lib (DPI glue + model + any
+    // per-chunk translation units). Compiled concurrently, one compiler
+    // process per file, since they're independent translation units.
+    std::vector<std::filesystem::path> sources;
     std::filesystem::path out_lib;
     std::vector<std::filesystem::path> include_dirs;
     // Static libraries whose object members get folded into out_lib

@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <span>
+#include <thread>
 #include <vector>
 
 using namespace mate;
@@ -1277,8 +1278,27 @@ int generatedResetIdForDomain(const RtlRuntimeModel& model, ResetId domain) {
     return -1;
 }
 
-struct NativeCombinationalCode {
+// One per output translation unit holding a subset of the design's
+// evaluateCombinationalChunkN functions, so they can be compiled by separate
+// compiler processes in parallel (see dpi_lib_link.h). `file_index` becomes
+// part of the generated file name.
+struct NativeCombinationalChunkFile {
+    size_t file_index = 0;
     std::string cpp_text;
+};
+
+struct NativeCombinationalCode {
+    // Self-contained translation units, each holding a subset of the
+    // evaluateCombinationalChunkN function bodies (external linkage, so the
+    // dispatcher below can call them across files).
+    std::vector<NativeCombinationalChunkFile> chunk_files;
+    // extern prototypes for every evaluateCombinationalChunkN, to embed in
+    // the main model.cpp so the dispatcher can call them.
+    std::string chunk_declarations;
+    // The small evaluateCombinational() dispatcher (anonymous namespace,
+    // including its own copy of the maskToWidth/etc. helpers it needs for
+    // the final output-write statements) to embed in the main model.cpp.
+    std::string dispatcher_text;
     size_t temporaries_count = 0;
 };
 
@@ -1288,12 +1308,23 @@ struct NativeCombinationalCode {
 // C++ compiler register allocation and instruction scheduling blow up.
 constexpr size_t kCombinationalChunkSize = 50;
 
+// Chunk *functions* (kCombinationalChunkSize above) bound per-function
+// compiler blowup; chunk *files* bound wall-clock compile time by letting
+// independent functions compile on separate cores. Aim for roughly twice the
+// available hardware threads: enough to keep every core fed even when a few
+// files finish early, without so many tiny files that process-spawn overhead
+// dominates.
+size_t nativeCombinationalFileCount(size_t chunk_count) {
+    if (chunk_count == 0) return 0;
+    const size_t hardware_threads = std::max<size_t>(1, std::thread::hardware_concurrency());
+    return std::max<size_t>(1, std::min(chunk_count, hardware_threads * 2));
+}
+
 NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
     if (!model.top().dfg) {
         throw CompilerError("mate-dpi-codegen: top module has no DFG");
     }
 
-    std::ostringstream out;
     const auto order = topoOrder(*model.top().dfg);
     std::map<const DFGNode*, std::string> value_expr;
 
@@ -1336,29 +1367,29 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         return checkedType(lhs).isSigned() && checkedType(rhs).isSigned();
     };
 
-    out << "namespace {\n\n";
-    out << "int nodeWidth(int width) {\n";
-    out << "    if (width <= 0) {\n";
-    out << "        throw std::runtime_error(\"Mate native model: unresolved node width\");\n";
-    out << "    }\n";
-    out << "    return width;\n";
-    out << "}\n\n";
-    out << "mate::SimValue maskToWidth(const mate::SimValue& value, int width, bool is_signed) {\n";
-    out << "    return value.resized(width, is_signed);\n";
-    out << "}\n\n";
-    out << "mate::SimValue boolValue(bool value) {\n";
-    out << "    return mate::SimValue::fromU64(value ? 1 : 0, 1, false);\n";
-    out << "}\n\n";
-    out << "mate::SimValue widenForArithmetic(const mate::SimValue& value,\n";
-    out << "                                      bool operand_signed,\n";
-    out << "                                      bool other_signed,\n";
-    out << "                                      int result_width) {\n";
-    out << "    const bool is_signed = operand_signed && other_signed;\n";
-    out << "    return value.resized(nodeWidth(result_width), is_signed);\n";
-    out << "}\n\n";
-    out << "bool useSignedCompare(bool lhs_signed, bool rhs_signed) {\n";
-    out << "    return lhs_signed && rhs_signed;\n";
-    out << "}\n\n";
+    std::ostringstream helpers_out;
+    helpers_out << "int nodeWidth(int width) {\n";
+    helpers_out << "    if (width <= 0) {\n";
+    helpers_out << "        throw std::runtime_error(\"Mate native model: unresolved node width\");\n";
+    helpers_out << "    }\n";
+    helpers_out << "    return width;\n";
+    helpers_out << "}\n\n";
+    helpers_out << "mate::SimValue maskToWidth(const mate::SimValue& value, int width, bool is_signed) {\n";
+    helpers_out << "    return value.resized(width, is_signed);\n";
+    helpers_out << "}\n\n";
+    helpers_out << "mate::SimValue boolValue(bool value) {\n";
+    helpers_out << "    return mate::SimValue::fromU64(value ? 1 : 0, 1, false);\n";
+    helpers_out << "}\n\n";
+    helpers_out << "mate::SimValue widenForArithmetic(const mate::SimValue& value,\n";
+    helpers_out << "                                      bool operand_signed,\n";
+    helpers_out << "                                      bool other_signed,\n";
+    helpers_out << "                                      int result_width) {\n";
+    helpers_out << "    const bool is_signed = operand_signed && other_signed;\n";
+    helpers_out << "    return value.resized(nodeWidth(result_width), is_signed);\n";
+    helpers_out << "}\n\n";
+    helpers_out << "bool useSignedCompare(bool lhs_signed, bool rhs_signed) {\n";
+    helpers_out << "    return lhs_signed && rhs_signed;\n";
+    helpers_out << "}\n\n";
 
     constexpr std::string_view kChunkParams =
         "std::span<const mate::SimValue> inputs,\n"
@@ -1372,10 +1403,23 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         return std::format("evaluateCombinationalChunk{}", chunk_index);
     };
 
+    const size_t file_count = nativeCombinationalFileCount(chunk_count);
+    std::vector<std::ostringstream> file_streams(std::max<size_t>(file_count, 1));
+    for (auto& stream : file_streams) {
+        stream << "#include \"sim/sim_value.h\"\n";
+        stream << "#include <span>\n";
+        stream << "#include <stdexcept>\n\n";
+        stream << "namespace {\n\n" << helpers_out.str() << "} // namespace\n\n";
+    }
+    std::ostringstream declarations_out;
+
     for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
         const size_t begin = chunk_index * kCombinationalChunkSize;
         const size_t end = std::min(begin + kCombinationalChunkSize, order.size());
+        const size_t file_index = (chunk_index * file_count) / chunk_count;
+        std::ostringstream& out = file_streams[file_index];
 
+        declarations_out << "extern void " << chunkFnName(chunk_index) << "(" << kChunkParams << ");\n";
         out << "void " << chunkFnName(chunk_index) << "(" << kChunkParams << ") {\n";
 
     for (size_t topo_index = begin; topo_index < end; ++topo_index) {
@@ -1608,18 +1652,29 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         out << "}\n\n";
     }
 
-    out << "void evaluateCombinational(" << kChunkParams << ") {\n";
+    std::ostringstream dispatcher_out;
+    dispatcher_out << "namespace {\n\n";
+    dispatcher_out << helpers_out.str();
+    dispatcher_out << "void evaluateCombinational(" << kChunkParams << ") {\n";
     for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
-        out << "    " << chunkFnName(chunk_index)
-            << "(inputs, outputs, storage, temporaries);\n";
+        dispatcher_out << "    " << chunkFnName(chunk_index)
+                       << "(inputs, outputs, storage, temporaries);\n";
     }
     for (const auto& output : model.metadata().output_leaves) {
-        out << "    outputs[" << output.id.value << "] = "
-            << maskExpr(nodeValue(output.node), output.node) << ";\n";
+        dispatcher_out << "    outputs[" << output.id.value << "] = "
+                       << maskExpr(nodeValue(output.node), output.node) << ";\n";
     }
-    out << "}\n\n";
-    out << "} // namespace\n\n";
-    return NativeCombinationalCode{out.str(), order.size()};
+    dispatcher_out << "}\n\n";
+    dispatcher_out << "} // namespace\n\n";
+
+    NativeCombinationalCode result;
+    result.chunk_declarations = declarations_out.str();
+    result.dispatcher_text = dispatcher_out.str();
+    result.temporaries_count = order.size();
+    for (size_t i = 0; i < file_streams.size(); ++i) {
+        result.chunk_files.push_back(NativeCombinationalChunkFile{i, file_streams[i].str()});
+    }
+    return result;
 }
 
 struct NativeFlopCommitCode {
@@ -1758,14 +1813,22 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
     return result;
 }
 
-std::string makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeModel& model) {
+struct NativeModelCode {
+    std::string main_cpp_text;
+    std::vector<NativeCombinationalChunkFile> chunk_files;
+};
+
+NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
     out << "#include \"abi/abi_native.h\"\n\n";
     out << "#include <random>\n";
+    out << "#include <span>\n";
     out << "#include <stdexcept>\n";
     out << "#include <vector>\n\n";
     const NativeCombinationalCode native_code = makeNativeCombinationalCpp(model);
-    out << native_code.cpp_text;
+    out << native_code.chunk_declarations;
+    out << "\n";
+    out << native_code.dispatcher_text;
     const NativeFlopCommitCode flop_commit_code = makeNativeFlopCommitCpp(model);
     out << flop_commit_code.cpp_text;
     out << "extern \"C\" MateStatusCode mate_model_create(const MateModel** out_model, MateStatus* status) {\n";
@@ -1847,7 +1910,7 @@ std::string makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeModel& m
     out << "\n";
     out << "    return mate::abi::createNativeModel(metadata, out_model, status);\n";
     out << "}\n";
-    return out.str();
+    return NativeModelCode{out.str(), native_code.chunk_files};
 }
 
 void writeFile(const std::filesystem::path& path, const std::string& text) {
@@ -1863,16 +1926,30 @@ void writeFile(const std::filesystem::path& path, const std::string& text) {
 
 namespace mate {
 
-void generateDpiCodegen(const DpiCodegenConfig& config, const RtlRuntimeModel& model) {
+DpiCodegenOutput generateDpiCodegen(const DpiCodegenConfig& config, const RtlRuntimeModel& model) {
     SvSurfaceFacts sv_facts = collectSvSurfaceFacts(config);
     ModelPorts ports = collectPorts(model, sv_facts);
 
     std::filesystem::create_directories(config.out_dir);
-    writeFile(config.out_dir / (config.module_name + ".cpp"), makeCpp(config, ports, model));
-    writeFile(config.out_dir / (config.top_module + "_model.cpp"),
-              makeNativeModelCpp(ports, model));
+
+    DpiCodegenOutput output;
+    output.dpi_cpp = config.out_dir / (config.module_name + ".cpp");
+    writeFile(output.dpi_cpp, makeCpp(config, ports, model));
+
+    const NativeModelCode native_model_code = makeNativeModelCpp(ports, model);
+    const std::filesystem::path model_cpp_path = config.out_dir / (config.top_module + "_model.cpp");
+    writeFile(model_cpp_path, native_model_code.main_cpp_text);
+    output.model_cpps.push_back(model_cpp_path);
+    for (const auto& chunk_file : native_model_code.chunk_files) {
+        const std::filesystem::path chunk_path = config.out_dir /
+            std::format("{}_model_chunk_{}.cpp", config.top_module, chunk_file.file_index);
+        writeFile(chunk_path, chunk_file.cpp_text);
+        output.model_cpps.push_back(chunk_path);
+    }
+
     writeFile(config.out_dir / (config.module_name + "_pkg.sv"), makeSvPkg(config, ports, model));
     writeFile(config.out_dir / (config.module_name + ".sv"), makeSv(config, ports, model));
+    return output;
 }
 
 } // namespace mate

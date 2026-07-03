@@ -310,15 +310,48 @@ straggler (~9s behind the rest) instead of one of many serialized stragglers
 finishing progressively later. Full `ibex_core` end-to-end: ~1m20s (down from
 ~1m41s). 126/126 regression still passing.
 
-**Remaining known limit (not fixed, flagged for whoever picks this up
-next):** a single oversized MUX/CONCAT node can still dominate one file's
-compile time, since chunking splits by *node count*, not by each node's own
-generated-code size. Fully closing that gap would mean also splitting a
-single node's generated switch statement across multiple sub-functions (e.g.
-an outer dispatcher over arm-value sub-ranges calling one of several
-per-range switch functions) — a more invasive change to the MUX/CONCAT
-codegen itself, not just the file-packing layer, and out of scope for this
-pass.
+**Follow-up fix — chunk *boundaries* (not just file assignment) are now
+cost-aware.** The previous fix only bin-packed already-formed chunk functions
+onto files by size; it couldn't touch what was *inside* one function. The
+94,444-line straggler was one `evaluateCombinationalChunkN` function that
+happened to contain ~23 sibling MUX nodes — all decoder outputs
+(`illegal_insn_dec`, `mult_en_dec`, `csr_access`, `pc_mux_o`, ... in
+`ibex_id_stage.sv`/`ibex_decoder.sv`) computed from the same 12-bit selector
+(`instr[31:20]`, the SYSTEM-opcode immediate/CSR-address field) — each
+expanding into a ~4096-case switch. They ended up in one function not by
+design but because the old chunking assigned a *fixed node count* (50) per
+function: since these sibling MUXes are mutually independent (none depends on
+another), a queue-based topological sort naturally emits them as one
+contiguous "ready layer," and a count-based window has no way to notice that
+50 *nodes* here means 90k+ *statements*.
+
+Fix: `makeNativeCombinationalCpp` no longer walks the topo order in fixed
+groups of 50 nodes. It accumulates a per-node `combinationalNodeCost` (a MUX
+costs `muxArmCount()` — one unit per generated `case` line — every other node
+costs 1) and closes the current chunk once accumulated cost reaches
+`kCombinationalChunkCostBudget` (kept at 50, unchanged from the old node-count
+budget, since ordinary nodes still cost 1 — only the unit of measurement
+changed, not the calibration). A single node whose own cost already meets or
+exceeds the budget gets a chunk entirely to itself instead of sharing one
+with whatever happens to be topologically adjacent. Chunk *count* is not
+decided up front — it's an emergent byproduct of the cost walk, independent
+of how many files/cores are available downstream (that remains the separate,
+`nproc`-scaled bin-packing decision from the fix above).
+
+Effect on `ibex_core`: chunk file sizes went from a 12Γ— spread (94,444 lines
+down to ~7,500) to a ~14% spread (15,130–17,262 lines across all 28 files) —
+the mega-MUX chunk is now tiny and bin-packs in like everything else instead
+of dominating. `mate --dpi-lib` codegen+compile step: ~33s β†’ ~26s. Full
+`ibex_core` end-to-end: ~1m20s β†’ ~1m12s. 126/126 passing under
+`--mode verilator-dpi`, 138/138 under `make regression`.
+
+Known remaining caveat: `cost = muxArmCount()` is linear, but actual compiler
+cost for very large single switches is plausibly superlinear (the same
+reason the original flat-function design didn't just take proportionally
+longer — it effectively never finished). If a single isolated mega-MUX chunk
+is ever observed to still dominate wall-clock on its own, the next lever is a
+convex cost function (e.g. `armCount^1.5`) rather than assuming linear holds
+indefinitely — not yet needed at the sizes observed so far.
 
 ## Phase 2: Native Generated Model
 

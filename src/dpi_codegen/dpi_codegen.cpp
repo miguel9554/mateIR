@@ -24,6 +24,7 @@
 #include <string_view>
 #include <span>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace mate;
@@ -1302,13 +1303,33 @@ struct NativeCombinationalCode {
     size_t temporaries_count = 0;
 };
 
-// Splitting the topo order into fixed-size chunks keeps each generated
+// Splitting the topo order into cost-bounded chunks keeps each generated
 // function's statement count bounded. A single flat function over a large
 // design's full node count (hundreds of thousands of statements/locals) makes
 // C++ compiler register allocation and instruction scheduling blow up.
-constexpr size_t kCombinationalChunkSize = 50;
+//
+// Chunk boundaries are chosen by accumulated *cost*, not raw node count: an
+// ordinary node costs 1 (one generated statement), but a MUX node's own
+// codegen emits one `case: return ...;` line per arm (see combinationalNodeCost
+// below), so a single MUX can be worth thousands of "cost-1" nodes despite
+// being one DFG node. Node-count-only chunking let a run of topologically
+// adjacent giant MUXes (e.g. several sibling decoder outputs computed from
+// the same selector) land in the same function purely by coincidence of
+// order, producing one 90k+ line outlier function no per-file parallelism
+// could subdivide. Accumulating cost instead means a single oversized node
+// can blow past the budget by itself and immediately close its own
+// (appropriately tiny) chunk, rather than sharing a function with 22 other
+// equally oversized siblings.
+constexpr size_t kCombinationalChunkCostBudget = 50;
 
-// Chunk *functions* (kCombinationalChunkSize above) bound per-function
+size_t combinationalNodeCost(const DFGNode* node) {
+    if (node->kind() == DFGOp::MUX) {
+        return std::max<size_t>(1, node->muxArmCount());
+    }
+    return 1;
+}
+
+// Chunk *functions* (kCombinationalChunkCostBudget above) bound per-function
 // compiler blowup; chunk *files* bound wall-clock compile time by letting
 // independent functions compile on separate cores. Aim for roughly twice the
 // available hardware threads: enough to keep every core fed even when a few
@@ -1397,30 +1418,45 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         "                           std::span<mate::SimValue> storage,\n"
         "                           std::span<mate::SimValue> temporaries";
 
-    const size_t chunk_count =
-        order.empty() ? 0 : (order.size() + kCombinationalChunkSize - 1) / kCombinationalChunkSize;
+    // Chunk boundaries: walk the topo order accumulating combinationalNodeCost,
+    // closing a chunk once accumulated cost reaches the budget. A single node
+    // whose own cost already meets or exceeds the budget (e.g. a wide MUX)
+    // gets a chunk of its own rather than sharing one with whatever else
+    // happens to be topologically adjacent.
+    std::vector<std::pair<size_t, size_t>> chunk_ranges;
+    {
+        size_t begin = 0;
+        size_t running_cost = 0;
+        for (size_t i = 0; i < order.size(); ++i) {
+            running_cost += combinationalNodeCost(order[i]);
+            if (running_cost >= kCombinationalChunkCostBudget) {
+                chunk_ranges.emplace_back(begin, i + 1);
+                begin = i + 1;
+                running_cost = 0;
+            }
+        }
+        if (begin < order.size()) {
+            chunk_ranges.emplace_back(begin, order.size());
+        }
+    }
+    const size_t chunk_count = chunk_ranges.size();
     auto chunkFnName = [](size_t chunk_index) {
         return std::format("evaluateCombinationalChunk{}", chunk_index);
     };
 
     const size_t file_count = nativeCombinationalFileCount(chunk_count);
-    // Chunk *functions* are node-count-bounded (kCombinationalChunkSize), not
-    // generated-code-size-bounded: a single node (e.g. a wide MUX) can expand
-    // into a switch with tens of thousands of cases, so two 50-node chunks
-    // can differ in compiled size by orders of magnitude. Generate each
-    // chunk's text into its own buffer first, then bin-pack by text size
-    // (largest-first onto the currently smallest file) rather than assigning
-    // contiguous chunk-index ranges — otherwise a run of adjacent oversized
-    // chunks (which cluster together since topologically-close nodes tend to
-    // come from the same RTL construct, e.g. a big mux tree) can all land in
-    // the same file and single-handedly dominate wall-clock compile time
-    // while every other file — and core — finishes early and sits idle.
+    // Chunk *files* still need their own size-based bin-packing on top of the
+    // cost-aware chunk boundaries above: even with cost-bounded chunks, wildly
+    // different chunk sizes can still coexist (a chunk holding one huge MUX vs.
+    // a chunk holding 50 trivial nodes), so generate each chunk's text into
+    // its own buffer first, then bin-pack by text size (largest-first onto
+    // the currently smallest file) rather than assigning contiguous
+    // chunk-index ranges to files.
     std::vector<std::string> chunk_texts(chunk_count);
     std::ostringstream declarations_out;
 
     for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
-        const size_t begin = chunk_index * kCombinationalChunkSize;
-        const size_t end = std::min(begin + kCombinationalChunkSize, order.size());
+        const auto [begin, end] = chunk_ranges[chunk_index];
         std::ostringstream out;
 
         declarations_out << "extern void " << chunkFnName(chunk_index) << "(" << kChunkParams << ");\n";

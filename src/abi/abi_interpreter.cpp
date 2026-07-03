@@ -1141,6 +1141,28 @@ MateStatusCode mate_set_input(MateInstance* instance,
     });
 }
 
+MateStatusCode mate_set_inputs(MateInstance* instance,
+                               const MateInputUpdate* updates,
+                               int32_t update_count,
+                               MateStatus* status) {
+    return guard(status, [&]() {
+        MateInstance& checked = checkedInstance(instance);
+        const std::vector<mate::RuntimeInputUpdate> runtime_updates =
+            convertAndStoreUpdates(checked, updates, update_count);
+        if (checked.model->evaluate_combinational) {
+            // Fully native: do not touch RtlRuntimeInstance here (see
+            // mate_set_input above).
+            checked.model->evaluate_combinational(checked.native_inputs, checked.native_outputs,
+                                                  checked.native_storage, checked.native_temporaries);
+            copyNativeOutputsToWordStorage(checked);
+            copyNativeObservablesToWordStorage(checked);
+            return;
+        }
+        checked.runtime->setInputValues(runtime_updates);
+        refreshNativeStorage(checked);
+    });
+}
+
 MateStatusCode mate_apply_clock(MateInstance* instance,
                                 int32_t clock_id,
                                 MateEdge edge,

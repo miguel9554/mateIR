@@ -8,6 +8,87 @@
 
 namespace mate {
 
+// Word storage for SimValue with inline capacity for one 64-bit word, so
+// values up to 64 bits wide (the overwhelmingly common case in generated
+// models) never touch the heap.
+class SimWords {
+public:
+    SimWords() = default;
+    explicit SimWords(size_t count) : size_(count) {
+        if (count > kInline) {
+            heap_ = new uint64_t[count]();
+        }
+    }
+    SimWords(const SimWords& other) { copyFrom(other); }
+    SimWords& operator=(const SimWords& other) {
+        if (this != &other) {
+            release();
+            copyFrom(other);
+        }
+        return *this;
+    }
+    SimWords(SimWords&& other) noexcept { moveFrom(other); }
+    SimWords& operator=(SimWords&& other) noexcept {
+        if (this != &other) {
+            release();
+            moveFrom(other);
+        }
+        return *this;
+    }
+    ~SimWords() { release(); }
+
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    uint64_t* data() { return heap_ ? heap_ : inline_; }
+    const uint64_t* data() const { return heap_ ? heap_ : inline_; }
+    uint64_t& operator[](size_t i) { return data()[i]; }
+    const uint64_t& operator[](size_t i) const { return data()[i]; }
+    uint64_t& back() { return data()[size_ - 1]; }
+    const uint64_t& back() const { return data()[size_ - 1]; }
+    uint64_t* begin() { return data(); }
+    uint64_t* end() { return data() + size_; }
+    const uint64_t* begin() const { return data(); }
+    const uint64_t* end() const { return data() + size_; }
+
+    bool operator==(const SimWords& other) const {
+        if (size_ != other.size_) return false;
+        const uint64_t* a = data();
+        const uint64_t* b = other.data();
+        for (size_t i = 0; i < size_; ++i) {
+            if (a[i] != b[i]) return false;
+        }
+        return true;
+    }
+
+private:
+    static constexpr size_t kInline = 1;
+    size_t size_ = 0;
+    uint64_t inline_[kInline] = {0};
+    uint64_t* heap_ = nullptr;
+
+    void copyFrom(const SimWords& other) {
+        size_ = other.size_;
+        if (size_ > kInline) {
+            heap_ = new uint64_t[size_];
+            for (size_t i = 0; i < size_; ++i) heap_[i] = other.heap_[i];
+        } else {
+            heap_ = nullptr;
+            for (size_t i = 0; i < kInline; ++i) inline_[i] = other.inline_[i];
+        }
+    }
+    void moveFrom(SimWords& other) {
+        size_ = other.size_;
+        heap_ = other.heap_;
+        for (size_t i = 0; i < kInline; ++i) inline_[i] = other.inline_[i];
+        other.heap_ = nullptr;
+        other.size_ = 0;
+    }
+    void release() {
+        delete[] heap_;
+        heap_ = nullptr;
+    }
+};
+
 class SimValue {
 public:
     SimValue() = default;
@@ -63,7 +144,7 @@ private:
     int width_ = 0;
     bool signed_ = false;
     bool aggregate_ = false;
-    std::vector<uint64_t> words_;
+    SimWords words_;
     std::vector<SimValue> elements_;
 
     explicit SimValue(int width, bool is_signed);

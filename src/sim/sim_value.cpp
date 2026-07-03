@@ -178,6 +178,11 @@ void SimValue::setBit(int bit, bool value) {
 }
 
 SimValue SimValue::resized(int width, bool is_signed) const {
+    if (width == width_) {
+        SimValue result = *this;
+        result.signed_ = is_signed;
+        return result;
+    }
     SimValue result(width, is_signed);
     int copied = std::min(width_, result.width_);
     result.copyBitsFrom(*this, 0, 0, copied);
@@ -239,6 +244,12 @@ SimValue SimValue::bitwiseNot() const {
 }
 
 SimValue SimValue::bitwiseAnd(const SimValue& rhs) const {
+    if (width_ == rhs.width_) {
+        SimValue result(width_, signed_ && rhs.signed_);
+        for (size_t i = 0; i < result.words_.size(); i++) result.words_[i] = words_[i] & rhs.words_[i];
+        result.maskTopWord();
+        return result;
+    }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, signed_);
     SimValue b = rhs.resized(width, rhs.signed_);
@@ -249,6 +260,12 @@ SimValue SimValue::bitwiseAnd(const SimValue& rhs) const {
 }
 
 SimValue SimValue::bitwiseOr(const SimValue& rhs) const {
+    if (width_ == rhs.width_) {
+        SimValue result(width_, signed_ && rhs.signed_);
+        for (size_t i = 0; i < result.words_.size(); i++) result.words_[i] = words_[i] | rhs.words_[i];
+        result.maskTopWord();
+        return result;
+    }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, signed_);
     SimValue b = rhs.resized(width, rhs.signed_);
@@ -259,6 +276,12 @@ SimValue SimValue::bitwiseOr(const SimValue& rhs) const {
 }
 
 SimValue SimValue::bitwiseXor(const SimValue& rhs) const {
+    if (width_ == rhs.width_) {
+        SimValue result(width_, signed_ && rhs.signed_);
+        for (size_t i = 0; i < result.words_.size(); i++) result.words_[i] = words_[i] ^ rhs.words_[i];
+        result.maskTopWord();
+        return result;
+    }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, signed_);
     SimValue b = rhs.resized(width, rhs.signed_);
@@ -276,6 +299,19 @@ SimValue SimValue::bitwiseXnor(const SimValue& rhs) const {
 }
 
 SimValue SimValue::add(const SimValue& rhs) const {
+    if (width_ == rhs.width_) {
+        SimValue result(width_, signed_ && rhs.signed_);
+        uint64_t carry = 0;
+        for (size_t i = 0; i < result.words_.size(); i++) {
+            uint64_t sum = words_[i] + carry;
+            carry = sum < words_[i] ? 1 : 0;
+            uint64_t sum2 = sum + rhs.words_[i];
+            if (sum2 < sum) carry++;
+            result.words_[i] = sum2;
+        }
+        result.maskTopWord();
+        return result;
+    }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, signed_);
     SimValue b = rhs.resized(width, rhs.signed_);
@@ -313,11 +349,18 @@ SimValue SimValue::mul(const SimValue& rhs) const {
 }
 
 bool SimValue::eq(const SimValue& rhs) const {
+    if (width_ == rhs.width_) return words_ == rhs.words_;
     int width = std::max(width_, rhs.width_);
     return resized(width, signed_).words_ == rhs.resized(width, rhs.signed_).words_;
 }
 
 bool SimValue::unsignedLt(const SimValue& rhs) const {
+    if (width_ == rhs.width_) {
+        for (size_t i = words_.size(); i > 0; i--) {
+            if (words_[i - 1] != rhs.words_[i - 1]) return words_[i - 1] < rhs.words_[i - 1];
+        }
+        return false;
+    }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, false);
     SimValue b = rhs.resized(width, false);
@@ -401,7 +444,18 @@ void SimValue::mulAddSmall(uint32_t mul, uint32_t add) {
 
 void SimValue::copyBitsFrom(const SimValue& src, int src_start, int dst_start, int count) {
     if (count <= 0) return;
-    for (int i = 0; i < count; i++) {
+    int i = 0;
+    if (src_start == 0 && dst_start == 0) {
+        // Word-aligned prefix: copy whole words, then fall back to the bit
+        // loop for the remainder. Callers pass freshly zeroed destinations,
+        // so whole-word copies within `count` are safe.
+        const int full_words = count / 64;
+        for (int w = 0; w < full_words; ++w) {
+            words_[static_cast<size_t>(w)] = src.words_[static_cast<size_t>(w)];
+        }
+        i = full_words * 64;
+    }
+    for (; i < count; i++) {
         setBit(dst_start + i, src.getBit(src_start + i));
     }
 }

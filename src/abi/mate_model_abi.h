@@ -95,6 +95,11 @@ MateStatusCode mate_set_input(MateInstance* instance,
                               const uint64_t* words,
                               int32_t nwords,
                               MateStatus* status);
+/* Applies all updates, then evaluates combinational logic once. */
+MateStatusCode mate_set_inputs(MateInstance* instance,
+                               const MateInputUpdate* updates,
+                               int32_t update_count,
+                               MateStatus* status);
 MateStatusCode mate_apply_clock(MateInstance* instance,
                                 int32_t clock_id,
                                 MateEdge edge,

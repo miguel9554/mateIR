@@ -795,6 +795,17 @@ MateStatusCode mate_set_input(MateInstance* instance,
     });
 }
 
+MateStatusCode mate_set_inputs(MateInstance* instance,
+                               const MateInputUpdate* updates,
+                               int32_t update_count,
+                               MateStatus* status) {
+    return guard(status, [&]() {
+        MateInstance& checked = checkedInstance(instance);
+        applyRawInputUpdates(checked, updates, update_count);
+        evaluateAndPublish(checked);
+    });
+}
+
 MateStatusCode mate_apply_clock(MateInstance* instance,
                                 int32_t clock_id,
                                 MateEdge edge,

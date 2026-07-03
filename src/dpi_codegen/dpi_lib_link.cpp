@@ -42,6 +42,7 @@ std::filesystem::path compileToObject(const mate::DpiLibLinkConfig& config,
     std::vector<std::string> args = {
         quoteShellArg(config.cxx),
         "-std=c++20",
+        "-O1",
         "-fPIC",
         "-c",
         quoteShellArg(source),

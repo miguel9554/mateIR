@@ -889,14 +889,9 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << " {\n";
     out << "        auto& context = checkedContext(context_handle);\n";
     out << "        MateStatus status{};\n";
-    for (LeafIndex index : data_inputs) {
-        const auto& input = inputLeaf(ports, index);
-        const std::string ident = leafIdentifier(input.leaf_name);
-        emitPackLeaf(input, ident);
-        out << "        check(mate_set_input(context.instance, context.inputs.at(kInput_" << ident
-            << "), words_" << ident << ".data(), static_cast<int32_t>(words_" << ident
-            << ".size()), &status), status, \"" << config.function_prefix << "_set_input_values\");\n";
-    }
+    emitUpdateArrayWithCount("input_updates", data_inputs);
+    out << "        check(mate_set_inputs(context.instance, input_updates, input_updates_count, &status), status, \""
+        << config.function_prefix << "_set_input_values\");\n";
     out << "        writeOutputs(context";
     for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";

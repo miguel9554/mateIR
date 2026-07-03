@@ -206,7 +206,6 @@ add_library(mate-abi-native STATIC ${ABI_NATIVE_SOURCES})
 target_include_directories(mate-abi-native PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(mate-abi-native PUBLIC mate-mateir)
 mate_configure_project_target(mate-abi-native)
 
 add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)

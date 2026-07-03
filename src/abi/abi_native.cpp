@@ -81,7 +81,7 @@ struct MateModel {
     std::vector<AbiStorageSlot> input_storage;
     std::vector<AbiStorageSlot> output_storage;
     std::vector<AbiStorageSlot> observable_storage;
-    std::vector<AbiStorageSlot> spill_storage;
+    size_t spill_words_count = 0;
     mate::abi::GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
     std::vector<mate::abi::GeneratedResetApplyFn> reset_apply;
     std::vector<mate::abi::GeneratedClockCommitFn> clock_commit;
@@ -93,11 +93,12 @@ struct MateInstance {
     std::vector<std::vector<uint64_t>> input_words;
     std::vector<std::vector<uint64_t>> output_words;
     std::vector<std::vector<uint64_t>> observable_words;
-    std::vector<std::vector<uint64_t>> spill_words;
+    // Contiguous cross-chunk scratch buffer; the generated code addresses it
+    // with compile-time offsets.
+    std::vector<uint64_t> spill_words;
     std::vector<NativeWordSlot> input_slots;
     std::vector<NativeWordSlot> output_slots;
     std::vector<NativeWordSlot> observable_slots;
-    std::vector<NativeWordSlot> spill_slots;
 };
 
 namespace {
@@ -259,7 +260,7 @@ std::vector<NativeWordSlot> makeWordSlots(std::vector<std::vector<uint64_t>>& st
 
 void evaluateAndPublish(MateInstance& instance) {
     instance.model->evaluate_combinational(instance.input_slots, instance.output_slots,
-                                           instance.observable_slots, instance.spill_slots);
+                                           instance.observable_slots, instance.spill_words);
 }
 
 // Mirrors MateIRRuntime::applyClockEdge (src/sim/runtime.cpp): drive the
@@ -310,7 +311,7 @@ void applyClockEdge(MateInstance& instance,
 
     if (active_edge) {
         instance.model->evaluate_combinational(instance.input_slots, instance.output_slots,
-                                               instance.observable_slots, instance.spill_slots);
+                                               instance.observable_slots, instance.spill_words);
         instance.model->clock_commit.at(clock_id)(instance.input_slots, instance.observable_slots);
     }
     evaluateAndPublish(instance);
@@ -499,20 +500,6 @@ std::vector<AbiStorageSlot> buildObservableStorage(const GeneratedModelMetadata&
     return storage;
 }
 
-std::vector<AbiStorageSlot> buildSpillStorage(const GeneratedModelMetadata& generated_metadata) {
-    std::vector<AbiStorageSlot> storage;
-    storage.reserve(generated_metadata.spill_storage.size());
-    for (const auto& generated : generated_metadata.spill_storage) {
-        storage.push_back(AbiStorageSlot{
-            .full_path = std::string(generated.full_path),
-            .leaf_name = std::string(generated.leaf_name),
-            .width = generated.width,
-            .is_signed = generated.is_signed,
-        });
-    }
-    return storage;
-}
-
 void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& generated_metadata) {
     if (!generated_metadata.evaluate_combinational) {
         throw mate::CompilerError(
@@ -529,7 +516,7 @@ void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& g
     model.input_storage = buildInputStorage(generated_metadata);
     model.output_storage = buildOutputStorage(generated_metadata);
     model.observable_storage = buildObservableStorage(generated_metadata);
-    model.spill_storage = buildSpillStorage(generated_metadata);
+    model.spill_words_count = generated_metadata.spill_words_count;
     model.evaluate_combinational = generated_metadata.evaluate_combinational;
     model.reset_apply = generated_metadata.reset_apply;
     model.clock_commit = generated_metadata.clock_commit;
@@ -591,11 +578,10 @@ MateStatusCode mate_instance_create(const MateModel* model,
         instance->input_words = allocateStorage(checked_model.input_storage);
         instance->output_words = allocateStorage(checked_model.output_storage);
         instance->observable_words = allocateStorage(checked_model.observable_storage);
-        instance->spill_words = allocateStorage(checked_model.spill_storage);
+        instance->spill_words.assign(checked_model.spill_words_count, 0);
         instance->input_slots = makeWordSlots(instance->input_words);
         instance->output_slots = makeWordSlots(instance->output_words);
         instance->observable_slots = makeWordSlots(instance->observable_words);
-        instance->spill_slots = makeWordSlots(instance->spill_words);
         *out_instance = instance.release();
     });
 }

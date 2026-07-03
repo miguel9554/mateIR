@@ -63,11 +63,14 @@ struct NativeWordSlot {
     int32_t nwords = 0;
 };
 
+// `spills` is a single contiguous word buffer of `spill_words_count` words;
+// the generated chunks address it via compile-time offsets, so it carries no
+// per-value slot metadata.
 using GeneratedCombinationalEvaluateFn = void (*)(
     std::span<const NativeWordSlot> inputs,
     std::span<NativeWordSlot> outputs,
     std::span<NativeWordSlot> storage,
-    std::span<NativeWordSlot> spills);
+    std::span<uint64_t> spills);
 
 // Applies reset values to a single reset domain's FlopQ storage slots.
 using GeneratedResetApplyFn = void (*)(std::span<NativeWordSlot> storage);
@@ -93,9 +96,11 @@ struct GeneratedModelMetadata {
     std::vector<GeneratedResetMetadata> resets;
     std::vector<GeneratedStorageMetadata> storage;
     GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
-    // Scratch slots for values crossing generated combinational chunk
-    // boundaries. Not part of runtime-observable metadata.
-    std::vector<GeneratedStorageMetadata> spill_storage;
+    // Word count of the contiguous scratch buffer for values crossing
+    // generated combinational chunk boundaries. The generated code knows each
+    // value's offset/width statically; the runtime only allocates the buffer.
+    // Not part of runtime-observable metadata.
+    size_t spill_words_count = 0;
     // One entry per `resets`/`clocks` entry, same order, when
     // `evaluate_combinational` is set. Empty when the model has no native
     // combinational evaluator (interpreter-only fallback).

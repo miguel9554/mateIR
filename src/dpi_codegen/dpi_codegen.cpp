@@ -3,6 +3,7 @@
 #include "frontends/systemverilog/passes/extractor.h"
 #include "mateir/module.h"
 #include "sim/runtime_model.h"
+#include "sim/word_ops.h"
 #include "util/source_loc.h"
 
 #include "slang/syntax/SyntaxTree.h"
@@ -1296,7 +1297,9 @@ struct NativeCombinationalCode {
     std::string chunk_declarations;
     // The small evaluateCombinational() dispatcher to embed in model.cpp.
     std::string dispatcher_text;
-    std::vector<const DFGNode*> spill_nodes;
+    // Total word count of the contiguous cross-chunk spill buffer; per-value
+    // offsets are baked into the generated chunk code as constants.
+    size_t spill_words_count = 0;
 };
 
 // Splitting the topo order into cost-bounded chunks keeps each generated
@@ -1316,7 +1319,17 @@ struct NativeCombinationalCode {
 // can blow past the budget by itself and immediately close its own
 // (appropriately tiny) chunk, rather than sharing a function with 22 other
 // equally oversized siblings.
-constexpr size_t kCombinationalChunkCostBudget = 50;
+//
+// The budget also controls how many values cross chunk boundaries: every
+// crossing value is spilled to the cross-chunk word buffer and reloaded at
+// each remote use, so undersized chunks turn the "locals in registers"
+// codegen back into a memory-indexed temporaries array (the budget-50 first
+// cut spilled 98k of ibex_core's ~300k nodes). Measured on ibex_core
+// (July 2026, -O1): budget 4000 gives a 96s clean verilator-DPI build;
+// budget 16000 gives 609s with identical sim speed and a near-identical
+// spill count (spill count is bounded by topo-order locality, not budget),
+// so bigger chunks only buy superlinear per-function compile cost.
+constexpr size_t kCombinationalChunkCostBudget = 4000;
 
 size_t combinationalNodeCost(const DFGNode* node) {
     if (node->kind() == DFGOp::MUX) {
@@ -1361,7 +1374,7 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         "std::span<const mate::abi::NativeWordSlot> inputs,\n"
         "                           std::span<mate::abi::NativeWordSlot> outputs,\n"
         "                           std::span<mate::abi::NativeWordSlot> storage,\n"
-        "                           std::span<mate::abi::NativeWordSlot> spills";
+        "                           std::span<uint64_t> spills";
 
     // Chunk boundaries: walk the topo order accumulating combinationalNodeCost,
     // closing a chunk once accumulated cost reaches the budget. A single node
@@ -1411,8 +1424,11 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         output_indices_for_node[output.node].push_back(output.id.value);
     }
 
-    std::map<const DFGNode*, size_t> spill_index_for_node;
-    std::vector<const DFGNode*> spill_nodes;
+    // Values crossing a chunk boundary spill to one contiguous word buffer.
+    // Each spilled node gets a static word offset; the runtime only needs the
+    // buffer's total word count (no per-value slot metadata).
+    std::map<const DFGNode*, size_t> spill_offset_for_node;
+    size_t spill_words_count = 0;
     auto needs_spill = [&](const DFGNode* node) {
         const DFGOp kind = node->kind();
         if (kind == DFGOp::INPUT || kind == DFGOp::CONST || kind == DFGOp::X) return false;
@@ -1424,8 +1440,8 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     };
     for (const DFGNode* node : order) {
         if (!needs_spill(node)) continue;
-        spill_index_for_node[node] = spill_nodes.size();
-        spill_nodes.push_back(node);
+        spill_offset_for_node[node] = spill_words_count;
+        spill_words_count += wordops::wordCount(checkedType(node).width);
     }
 
     auto localName = [&](const DFGNode* node) {
@@ -1446,6 +1462,13 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
                            index,
                            slots_name,
                            index);
+    };
+
+    auto spillLoadExpr = [&](size_t offset, const Type& type) {
+        return std::format("{}::fromWords(spills.data() + {}, {})",
+                           fixedValueType(type),
+                           offset,
+                           wordops::wordCount(type.width));
     };
 
     const size_t file_count = nativeCombinationalFileCount(chunk_count);
@@ -1484,8 +1507,8 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
             if (node->kind() == DFGOp::X) {
                 return std::format("{}::zero()", fixedValueType(type));
             }
-            if (auto spill_it = spill_index_for_node.find(node); spill_it != spill_index_for_node.end()) {
-                return loadExpr("spills", spill_it->second, type);
+            if (auto spill_it = spill_offset_for_node.find(node); spill_it != spill_offset_for_node.end()) {
+                return spillLoadExpr(spill_it->second, type);
             }
             throw CompilerError(std::format(
                 "mate-dpi-codegen: generated value for node '{}' is not available in chunk {}",
@@ -1530,18 +1553,16 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
                     auto inputs = node->binaryInputs();
                     const char* op =
                         kind == DFGOp::ADD ? "add" : (kind == DFGOp::SUB ? "sub" : "mul");
-                    const bool lhs_signed =
-                        checkedType(inputs.lhs.node).isSigned() && checkedType(inputs.rhs.node).isSigned();
-                    const bool rhs_signed =
-                        checkedType(inputs.rhs.node).isSigned() && checkedType(inputs.lhs.node).isSigned();
+                    const bool operands_signed =
+                        compareIsSigned(inputs.lhs.node, inputs.rhs.node);
                     expr = std::format("{}.resized<{}, {}>().{}({}.resized<{}, {}>())",
                                        nodeValue(inputs.lhs.node),
                                        type.width,
-                                       boolLiteral(lhs_signed),
+                                       boolLiteral(operands_signed),
                                        op,
                                        nodeValue(inputs.rhs.node),
                                        type.width,
-                                       boolLiteral(rhs_signed));
+                                       boolLiteral(operands_signed));
                     break;
                 }
 
@@ -1718,9 +1739,9 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
                         << "].words, outputs[" << output_index << "].nwords);\n";
                 }
             }
-            if (auto spill_it = spill_index_for_node.find(node); spill_it != spill_index_for_node.end()) {
-                out << "    " << var << ".copyToWords(spills[" << spill_it->second
-                    << "].words, spills[" << spill_it->second << "].nwords);\n";
+            if (auto spill_it = spill_offset_for_node.find(node); spill_it != spill_offset_for_node.end()) {
+                out << "    " << var << ".copyToWords(spills.data() + " << spill_it->second
+                    << ", " << wordops::wordCount(type.width) << ");\n";
             }
         }
 
@@ -1765,7 +1786,7 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     NativeCombinationalCode result;
     result.chunk_declarations = declarations_out.str();
     result.dispatcher_text = dispatcher_out.str();
-    result.spill_nodes = std::move(spill_nodes);
+    result.spill_words_count = spill_words_count;
     for (size_t i = 0; i < file_streams.size(); ++i) {
         result.chunk_files.push_back(NativeCombinationalChunkFile{i, file_streams[i].str()});
     }
@@ -2000,18 +2021,7 @@ NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeMode
             << (observable.type.isSigned() ? "true" : "false") << "},\n";
     }
     out << "    };\n";
-    out << "    metadata.spill_storage = {\n";
-    for (size_t i = 0; i < native_code.spill_nodes.size(); ++i) {
-        const DFGNode* node = native_code.spill_nodes[i];
-        const auto& type = *node->type;
-        out << "        mate::abi::GeneratedStorageMetadata{"
-            << "mate::abi::GeneratedStorageKind::Temporary, "
-            << cppString(std::format("__spill_{}", i)) << ", "
-            << cppString(std::format("__spill_{}", i)) << ", "
-            << type.width << ", "
-            << (type.isSigned() ? "true" : "false") << "},\n";
-    }
-    out << "    };\n";
+    out << "    metadata.spill_words_count = " << native_code.spill_words_count << ";\n";
     out << "    metadata.evaluate_combinational = &evaluateCombinational;\n";
     out << "    metadata.reset_apply = {";
     for (size_t i = 0; i < flop_commit_code.reset_apply_fn_names.size(); ++i) {

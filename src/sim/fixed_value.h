@@ -14,6 +14,14 @@
 
 namespace mate {
 
+// Inlining note (measured on ibex_core generated chunks at -O1, July 2026):
+// fromWords/copyToWords must stay small enough for -O1's inliner to pick up
+// on its own — with a null-check throw edge in their bodies they were left
+// out-of-line (16k+ calls in a single chunk object, ~20% slower sim), and
+// forcing them inline via always_inline instead cost 1.5-4.7x generated
+// compile time. Keep these bodies branch-free; validate buffers at the ABI
+// boundary, not here.
+
 template <int Width, bool Signed = false>
 struct FixedValue {
     static_assert(Width > 0, "FixedValue width must be positive");
@@ -45,8 +53,11 @@ struct FixedValue {
         return fromU64(static_cast<uint64_t>(value));
     }
 
+    // Precondition (not checked here): `words` points at `nwords` valid
+    // words. The generated model calls this on every operand access with
+    // pointers the ABI layer built from storage it owns; a per-access check
+    // would put a throw edge on every inlined copy.
     static FixedValue fromWords(const uint64_t* words, size_t nwords) {
-        wordops::requireBuffer(words, nwords);
         FixedValue result;
         const size_t copied = std::min(kWords, nwords);
         for (size_t i = 0; i < copied; ++i) result.w[i] = words[i];
@@ -54,8 +65,8 @@ struct FixedValue {
         return result;
     }
 
+    // Same unchecked precondition as fromWords.
     void copyToWords(uint64_t* words, size_t nwords) const {
-        wordops::requireBuffer(words, nwords);
         for (size_t i = 0; i < nwords; ++i) {
             words[i] = i < kWords ? w[i] : 0;
         }

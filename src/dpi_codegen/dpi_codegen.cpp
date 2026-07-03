@@ -1404,20 +1404,24 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     };
 
     const size_t file_count = nativeCombinationalFileCount(chunk_count);
-    std::vector<std::ostringstream> file_streams(std::max<size_t>(file_count, 1));
-    for (auto& stream : file_streams) {
-        stream << "#include \"sim/sim_value.h\"\n";
-        stream << "#include <span>\n";
-        stream << "#include <stdexcept>\n\n";
-        stream << "namespace {\n\n" << helpers_out.str() << "} // namespace\n\n";
-    }
+    // Chunk *functions* are node-count-bounded (kCombinationalChunkSize), not
+    // generated-code-size-bounded: a single node (e.g. a wide MUX) can expand
+    // into a switch with tens of thousands of cases, so two 50-node chunks
+    // can differ in compiled size by orders of magnitude. Generate each
+    // chunk's text into its own buffer first, then bin-pack by text size
+    // (largest-first onto the currently smallest file) rather than assigning
+    // contiguous chunk-index ranges — otherwise a run of adjacent oversized
+    // chunks (which cluster together since topologically-close nodes tend to
+    // come from the same RTL construct, e.g. a big mux tree) can all land in
+    // the same file and single-handedly dominate wall-clock compile time
+    // while every other file — and core — finishes early and sits idle.
+    std::vector<std::string> chunk_texts(chunk_count);
     std::ostringstream declarations_out;
 
     for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
         const size_t begin = chunk_index * kCombinationalChunkSize;
         const size_t end = std::min(begin + kCombinationalChunkSize, order.size());
-        const size_t file_index = (chunk_index * file_count) / chunk_count;
-        std::ostringstream& out = file_streams[file_index];
+        std::ostringstream out;
 
         declarations_out << "extern void " << chunkFnName(chunk_index) << "(" << kChunkParams << ");\n";
         out << "void " << chunkFnName(chunk_index) << "(" << kChunkParams << ") {\n";
@@ -1650,6 +1654,31 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     }
 
         out << "}\n\n";
+        chunk_texts[chunk_index] = out.str();
+    }
+
+    // Bin-pack chunks onto files by text size, largest-first onto whichever
+    // file currently has the least text (the "longest processing time"
+    // heuristic) — see comment above chunk_texts for why contiguous
+    // chunk-index ranges aren't good enough.
+    std::vector<std::ostringstream> file_streams(std::max<size_t>(file_count, 1));
+    for (auto& stream : file_streams) {
+        stream << "#include \"sim/sim_value.h\"\n";
+        stream << "#include <span>\n";
+        stream << "#include <stdexcept>\n\n";
+        stream << "namespace {\n\n" << helpers_out.str() << "} // namespace\n\n";
+    }
+    std::vector<size_t> file_sizes(file_streams.size(), 0);
+    std::vector<size_t> chunk_by_size(chunk_count);
+    for (size_t i = 0; i < chunk_count; ++i) chunk_by_size[i] = i;
+    std::sort(chunk_by_size.begin(), chunk_by_size.end(), [&](size_t a, size_t b) {
+        return chunk_texts[a].size() > chunk_texts[b].size();
+    });
+    for (size_t chunk_index : chunk_by_size) {
+        const size_t lightest_file =
+            std::min_element(file_sizes.begin(), file_sizes.end()) - file_sizes.begin();
+        file_streams[lightest_file] << chunk_texts[chunk_index];
+        file_sizes[lightest_file] += chunk_texts[chunk_index].size();
     }
 
     std::ostringstream dispatcher_out;

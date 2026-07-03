@@ -280,6 +280,46 @@ chunk files + dpi.cpp + model.cpp) end-to-end in **~1m41s**, down from ~2.3
 minutes before parallel compilation and ~5.4 minutes before `mate --dpi-lib`
 existed at all.
 
+**Follow-up correction — contiguous chunk-index file assignment was badly
+imbalanced.** After landing the above, `ibex_core`'s wall-clock time and CPU
+utilization didn't improve as much as the file count suggested it should
+(cores visibly idle mid-build). Root cause: `evaluateCombinationalChunkN`
+functions are bounded by *node count* (`kCombinationalChunkSize` = 50), not by
+*generated code size* — a single node (e.g. a wide MUX) can expand into a
+switch with tens of thousands of `case` labels, so two 50-node chunks can
+differ in compiled size by orders of magnitude. Assigning contiguous
+chunk-index ranges to files let a run of adjacent oversized chunks (which
+cluster together, since topologically-close nodes tend to come from the same
+RTL construct — e.g. a register-file read mux) all land in the *same* file:
+one measured case had a single file balloon to 325,601 lines (one function
+alone had 94,208 `case` labels) against ~11,683 lines for every other file,
+so that one file single-handedly dominated wall-clock while every other
+core sat idle after finishing early.
+
+Fix: `makeNativeCombinationalCpp` now generates each chunk's text into its
+own buffer first, then bin-packs chunks onto files by text size — largest
+chunk first, always onto whichever file currently has the least accumulated
+text (the "longest processing time" multiprocessor-scheduling heuristic) —
+instead of contiguous index ranges. This cannot fully eliminate the
+imbalance (the single 94k-line function is still one atomic, unsplittable
+translation-unit-internal compile no matter which file it's binned into),
+but it tightens the spread dramatically: `mate --dpi-lib`'s codegen+compile
+step on `ibex_core` dropped from ~52s to ~33s, and the file holding that
+giant function (94,444 lines after rebalancing) became the *only* meaningful
+straggler (~9s behind the rest) instead of one of many serialized stragglers
+finishing progressively later. Full `ibex_core` end-to-end: ~1m20s (down from
+~1m41s). 126/126 regression still passing.
+
+**Remaining known limit (not fixed, flagged for whoever picks this up
+next):** a single oversized MUX/CONCAT node can still dominate one file's
+compile time, since chunking splits by *node count*, not by each node's own
+generated-code size. Fully closing that gap would mean also splitting a
+single node's generated switch statement across multiple sub-functions (e.g.
+an outer dispatcher over arm-value sub-ranges calling one of several
+per-range switch functions) — a more invasive change to the MUX/CONCAT
+codegen itself, not just the file-packing layer, and out of scope for this
+pass.
+
 ## Phase 2: Native Generated Model
 
 Replace `<module>_model.cpp` with native generated code implementing the same ABI.

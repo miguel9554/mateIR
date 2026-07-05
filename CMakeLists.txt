@@ -206,7 +206,6 @@ add_library(mate-abi-native STATIC ${ABI_NATIVE_SOURCES})
 target_include_directories(mate-abi-native PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(mate-abi-native PUBLIC mate-sim-value)
 mate_configure_project_target(mate-abi-native)
 
 add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)
@@ -254,6 +253,11 @@ target_link_libraries(mate-vector-simulator PRIVATE
     mate-vector-simulator-lib
 )
 mate_configure_project_target(mate-vector-simulator)
+
+add_executable(mate-fixed-value-diff-test tests/unit/fixed_value_diff_test.cpp)
+target_include_directories(mate-fixed-value-diff-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-fixed-value-diff-test PRIVATE mate-sim-value)
+mate_configure_project_target(mate-fixed-value-diff-test)
 
 # Print build configuration
 message(STATUS "")

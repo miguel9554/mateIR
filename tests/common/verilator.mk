@@ -47,7 +47,7 @@ GEN_STAMP   = $(DPI_GEN_DIR)/.stamp
 # tree: where svdpi.h/our headers live, and which of our own static libraries
 # to fold into the output archive.
 DPI_INCLUDE_DIRS = $(abspath $(PROJECT_ROOT)/src),$(abspath $(PROJECT_ROOT)/external/slang/external/ieee1800)
-DPI_LINK_LIBS = $(abspath $(BUILD_DIR)/libmate-abi-native.a),$(abspath $(BUILD_DIR)/libmate-sim-value.a)
+DPI_LINK_LIBS = $(abspath $(BUILD_DIR)/libmate-abi-native.a)
 
 SRCS = $(RTL_SRCS) $(TB_SRCS) $(GEN_SRCS) $(GEN_SV_PKG) $(GEN_SV)
 

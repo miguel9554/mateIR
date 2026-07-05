@@ -8,7 +8,6 @@
 // native backend's link stays free of them too.
 
 #include "abi/mate_model_abi.h"
-#include "sim/sim_value.h"
 
 #include <cstdint>
 #include <random>
@@ -59,26 +58,34 @@ struct GeneratedStorageMetadata {
     bool is_signed = false;
 };
 
+struct NativeWordSlot {
+    uint64_t* words = nullptr;
+    int32_t nwords = 0;
+};
+
+// `spills` is a single contiguous word buffer of `spill_words_count` words;
+// the generated chunks address it via compile-time offsets, so it carries no
+// per-value slot metadata.
 using GeneratedCombinationalEvaluateFn = void (*)(
-    std::span<const mate::SimValue> inputs,
-    std::span<mate::SimValue> outputs,
-    std::span<mate::SimValue> storage,
-    std::span<mate::SimValue> temporaries);
+    std::span<const NativeWordSlot> inputs,
+    std::span<NativeWordSlot> outputs,
+    std::span<NativeWordSlot> storage,
+    std::span<uint64_t> spills);
 
 // Applies reset values to a single reset domain's FlopQ storage slots.
-using GeneratedResetApplyFn = void (*)(std::span<mate::SimValue> storage);
+using GeneratedResetApplyFn = void (*)(std::span<NativeWordSlot> storage);
 
 // Commits FlopD -> FlopQ storage for a single clock domain, honoring async
 // reset priority (a flop is skipped if any of its reset domains is currently
 // at its active level, read from `inputs`).
 using GeneratedClockCommitFn = void (*)(
-    std::span<const mate::SimValue> inputs,
-    std::span<mate::SimValue> storage);
+    std::span<const NativeWordSlot> inputs,
+    std::span<NativeWordSlot> storage);
 
 // Applies FlopsInitial to every flop Q leaf in the design, in generated
 // (flop-declaration) order. Mirrors MateIRRuntime::initFlops.
 using GeneratedFlopsInitFn = void (*)(
-    std::span<mate::SimValue> storage,
+    std::span<NativeWordSlot> storage,
     MateFlopsInitial mode,
     std::mt19937_64& rng);
 
@@ -89,10 +96,11 @@ struct GeneratedModelMetadata {
     std::vector<GeneratedResetMetadata> resets;
     std::vector<GeneratedStorageMetadata> storage;
     GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
-    // Scratch slots for intermediate DFG node values, private to the generated
-    // combinational evaluator. Not part of runtime-observable metadata: these
-    // values have no interpreter-side counterpart to validate against.
-    size_t temporaries_count = 0;
+    // Word count of the contiguous scratch buffer for values crossing
+    // generated combinational chunk boundaries. The generated code knows each
+    // value's offset/width statically; the runtime only allocates the buffer.
+    // Not part of runtime-observable metadata.
+    size_t spill_words_count = 0;
     // One entry per `resets`/`clocks` entry, same order, when
     // `evaluate_combinational` is set. Empty when the model has no native
     // combinational evaluator (interpreter-only fallback).

@@ -1,7 +1,7 @@
 #include "sim/sim_value.h"
+#include "sim/word_ops.h"
 
 #include <algorithm>
-#include <bit>
 #include <cctype>
 #include <stdexcept>
 
@@ -15,7 +15,7 @@ SimValue::SimValue(int width, bool is_signed)
 }
 
 size_t SimValue::wordCount(int width) {
-    return width <= 0 ? 0 : static_cast<size_t>((width + 63) / 64);
+    return wordops::wordCount(width);
 }
 
 SimValue SimValue::zero(int width, bool is_signed) {
@@ -24,8 +24,7 @@ SimValue SimValue::zero(int width, bool is_signed) {
 
 SimValue SimValue::ones(int width, bool is_signed) {
     SimValue value(width, is_signed);
-    std::fill(value.words_.begin(), value.words_.end(), ~0ULL);
-    value.maskTopWord();
+    wordops::fillOnes(value.words_.data(), value.words_.size(), value.width_);
     return value;
 }
 
@@ -144,11 +143,7 @@ const SimValue& SimValue::element(size_t index) const {
 }
 
 void SimValue::maskTopWord() {
-    if (words_.empty()) return;
-    int used = width_ % 64;
-    if (used == 0) return;
-    uint64_t mask = (1ULL << used) - 1ULL;
-    words_.back() &= mask;
+    wordops::maskTopWord(words_.data(), words_.size(), width_);
 }
 
 bool SimValue::isZero() const {
@@ -156,7 +151,7 @@ bool SimValue::isZero() const {
         return std::all_of(elements_.begin(), elements_.end(),
             [](const SimValue& element) { return element.isZero(); });
     }
-    return std::all_of(words_.begin(), words_.end(), [](uint64_t word) { return word == 0; });
+    return wordops::isZero(words_.data(), words_.size(), width_);
 }
 
 uint64_t SimValue::lowU64() const {
@@ -165,16 +160,11 @@ uint64_t SimValue::lowU64() const {
 }
 
 bool SimValue::getBit(int bit) const {
-    if (bit < 0 || bit >= width_) return false;
-    return (words_[static_cast<size_t>(bit / 64)] >> (bit % 64)) & 1ULL;
+    return wordops::getBit(words_.data(), words_.size(), width_, bit);
 }
 
 void SimValue::setBit(int bit, bool value) {
-    if (bit < 0 || bit >= width_) return;
-    uint64_t mask = 1ULL << (bit % 64);
-    auto& word = words_[static_cast<size_t>(bit / 64)];
-    if (value) word |= mask;
-    else word &= ~mask;
+    wordops::setBit(words_.data(), words_.size(), width_, bit, value);
 }
 
 SimValue SimValue::resized(int width, bool is_signed) const {
@@ -184,227 +174,176 @@ SimValue SimValue::resized(int width, bool is_signed) const {
         return result;
     }
     SimValue result(width, is_signed);
-    int copied = std::min(width_, result.width_);
-    result.copyBitsFrom(*this, 0, 0, copied);
-    if (is_signed && width > width_ && width_ > 0 && getBit(width_ - 1)) {
-        for (int bit = width_; bit < width; bit++) {
-            result.setBit(bit, true);
-        }
-    }
-    result.maskTopWord();
+    wordops::resize(result.words_.data(), result.words_.size(), result.width_,
+                    words_.data(), words_.size(), width_, is_signed);
     return result;
 }
 
 SimValue SimValue::slice(int high, int low) const {
     if (high < low) return zero(0);
     SimValue result(high - low + 1, false);
-    result.copyBitsFrom(*this, low, 0, result.width_);
-    result.maskTopWord();
+    wordops::slice(result.words_.data(), result.words_.size(), result.width_,
+                   words_.data(), words_.size(), width_, low);
     return result;
 }
 
 SimValue SimValue::shl(uint64_t amount) const {
     SimValue result(width_, signed_);
-    if (amount >= static_cast<uint64_t>(width_)) return result;
-    for (int bit = 0; bit < width_ - static_cast<int>(amount); bit++) {
-        result.setBit(bit + static_cast<int>(amount), getBit(bit));
-    }
+    wordops::shiftLeft(result.words_.data(), words_.data(), words_.size(), width_, amount);
     return result;
 }
 
 SimValue SimValue::shr(uint64_t amount, bool arithmetic) const {
     SimValue result(width_, signed_);
-    bool sign = arithmetic && signed_ && width_ > 0 && getBit(width_ - 1);
-    if (amount >= static_cast<uint64_t>(width_)) {
-        return sign ? ones(width_, signed_) : result;
-    }
-    for (int bit = static_cast<int>(amount); bit < width_; bit++) {
-        result.setBit(bit - static_cast<int>(amount), getBit(bit));
-    }
-    if (sign) {
-        for (int bit = width_ - static_cast<int>(amount); bit < width_; bit++) {
-            result.setBit(bit, true);
-        }
-    }
-    result.maskTopWord();
+    wordops::shiftRight(result.words_.data(), words_.data(), words_.size(), width_,
+                        amount, arithmetic, signed_);
     return result;
 }
 
 SimValue SimValue::negated() const {
-    SimValue result = bitwiseNot();
-    result = result.add(fromU64(1, width_, signed_));
-    return result.resized(width_, signed_);
+    SimValue result(width_, signed_);
+    wordops::negate(result.words_.data(), words_.data(), words_.size(), width_);
+    return result;
 }
 
 SimValue SimValue::bitwiseNot() const {
     SimValue result(width_, signed_);
-    for (size_t i = 0; i < words_.size(); i++) result.words_[i] = ~words_[i];
-    result.maskTopWord();
+    wordops::bitwiseNot(result.words_.data(), words_.data(), words_.size(), width_);
     return result;
 }
 
 SimValue SimValue::bitwiseAnd(const SimValue& rhs) const {
     if (width_ == rhs.width_) {
         SimValue result(width_, signed_ && rhs.signed_);
-        for (size_t i = 0; i < result.words_.size(); i++) result.words_[i] = words_[i] & rhs.words_[i];
-        result.maskTopWord();
+        wordops::bitwiseAnd(result.words_.data(), words_.data(), rhs.words_.data(),
+                            result.words_.size(), result.width_);
         return result;
     }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, signed_);
     SimValue b = rhs.resized(width, rhs.signed_);
     SimValue result(width, signed_ && rhs.signed_);
-    for (size_t i = 0; i < result.words_.size(); i++) result.words_[i] = a.words_[i] & b.words_[i];
-    result.maskTopWord();
+    wordops::bitwiseAnd(result.words_.data(), a.words_.data(), b.words_.data(),
+                        result.words_.size(), result.width_);
     return result;
 }
 
 SimValue SimValue::bitwiseOr(const SimValue& rhs) const {
     if (width_ == rhs.width_) {
         SimValue result(width_, signed_ && rhs.signed_);
-        for (size_t i = 0; i < result.words_.size(); i++) result.words_[i] = words_[i] | rhs.words_[i];
-        result.maskTopWord();
+        wordops::bitwiseOr(result.words_.data(), words_.data(), rhs.words_.data(),
+                           result.words_.size(), result.width_);
         return result;
     }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, signed_);
     SimValue b = rhs.resized(width, rhs.signed_);
     SimValue result(width, signed_ && rhs.signed_);
-    for (size_t i = 0; i < result.words_.size(); i++) result.words_[i] = a.words_[i] | b.words_[i];
-    result.maskTopWord();
+    wordops::bitwiseOr(result.words_.data(), a.words_.data(), b.words_.data(),
+                       result.words_.size(), result.width_);
     return result;
 }
 
 SimValue SimValue::bitwiseXor(const SimValue& rhs) const {
     if (width_ == rhs.width_) {
         SimValue result(width_, signed_ && rhs.signed_);
-        for (size_t i = 0; i < result.words_.size(); i++) result.words_[i] = words_[i] ^ rhs.words_[i];
-        result.maskTopWord();
+        wordops::bitwiseXor(result.words_.data(), words_.data(), rhs.words_.data(),
+                            result.words_.size(), result.width_);
         return result;
     }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, signed_);
     SimValue b = rhs.resized(width, rhs.signed_);
     SimValue result(width, signed_ && rhs.signed_);
-    for (size_t i = 0; i < result.words_.size(); i++) result.words_[i] = a.words_[i] ^ b.words_[i];
-    result.maskTopWord();
+    wordops::bitwiseXor(result.words_.data(), a.words_.data(), b.words_.data(),
+                        result.words_.size(), result.width_);
     return result;
 }
 
 SimValue SimValue::bitwiseXnor(const SimValue& rhs) const {
-    SimValue result = bitwiseXor(rhs).bitwiseNot();
-    result.signed_ = signed_ && rhs.signed_;
-    result.maskTopWord();
+    int width = std::max(width_, rhs.width_);
+    SimValue a = resized(width, signed_);
+    SimValue b = rhs.resized(width, rhs.signed_);
+    SimValue result(width, signed_ && rhs.signed_);
+    wordops::bitwiseXnor(result.words_.data(), a.words_.data(), b.words_.data(),
+                         result.words_.size(), result.width_);
     return result;
 }
 
 SimValue SimValue::add(const SimValue& rhs) const {
     if (width_ == rhs.width_) {
         SimValue result(width_, signed_ && rhs.signed_);
-        uint64_t carry = 0;
-        for (size_t i = 0; i < result.words_.size(); i++) {
-            uint64_t sum = words_[i] + carry;
-            carry = sum < words_[i] ? 1 : 0;
-            uint64_t sum2 = sum + rhs.words_[i];
-            if (sum2 < sum) carry++;
-            result.words_[i] = sum2;
-        }
-        result.maskTopWord();
+        wordops::add(result.words_.data(), words_.data(), rhs.words_.data(),
+                     result.words_.size(), result.width_);
         return result;
     }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, signed_);
     SimValue b = rhs.resized(width, rhs.signed_);
     SimValue result(width, signed_ && rhs.signed_);
-    uint64_t carry = 0;
-    for (size_t i = 0; i < result.words_.size(); i++) {
-        uint64_t sum = a.words_[i] + carry;
-        carry = sum < a.words_[i] ? 1 : 0;
-        uint64_t sum2 = sum + b.words_[i];
-        if (sum2 < sum) carry++;
-        result.words_[i] = sum2;
-    }
-    result.maskTopWord();
+    wordops::add(result.words_.data(), a.words_.data(), b.words_.data(),
+                 result.words_.size(), result.width_);
     return result;
 }
 
 SimValue SimValue::sub(const SimValue& rhs) const {
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, signed_);
-    SimValue b = rhs.resized(width, rhs.signed_).negated();
-    return a.add(b).resized(width, signed_ && rhs.signed_);
+    SimValue b = rhs.resized(width, rhs.signed_);
+    SimValue result(width, signed_ && rhs.signed_);
+    wordops::sub(result.words_.data(), a.words_.data(), b.words_.data(),
+                 result.words_.size(), result.width_);
+    return result;
 }
 
 SimValue SimValue::mul(const SimValue& rhs) const {
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, false);
+    SimValue b = rhs.resized(width, false);
     SimValue result(width, signed_ && rhs.signed_);
-    for (int bit = 0; bit < rhs.width_; bit++) {
-        if (rhs.getBit(bit)) {
-            result = result.add(a.shl(static_cast<uint64_t>(bit))).resized(width, result.signed_);
-        }
-    }
-    result.maskTopWord();
+    wordops::mul(result.words_.data(), a.words_.data(), b.words_.data(),
+                 result.words_.size(), result.width_);
     return result;
 }
 
 bool SimValue::eq(const SimValue& rhs) const {
-    if (width_ == rhs.width_) return words_ == rhs.words_;
+    if (width_ == rhs.width_) {
+        return wordops::eq(words_.data(), rhs.words_.data(), words_.size(), width_);
+    }
     int width = std::max(width_, rhs.width_);
-    return resized(width, signed_).words_ == rhs.resized(width, rhs.signed_).words_;
+    SimValue a = resized(width, signed_);
+    SimValue b = rhs.resized(width, rhs.signed_);
+    return wordops::eq(a.words_.data(), b.words_.data(), a.words_.size(), width);
 }
 
 bool SimValue::unsignedLt(const SimValue& rhs) const {
     if (width_ == rhs.width_) {
-        for (size_t i = words_.size(); i > 0; i--) {
-            if (words_[i - 1] != rhs.words_[i - 1]) return words_[i - 1] < rhs.words_[i - 1];
-        }
-        return false;
+        return wordops::unsignedLt(words_.data(), rhs.words_.data(), words_.size(), width_);
     }
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, false);
     SimValue b = rhs.resized(width, false);
-    for (size_t i = a.words_.size(); i > 0; i--) {
-        if (a.words_[i - 1] != b.words_[i - 1]) return a.words_[i - 1] < b.words_[i - 1];
-    }
-    return false;
+    return wordops::unsignedLt(a.words_.data(), b.words_.data(), a.words_.size(), width);
 }
 
 bool SimValue::signedLt(const SimValue& rhs) const {
     int width = std::max(width_, rhs.width_);
     SimValue a = resized(width, true);
     SimValue b = rhs.resized(width, true);
-    bool a_neg = width > 0 && a.getBit(width - 1);
-    bool b_neg = width > 0 && b.getBit(width - 1);
-    if (a_neg != b_neg) return a_neg;
-    return a.unsignedLt(b);
+    return wordops::signedLt(a.words_.data(), b.words_.data(), a.words_.size(), width);
 }
 
 bool SimValue::reductionAnd() const {
-    if (width_ == 0) return false;
-    SimValue masked = *this;
-    masked.maskTopWord();
-    for (int bit = 0; bit < width_; bit++) {
-        if (!masked.getBit(bit)) return false;
-    }
-    return true;
+    return wordops::reductionAnd(words_.data(), words_.size(), width_);
 }
 
 bool SimValue::reductionOr() const {
-    return !isZero();
+    if (aggregate_) return !isZero();
+    return wordops::reductionOr(words_.data(), words_.size(), width_);
 }
 
 bool SimValue::reductionXor() const {
-    bool parity = false;
-    for (size_t i = 0; i < words_.size(); i++) {
-        uint64_t word = words_[i];
-        if (i + 1 == words_.size()) {
-            int used = width_ % 64;
-            if (used != 0) word &= (1ULL << used) - 1ULL;
-        }
-        parity ^= static_cast<bool>(std::popcount(word) & 1U);
-    }
-    return parity;
+    return wordops::reductionXor(words_.data(), words_.size(), width_);
 }
 
 std::string SimValue::toBinaryString() const {
@@ -425,39 +364,12 @@ std::string SimValue::toBinaryString() const {
 }
 
 void SimValue::mulAddSmall(uint32_t mul, uint32_t add) {
-    uint64_t carry = add;
-    for (auto& word : words_) {
-        uint64_t next_carry = 0;
-        uint64_t result = 0;
-        for (int chunk = 0; chunk < 4; chunk++) {
-            uint64_t part = (word >> (chunk * 16)) & 0xffffULL;
-            uint64_t product = part * mul + (carry & 0xffffULL);
-            result |= (product & 0xffffULL) << (chunk * 16);
-            carry = (carry >> 16) + (product >> 16);
-        }
-        next_carry = carry;
-        word = result;
-        carry = next_carry;
-    }
-    maskTopWord();
+    wordops::mulAddSmall(words_.data(), words_.size(), width_, mul, add);
 }
 
 void SimValue::copyBitsFrom(const SimValue& src, int src_start, int dst_start, int count) {
-    if (count <= 0) return;
-    int i = 0;
-    if (src_start == 0 && dst_start == 0) {
-        // Word-aligned prefix: copy whole words, then fall back to the bit
-        // loop for the remainder. Callers pass freshly zeroed destinations,
-        // so whole-word copies within `count` are safe.
-        const int full_words = count / 64;
-        for (int w = 0; w < full_words; ++w) {
-            words_[static_cast<size_t>(w)] = src.words_[static_cast<size_t>(w)];
-        }
-        i = full_words * 64;
-    }
-    for (; i < count; i++) {
-        setBit(dst_start + i, src.getBit(src_start + i));
-    }
+    wordops::copyBits(words_.data(), words_.size(), width_, dst_start,
+                      src.words_.data(), src.words_.size(), src.width_, src_start, count);
 }
 
 } // namespace mate

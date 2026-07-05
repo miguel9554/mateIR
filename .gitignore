@@ -58,3 +58,4 @@ docs/1800-2023.pdf
 docs/*
 get_prompt.py
 .codex
+test-results/**

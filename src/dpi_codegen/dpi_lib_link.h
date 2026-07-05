@@ -3,7 +3,7 @@
 // Compiles the generated DPI glue/model C++ produced by generateDpiCodegen
 // into a single self-contained static library: the caller links exactly one
 // .a and needs no knowledge of mate's own include paths, C++ standard, or
-// internal static libraries (mate-abi-native, mate-sim-value).
+// internal static libraries (currently mate-abi-native).
 
 #include <filesystem>
 #include <string>

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Run regression tests defined in a plain-text manifest."""
 import argparse
+import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -22,6 +25,7 @@ RESET = "\033[0m"
 
 RUN_MODE_VALIDATE = "validate"
 RUN_MODE_VERILATOR_DPI = "verilator-dpi"
+LOGS_ROOT = REPO_ROOT / "test-results" / "regression"
 
 
 def load_test_cases():
@@ -289,6 +293,44 @@ def run_case(case, build_target, simulator, run_mode):
     return name, ok, output
 
 
+def make_run_logs_dir(build, run_mode):
+    """Create a fresh directory for one regression invocation's logs."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_logs_dir = LOGS_ROOT / f"{stamp}-{build}-{run_mode}"
+    run_logs_dir.mkdir(parents=True, exist_ok=False)
+    latest = LOGS_ROOT / "latest"
+    if latest.exists() or latest.is_symlink():
+        if latest.is_dir() and not latest.is_symlink():
+            shutil.rmtree(latest)
+        else:
+            latest.unlink()
+    latest.symlink_to(run_logs_dir.name)
+    return run_logs_dir
+
+
+def write_text_log(path, title, output, *, ok=None, metadata=None):
+    """Write a text log with lightweight metadata header."""
+    lines = [title]
+    if ok is not None:
+        lines.append(f"result: {'PASS' if ok else 'FAIL'}")
+    if metadata:
+        for key, value in metadata.items():
+            lines.append(f"{key}: {value}")
+    lines.append("")
+    text = "\n".join(lines)
+    if output:
+        text += output
+        if not output.endswith("\n"):
+            text += "\n"
+    path.write_text(text)
+
+
+def write_summary(run_logs_dir, summary):
+    """Persist machine-readable regression results."""
+    summary_path = run_logs_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run regression tests.")
     parser.add_argument(
@@ -322,6 +364,18 @@ def main():
     )
     args = parser.parse_args()
     simulator = REPO_ROOT / "build" / args.build / "mate"
+    run_logs_dir = make_run_logs_dir(args.build, args.mode)
+    test_logs_dir = run_logs_dir / "tests"
+    test_logs_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "build": args.build,
+        "jobs": args.jobs,
+        "mode": args.mode,
+        "run_logs_dir": str(run_logs_dir.relative_to(REPO_ROOT)),
+        "selected_tests": [],
+        "steps": {},
+        "tests": {},
+    }
 
     try:
         cases = load_test_cases()
@@ -339,30 +393,81 @@ def main():
         print("No test cases found.")
         sys.exit(1)
 
+    summary["selected_tests"] = [case["name"] for case in cases]
+    print(f"Writing regression logs under {run_logs_dir.relative_to(REPO_ROOT)}", flush=True)
+
     print("Checking DFG API guardrails...", flush=True)
     ok, output = run_dfg_api_guard()
+    summary["steps"]["dfg_api_guard"] = {
+        "log": str((run_logs_dir / "dfg_api_guard.log").relative_to(REPO_ROOT)),
+        "ok": ok,
+    }
+    write_text_log(
+        run_logs_dir / "dfg_api_guard.log",
+        "DFG API guard",
+        output,
+        ok=ok,
+        metadata={"step": "dfg_api_guard"},
+    )
     if not ok:
+        write_summary(run_logs_dir, summary)
         print(f"{RED}DFG API guard failed{RESET}")
         print(output)
         sys.exit(1)
 
     print("Checking module-node API guardrails...", flush=True)
     ok, output = run_module_node_api_guard()
+    summary["steps"]["module_node_api_guard"] = {
+        "log": str((run_logs_dir / "module_node_api_guard.log").relative_to(REPO_ROOT)),
+        "ok": ok,
+    }
+    write_text_log(
+        run_logs_dir / "module_node_api_guard.log",
+        "Module-node API guard",
+        output,
+        ok=ok,
+        metadata={"step": "module_node_api_guard"},
+    )
     if not ok:
+        write_summary(run_logs_dir, summary)
         print(f"{RED}Module-node API guard failed{RESET}")
         print(output)
         sys.exit(1)
 
     print("Building simulator...", flush=True)
     ok, output = ensure_simulator(args.build)
+    summary["steps"]["build_simulator"] = {
+        "log": str((run_logs_dir / "build_simulator.log").relative_to(REPO_ROOT)),
+        "ok": ok,
+    }
+    write_text_log(
+        run_logs_dir / "build_simulator.log",
+        "Build simulator",
+        output,
+        ok=ok,
+        metadata={"build": args.build, "step": "build_simulator"},
+    )
     if not ok:
+        write_summary(run_logs_dir, summary)
         print(f"{RED}Failed to build simulator{RESET}")
         print(output)
         sys.exit(1)
 
     print("Running FixedValue differential test...", flush=True)
     ok, output = run_fixed_value_diff_test(args.build)
+    summary["steps"]["fixed_value_diff_test"] = {
+        "log": str((run_logs_dir / "fixed_value_diff_test.log").relative_to(REPO_ROOT)),
+        "ok": ok,
+    }
+    write_text_log(
+        run_logs_dir / "fixed_value_diff_test.log",
+        "FixedValue differential test",
+        output,
+        ok=ok,
+        metadata={"binary": FIXED_VALUE_DIFF_TEST, "step": "fixed_value_diff_test"},
+    )
     if not ok:
+        write_summary(run_logs_dir, summary)
         print(f"{RED}FixedValue differential test failed{RESET}")
         print(output)
         sys.exit(1)
@@ -381,6 +486,29 @@ def main():
         for future in as_completed(futures):
             name, ok, output = future.result()
             results[name] = (ok, output)
+            test_log_path = test_logs_dir / f"{name}.log"
+            case = futures[future]
+            metadata = {
+                "kind": case["kind"],
+                "mode": args.mode,
+                "test": name,
+            }
+            if case["kind"] == "expected_failure":
+                metadata["expected_error"] = case["expected_error"]
+            write_text_log(
+                test_log_path,
+                f"Regression test {name}",
+                output,
+                ok=ok,
+                metadata=metadata,
+            )
+            summary["tests"][name] = {
+                "kind": case["kind"],
+                "log": str(test_log_path.relative_to(REPO_ROOT)),
+                "ok": ok,
+            }
+            if case["kind"] == "expected_failure":
+                summary["tests"][name]["expected_error"] = case["expected_error"]
             completed += 1
             status = f"{GREEN}PASS{RESET}" if ok else f"{RED}FAIL{RESET}"
             print(f"  [{completed}/{total}] {status}  {name}", flush=True)
@@ -414,6 +542,9 @@ def main():
 
     passed = sum(1 for ok, _ in results.values() if ok)
     total = len(results)
+    summary["passed"] = passed
+    summary["total"] = total
+    write_summary(run_logs_dir, summary)
     print(f"\n{passed}/{total} passed")
 
     sys.exit(0 if passed == total else 1)

@@ -371,32 +371,49 @@ std::string boolLiteral(bool value) {
     return value ? "true" : "false";
 }
 
+// DFS post-order topological sort. A breadth-first (Kahn) order interleaves
+// unrelated logic cones level by level, so contiguous chunking puts a
+// producer and its consumer in different chunks almost every time (measured
+// on ibex_core: 96k spilled words). Depth-first post-order keeps each cone's
+// producer chain contiguous, which is what chunk-locality (and therefore the
+// cross-chunk spill count) depends on.
 std::vector<const DFGNode*> topoOrder(const DFG& dfg) {
-    std::map<const DFGNode*, int> in_degree;
-    std::map<const DFGNode*, std::vector<const DFGNode*>> successors;
+    std::map<const DFGNode*, std::vector<const DFGNode*>> producers;
     for (const auto& node : dfg.nodes) {
-        in_degree[node.get()] = 0;
-    }
-    for (const auto& node : dfg.nodes) {
+        auto& list = producers[node.get()];
         DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
-            in_degree[node.get()]++;
-            successors[input.node].push_back(node.get());
+            list.push_back(input.node);
         });
     }
 
-    std::queue<const DFGNode*> ready;
-    for (const auto& [node, degree] : in_degree) {
-        if (degree == 0) ready.push(node);
-    }
-
+    enum class VisitState { Unvisited, OnStack, Done };
+    std::map<const DFGNode*, VisitState> state;
     std::vector<const DFGNode*> order;
     order.reserve(dfg.nodes.size());
-    while (!ready.empty()) {
-        const DFGNode* node = ready.front();
-        ready.pop();
-        order.push_back(node);
-        for (const DFGNode* successor : successors[node]) {
-            if (--in_degree[successor] == 0) ready.push(successor);
+    std::vector<std::pair<const DFGNode*, size_t>> stack;
+    for (const auto& root : dfg.nodes) {
+        if (state[root.get()] == VisitState::Done) continue;
+        state[root.get()] = VisitState::OnStack;
+        stack.emplace_back(root.get(), 0);
+        while (!stack.empty()) {
+            auto& [node, next_input] = stack.back();
+            const auto& inputs = producers.at(node);
+            if (next_input < inputs.size()) {
+                const DFGNode* producer = inputs[next_input++];
+                VisitState& producer_state = state[producer];
+                if (producer_state == VisitState::OnStack) {
+                    throw CompilerError(
+                        "mate-dpi-codegen: topological sort failed for generated model");
+                }
+                if (producer_state == VisitState::Unvisited) {
+                    producer_state = VisitState::OnStack;
+                    stack.emplace_back(producer, 0);
+                }
+            } else {
+                state[node] = VisitState::Done;
+                order.push_back(node);
+                stack.pop_back();
+            }
         }
     }
     if (order.size() != dfg.nodes.size()) {
@@ -1381,6 +1398,16 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     // whose own cost already meets or exceeds the budget (e.g. a wide MUX)
     // gets a chunk of its own rather than sharing one with whatever else
     // happens to be topologically adjacent.
+    //
+    // Contiguous slicing over the DFS post-order beat greedy cone clustering
+    // ("join your deepest producer's chunk if under budget") when measured on
+    // ibex_core: clustering produced slightly *more* cross-chunk spills
+    // (94.8k vs 91.6k words) and slower compiles, because crossings are
+    // dominated by high-fanout values no assignment can localize, while
+    // pulling nodes into older chunks breaks up the contiguous cone runs the
+    // DFS order provides. Revisit only with a real (multilevel, cut-
+    // minimizing, acyclic) partitioner, and only after DFG re-vectorization
+    // changes the graph's granularity.
     std::vector<std::pair<size_t, size_t>> chunk_ranges;
     {
         size_t begin = 0;

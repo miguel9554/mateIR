@@ -1830,11 +1830,9 @@ struct NativeFlopCommitCode {
 };
 
 // Emits, per clock/reset domain, native FlopD->FlopQ commit and reset-apply
-// functions mirroring MateIRRuntime::applyClockDomain/applyResetDomain
-// (src/sim/runtime.cpp): a clock domain's commit skips any flop for which one
-// of its reset domains currently reads at its active level (async reset
-// priority), and a reset domain broadcasts the flop's reset value to every Q
-// leaf.
+// functions. A clock domain's commit skips any flop for which one of its reset
+// domains currently reads at its active level (async reset priority), and a
+// reset domain broadcasts the flop's reset value to every Q leaf.
 NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
     const auto& rt = model.metadata();
     std::ostringstream out;
@@ -1923,8 +1921,7 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
         out << "}\n\n";
     }
 
-    // Applies FlopsInitial to every flop Q leaf in declaration order, mirroring
-    // MateIRRuntime::initFlops (src/sim/runtime.cpp).
+    // Applies FlopsInitial to every flop Q leaf in declaration order.
     result.flops_init_fn_name = "initFlops";
     out << "void " << result.flops_init_fn_name
         << "(std::span<mate::abi::NativeWordSlot> storage, MateFlopsInitial mode, std::mt19937_64& rng) {\n";

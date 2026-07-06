@@ -166,65 +166,6 @@ contract framework that can catch invalid MUX arms or incompatible arithmetic in
 
 **Impact: High** — turns debug-time suspicions into compiler-enforced invariants.
 
----
-
-## Generic structured DFG evaluation trace
-
-**Problem**: When static artifacts are insufficient, verifying runtime operation behavior
-currently requires adding temporary prints inside the simulator. A `--debug-slices` flag
-would solve only the current bug.
-
-**Proposal**: Add a generic, filtered DFG evaluation trace:
-
-```text
-mate --simulate ... --trace-dfg-node <id-or-name>
-mate --simulate ... --trace-dfg-op <op>
-mate --simulate ... --trace-dfg-cone <id-or-name>
-```
-
-Useful common filters:
-
-- instance path, node id, node name, operation, or source location
-- time range
-- emit only when input or output values change
-- maximum event count
-
-Emit a structured JSONL trace as the canonical output, with an optional human-readable
-formatter. Every evaluation event should contain:
-
-- simulation time
-- node identity, operation, type, and source location
-- named input nodes and runtime values
-- output value
-- operation decisions and derived values
-
-Example events:
-
-```json
-{"time":305000,"node":117,"op":"SLICE",
- "inputs":{"source":"0110011","high":0,"low":0},
- "decisions":{"index_mode":"packed","internal_low":-1,"internal_high":-1},
- "result":"0"}
-{"time":305000,"node":290781,"op":"MUX",
- "inputs":{"selector":1988},
- "decisions":{"selected_arm_value":1988,"selected_arm_node":291944},
- "result":"0"}
-{"time":305000,"node":410,"op":"ADD",
- "inputs":{"lhs":"0111","rhs":"1"},
- "decisions":{"lhs_extended_width":8,"rhs_extended_width":8,"signed":false},
- "result":"00001000"}
-```
-
-The trace interface is generic. Each evaluator contributes its own `decisions` fields where
-the output cannot be understood from raw inputs alone.
-
-**SLICE validation case**: the trace exposes effective internal indices without a dedicated
-simulator flag. The same mechanism exposes MUX arm choice and arithmetic widening.
-
-**Impact: High** — removes temporary simulator instrumentation for any DFG operation.
-
----
-
 ## Cross-pass node and cone diff
 
 **Problem**: Existing per-pass dumps show each graph independently, but it is difficult to

@@ -15,12 +15,9 @@
 #include <vector>
 
 // Fully native ABI backend: no SystemVerilog frontend/slang/yaml-cpp
-// dependency, no RtlRuntimeModel/RtlRuntimeInstance. Everything is built from
+// dependency and no runtime model objects. Everything is built from
 // GeneratedModelMetadata and generated function pointers. This is the backend
 // linked into DPI simulation binaries.
-//
-// See src/abi/abi_interpreter.cpp for the interpreter-backed twin of this
-// file. The native path intentionally stays on raw word storage.
 
 namespace {
 
@@ -71,6 +68,21 @@ struct AbiStorageSlot {
     bool is_signed = false;
 };
 
+enum class AbiObservableStorageKind {
+    Input,
+    Output,
+    Storage,
+};
+
+struct AbiObservable {
+    std::string full_path;
+    std::string leaf_name;
+    int32_t width = 0;
+    bool is_signed = false;
+    AbiObservableStorageKind storage_kind = AbiObservableStorageKind::Storage;
+    size_t storage_index = 0;
+};
+
 } // namespace
 
 struct MateModel {
@@ -81,6 +93,7 @@ struct MateModel {
     std::vector<AbiStorageSlot> input_storage;
     std::vector<AbiStorageSlot> output_storage;
     std::vector<AbiStorageSlot> observable_storage;
+    std::vector<AbiObservable> observables;
     size_t spill_words_count = 0;
     mate::abi::GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
     std::vector<mate::abi::GeneratedResetApplyFn> reset_apply;
@@ -263,11 +276,10 @@ void evaluateAndPublish(MateInstance& instance) {
                                            instance.observable_slots, instance.spill_words);
 }
 
-// Mirrors MateIRRuntime::applyClockEdge (src/sim/runtime.cpp): drive the
-// clock source signal, apply sync-input updates on the active edge only,
-// re-evaluate combinational logic so the flop commit sees fresh D values,
-// commit FlopD -> FlopQ for this clock domain, then re-evaluate once more so
-// outputs reflect the new FlopQ state.
+// Drive the clock source signal, apply sync-input updates on the active edge
+// only, re-evaluate combinational logic so the flop commit sees fresh D
+// values, commit FlopD -> FlopQ for this clock domain, then re-evaluate once
+// more so outputs reflect the new FlopQ state.
 void applyClockEdge(MateInstance& instance,
                     size_t clock_id,
                     const AbiClock& clock,
@@ -317,9 +329,8 @@ void applyClockEdge(MateInstance& instance,
     evaluateAndPublish(instance);
 }
 
-// Mirrors MateIRRuntime::applyResetEdge (src/sim/runtime.cpp): drive the
-// reset source signal and, on the active edge, apply reset values to this
-// domain's FlopQ storage.
+// Drive the reset source signal and, on the active edge, apply reset values to
+// this domain's FlopQ storage.
 void applyResetEdge(MateInstance& instance, size_t reset_id, const AbiReset& reset, MateEdge edge) {
     const AbiInput& source = instance.model->inputs.at(reset.source_storage_index);
     setStorageFromEdge(instance.model->input_storage.at(source.storage_index), edge,
@@ -500,6 +511,51 @@ std::vector<AbiStorageSlot> buildObservableStorage(const GeneratedModelMetadata&
     return storage;
 }
 
+std::vector<AbiObservable> buildObservables(const GeneratedModelMetadata& generated_metadata) {
+    std::vector<AbiObservable> observables;
+    observables.reserve(generated_metadata.inputs.size() +
+                        generated_metadata.outputs.size() +
+                        generated_metadata.storage.size());
+
+    for (size_t i = 0; i < generated_metadata.inputs.size(); ++i) {
+        const auto& input = generated_metadata.inputs[i];
+        observables.push_back(AbiObservable{
+            .full_path = "input:" + std::string(input.leaf_name),
+            .leaf_name = std::string(input.leaf_name),
+            .width = input.width,
+            .is_signed = input.is_signed,
+            .storage_kind = AbiObservableStorageKind::Input,
+            .storage_index = i,
+        });
+    }
+
+    for (size_t i = 0; i < generated_metadata.outputs.size(); ++i) {
+        const auto& output = generated_metadata.outputs[i];
+        observables.push_back(AbiObservable{
+            .full_path = "output:" + std::string(output.leaf_name),
+            .leaf_name = std::string(output.leaf_name),
+            .width = output.width,
+            .is_signed = output.is_signed,
+            .storage_kind = AbiObservableStorageKind::Output,
+            .storage_index = i,
+        });
+    }
+
+    for (size_t i = 0; i < generated_metadata.storage.size(); ++i) {
+        const auto& storage = generated_metadata.storage[i];
+        observables.push_back(AbiObservable{
+            .full_path = std::string(storage.full_path),
+            .leaf_name = std::string(storage.leaf_name),
+            .width = storage.width,
+            .is_signed = storage.is_signed,
+            .storage_kind = AbiObservableStorageKind::Storage,
+            .storage_index = i,
+        });
+    }
+
+    return observables;
+}
+
 void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& generated_metadata) {
     if (!generated_metadata.evaluate_combinational) {
         throw mate::CompilerError(
@@ -516,6 +572,7 @@ void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& g
     model.input_storage = buildInputStorage(generated_metadata);
     model.output_storage = buildOutputStorage(generated_metadata);
     model.observable_storage = buildObservableStorage(generated_metadata);
+    model.observables = buildObservables(generated_metadata);
     model.spill_words_count = generated_metadata.spill_words_count;
     model.evaluate_combinational = generated_metadata.evaluate_combinational;
     model.reset_apply = generated_metadata.reset_apply;
@@ -606,9 +663,9 @@ MateStatusCode mate_instance_init(MateInstance* instance,
         checked.model->flops_init(checked.observable_slots, flops_initial, rng);
         applyRawInputUpdates(checked, async_inputs, async_count);
         applyRawInputUpdates(checked, sync_inputs, sync_count);
-        // Reset-at-power-up: mirrors MateIRRuntime::initializeInputsAndEvaluate,
-        // which applies every reset domain that reads active right after the
-        // initial inputs are set, before the first combinational evaluation.
+        // Reset-at-power-up: apply every reset domain that reads active right
+        // after the initial inputs are set, before the first combinational
+        // evaluation.
         for (size_t i = 0; i < checked.model->resets.size(); ++i) {
             const AbiReset& reset = checked.model->resets.at(i);
             if (resetDomainActive(checked, reset)) {
@@ -638,6 +695,19 @@ int32_t mate_output_id(const MateModel* model, const char* leaf_name) {
         const auto& outputs = checkedModel(model).outputs;
         for (size_t i = 0; i < outputs.size(); ++i) {
             if (outputs[i].leaf_name == leaf_name) return static_cast<int32_t>(i);
+        }
+        return -1;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int32_t mate_observable_id(const MateModel* model, const char* full_path) {
+    try {
+        if (!full_path) return -1;
+        const auto& observables = checkedModel(model).observables;
+        for (size_t i = 0; i < observables.size(); ++i) {
+            if (observables[i].full_path == full_path) return static_cast<int32_t>(i);
         }
         return -1;
     } catch (...) {
@@ -709,6 +779,29 @@ MateStatusCode mate_output_info(const MateModel* model,
             .width = output.width,
             .nwords = wordCount(output.width),
             .is_signed = output.is_signed ? 1 : 0,
+            .kind = MATE_INPUT_ASYNC,
+            .clock_id = -1,
+            .reset_id = -1,
+        };
+    });
+}
+
+MateStatusCode mate_observable_info(const MateModel* model,
+                                    int32_t observable_id,
+                                    MatePortInfo* out_info,
+                                    MateStatus* status) {
+    return guard(status, [&]() {
+        const MateModel& checked = checkedModel(model);
+        if (!out_info) throw mate::CompilerError("Mate ABI: observable info output pointer is null");
+        if (observable_id < 0 || static_cast<size_t>(observable_id) >= checked.observables.size()) {
+            throw mate::CompilerError(std::format("Mate ABI: invalid observable handle {}", observable_id));
+        }
+        const auto& observable = checked.observables.at(static_cast<size_t>(observable_id));
+        *out_info = MatePortInfo{
+            .id = observable_id,
+            .width = observable.width,
+            .nwords = wordCount(observable.width),
+            .is_signed = observable.is_signed ? 1 : 0,
             .kind = MATE_INPUT_ASYNC,
             .clock_id = -1,
             .reset_id = -1,
@@ -788,6 +881,41 @@ MateStatusCode mate_get_output(const MateInstance* instance,
         const auto& output = checked.model->outputs.at(static_cast<size_t>(output_id));
         storageToWords(output.leaf_name, checked.output_words.at(output.storage_index),
                        output.width, words, nwords);
+    });
+}
+
+MateStatusCode mate_get_observable(const MateInstance* instance,
+                                   int32_t observable_id,
+                                   uint64_t* words,
+                                   int32_t nwords,
+                                   MateStatus* status) {
+    return guard(status, [&]() {
+        const MateInstance& checked = checkedInstance(instance);
+        if (observable_id < 0 || static_cast<size_t>(observable_id) >= checked.model->observables.size()) {
+            throw mate::CompilerError(std::format("Mate ABI: invalid observable handle {}", observable_id));
+        }
+        const auto& observable = checked.model->observables.at(static_cast<size_t>(observable_id));
+        const std::vector<uint64_t>* storage = nullptr;
+        switch (observable.storage_kind) {
+            case AbiObservableStorageKind::Input:
+                storage = &checked.input_words.at(observable.storage_index);
+                break;
+            case AbiObservableStorageKind::Output:
+                storage = &checked.output_words.at(observable.storage_index);
+                break;
+            case AbiObservableStorageKind::Storage:
+                storage = &checked.observable_words.at(observable.storage_index);
+                break;
+        }
+        if (!storage) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: observable '{}' has no backing storage", observable.full_path));
+        }
+        storageToWords(observable.full_path,
+                       *storage,
+                       observable.width,
+                       words,
+                       nwords);
     });
 }
 

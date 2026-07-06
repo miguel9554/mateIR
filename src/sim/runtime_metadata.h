@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mateir/mateir.h"
+#include "sim/sim_value.h"
 
 #include <cstddef>
 #include <map>
@@ -56,6 +57,17 @@ enum class RuntimeObservableKind {
     Internal,
     FlopD,
     FlopQ,
+};
+
+enum class FlopsInitial {
+    Random,
+    AllZeros,
+    AllOnes,
+};
+
+struct RuntimeInputUpdate {
+    RuntimeInputId input;
+    SimValue value;
 };
 
 struct RuntimeInputLeafMetadata {

@@ -28,6 +28,7 @@ class Port:
     named_struct_type: str  # preserved named type text for struct ports
     struct_leaves: list[tuple[str, str]]  # [("field.sub", "logic [N:0]"), ...]
     unpacked_dims: str = ""  # unpacked dimensions on the declarator, e.g. "[IC_NUM_WAYS]"
+    interface_type: str = ""  # interface type for interface ports, e.g. "my_if"
 
 
 @dataclass
@@ -205,13 +206,24 @@ def parse_module(filepath: Path) -> ModuleInfo:
                     if 'StructType' in td_kind:
                         named_struct_type = type_name
                         struct_leaves = struct_leaves_map.get(lookup_name, [])
+                    interface_type = ""
+                elif not direction:
+                    # Slang's Python bindings expose a plain interface ANSI port
+                    # like `my_if p` as a directionless NamedType port.
+                    is_signed, param_dims = False, ''
+                    named_struct_type = ""
+                    struct_leaves = []
+                    interface_type = type_name
                 else:
                     # Unknown typedef — fall back to scalar logic
                     is_signed, param_dims = False, ''
                     named_struct_type = ""
                     struct_leaves = []
+                    interface_type = ""
                 resolved_dims = resolve_dims(param_dims)
             else:
+                if not direction:
+                    raise ValueError(f"Unsupported directionless port '{port_name}'")
                 # Standard integer / implicit / logic type
                 try:
                     is_signed = (dt.signing.kind == pyslang.TokenKind.SignedKeyword)
@@ -224,6 +236,7 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 resolved_dims = resolve_dims(param_dims)
                 named_struct_type = ""
                 struct_leaves = []
+                interface_type = ""
 
             port_unpacked_dims = ""
             try:
@@ -241,6 +254,7 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 named_struct_type=named_struct_type,
                 struct_leaves=struct_leaves,
                 unpacked_dims=port_unpacked_dims,
+                interface_type=interface_type,
             ))
 
     return ModuleInfo(name=mod_name, parameters=params, ports=ports, imports=imports)
@@ -248,6 +262,8 @@ def parse_module(filepath: Path) -> ModuleInfo:
 
 def port_type_str(port: Port, use_resolved: bool = False) -> str:
     """Build type string like 'logic signed [WL-1:0]' or 'logic [8-1:0]'."""
+    if port.interface_type:
+        return port.interface_type
     if port.named_struct_type:
         return port.named_struct_type
     parts = ['logic']
@@ -410,6 +426,7 @@ def gen_uut_if(module: ModuleInfo) -> str:
     # Input signals
     inputs = [p for p in module.ports if p.direction == 'input']
     outputs = [p for p in module.ports if p.direction == 'output']
+    interfaces = [p for p in module.ports if p.interface_type]
 
     lines.append('    // Inputs')
     for p in inputs:
@@ -422,12 +439,20 @@ def gen_uut_if(module: ModuleInfo) -> str:
         dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
         lines.append(f'    {port_type_str(p)} {p.name}{dim_part};')
 
+    if interfaces:
+        lines.append('')
+        lines.append('    // Interfaces')
+        for p in interfaces:
+            lines.append(f'    {p.interface_type} {p.name}();')
+
     # Modports
     lines.append('')
 
     def modport_line(name: str, flip: bool) -> str:
         parts = []
         for p in module.ports:
+            if p.interface_type:
+                continue
             if flip:
                 d = 'output' if p.direction == 'input' else 'input'
             else:
@@ -517,11 +542,19 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
 
     # Module instantiations
     lines.append('    // modules')
+    port_conns = []
+    for p in module.ports:
+        if p.interface_type:
+            port_conns.append(f'        .{p.name}(_if.{p.name})')
+        else:
+            port_conns.append(f'        .{p.name}({p.name})')
     if has_params:
         param_list = ', '.join(p.name for p in module.parameters)
-        lines.append(f'    {module.name} #({param_list}) uut(.*);')
+        lines.append(f'    {module.name} #({param_list}) uut(')
     else:
-        lines.append(f'    {module.name} uut(.*);')
+        lines.append(f'    {module.name} uut(')
+    lines.append(',\n'.join(port_conns))
+    lines.append('    );')
     lines.append('    uut_tb uut_tb(.*);')
     lines.append('    if (INCLUDE_UUT_RECORDER) begin : g_recorder')
     lines.append('        uut_recorder u_recorder(.*);')
@@ -542,8 +575,12 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
         lines.append('        uut_if dpi_if();')
     lines.append('')
     lines.append(f'        {module.name}_dpi dpi_uut(')
-    port_conns = [f'            .{p.name}(dpi_if.{p.name})' for p in module.ports]
-    lines.append(',\n'.join(port_conns))
+    dpi_port_conns = [
+        f'            .{p.name}(dpi_if.{p.name})'
+        for p in module.ports
+        if not p.interface_type
+    ]
+    lines.append(',\n'.join(dpi_port_conns))
     lines.append('        );')
     lines.append('')
     lines.append('        uut_tb dpi_tb(._if(dpi_if));')

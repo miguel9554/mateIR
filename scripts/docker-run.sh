@@ -15,6 +15,8 @@ fi
 docker run "${docker_args[@]}" \
   --cap-add=SYS_PTRACE \
   --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp \
+  -e CCACHE_DIR="/tmp/mate-ccache-$(id -u)" \
   -v "$(pwd)":"$(pwd)" \
   -w "$(pwd)" \
   mate-dev:latest \

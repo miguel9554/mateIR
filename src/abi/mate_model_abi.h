@@ -78,6 +78,7 @@ MateStatusCode mate_instance_init(MateInstance* instance,
 
 int32_t mate_input_id(const MateModel* model, const char* leaf_name);
 int32_t mate_output_id(const MateModel* model, const char* leaf_name);
+int32_t mate_observable_id(const MateModel* model, const char* full_path);
 int32_t mate_clock_id(const MateModel* model, const char* display_or_leaf_name);
 int32_t mate_reset_id(const MateModel* model, const char* display_or_leaf_name);
 
@@ -89,6 +90,10 @@ MateStatusCode mate_output_info(const MateModel* model,
                                 int32_t output_id,
                                 MatePortInfo* out_info,
                                 MateStatus* status);
+MateStatusCode mate_observable_info(const MateModel* model,
+                                    int32_t observable_id,
+                                    MatePortInfo* out_info,
+                                    MateStatus* status);
 
 MateStatusCode mate_set_input(MateInstance* instance,
                               int32_t input_id,
@@ -115,6 +120,11 @@ MateStatusCode mate_get_output(const MateInstance* instance,
                                uint64_t* words,
                                int32_t nwords,
                                MateStatus* status);
+MateStatusCode mate_get_observable(const MateInstance* instance,
+                                   int32_t observable_id,
+                                   uint64_t* words,
+                                   int32_t nwords,
+                                   MateStatus* status);
 
 #ifdef __cplusplus
 }

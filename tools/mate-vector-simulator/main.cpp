@@ -35,9 +35,6 @@ void printUsage(const char* progName) {
               << "  --flops-seed <n>          Seed for random flop initialization\n"
               << "  --debug-nodes <n1,n2,...> Comma-separated node names for debug DOTs\n"
               << "  --dump-passes             Dump per-pass DFG .dot/.json and final DFG dump\n"
-              << "  --trace-dfg-node <...>    Comma-separated node ids/names to trace during simulation\n"
-              << "  --trace-dfg-cone <...>    Comma-separated node ids/names whose backward cones are traced\n"
-              << "  --trace-dfg-op <...>      Comma-separated DFG ops to trace during simulation\n"
               << "  --params <K=V,K=V,...>    Comma-separated top parameter overrides\n";
 }
 
@@ -93,9 +90,6 @@ int main(int argc, char** argv) {
     std::string flopsInitialStr;
     std::string flopsSeedStr;
     std::string debugNodesStr;
-    std::string traceDfgNodesStr;
-    std::string traceDfgConesStr;
-    std::string traceDfgOpsStr;
     std::string paramsStr;
     std::string emitInferredDomainsPath;
     std::string emitInferredSynchronizersDir;
@@ -127,9 +121,6 @@ int main(int argc, char** argv) {
                    std::strcmp(argv[i], "--flops-initial") == 0 ||
                    std::strcmp(argv[i], "--flops-seed") == 0 ||
                    std::strcmp(argv[i], "--debug-nodes") == 0 ||
-                   std::strcmp(argv[i], "--trace-dfg-node") == 0 ||
-                   std::strcmp(argv[i], "--trace-dfg-cone") == 0 ||
-                   std::strcmp(argv[i], "--trace-dfg-op") == 0 ||
                    std::strcmp(argv[i], "--params") == 0 ||
                    std::strcmp(argv[i], "--emit-inferred-domains") == 0 ||
                    std::strcmp(argv[i], "--emit-inferred-synchronizers") == 0) {
@@ -147,9 +138,6 @@ int main(int argc, char** argv) {
             else if (opt == "--flops-initial") flopsInitialStr = value;
             else if (opt == "--flops-seed") flopsSeedStr = value;
             else if (opt == "--debug-nodes") debugNodesStr = value;
-            else if (opt == "--trace-dfg-node") traceDfgNodesStr = value;
-            else if (opt == "--trace-dfg-cone") traceDfgConesStr = value;
-            else if (opt == "--trace-dfg-op") traceDfgOpsStr = value;
             else if (opt == "--params") paramsStr = value;
             else if (opt == "--emit-inferred-domains") emitInferredDomainsPath = value;
             else if (opt == "--emit-inferred-synchronizers") emitInferredSynchronizersDir = value;
@@ -213,11 +201,6 @@ int main(int argc, char** argv) {
         simConfig.inputs_dir = inputsDir;
         simConfig.output_dir = outputDir;
         simConfig.parameters = frontendOptions.parameters;
-        simConfig.debug_dfg_nodes = frontendOptions.debug_dfg_nodes;
-        simConfig.trace_dfg_nodes = splitComma(traceDfgNodesStr);
-        simConfig.trace_dfg_cones = splitComma(traceDfgConesStr);
-        simConfig.trace_dfg_ops = splitComma(traceDfgOpsStr);
-
         if (!flopsInitialStr.empty()) {
             if (flopsInitialStr == "random") simConfig.flops_initial = FlopsInitial::Random;
             else if (flopsInitialStr == "zeros") simConfig.flops_initial = FlopsInitial::AllZeros;

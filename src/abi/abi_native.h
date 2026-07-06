@@ -2,7 +2,7 @@
 
 // Native ABI backend: builds a MateModel purely from generated metadata and
 // generated function pointers, with no SystemVerilog frontend/slang
-// dependency and no RtlRuntimeModel/RtlRuntimeInstance. This is the backend
+// dependency and no runtime model objects. This is the backend
 // linked into DPI simulation binaries (see tests/common/verilator.mk).
 
 #include "abi/generated_model_metadata.h"

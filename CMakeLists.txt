@@ -124,7 +124,6 @@ set(SIM_VALUE_SOURCES
 )
 
 set(RTL_RUNTIME_SOURCES
-    src/sim/runtime.cpp
     src/sim/runtime_model.cpp
     src/sim/runtime_metadata.cpp
 )
@@ -133,15 +132,12 @@ set(RTL_RUNTIME_COMPILER_SOURCES
     src/sim/runtime_compiler.cpp
 )
 
-set(DPI_SUPPORT_SOURCES
-    src/dpi/dpi_support.cpp
-)
-
 set(ABI_NATIVE_SOURCES
     src/abi/abi_native.cpp
 )
 
 set(VECTOR_SIMULATOR_SOURCES
+    tools/mate-vector-simulator/sim_engine.cpp
     tools/mate-vector-simulator/simulator_consumer.cpp
     tools/mate-vector-simulator/simulator.cpp
     tools/mate-vector-simulator/vcd_writer.cpp
@@ -180,14 +176,6 @@ target_link_libraries(mate-rtl-runtime-compiler PUBLIC
 )
 mate_configure_project_target(mate-rtl-runtime-compiler)
 
-add_library(mate-dpi-support STATIC ${DPI_SUPPORT_SOURCES})
-target_include_directories(mate-dpi-support PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/slang/external/ieee1800
-)
-target_link_libraries(mate-dpi-support PUBLIC mate-rtl-runtime-compiler)
-mate_configure_project_target(mate-dpi-support)
-
 # No mateir/frontend/yaml-cpp/slang dependency by design: this is the ABI
 # backend linked into DPI simulation binaries (tests/common/verilator.mk),
 # and Phase 2E requires those to be absent from that link.
@@ -196,6 +184,17 @@ target_include_directories(mate-abi-native PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 mate_configure_project_target(mate-abi-native)
+
+add_library(mate-dpi-codegen STATIC src/dpi_codegen/dpi_codegen.cpp src/dpi_codegen/dpi_lib_link.cpp)
+target_include_directories(mate-dpi-codegen PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(mate-dpi-codegen PUBLIC
+    mate-rtl-runtime-compiler
+    Threads::Threads
+    slang::slang
+)
+mate_configure_project_target(mate-dpi-codegen)
 
 add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)
 target_include_directories(mate-vcd-tracer PUBLIC
@@ -209,7 +208,10 @@ target_include_directories(mate-vector-simulator-lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/mate-vector-simulator
 )
 target_link_libraries(mate-vector-simulator-lib
-    PUBLIC mate-rtl-runtime mate-vcd-tracer
+    PUBLIC mate-rtl-runtime mate-dpi-codegen mate-vcd-tracer ${CMAKE_DL_LIBS}
+)
+target_compile_definitions(mate-vector-simulator-lib PRIVATE
+    MATE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 mate_configure_project_target(mate-vector-simulator-lib)
 
@@ -218,7 +220,7 @@ target_include_directories(mate-static-analysis PUBLIC ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(mate-static-analysis PUBLIC mate-mateir)
 mate_configure_project_target(mate-static-analysis)
 
-add_executable(mate src/main.cpp src/dpi_codegen/dpi_codegen.cpp src/dpi_codegen/dpi_lib_link.cpp)
+add_executable(mate src/main.cpp)
 target_include_directories(mate PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/mate-vector-simulator
@@ -227,6 +229,7 @@ target_link_libraries(mate PRIVATE
     mate-rtl-runtime-compiler
     mate-static-analysis
     mate-vector-simulator-lib
+    mate-dpi-codegen
     slang::slang
     Threads::Threads
 )

@@ -11,7 +11,6 @@
 #include <iostream>
 #include <map>
 #include <optional>
-#include <queue>
 #include <random>
 #include <set>
 #include <span>
@@ -23,68 +22,6 @@
 namespace mate {
 
 namespace {
-
-std::string jsonEscape(std::string_view text) {
-    std::ostringstream ss;
-    for (char c : text) {
-        switch (c) {
-            case '\\': ss << "\\\\"; break;
-            case '"': ss << "\\\""; break;
-            case '\n': ss << "\\n"; break;
-            case '\r': ss << "\\r"; break;
-            case '\t': ss << "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    ss << "\\u" << std::hex << std::setw(4) << std::setfill('0')
-                       << static_cast<int>(static_cast<unsigned char>(c))
-                       << std::dec << std::setfill(' ');
-                } else {
-                    ss << c;
-                }
-                break;
-        }
-    }
-    return ss.str();
-}
-
-std::string nodeTraceName(const DFGNode* node) {
-    const std::string full = node->debugName();
-    return full.empty() ? node->str() : full;
-}
-
-std::string simValueJson(const SimValue& value) {
-    return "\"" + jsonEscape(value.toBinaryString()) + "\"";
-}
-
-std::string formatTypeJson(const std::optional<Type>& type) {
-    if (!type.has_value()) return "null";
-    std::ostringstream ss;
-    ss << "{"
-       << "\"kind\":\"" << (type->kind == TypeKind::Enum ? "enum" :
-                             type->kind == TypeKind::Struct ? "struct" : "integer") << "\","
-       << "\"width\":" << type->width << ","
-       << "\"signed\":" << (type->isSigned() ? "true" : "false");
-    if (!type->packed_dims.empty()) {
-        ss << ",\"packed_dims\":[";
-        for (size_t i = 0; i < type->packed_dims.size(); ++i) {
-            if (i) ss << ",";
-            ss << "{\"left\":" << type->packed_dims[i].left
-               << ",\"right\":" << type->packed_dims[i].right << "}";
-        }
-        ss << "]";
-    }
-    if (!type->unpacked_dims.empty()) {
-        ss << ",\"unpacked_dims\":[";
-        for (size_t i = 0; i < type->unpacked_dims.size(); ++i) {
-            if (i) ss << ",";
-            ss << "{\"left\":" << type->unpacked_dims[i].left
-               << ",\"right\":" << type->unpacked_dims[i].right << "}";
-        }
-        ss << "]";
-    }
-    ss << "}";
-    return ss.str();
-}
 
 } // namespace
 
@@ -483,140 +420,9 @@ Simulator::Simulator(const RtlRuntimeModel& model, const SimConfig& config)
         throw CompilerError("Simulator: module has no DFG");
     }
 
-    runtime_ = model_.createInstance();
-    initTraceConfiguration();
-    runtime_->trace_sink = [this](const DFGNode* node,
-                                  const std::vector<std::pair<std::string, SimValue>>& inputs,
-                                  const SimValue& result,
-                                  const std::string& decisions_json) {
-        emitTraceEvent(runtime_trace_time_ns_, node, inputs, result, decisions_json);
-    };
-
+    runtime_ = std::make_unique<NativeSimEngine>(model_, config_);
     buildTimeline();
     loadSyncInputs();
-}
-
-void Simulator::initTraceConfiguration() {
-    auto resolveNodeSpec = [&](const std::string& spec) -> const DFGNode* {
-        const auto& nodes = module_.dfg->nodes;
-        std::vector<const DFGNode*> matches;
-        bool numeric = !spec.empty() &&
-            std::all_of(spec.begin(), spec.end(), [](unsigned char c) { return std::isdigit(c); });
-        for (size_t i = 0; i < nodes.size(); ++i) {
-            const DFGNode* node = nodes[i].get();
-            if (numeric) {
-                uint64_t value = std::stoull(spec);
-                if (i == value || node->debug_id == value) matches.push_back(node);
-                continue;
-            }
-            if (node->name == spec || node->debugName() == spec) {
-                matches.push_back(node);
-            }
-        }
-        if (matches.empty()) {
-            throw CompilerError(std::format(
-                "Simulator: trace node '{}' not found in live DFG", spec));
-        }
-        if (matches.size() > 1) {
-            throw CompilerError(std::format(
-                "Simulator: trace node '{}' is ambiguous ({} matches)", spec, matches.size()));
-        }
-        return matches.front();
-    };
-
-    for (const auto& op : config_.trace_dfg_ops) {
-        std::string upper = op;
-        std::transform(upper.begin(), upper.end(), upper.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-        traced_ops_.insert(std::move(upper));
-    }
-
-    for (const auto& spec : config_.trace_dfg_nodes) {
-        traced_nodes_.insert(resolveNodeSpec(spec));
-    }
-
-    for (const auto& spec : config_.trace_dfg_cones) {
-        const DFGNode* root = resolveNodeSpec(spec);
-        std::queue<const DFGNode*> q;
-        traced_nodes_.insert(root);
-        q.push(root);
-        while (!q.empty()) {
-            const DFGNode* curr = q.front();
-            q.pop();
-            DFGTraversal::forEachInput(curr, [&](size_t, const DFGOutput& input) {
-                if (traced_nodes_.insert(input.node).second) q.push(input.node);
-            });
-        }
-    }
-
-    if (!traced_nodes_.empty() || !traced_ops_.empty()) {
-        std::filesystem::create_directories(config_.output_dir);
-        dfg_trace_path_ = config_.output_dir + "/dfg_trace.jsonl";
-        dfg_trace_out_ = std::make_unique<std::ofstream>(*dfg_trace_path_);
-        if (!dfg_trace_out_->is_open()) {
-            throw CompilerError(std::format(
-                "Simulator: cannot open DFG trace output '{}'", *dfg_trace_path_));
-        }
-    }
-}
-
-bool Simulator::shouldTraceNode(const DFGNode* node) const {
-    if (!node) return false;
-    if (traced_nodes_.contains(node)) return true;
-    return traced_ops_.contains(std::string(to_string(node->kind())));
-}
-
-void Simulator::emitPassiveTraceEvents(int64_t time_ns) {
-    if (!dfg_trace_out_) return;
-    for (const auto& owned : module_.dfg->nodes) {
-        const DFGNode* node = owned.get();
-        if (!shouldTraceNode(node)) continue;
-        if (node->kind() != DFGOp::INPUT &&
-            node->kind() != DFGOp::CONST &&
-            node->kind() != DFGOp::X &&
-            !runtime_->isFlopQNode(node)) {
-            continue;
-        }
-        const SimValue* value = runtime_->findNodeValue(node);
-        if (!value) continue;
-        emitTraceEvent(time_ns, node, {}, *value, "\"source\":\"state\"");
-    }
-}
-
-void Simulator::emitTraceEvent(int64_t time_ns,
-                               const DFGNode* node,
-                               const std::vector<std::pair<std::string, SimValue>>& inputs,
-                               const SimValue& result,
-                               const std::string& decisions_json) {
-    if (!dfg_trace_out_ || !shouldTraceNode(node)) return;
-
-    auto node_index = runtime_->nodeIndex(node);
-    if (!node_index.has_value()) {
-        throw CompilerError(std::format(
-            "Simulator: traced node {} has no live node index", node->str()), node);
-    }
-
-    *dfg_trace_out_ << "{"
-                    << "\"time\":" << time_ns
-                    << ",\"id\":" << *node_index
-                    << ",\"debug_id\":" << node->debug_id
-                    << ",\"op\":\"" << to_string(node->kind()) << "\""
-                    << ",\"name\":\"" << jsonEscape(nodeTraceName(node)) << "\""
-                    << ",\"type\":" << formatTypeJson(node->type);
-    if (node->loc) {
-        *dfg_trace_out_ << ",\"loc\":\"" << jsonEscape(node->loc->str()) << "\"";
-    }
-    *dfg_trace_out_ << ",\"inputs\":{";
-    for (size_t i = 0; i < inputs.size(); ++i) {
-        if (i) *dfg_trace_out_ << ",";
-        *dfg_trace_out_ << "\"" << jsonEscape(inputs[i].first) << "\":" << simValueJson(inputs[i].second);
-    }
-    *dfg_trace_out_ << "}"
-                    << ",\"result\":" << simValueJson(result);
-    if (!decisions_json.empty()) {
-        *dfg_trace_out_ << ",\"decisions\":{" << decisions_json << "}";
-    }
-    *dfg_trace_out_ << "}\n";
 }
 
 // ============================================================================
@@ -688,9 +494,7 @@ void Simulator::run() {
         });
     }
 
-    runtime_trace_time_ns_ = 0;
     runtime_->initializeInputsAndEvaluate(initial_async_inputs, initial_sync_inputs);
-    emitPassiveTraceEvents(0);
 
     // VCD: trace initial state at time 0
     vcd_->update(*runtime_, 0);
@@ -766,8 +570,6 @@ void Simulator::run() {
 
         bool timestamp_had_active_clock_edge = false;
         for (const auto& update : async_updates) {
-            runtime_trace_time_ns_ = batch_time;
-
             const auto& input_metadata = runtime_metadata_.input_leaves.at(update.input.value);
             const std::string& leaf_name = input_metadata.leaf_name;
             const auto clock_it = runtime_metadata_.clock_domains_by_top_input.find(leaf_name);
@@ -793,7 +595,6 @@ void Simulator::run() {
                         sync_transition = collectClockSyncInputTransition(clock_id);
                         timestamp_had_active_clock_edge = true;
                     }
-                    runtime_trace_time_ns_ = batch_time;
                     runtime_->applyClockEdge(clock_id, *edge,
                                              sync_transition.before_edge);
                     if (!sync_transition.after_edge.empty()) {
@@ -806,7 +607,6 @@ void Simulator::run() {
             if (is_reset_source) {
                 if (!edge.has_value()) continue;
                 for (ResetId reset_id : reset_it->second) {
-                    runtime_trace_time_ns_ = batch_time;
                     runtime_->applyResetEdge(reset_id, *edge);
                 }
                 continue;
@@ -819,8 +619,6 @@ void Simulator::run() {
             }
             runtime_->setInputValues(std::span<const RuntimeInputUpdate>(&update, 1));
         }
-        emitPassiveTraceEvents(batch_time);
-
         // VCD: trace all values at every time step
         vcd_->update(*runtime_, batch_time);
 
@@ -839,9 +637,6 @@ void Simulator::run() {
     }
 
     vcd_->close(timeline_.empty() ? 0 : timeline_.back().time);
-    if (dfg_trace_out_) {
-        dfg_trace_out_->flush();
-    }
 
     writeOutputFiles();
 
@@ -853,9 +648,6 @@ void Simulator::run() {
     }
     std::cout << "Simulator: output written to '" << config_.output_dir << "/'" << std::endl;
     std::cout << "Simulator: grouped VCD trace written to '" << vcd_->grouped_path() << "'" << std::endl;
-    if (dfg_trace_path_) {
-        std::cout << "Simulator: DFG trace written to '" << *dfg_trace_path_ << "'" << std::endl;
-    }
 }
 
 } // namespace mate

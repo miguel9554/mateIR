@@ -80,7 +80,7 @@ using GeneratedClockCommitFn = void (*)(
     std::span<NativeWordSlot> storage);
 
 // Applies FlopsInitial to every flop Q leaf in the design, in generated
-// (flop-declaration) order. Mirrors MateIRRuntime::initFlops.
+// (flop-declaration) order.
 using GeneratedFlopsInitFn = void (*)(
     std::span<NativeWordSlot> storage,
     MateFlopsInitial mode,

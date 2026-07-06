@@ -1,8 +1,7 @@
 #pragma once
 
 #include "mateir/mateir.h"
-#include "mateir/debug.h"
-#include "sim/runtime_model.h"
+#include "sim_engine.h"
 #include "sim/sim_value.h"
 #include "vcd_writer.h"
 
@@ -12,7 +11,6 @@
 #include <optional>
 #include <set>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 namespace mate {
@@ -23,12 +21,8 @@ struct SimConfig {
     std::string inputs_dir;
     std::string output_dir;
     std::map<std::string, int64_t> parameters;
-    std::vector<DebugNodeSpec> debug_dfg_nodes;
     FlopsInitial flops_initial = FlopsInitial::Random;
     std::optional<uint64_t> flops_initial_seed;
-    std::vector<std::string> trace_dfg_nodes;
-    std::vector<std::string> trace_dfg_cones;
-    std::vector<std::string> trace_dfg_ops;
 };
 
 struct AsyncEvent {
@@ -54,7 +48,7 @@ private:
     const SimConfig& config_;
     const MateIRRuntimeMetadata& runtime_metadata_;
 
-    std::unique_ptr<RtlRuntimeInstance> runtime_;
+    std::unique_ptr<SimEngine> runtime_;
 
     // Testbench infrastructure
     std::vector<AsyncEvent> timeline_;
@@ -67,11 +61,6 @@ private:
     std::map<std::string, std::vector<SimValue>> recorded_values_;
 
     std::unique_ptr<VcdWriter> vcd_;
-    std::unique_ptr<std::ofstream> dfg_trace_out_;
-    std::unordered_set<const DFGNode*> traced_nodes_;
-    std::set<std::string> traced_ops_;
-    std::optional<std::string> dfg_trace_path_;
-    int64_t runtime_trace_time_ns_ = 0;
 
     // Testbench methods
     void buildTimeline();
@@ -82,14 +71,6 @@ private:
     bool isClockOrResetSource(const std::string& leaf_name) const;
     void recordOutputs();
     void writeOutputFiles();
-    void initTraceConfiguration();
-    bool shouldTraceNode(const DFGNode* node) const;
-    void emitPassiveTraceEvents(int64_t time_ns);
-    void emitTraceEvent(int64_t time_ns,
-                        const DFGNode* node,
-                        const std::vector<std::pair<std::string, SimValue>>& inputs,
-                        const SimValue& result,
-                        const std::string& decisions_json = "");
 };
 
 } // namespace mate

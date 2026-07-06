@@ -29,6 +29,7 @@ class Port:
     struct_leaves: list[tuple[str, str]]  # [("field.sub", "logic [N:0]"), ...]
     unpacked_dims: str = ""  # unpacked dimensions on the declarator, e.g. "[IC_NUM_WAYS]"
     interface_type: str = ""  # interface type for interface ports, e.g. "my_if"
+    interface_modport: str = ""  # optional modport on interface ports, e.g. "master"
 
 
 @dataclass
@@ -184,8 +185,29 @@ def parse_module(filepath: Path) -> ModuleInfo:
         for port in header.ports.ports:
             if not hasattr(port, 'header'):
                 continue  # skip comma tokens
-            direction = port.header.direction.rawText
             port_name = port.declarator.name.valueText
+
+            if 'InterfacePortHeader' in str(port.header.kind):
+                modport = ""
+                try:
+                    modport = port.header.modport.member.valueText
+                except AttributeError:
+                    pass
+                ports.append(Port(
+                    name=port_name,
+                    direction="",
+                    is_signed=False,
+                    param_dims="",
+                    resolved_dims="",
+                    named_struct_type="",
+                    struct_leaves=[],
+                    unpacked_dims="",
+                    interface_type=port.header.nameOrKeyword.valueText,
+                    interface_modport=modport,
+                ))
+                continue
+
+            direction = port.header.direction.rawText
 
             dt = port.header.dataType
             kind_name = str(dt.kind)
@@ -207,6 +229,7 @@ def parse_module(filepath: Path) -> ModuleInfo:
                         named_struct_type = type_name
                         struct_leaves = struct_leaves_map.get(lookup_name, [])
                     interface_type = ""
+                    interface_modport = ""
                 elif not direction:
                     # Slang's Python bindings expose a plain interface ANSI port
                     # like `my_if p` as a directionless NamedType port.
@@ -214,12 +237,14 @@ def parse_module(filepath: Path) -> ModuleInfo:
                     named_struct_type = ""
                     struct_leaves = []
                     interface_type = type_name
+                    interface_modport = ""
                 else:
                     # Unknown typedef — fall back to scalar logic
                     is_signed, param_dims = False, ''
                     named_struct_type = ""
                     struct_leaves = []
                     interface_type = ""
+                    interface_modport = ""
                 resolved_dims = resolve_dims(param_dims)
             else:
                 if not direction:
@@ -237,6 +262,7 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 named_struct_type = ""
                 struct_leaves = []
                 interface_type = ""
+                interface_modport = ""
 
             port_unpacked_dims = ""
             try:
@@ -255,6 +281,7 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 struct_leaves=struct_leaves,
                 unpacked_dims=port_unpacked_dims,
                 interface_type=interface_type,
+                interface_modport=interface_modport,
             ))
 
     return ModuleInfo(name=mod_name, parameters=params, ports=ports, imports=imports)
@@ -263,6 +290,8 @@ def parse_module(filepath: Path) -> ModuleInfo:
 def port_type_str(port: Port, use_resolved: bool = False) -> str:
     """Build type string like 'logic signed [WL-1:0]' or 'logic [8-1:0]'."""
     if port.interface_type:
+        if port.interface_modport:
+            return f'{port.interface_type}.{port.interface_modport}'
         return port.interface_type
     if port.named_struct_type:
         return port.named_struct_type

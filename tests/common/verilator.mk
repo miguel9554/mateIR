@@ -1,6 +1,17 @@
 .PHONY: simulate clean force prep
 
-WAVES = waves.vcd
+TRACE_FORMAT ?= VCD
+ifeq ($(TRACE_FORMAT),VCD)
+TRACE_FLAG = --trace --trace-underscore
+TRACE_EXT = vcd
+else ifeq ($(TRACE_FORMAT),FST)
+TRACE_FLAG = --trace-fst --trace-underscore
+TRACE_EXT = fst
+else
+$(error TRACE_FORMAT must be VCD or FST)
+endif
+
+WAVES ?= waves.$(TRACE_EXT)
 
 ROOT_DIR       = ../..
 PROJECT_ROOT   = $(ROOT_DIR)/../..
@@ -82,7 +93,7 @@ $(GEN_SV_PKG) $(GEN_SV) $(DPI_LIB): $(GEN_STAMP)
 
 $(OUT): $(GEN_DIR)/tb.sv $(DPI_LIB) | prep
 	rm -rf obj_dir
-	verilator --trace --timing --cc --exe --build --main \
+	verilator $(TRACE_FLAG) --timing --cc --exe --build --main \
 		$(VERILATOR_WARNS) \
 		--top-module $(TOP_MODULE) \
 		-I$(RTL_DIR) \
@@ -91,7 +102,7 @@ $(OUT): $(GEN_DIR)/tb.sv $(DPI_LIB) | prep
 		$(DPI_TIME_C)
 
 clean:
-	rm -rf obj_dir $(WAVES) $(DPI_GEN_DIR)
+	rm -rf obj_dir waves.vcd waves.fst $(DPI_GEN_DIR)
 
 else
 
@@ -106,11 +117,11 @@ $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/chec
 
 $(OUT): $(SRCS) $(GEN_DIR)/tb.sv
 	rm -rf obj_dir
-	verilator --trace --binary --x-initial unique --main-top-name TOP \
+	verilator $(TRACE_FLAG) --binary --x-initial unique --main-top-name TOP \
 		$(VERILATOR_WARNS) --top $(TOP_MODULE) -I$(RTL_DIR) $(SRCS) $(DPI_TIME_C)
 
 clean:
-	rm -rf obj_dir $(WAVES)
+	rm -rf obj_dir waves.vcd waves.fst
 
 endif
 

@@ -18,9 +18,6 @@
 // dependency, no RtlRuntimeModel/RtlRuntimeInstance. Everything is built from
 // GeneratedModelMetadata and generated function pointers. This is the backend
 // linked into DPI simulation binaries.
-//
-// See src/abi/abi_interpreter.cpp for the interpreter-backed twin of this
-// file. The native path intentionally stays on raw word storage.
 
 namespace {
 

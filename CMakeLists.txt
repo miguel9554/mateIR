@@ -137,10 +137,6 @@ set(DPI_SUPPORT_SOURCES
     src/dpi/dpi_support.cpp
 )
 
-set(ABI_INTERPRETER_SOURCES
-    src/abi/abi_interpreter.cpp
-)
-
 set(ABI_NATIVE_SOURCES
     src/abi/abi_native.cpp
 )
@@ -191,13 +187,6 @@ target_include_directories(mate-dpi-support PUBLIC
 )
 target_link_libraries(mate-dpi-support PUBLIC mate-rtl-runtime-compiler)
 mate_configure_project_target(mate-dpi-support)
-
-add_library(mate-abi-interpreter STATIC ${ABI_INTERPRETER_SOURCES})
-target_include_directories(mate-abi-interpreter PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-target_link_libraries(mate-abi-interpreter PUBLIC mate-rtl-runtime-compiler)
-mate_configure_project_target(mate-abi-interpreter)
 
 # No mateir/frontend/yaml-cpp/slang dependency by design: this is the ABI
 # backend linked into DPI simulation binaries (tests/common/verilator.mk),

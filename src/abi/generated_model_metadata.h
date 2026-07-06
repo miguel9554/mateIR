@@ -1,11 +1,8 @@
 #pragma once
 
 // Types describing the static shape and generated native functions of a
-// compiled model. Shared by both ABI backends:
-//   - abi_interpreter.{h,cpp}: interpreter-backed, requires the SV frontend.
-//   - abi_native.{h,cpp}: fully native, no SV frontend/slang dependency.
-// This header must stay free of any frontend/mateir/slang dependency so the
-// native backend's link stays free of them too.
+// compiled model. This header must stay free of any frontend/mateir/slang
+// dependency so the native backend's link stays free of them too.
 
 #include "abi/mate_model_abi.h"
 

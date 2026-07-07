@@ -2,6 +2,7 @@
 
 #include "frontends/systemverilog/unresolved.h"
 #include "frontends/systemverilog/domain_facts.h"
+#include "mateir/lang_metadata.h"
 #include "mateir/module.h"
 
 #include <memory>
@@ -30,7 +31,8 @@ Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedInterface>>& interfaces,
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
-    FrontendDomainFacts* domainFacts = nullptr);
+    FrontendDomainFacts* domainFacts = nullptr,
+    LangMetadata* langMeta = nullptr);
 
 // Resolve only the named top module, embedding submodules in its hierarchy
 Module resolveModules(
@@ -41,6 +43,7 @@ Module resolveModules(
     const slang::SourceManager& sourceManager,
     const std::string& topModuleName,
     const ParameterContext& topParams,
-    FrontendDomainFacts* domainFacts = nullptr);
+    FrontendDomainFacts* domainFacts = nullptr,
+    LangMetadata* langMeta = nullptr);
 
 } // namespace mate

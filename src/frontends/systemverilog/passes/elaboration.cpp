@@ -1,4 +1,6 @@
 #include "frontends/systemverilog/passes/elaboration.h"
+
+#include "mateir/lang_metadata.h"
 #include "mateir/constant_value.h"
 #include "frontends/systemverilog/syntax_helpers.h"
 #include "mateir/dfg.h"
@@ -164,6 +166,8 @@ struct ResolutionContext {
     std::map<std::string, IfacePortView> interface_ports = {};
     // Interface instances declared in this module, keyed by instance name.
     std::map<std::string, IfaceInstanceView> interface_instances = {};
+    // Language-metadata sidecar collector (frontend-owned; may be null).
+    LangMetadata* lang_meta = nullptr;
 
     // Child contexts (generate scopes, loop bodies) must inherit the parent's
     // interface views so interface member references keep resolving.
@@ -232,7 +236,8 @@ static Module resolveModule(const UnresolvedModule& unresolved,
                                     const PackageRegistry& pkgRegistry,
                                     const std::vector<ImportSpec>& globalImports,
                                     const InstancePath& occurrencePath,
-                                    FrontendDomainFacts* domainFacts);
+                                    FrontendDomainFacts* domainFacts,
+                                    LangMetadata* langMeta);
 
 namespace {
 
@@ -8295,7 +8300,7 @@ static void instantiateSubmoduleInstance(
                                      ctx.moduleLookup, *ctx.interfaceLookup, ctx.sm,
                                      ctx.pkgRegistry, ctx.globalImports,
                                      childOccurrencePath,
-                                     ctx.domain_facts);
+                                     ctx.domain_facts, ctx.lang_meta);
 
     std::set<std::string> subInputNames, subOutputNames;
     forEachInputNode(resolvedSub, [&](const ModuleNode& inp) { subInputNames.insert(inp.name); });
@@ -9336,7 +9341,16 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                              const PackageRegistry& pkgRegistry,
                              const std::vector<ImportSpec>& globalImports,
                              const InstancePath& occurrencePath,
-                             FrontendDomainFacts* domainFacts) {
+                             FrontendDomainFacts* domainFacts,
+                             LangMetadata* langMeta) {
+    const std::string langMetaModulePath = [&] {
+        std::string path;
+        for (const auto& elem : occurrencePath.elems) {
+            if (!path.empty()) path += ".";
+            path += elem;
+        }
+        return path;
+    }();
     Module resolved;
     resolved.name = unresolved.name;
     ModuleOccurrenceKey occurrence{occurrencePath, resolved.name};
@@ -9472,6 +9486,31 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
         for (const auto& sig : idef.input_ports) addMember(sig, false);
         for (const auto& sig : idef.signal_decls) addMember(sig, modportDirs.at(sig.name));
+
+        if (langMeta) {
+            LangMetaRecord record;
+            record.kind = "sv.interface_port";
+            record.name = ip.port_name;
+            record.attrs["interface"] = ip.interface_name;
+            record.attrs["modport"] = ip.modport_name;
+            auto memberBinding = [&](const std::string& member) {
+                record.bindings.push_back(LangMetaBinding{
+                    .role = "member:" + member,
+                    .anchor = {langMetaModulePath, "module_node",
+                               ip.port_name + "." + member},
+                });
+            };
+            for (const auto& sig : idef.input_ports) memberBinding(sig.name);
+            for (const auto& sig : idef.signal_decls) memberBinding(sig.name);
+            for (const auto& p : idef.parameters) {
+                record.bindings.push_back(LangMetaBinding{
+                    .role = "param:" + p.name,
+                    .anchor = {langMetaModulePath, "param",
+                               ip.port_name + "." + p.name},
+                });
+            }
+            langMeta->records.push_back(std::move(record));
+        }
 
         ifacePortViews.emplace(ip.port_name, std::move(view));
     }
@@ -9654,6 +9693,30 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
             for (const auto& sig : idef.input_ports)  addMember(sig);
             for (const auto& sig : idef.signal_decls) addMember(sig);
 
+            if (langMeta) {
+                LangMetaRecord record;
+                record.kind = "sv.interface_instance";
+                record.name = instName;
+                record.attrs["interface"] = typeName;
+                auto memberBinding = [&](const std::string& member) {
+                    record.bindings.push_back(LangMetaBinding{
+                        .role = "member:" + member,
+                        .anchor = {langMetaModulePath, "module_node",
+                                   instName + "." + member},
+                    });
+                };
+                for (const auto& sig : idef.input_ports)  memberBinding(sig.name);
+                for (const auto& sig : idef.signal_decls) memberBinding(sig.name);
+                for (const auto& p : idef.parameters) {
+                    record.bindings.push_back(LangMetaBinding{
+                        .role = "param:" + p.name,
+                        .anchor = {langMetaModulePath, "param",
+                                   instName + "." + p.name},
+                    });
+                }
+                langMeta->records.push_back(std::move(record));
+            }
+
             ifaceInstanceViews.emplace(instName, std::move(view));
             pendingIfaceInstances.push_back(PendingIfaceInstance{&idef, inst, instName});
         }
@@ -9742,6 +9805,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     resCtx.interfaceLookup = &interfaceLookup;
     resCtx.interface_ports = std::move(ifacePortViews);
     resCtx.interface_instances = std::move(ifaceInstanceViews);
+    resCtx.lang_meta = langMeta;
 
     // Connect the interface's own input ports (e.g. clk) for each interface
     // instance, now that expressions can be built.
@@ -9868,7 +9932,8 @@ Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedInterface>>& interfaces,
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
-    FrontendDomainFacts* domainFacts) {
+    FrontendDomainFacts* domainFacts,
+    LangMetadata* langMeta) {
 
     // Filter out package declarations from module count
     if (modules.size() != 1) {
@@ -9888,7 +9953,7 @@ Module resolveModules(
     ParameterContext emptyCtx;
     return resolveModule(*modules[0], emptyCtx, moduleLookup, interfaceLookup,
                          sourceManager, pkgRegistry,
-                         globalImports, {}, domainFacts);
+                         globalImports, {}, domainFacts, langMeta);
 }
 
 Module resolveModules(
@@ -9899,7 +9964,8 @@ Module resolveModules(
     const slang::SourceManager& sourceManager,
     const std::string& topModuleName,
     const ParameterContext& topParams,
-    FrontendDomainFacts* domainFacts) {
+    FrontendDomainFacts* domainFacts,
+    LangMetadata* langMeta) {
 
     PackageRegistry pkgRegistry = resolvePackages(packages, sourceManager);
 
@@ -9917,7 +9983,7 @@ Module resolveModules(
 
     return resolveModule(*it->second, topParams, moduleLookup, interfaceLookup,
                          sourceManager, pkgRegistry,
-                         globalImports, {}, domainFacts);
+                         globalImports, {}, domainFacts, langMeta);
 }
 
 } // namespace mate

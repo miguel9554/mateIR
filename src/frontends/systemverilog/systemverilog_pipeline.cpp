@@ -15,6 +15,7 @@
 #include "frontends/systemverilog/passes/top_io_domains_infer.h"
 #include "frontends/systemverilog/passes/type_propagation.h"
 #include "frontends/systemverilog/domain_facts.h"
+#include "mateir/lang_metadata.h"
 #include "util/debug.h"
 
 #include "yaml-cpp/yaml.h"
@@ -151,6 +152,7 @@ void validateDebugSpecsBeforePipeline(const Module& topModule,
 }
 
 void runMateIRPipeline(MateIR& ir,
+                       LangMetadata&& langMeta,
                        const std::optional<std::string>& topDomainPath,
                        TopDomainMode topDomainMode,
                        bool inferSynchronizers,
@@ -357,11 +359,24 @@ void runMateIRPipeline(MateIR& ir,
 
     };
 
+    // Sidecar integrity rests on this invariant: named Module entities are
+    // created by elaboration and never renamed nor deleted by any pass.
+    const NamedEntitySnapshot namedEntitiesBefore = collectNamedEntities(topModule);
+
     runPipeline(topModule, topModule.name);
+
+    assertNamedEntitiesUnchanged(namedEntitiesBefore, topModule);
+
+    // Attach the language-metadata sidecar only now that all passes have run:
+    // passes never had an access path to it. Then verify every record.
+    ir.lang_metadata = std::move(langMeta);
+    validateLangMetadata(ir.lang_metadata, ir.top);
 
     std::string dir = DEBUG_OUTPUT_DIR + "/" + topModule.name;
     std::filesystem::create_directories(dir);
     std::ofstream(dir + "/hierarchy.json") << hierarchyToJson(ir);
+    std::ofstream(dir + "/lang_metadata.json")
+        << langMetadataToJson(ir.lang_metadata) << "\n";
 
     if (topDomainMode == TopDomainMode::Infer && emitInferredDomainsPath) {
         emitInferredTopDomainsYaml(topModule, domainFacts, *emitInferredDomainsPath);
@@ -378,6 +393,7 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
                                   const SystemVerilogCompileOptions& options) {
     MateIR ir;
     FrontendDomainFacts domainFacts;
+    LangMetadata langMeta;
     ir.top = [&]() -> Module {
         if (options.top_module) {
             ParameterContext topParams;
@@ -387,11 +403,12 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
             }
             return resolveModules(extracted.modules, extracted.packages, extracted.interfaces,
                                   extracted.globalImports,
-                                  sourceManager, *options.top_module, topParams, &domainFacts);
+                                  sourceManager, *options.top_module, topParams, &domainFacts,
+                                  &langMeta);
         }
         return resolveModules(extracted.modules, extracted.packages, extracted.interfaces,
                               extracted.globalImports,
-                              sourceManager, &domainFacts);
+                              sourceManager, &domainFacts, &langMeta);
     }();
     ir.source_files = options.source_files;
     ir.frontend_module_count = extracted.modules.size();
@@ -401,7 +418,7 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
         topDomainPath = loadTopDomainPath(options.domain_files, ir.top.name);
     }
     auto cdcPathsByModule = loadCdcPathsByModule(options.source_files, options.domain_files);
-    runMateIRPipeline(ir, topDomainPath, options.top_domain_mode,
+    runMateIRPipeline(ir, std::move(langMeta), topDomainPath, options.top_domain_mode,
                       options.infer_synchronizers,
                       options.emit_inferred_domains_path,
                       options.emit_inferred_synchronizers_dir,

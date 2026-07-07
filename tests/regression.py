@@ -107,7 +107,12 @@ def filter_cases_by_name(cases, names):
 
 
 def select_cases_for_mode(cases, run_mode):
-    """Return the cases that can be run by the requested mode."""
+    """Return the cases that can be run by the requested mode.
+
+    A test with a `dpi.skip` marker file in its directory is excluded from
+    verilator-dpi mode (used for features the DPI path does not support yet,
+    e.g. interface-typed top-level ports).
+    """
     if run_mode == RUN_MODE_VALIDATE:
         return cases
     if run_mode != RUN_MODE_VERILATOR_DPI:
@@ -116,7 +121,10 @@ def select_cases_for_mode(cases, run_mode):
         case
         for case in cases
         if case["kind"] != "validate"
-        or (TESTS_DIR / case["name"] / "work" / "verilator").is_dir()
+        or (
+            (TESTS_DIR / case["name"] / "work" / "verilator").is_dir()
+            and not (TESTS_DIR / case["name"] / "dpi.skip").exists()
+        )
     ]
 
 

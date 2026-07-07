@@ -385,10 +385,12 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
                 topParams.values[name] =
                     ConstantValue::bits(Type::makeInteger(64, true), value);
             }
-            return resolveModules(extracted.modules, extracted.packages, extracted.globalImports,
+            return resolveModules(extracted.modules, extracted.packages, extracted.interfaces,
+                                  extracted.globalImports,
                                   sourceManager, *options.top_module, topParams, &domainFacts);
         }
-        return resolveModules(extracted.modules, extracted.packages, extracted.globalImports,
+        return resolveModules(extracted.modules, extracted.packages, extracted.interfaces,
+                              extracted.globalImports,
                               sourceManager, &domainFacts);
     }();
     ir.source_files = options.source_files;

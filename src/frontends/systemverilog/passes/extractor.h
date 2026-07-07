@@ -14,6 +14,7 @@ namespace mate {
 struct ExtractedIR {
     std::vector<std::unique_ptr<UnresolvedModule>> modules;
     std::vector<std::unique_ptr<UnresolvedPackage>> packages;
+    std::vector<std::unique_ptr<UnresolvedInterface>> interfaces;
     std::vector<ImportSpec> globalImports;  // compilation-unit scope
 };
 

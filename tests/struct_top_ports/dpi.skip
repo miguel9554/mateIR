@@ -1,0 +1,3 @@
+Top-level interface ports are not supported by the DPI wrapper yet.
+Phase 3 of plans/PLAN-sv-interfaces.md adds interface-typed DPI wrapper ports;
+remove this marker when it lands.

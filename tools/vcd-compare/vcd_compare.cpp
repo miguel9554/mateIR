@@ -898,6 +898,33 @@ static std::map<std::string, std::vector<VCDSignal *>> build_signal_map(
     return out;
 }
 
+// --alias-scope support: some tools (e.g. Verilator) trace interface-port
+// members under the interface instance's own scope instead of under the module
+// that references them. An alias maps an expected-signal prefix at a given
+// hierarchy position to an absolute scope elsewhere in the same VCD, whose
+// signals are merged into the signal map as "<port>.<signal>".
+struct ResolvedAliasScope {
+    std::string parent_rel_path;  // instance path relative to the root scope ("" = top)
+    std::string port_name;        // expected-signal prefix (the interface port name)
+    std::map<std::string, std::vector<VCDSignal *>> signals;
+};
+
+static std::vector<ResolvedAliasScope> g_aliases1;
+static std::vector<ResolvedAliasScope> g_aliases2;
+
+static void merge_alias_signals(
+    std::map<std::string, std::vector<VCDSignal *>> &out,
+    const std::vector<ResolvedAliasScope> &aliases,
+    const std::string &rel_path) {
+    for (const auto &alias : aliases) {
+        if (alias.parent_rel_path != rel_path) continue;
+        for (const auto &[name, sigs] : alias.signals) {
+            auto &dst = out[alias.port_name + "." + name];
+            dst.insert(dst.end(), sigs.begin(), sigs.end());
+        }
+    }
+}
+
 static std::map<std::string, VCDScope *> build_child_scope_map(VCDScope *scope, const std::string &scope_path,
                                                                const char *file_label) {
     std::map<std::string, VCDScope *> out;
@@ -1048,6 +1075,7 @@ static bool validate_hierarchy_recursive(
     const std::string &label2,
     const HierarchyModule &hier,
     const std::string &display_scope_path,
+    const std::string &rel_path,
     ValidationStats &stats)
 {
     ScopeSummary summary;
@@ -1071,6 +1099,8 @@ static bool validate_hierarchy_recursive(
         expected_children.insert(sub.instance_name);
     auto signals1 = build_signal_map(scope1, expected_children, scope_path1, label1.c_str());
     auto signals2 = build_signal_map(scope2, expected_children, scope_path2, label2.c_str());
+    merge_alias_signals(signals1, g_aliases1, rel_path);
+    merge_alias_signals(signals2, g_aliases2, rel_path);
 
     for (const auto &entry : expected) {
         std::string matched1;
@@ -1153,10 +1183,12 @@ static bool validate_hierarchy_recursive(
         if (!child1 || !child2)
             continue;
 
+        std::string child_rel = rel_path.empty()
+            ? sub.instance_name : rel_path + "." + sub.instance_name;
         if (!validate_hierarchy_recursive(child1, child_path1,
                                           child2, child_path2,
                                           label1, label2,
-                                          sub, child_display, stats)) {
+                                          sub, child_display, child_rel, stats)) {
             return false;
         }
     }
@@ -1172,6 +1204,7 @@ static void compare_hierarchy_recursive(
     const HierarchyModule &hier,
     const std::vector<double> &timestamps,
     const std::string &display_scope_path,
+    const std::string &rel_path,
     GlobalStats &stats)
 {
     ScopeSummary summary;
@@ -1186,6 +1219,8 @@ static void compare_hierarchy_recursive(
         expected_children.insert(sub.instance_name);
     auto signals1 = build_signal_map(scope1, expected_children, scope_path1, label1.c_str());
     auto signals2 = build_signal_map(scope2, expected_children, scope_path2, label2.c_str());
+    merge_alias_signals(signals1, g_aliases1, rel_path);
+    merge_alias_signals(signals2, g_aliases2, rel_path);
     bool scope_failed = false;
 
     std::printf("\n");
@@ -1305,7 +1340,10 @@ static void compare_hierarchy_recursive(
         compare_hierarchy_recursive(f1, child1, ps1, scope_path1 + "." + sub.instance_name,
                                     f2, child2, ps2, scope_path2 + "." + sub.instance_name,
                                     label1, label2,
-                                    sub, timestamps, display_scope_path + "." + sub.instance_name, stats);
+                                    sub, timestamps, display_scope_path + "." + sub.instance_name,
+                                    rel_path.empty() ? sub.instance_name
+                                                     : rel_path + "." + sub.instance_name,
+                                    stats);
     }
 }
 
@@ -1318,6 +1356,8 @@ int main(int argc, char *argv[]) {
     std::string hierarchy_path;
     std::string start_time_arg;
     std::vector<const char *> positional;
+    // raw --alias-scope args: "<label>:<prefix>=<absolute.scope.path>"
+    std::vector<std::string> alias_args;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--hierarchy") == 0) {
@@ -1332,6 +1372,12 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             start_time_arg = argv[++i];
+        } else if (std::strcmp(argv[i], "--alias-scope") == 0) {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Error: --alias-scope requires an argument\n");
+                return 1;
+            }
+            alias_args.push_back(argv[++i]);
         } else {
             positional.push_back(argv[i]);
         }
@@ -1395,6 +1441,55 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Resolve --alias-scope entries: "<label>:<prefix>=<absolute.scope.path>".
+    // The prefix is the hierarchy-relative instance path of the aliased port
+    // (e.g. "bus" for a top-level interface port, "u_child.bus" below it).
+    for (const auto &arg : alias_args) {
+        auto colon = arg.find(':');
+        auto eq = arg.find('=', colon == std::string::npos ? 0 : colon + 1);
+        if (colon == std::string::npos || eq == std::string::npos ||
+            colon == 0 || eq <= colon + 1 || eq + 1 >= arg.size()) {
+            std::fprintf(stderr,
+                         "Error: bad --alias-scope '%s' "
+                         "(expected <label>:<prefix>=<scope.path>)\n",
+                         arg.c_str());
+            return 1;
+        }
+        std::string alias_label = arg.substr(0, colon);
+        std::string prefix = arg.substr(colon + 1, eq - colon - 1);
+        std::string alias_path = arg.substr(eq + 1);
+
+        VCDFile *alias_file = nullptr;
+        std::vector<ResolvedAliasScope> *dest = nullptr;
+        if (alias_label == label1) { alias_file = f1; dest = &g_aliases1; }
+        else if (alias_label == label2) { alias_file = f2; dest = &g_aliases2; }
+        else {
+            std::fprintf(stderr, "Error: --alias-scope label '%s' matches no input\n",
+                         alias_label.c_str());
+            return 1;
+        }
+
+        VCDScope *alias_scope = find_scope(alias_file, alias_path);
+        if (!alias_scope) {
+            std::fprintf(stderr, "Error: --alias-scope scope '%s' not found in %s\n",
+                         alias_path.c_str(), alias_label.c_str());
+            print_scopes(alias_file, alias_label.c_str());
+            return 1;
+        }
+
+        ResolvedAliasScope resolved;
+        auto last_dot = prefix.rfind('.');
+        if (last_dot == std::string::npos) {
+            resolved.parent_rel_path = "";
+            resolved.port_name = prefix;
+        } else {
+            resolved.parent_rel_path = prefix.substr(0, last_dot);
+            resolved.port_name = prefix.substr(last_dot + 1);
+        }
+        collect_flat_signals(alias_scope, "", {}, resolved.signals);
+        dest->push_back(std::move(resolved));
+    }
+
     double ps1 = f1->time_resolution * unit_to_ps(f1->time_units);
     double ps2 = f2->time_resolution * unit_to_ps(f2->time_units);
     double start_time_ps = 0.0;
@@ -1432,7 +1527,7 @@ int main(int argc, char *argv[]) {
     bool hierarchy_ok = validate_hierarchy_recursive(scope1, scope_path1,
                                                      scope2, scope_path2,
                                                      label1, label2,
-                                                     *hier_root, scope_path1, validation);
+                                                     *hier_root, scope_path1, "", validation);
 
     if (!hierarchy_ok) {
         std::printf("\n========================================\n");
@@ -1463,7 +1558,7 @@ int main(int argc, char *argv[]) {
     compare_hierarchy_recursive(f1, scope1, ps1, scope_path1,
                                 f2, scope2, ps2, scope_path2,
                                 label1, label2,
-                                *hier_root, timestamps, scope_path1, stats);
+                                *hier_root, timestamps, scope_path1, "", stats);
 
     std::printf("\n========================================\n");
     std::printf("Scopes compared:   %d\n", stats.scopes_compared);

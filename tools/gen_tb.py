@@ -30,6 +30,10 @@ class Port:
     unpacked_dims: str = ""  # unpacked dimensions on the declarator, e.g. "[IC_NUM_WAYS]"
     interface_type: str = ""  # interface type for interface ports, e.g. "my_if"
     interface_modport: str = ""  # optional modport on interface ports, e.g. "master"
+    # True for pseudo-ports representing interface-port members ("bus.data"),
+    # used for domains validation and stimulus recording only. They are never
+    # declared as uut_if signals or connected as real ports.
+    iface_member: bool = False
 
 
 @dataclass
@@ -287,6 +291,74 @@ def parse_module(filepath: Path) -> ModuleInfo:
     return ModuleInfo(name=mod_name, parameters=params, ports=ports, imports=imports)
 
 
+def parse_interfaces(rtl_dir: Path) -> dict:
+    """Parse interface declarations in the RTL dir.
+
+    Returns {name: {"signals": [(name, type_str)], "modports": {mp: {sig: dir}}}}.
+    """
+    interfaces = {}
+    for f in sorted(list(rtl_dir.glob('*.sv')) + list(rtl_dir.glob('*.v'))):
+        tree = pyslang.SyntaxTree.fromFile(str(f))
+        for member in tree.root.members:
+            if 'InterfaceDeclaration' not in str(member.kind):
+                continue
+            name = member.header.name.valueText
+            signals = []
+            modports = {}
+            for m in member.members:
+                kind = str(m.kind)
+                if 'DataDeclaration' in kind or 'NetDeclaration' in kind:
+                    type_str = str(m.type).strip()
+                    for decl in m.declarators:
+                        signals.append((decl.name.valueText, type_str))
+                elif 'ModportDeclaration' in kind:
+                    for item in m.items:
+                        dirs = {}
+                        for plist in item.ports.ports:
+                            if 'ModportSimplePortList' not in str(plist.kind):
+                                continue
+                            direction = plist.direction.valueText
+                            for p in plist.ports:
+                                dirs[p.name.valueText] = direction
+                        modports[item.name.valueText] = dirs
+            interfaces[name] = {"signals": signals, "modports": modports}
+    return interfaces
+
+
+def add_iface_member_ports(module: ModuleInfo, interfaces: dict) -> None:
+    """Append pseudo-ports for interface-port members that the UUT reads.
+
+    A member is an input of the UUT when the port's modport marks it 'input'.
+    These pseudo-ports drive domains validation and stimulus recording; they
+    are skipped everywhere a real port would be declared or connected.
+    """
+    for port in list(module.ports):
+        if not port.interface_type or port.iface_member:
+            continue
+        iface = interfaces.get(port.interface_type)
+        if iface is None:
+            continue
+        dirs = iface["modports"].get(port.interface_modport, {})
+        for sig_name, type_str in iface["signals"]:
+            if dirs.get(sig_name) != 'input':
+                continue
+            dims_match = re.search(r'\[[^\]]+\]', type_str)
+            dims = dims_match.group(0) if dims_match else ''
+            module.ports.append(Port(
+                name=f'{port.name}.{sig_name}',
+                direction='input',
+                is_signed=False,
+                param_dims=dims,
+                resolved_dims=dims,
+                named_struct_type='',
+                struct_leaves=[],
+                unpacked_dims='',
+                interface_type='',
+                interface_modport='',
+                iface_member=True,
+            ))
+
+
 def port_type_str(port: Port, use_resolved: bool = False) -> str:
     """Build type string like 'logic signed [WL-1:0]' or 'logic [8-1:0]'."""
     if port.interface_type:
@@ -453,7 +525,7 @@ def gen_uut_if(module: ModuleInfo) -> str:
         lines.append(f'interface uut_if{import_clause};')
 
     # Input signals
-    inputs = [p for p in module.ports if p.direction == 'input']
+    inputs = [p for p in module.ports if p.direction == 'input' and not p.iface_member]
     outputs = [p for p in module.ports if p.direction == 'output']
     interfaces = [p for p in module.ports if p.interface_type]
 
@@ -480,7 +552,7 @@ def gen_uut_if(module: ModuleInfo) -> str:
     def modport_line(name: str, flip: bool) -> str:
         parts = []
         for p in module.ports:
-            if p.interface_type:
+            if p.interface_type or p.iface_member:
                 continue
             if flip:
                 d = 'output' if p.direction == 'input' else 'input'
@@ -514,7 +586,7 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     lines.append(f'    localparam bit INCLUDE_DPI_MODULE = {dpi_val};')
     lines.append('    localparam bit INCLUDE_UUT_RECORDER = !INCLUDE_DPI_MODULE;')
 
-    inputs = [p for p in module.ports if p.direction == 'input']
+    inputs = [p for p in module.ports if p.direction == 'input' and not p.iface_member]
     outputs = [p for p in module.ports if p.direction == 'output']
 
     # Parameters section
@@ -573,6 +645,8 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     lines.append('    // modules')
     port_conns = []
     for p in module.ports:
+        if p.iface_member:
+            continue
         if p.interface_type:
             port_conns.append(f'        .{p.name}(_if.{p.name})')
         else:
@@ -607,7 +681,7 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     dpi_port_conns = [
         f'            .{p.name}(dpi_if.{p.name})'
         for p in module.ports
-        if not p.interface_type
+        if not p.interface_type and not p.iface_member
     ]
     lines.append(',\n'.join(dpi_port_conns))
     lines.append('        );')
@@ -711,8 +785,11 @@ def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
 def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
     lines = []
     import_clause = (' ' + ' '.join(module.imports)) if module.imports else ''
+    has_ifaces = any(p.interface_type for p in module.ports)
     lines.append(f'module uut_recorder{import_clause}(')
-    lines.append('    uut_if.slave _if')
+    # Nested interface instances are not reachable through a modport'd port,
+    # so use a plain interface port when the UUT has interface ports.
+    lines.append('    uut_if _if' if has_ifaces else '    uut_if.slave _if')
     lines.append(');')
     lines.append('    localparam string base_dir = "../custom-sim/stimuli";')
     lines.append('')
@@ -765,7 +842,7 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
         lines.append('')
         lines.append('    // Async recorders')
         for sig in async_ports:
-            inst_name = f'u_{sig}_recorder'
+            inst_name = f'u_{sig.replace(".", "_")}_recorder'
             # Shorten reset instance name
             if sig in all_resets:
                 inst_name = f'u_{sig.replace("_n", "").replace("rst", "rst")}_recorder'
@@ -798,13 +875,13 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
                 for leaf_name, leaf_type in port.struct_leaves:
                     leaf_suffix = leaf_name.replace('.', '_')
                     length_expr, data_expr = length_and_data(port, f'_if.{port.name}.{leaf_name}')
-                    recorder_inst(f'u_{port.name}_{leaf_suffix}_recorder',
+                    recorder_inst(f'u_{port.name.replace(".", "_")}_{leaf_suffix}_recorder',
                                   f'path("{port.name}.{leaf_name}.txt")',
                                   leaf_type, True, length_expr, clk, data_expr)
             else:
                 type_str = port_type_str(port, use_resolved=True)
                 length_expr, data_expr = length_and_data(port, f'_if.{port.name}')
-                recorder_inst(f'u_{port.name}_recorder',
+                recorder_inst(f'u_{port.name.replace(".", "_")}_recorder',
                               f'path("{port.name}.txt")',
                               type_str, True, length_expr, clk, data_expr)
 
@@ -839,6 +916,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     module = parse_module(rtl_path)
+    interfaces = parse_interfaces(rtl_dir)
+    add_iface_member_ports(module, interfaces)
     port_names = {p.name for p in module.ports}
     domains = load_domains(domains_path, port_names)
     validate(module, domains)

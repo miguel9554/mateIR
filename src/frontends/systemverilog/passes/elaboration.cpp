@@ -62,6 +62,27 @@ struct PackageEntry {
 };
 using PackageRegistry = std::map<std::string, PackageEntry>;
 
+// Elaboration-time view of an interface-typed module port after lowering.
+// Members become ModuleNodes named "<port>.<member>"; directions come from the
+// declaration-site modport. Interface parameters become qualified module
+// Params ("<port>.<param>").
+struct IfacePortView {
+    std::string interface_name;
+    std::string modport_name;
+    // member base name -> true if this module drives it (modport output).
+    // Interface input ports (e.g. clk) appear as is_output=false.
+    std::map<std::string, bool> member_is_output;
+};
+
+// Elaboration-time view of an interface instance declared in this module.
+// Members become internal ModuleNodes named "<instance>.<member>".
+struct IfaceInstanceView {
+    std::string interface_name;
+    // interface parameter name (unqualified) -> resolved value
+    std::map<std::string, ConstantValue> param_values;
+    std::set<std::string> member_names;
+};
+
 // Context struct for resolution - bundles all parameters needed during DFG building
 struct ResolutionContext {
     DFG& graph;
@@ -136,7 +157,67 @@ struct ResolutionContext {
     // Name of the implicit return variable for the current function (empty if not in a function).
     // Used to convert 'return expr' inside control flow (case/if arms) into combDrivers assignments.
     std::string current_return_var = {};
+
+    // Interface support (set after construction in resolveModule):
+    const InterfaceLookup* interfaceLookup = nullptr;
+    // This module's interface-typed ports, keyed by port name.
+    std::map<std::string, IfacePortView> interface_ports = {};
+    // Interface instances declared in this module, keyed by instance name.
+    std::map<std::string, IfaceInstanceView> interface_instances = {};
+
+    // Child contexts (generate scopes, loop bodies) must inherit the parent's
+    // interface views so interface member references keep resolving.
+    void inheritInterfaceViews(const ResolutionContext& parent) {
+        interfaceLookup = parent.interfaceLookup;
+        interface_ports = parent.interface_ports;
+        interface_instances = parent.interface_instances;
+    }
 };
+
+// Returns the member-direction view if baseName names an interface port or an
+// interface instance in this module; nullptr otherwise. For instances, every
+// member is considered drivable by this module (out_is_output == nullptr).
+static const IfacePortView* lookupIfacePortView(const ResolutionContext& ctx,
+                                                const std::string& baseName) {
+    auto it = ctx.interface_ports.find(baseName);
+    return it == ctx.interface_ports.end() ? nullptr : &it->second;
+}
+
+static const IfaceInstanceView* lookupIfaceInstanceView(const ResolutionContext& ctx,
+                                                        const std::string& baseName) {
+    auto it = ctx.interface_instances.find(baseName);
+    return it == ctx.interface_instances.end() ? nullptr : &it->second;
+}
+
+static bool isIfaceBaseName(const ResolutionContext& ctx, const std::string& baseName) {
+    return lookupIfacePortView(ctx, baseName) != nullptr ||
+           lookupIfaceInstanceView(ctx, baseName) != nullptr;
+}
+
+// Validate a member reference on an interface port/instance and return the
+// qualified node name ("base.member"). Throws on unknown members. Qualified
+// parameters ("base.param") are also accepted; they resolve through ctx.params.
+static std::string resolveIfaceMemberName(const ResolutionContext& ctx,
+                                          const std::string& baseName,
+                                          const std::string& memberName,
+                                          const std::optional<SourceLoc>& loc) {
+    const std::string qualified = baseName + "." + memberName;
+    if (const auto* port = lookupIfacePortView(ctx, baseName)) {
+        if (port->member_is_output.contains(memberName)) return qualified;
+        if (ctx.params.values.contains(qualified)) return qualified;
+        throw CompilerError(
+            "Interface port '" + baseName + "' (interface '" + port->interface_name +
+            "') has no member or parameter named '" + memberName + "'", loc);
+    }
+    const auto* inst = lookupIfaceInstanceView(ctx, baseName);
+    if (inst->member_names.contains(memberName)) return qualified;
+    if (inst->param_values.contains(memberName) || ctx.params.values.contains(qualified)) {
+        return qualified;
+    }
+    throw CompilerError(
+        "Interface instance '" + baseName + "' (interface '" + inst->interface_name +
+        "') has no member or parameter named '" + memberName + "'", loc);
+}
 
 // ============================================================================
 // Resolution functions
@@ -146,6 +227,7 @@ struct ResolutionContext {
 static Module resolveModule(const UnresolvedModule& unresolved,
                                     const ParameterContext& topCtx,
                                     const ModuleLookup& moduleLookup,
+                                    const InterfaceLookup& interfaceLookup,
                                     const slang::SourceManager& sourceManager,
                                     const PackageRegistry& pkgRegistry,
                                     const std::vector<ImportSpec>& globalImports,
@@ -1801,6 +1883,25 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
             return it->second.requireInt64("Parameter '" + paramName + "'");
         }
 
+        case SyntaxKind::MemberAccessExpression: {
+            // Qualified constant access, e.g. an interface port parameter
+            // `_my_modport_if.W` stored in the context as "_my_modport_if.W".
+            auto& member = expr->as<MemberAccessExpressionSyntax>();
+            if (member.left->kind == SyntaxKind::IdentifierName) {
+                std::string qualified =
+                    std::string(member.left->as<IdentifierNameSyntax>().identifier.valueText()) +
+                    "." + std::string(member.name.valueText());
+                auto it = ctx.values.find(qualified);
+                if (it != ctx.values.end()) {
+                    return it->second.requireInt64("Parameter '" + qualified + "'");
+                }
+                throw CompilerError("Parameter '" + qualified + "' not found in context");
+            }
+            throw CompilerError(
+                "Unsupported member access in constant expression: " +
+                std::string(toString(member.left->kind)));
+        }
+
         case SyntaxKind::ParenthesizedExpression: {
             auto& paren = expr->as<ParenthesizedExpressionSyntax>();
             return evaluateConstantExpr(paren.expression, ctx, pkgRegistry, namedTypeRegistry, sm);
@@ -1893,6 +1994,12 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                     auto valueIt = ctx.values.find(baseName);
                     if (valueIt != ctx.values.end()) {
                         return valueIt->second.field(fieldName).requireInt64(baseName + "." + fieldName);
+                    }
+                    // Qualified constant, e.g. an interface port parameter
+                    // stored in the context as "<port>.<param>".
+                    auto qualifiedIt = ctx.values.find(baseName + "." + fieldName);
+                    if (qualifiedIt != ctx.values.end()) {
+                        return qualifiedIt->second.requireInt64(baseName + "." + fieldName);
                     }
                 }
                 throw CompilerError("Unsupported constant field selection");
@@ -2125,6 +2232,12 @@ static ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
                     auto valueIt = ctx.values.find(baseName);
                     if (valueIt != ctx.values.end()) {
                         return valueIt->second.field(fieldName);
+                    }
+                    // Qualified constant, e.g. an interface port parameter
+                    // stored in the context as "<port>.<param>".
+                    auto qualifiedIt = ctx.values.find(baseName + "." + fieldName);
+                    if (qualifiedIt != ctx.values.end()) {
+                        return qualifiedIt->second;
                     }
                 }
                 throw CompilerError(
@@ -3994,6 +4107,19 @@ static ExprValue buildExprValue(
 
     if (expr->kind == SyntaxKind::MemberAccessExpression) {
         const auto& member = expr->as<MemberAccessExpressionSyntax>();
+        // Interface member access: `bus.sig` resolves directly to the lowered
+        // node "bus.sig" (or qualified parameter "bus.W").
+        if (member.left->kind == SyntaxKind::IdentifierName) {
+            std::string baseName(
+                member.left->as<IdentifierNameSyntax>().identifier.valueText());
+            if (isIfaceBaseName(ctx, baseName)) {
+                auto loc = resolveSourceLoc(*expr, ctx.sm);
+                return exprValueFromIdentifier(
+                    resolveIfaceMemberName(
+                        ctx, baseName, std::string(member.name.valueText()), loc),
+                    loc, ctx);
+            }
+        }
         ExprValue base = buildExprValue(member.left, ctx);
         return selectStructField(base, std::string(member.name.valueText()), resolveSourceLoc(*expr, ctx.sm));
     }
@@ -4007,6 +4133,36 @@ static ExprValue buildExprValue(
             treatAsFieldAccess = lookupDeclaredType(baseName, ctx) != nullptr;
         }
         if (treatAsFieldAccess) {
+            // Interface member access ("bus.sig" parses as ScopedName in some
+            // contexts): resolve directly to the lowered node "bus.sig".
+            if (scoped.left->kind == SyntaxKind::IdentifierName) {
+                std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+                if (isIfaceBaseName(ctx, baseName)) {
+                    auto loc = resolveSourceLoc(*expr, ctx.sm);
+                    std::string memberName;
+                    if (scoped.right->kind == SyntaxKind::IdentifierName) {
+                        memberName = std::string(
+                            scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                    } else if (scoped.right->kind == SyntaxKind::IdentifierSelectName) {
+                        memberName = std::string(
+                            scoped.right->as<IdentifierSelectNameSyntax>().identifier.valueText());
+                    } else {
+                        throw CompilerError("Unsupported interface member selector", loc);
+                    }
+                    ExprValue value = exprValueFromIdentifier(
+                        resolveIfaceMemberName(ctx, baseName, memberName, loc), loc, ctx);
+                    if (scoped.right->kind == SyntaxKind::IdentifierSelectName) {
+                        const auto& name = scoped.right->as<IdentifierSelectNameSyntax>();
+                        for (const auto& elemSelect : name.selectors) {
+                            if (!elemSelect->selector) {
+                                throw CompilerError("Empty selector not allowed.", loc);
+                            }
+                            value = applySelector(value, *elemSelect->selector, ctx, loc);
+                        }
+                    }
+                    return value;
+                }
+            }
             if (scoped.left->kind == SyntaxKind::IdentifierName &&
                 scoped.right->kind == SyntaxKind::IdentifierName) {
                 std::string baseName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
@@ -5733,6 +5889,34 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     std::string baseName;
     std::vector<const ElementSelectSyntax*> selectors;
     std::vector<std::string> memberSuffix;
+    // Interface member target: fold "bus.sig" into the base name so the write
+    // goes to the lowered node "bus.sig", with direction enforcement. Returns
+    // false when baseName is not an interface port/instance.
+    auto foldIfaceMember = [&](std::string& baseName,
+                               const std::string& memberName) -> bool {
+        if (!memberSuffix.empty() || !selectors.empty() ||
+                !isIfaceBaseName(ctx, baseName)) {
+            return false;
+        }
+        if (ctx.is_sequential) {
+            throw CompilerError(
+                "Assignment to interface member '" + baseName + "." + memberName +
+                "' inside a sequential block is not supported; register the value "
+                "in a local flop and drive the member with a continuous assign",
+                assignLoc);
+        }
+        if (const auto* port = lookupIfacePortView(ctx, baseName)) {
+            auto dirIt = port->member_is_output.find(memberName);
+            if (dirIt != port->member_is_output.end() && !dirIt->second) {
+                throw CompilerError(
+                    "Cannot drive interface member '" + baseName + "." + memberName +
+                    "': it is an input of modport '" + port->modport_name +
+                    "' of interface '" + port->interface_name + "'", assignLoc);
+            }
+        }
+        baseName = resolveIfaceMemberName(ctx, baseName, memberName, assignLoc);
+        return true;
+    };
     std::function<void(const ExpressionSyntax*)> parseLhs = [&](const ExpressionSyntax* expr) {
         if (!expr) {
             throw CompilerError("Null LHS expression", assignLoc);
@@ -5759,20 +5943,29 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             case SyntaxKind::MemberAccessExpression: {
                 const auto& member = expr->as<MemberAccessExpressionSyntax>();
                 parseLhs(member.left);
-                memberSuffix.push_back(std::string(member.name.valueText()));
+                std::string memberName(member.name.valueText());
+                if (foldIfaceMember(baseName, memberName)) return;
+                memberSuffix.push_back(memberName);
                 return;
             }
             case SyntaxKind::ScopedName: {
                 const auto& scoped = expr->as<ScopedNameSyntax>();
                 parseLhs(&scoped.left->as<ExpressionSyntax>());
+                // Note: "bus.sig" parses as ScopedName in continuous-assign
+                // LHS position, as MemberAccessExpression in procedural code.
                 if (scoped.right->kind == SyntaxKind::IdentifierName) {
-                    memberSuffix.push_back(
-                        std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText()));
+                    std::string memberName(
+                        scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                    if (foldIfaceMember(baseName, memberName)) return;
+                    memberSuffix.push_back(memberName);
                     return;
                 }
                 if (scoped.right->kind == SyntaxKind::IdentifierSelectName) {
                     const auto& name = scoped.right->as<IdentifierSelectNameSyntax>();
-                    memberSuffix.push_back(std::string(name.identifier.valueText()));
+                    std::string memberName(name.identifier.valueText());
+                    if (!foldIfaceMember(baseName, memberName)) {
+                        memberSuffix.push_back(memberName);
+                    }
                     for (const auto& elemSelect : name.selectors) {
                         selectors.push_back(elemSelect);
                     }
@@ -7034,6 +7227,7 @@ void resolveForLoopStatementInPlace(
             ctx.subroutineRegistry, ctx.subroutine_locals,
             ctx.currently_inlining, ctx.is_subroutine_scope
         };
+        iterBodyCtx.inheritInterfaceViews(ctx);
         resolveStatementInPlace(forLoop->statement.get(), iterBodyCtx);
         ctx.combDrivers = iterBodyCtx.combDrivers;
         ctx.partial_drivers = iterBodyCtx.partial_drivers;
@@ -7471,16 +7665,278 @@ static void connectOutputPortLeaves(DFG& graph,
     }
 }
 
+// ============================================================================
+// Interface support helpers
+// ============================================================================
+
+static const UnresolvedModport* findModport(const UnresolvedInterface& iface,
+                                            const std::string& modportName) {
+    for (const auto& modport : iface.modports) {
+        if (modport.name == modportName) return &modport;
+    }
+    return nullptr;
+}
+
+// Resolve an interface's parameters to concrete values: overrides win, then
+// defaults (evaluated in the interface's own accumulating parameter scope).
+static ParameterContext resolveInterfaceParams(
+        const UnresolvedInterface& iface,
+        const std::string& useSiteName,
+        const std::map<std::string, ConstantValue>& overrides,
+        const PackageRegistry& pkgRegistry) {
+    ParameterContext ifaceCtx;
+    for (const auto& p : iface.parameters) {
+        if (auto it = overrides.find(p.name); it != overrides.end()) {
+            ifaceCtx.values[p.name] = it->second;
+        } else if (p.defaultValue) {
+            ifaceCtx.values[p.name] = integerConstant(
+                evaluateConstantExpr(p.defaultValue, ifaceCtx, &pkgRegistry));
+        } else {
+            throw CompilerError(
+                "Interface '" + iface.name + "': parameter '" + p.name +
+                "' has no value at '" + useSiteName + "' and no default");
+        }
+    }
+    return ifaceCtx;
+}
+
+// Parse #(...) parameter overrides at an interface instantiation. Supports
+// both ordered (`#(16)`, zipped against declaration order) and named
+// (`#(.W(16))`) assignments.
+static std::map<std::string, ConstantValue> parseInterfaceParamOverrides(
+        const ParameterValueAssignmentSyntax* paramAssign,
+        const UnresolvedInterface& iface,
+        const ParameterContext& evalCtx,
+        const PackageRegistry& pkgRegistry,
+        const slang::SourceManager& sm,
+        const NamedTypeRegistry& namedTypeRegistry) {
+    std::map<std::string, ConstantValue> overrides;
+    if (!paramAssign) return overrides;
+    size_t position = 0;
+    bool sawNamed = false;
+    for (const auto* param : paramAssign->parameters) {
+        if (param->kind == SyntaxKind::OrderedParamAssignment) {
+            if (sawNamed) {
+                throw CompilerError(
+                    "Interface '" + iface.name +
+                    "': ordered parameter assignments cannot follow named ones",
+                    resolveSourceLoc(*param, sm));
+            }
+            if (position >= iface.parameters.size()) {
+                throw CompilerError(
+                    "Too many parameter values for interface '" + iface.name + "'",
+                    resolveSourceLoc(*param, sm));
+            }
+            const auto& ordered = param->as<OrderedParamAssignmentSyntax>();
+            overrides[iface.parameters[position].name] = integerConstant(
+                evaluateConstantExpr(ordered.expr, evalCtx, &pkgRegistry,
+                                     &namedTypeRegistry, &sm));
+            ++position;
+        } else if (param->kind == SyntaxKind::NamedParamAssignment) {
+            sawNamed = true;
+            const auto& named = param->as<NamedParamAssignmentSyntax>();
+            std::string pname(named.name.valueText());
+            bool known = std::any_of(iface.parameters.begin(), iface.parameters.end(),
+                                     [&](const auto& p) { return p.name == pname; });
+            if (!known) {
+                throw CompilerError(
+                    "Interface '" + iface.name + "' has no parameter '" + pname + "'",
+                    resolveSourceLoc(*param, sm));
+            }
+            if (!named.expr) {
+                throw CompilerError(
+                    "Named parameter '" + pname + "' has no value",
+                    resolveSourceLoc(*param, sm));
+            }
+            overrides[pname] = integerConstant(
+                evaluateConstantExpr(named.expr, evalCtx, &pkgRegistry,
+                                     &namedTypeRegistry, &sm));
+        } else {
+            throw CompilerError(
+                "Unsupported parameter assignment kind: " +
+                std::string(toString(param->kind)),
+                resolveSourceLoc(*param, sm));
+        }
+    }
+    return overrides;
+}
+
+// A submodule's interface-typed ports, from the parent's perspective.
+struct SubIfacePortInfo {
+    const UnresolvedInterface* idef = nullptr;
+    std::string interface_name;
+    std::string modport_name;
+};
+using SubIfacePortMap = std::map<std::string, SubIfacePortInfo>;
+
+// The connection expression for an interface port must be a plain identifier
+// naming a parent-scope interface instance or interface port (pass-through).
+static std::string parseIfaceConnExpr(const ExpressionSyntax* expr,
+                                      const std::string& portName,
+                                      const std::optional<SourceLoc>& loc) {
+    if (expr->kind == SyntaxKind::IdentifierName) {
+        return std::string(expr->as<IdentifierNameSyntax>().identifier.valueText());
+    }
+    if (expr->kind == SyntaxKind::MemberAccessExpression ||
+        expr->kind == SyntaxKind::ScopedName) {
+        throw CompilerError(
+            "Interface port '" + portName + "': connection-site modport selection "
+            "is not supported; specify the modport at the port declaration "
+            "(declaration-site modport only)", loc);
+    }
+    throw CompilerError(
+        "Interface port '" + portName + "': connection must be a plain interface "
+        "instance name (got " + std::string(toString(expr->kind)) + ")", loc);
+}
+
+// Validate the parent-side base of an interface connection and return its
+// interface name (instance or pass-through port).
+static std::string parentIfaceNameOrThrow(const ResolutionContext& ctx,
+                                          const std::string& parentBase,
+                                          const std::string& portName,
+                                          const std::optional<SourceLoc>& loc) {
+    if (const auto* inst = lookupIfaceInstanceView(ctx, parentBase)) {
+        return inst->interface_name;
+    }
+    if (const auto* port = lookupIfacePortView(ctx, parentBase)) {
+        return port->interface_name;
+    }
+    throw CompilerError(
+        "Interface port '" + portName + "': connection '" + parentBase +
+        "' does not name an interface instance or interface port in this module", loc);
+}
+
+// Wire an interface-typed port of a child instance member-by-member:
+// child-input members get drivers from the parent-side member nodes; child
+// output members drive the parent-side member nodes through placeholders.
+static void resolveInterfacePortConnection(
+        const NamedPortConnectionSyntax& named,
+        DFG& graph, ModuleInstanceBinding& binding,
+        Module& resolvedSub,
+        const SubIfacePortInfo& info,
+        ResolutionContext& ctx) {
+    std::string portName(named.name.valueText());
+    if (!named.expr) {
+        throw CompilerError(
+            "Interface port '" + portName + "' requires a connection expression",
+            resolveSourceLoc(named, ctx.sm));
+    }
+    auto* expr = extractPortExpr(*named.expr);
+    auto loc = resolveSourceLoc(*expr, ctx.sm);
+    const std::string parentBase = parseIfaceConnExpr(expr, portName, loc);
+    const std::string parentIfaceName = parentIfaceNameOrThrow(ctx, parentBase, portName, loc);
+    if (parentIfaceName != info.interface_name) {
+        throw CompilerError(
+            "Interface port '" + portName + "' expects interface '" +
+            info.interface_name + "' but '" + parentBase + "' is of interface '" +
+            parentIfaceName + "'", loc);
+    }
+
+    const UnresolvedModport* modport = findModport(*info.idef, info.modport_name);
+    if (!modport) {
+        throw CompilerError(
+            "Interface '" + info.interface_name + "' has no modport '" +
+            info.modport_name + "'", loc);
+    }
+    std::map<std::string, bool> childDrives;
+    for (const auto& [name, isOutput] : modport->member_is_output) {
+        childDrives[name] = isOutput;
+    }
+
+    const auto* parentPort = lookupIfacePortView(ctx, parentBase);
+
+    auto wireMember = [&](const std::string& memberName, bool driven_by_child) {
+        const std::string childNodeName = portName + "." + memberName;
+        const std::string parentName = parentBase + "." + memberName;
+        if (!driven_by_child) {
+            auto* port = findInputNode(resolvedSub, childNodeName);
+            if (!port) {
+                throw CompilerError(
+                    "Interface member input '" + childNodeName +
+                    "' not found in submodule '" + resolvedSub.name + "'", loc);
+            }
+            ExprValue value = exprValueFromIdentifier(parentName, loc, ctx);
+            if (port->type.isStruct() || !port->type.unpacked_dims.empty()) {
+                bindInputPortLeaves(binding, *port, value, loc);
+            } else {
+                binding.inputs.push_back(ModuleInstanceInputBinding{
+                    .port_name = childNodeName,
+                    .leaf_name = childNodeName,
+                    .path = {},
+                    .driver = DFGOutput(value.scalar),
+                });
+            }
+            if (ctx.domain_facts) {
+                auto& facts = ctx.domain_facts->getOrCreate(ctx.occurrence);
+                facts.child_input_connections.push_back(ChildInputConnectionFact{
+                    .child_instance_path = appendInstancePath(
+                        ctx.occurrence.instance_path, binding.instance_name),
+                    .child_module_name = resolvedSub.name,
+                    .child_port = childNodeName,
+                    .expr_kind = ConnectionExprKind::SimpleIdentifier,
+                    .parent_signal_name = parentName,
+                    .diagnostic_expr_kind = "InterfaceMemberConnection",
+                    .loc = loc,
+                });
+            }
+        } else {
+            auto* outputPort = findOutputNode(resolvedSub, childNodeName);
+            if (!outputPort) {
+                throw CompilerError(
+                    "Interface member output '" + childNodeName +
+                    "' not found in submodule '" + resolvedSub.name + "'", loc);
+            }
+            if (parentPort) {
+                auto dirIt = parentPort->member_is_output.find(memberName);
+                if (dirIt != parentPort->member_is_output.end() && !dirIt->second) {
+                    throw CompilerError(
+                        "Instance '" + binding.instance_name + "' drives interface "
+                        "member '" + parentName + "', but modport '" +
+                        parentPort->modport_name + "' of this module's interface "
+                        "port '" + parentBase + "' marks it as an input", loc);
+                }
+            }
+            if (outputPort->type.isStruct() || !outputPort->type.unpacked_dims.empty()) {
+                connectOutputPortLeaves(graph, binding, *outputPort, parentName, ctx, loc);
+            } else {
+                auto* placeholder = getOrCreateOutputPlaceholder(
+                    graph, binding, childNodeName, childNodeName, {}, outputPort->type);
+                placeholder->loc = loc;
+                recordFullWrite(
+                    ctx, parentName, loc,
+                    std::format("module-output:{}:{}", binding.instance_name, childNodeName));
+                auto* target = lookupTargetNode(ctx, parentName);
+                if (!target) {
+                    throw CompilerError(
+                        "Cannot drive interface member '" + parentName + "'", loc);
+                }
+                graph.connectDriver(target, DFGOutput(placeholder));
+            }
+        }
+    };
+
+    // Interface's own input ports are read-only for every connected module.
+    for (const auto& port : info.idef->input_ports) wireMember(port.name, false);
+    for (const auto& sig : info.idef->signal_decls) wireMember(sig.name, childDrives.at(sig.name));
+}
+
 void resolveNamedPortConnection(
         const NamedPortConnectionSyntax& named,
         DFG& graph, ModuleInstanceBinding& binding,
         Module& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
+        const SubIfacePortMap& subIfacePorts,
         ResolutionContext& ctx) {
 
     // Extract port name
     std::string portName(named.name.valueText());
+
+    if (auto ifIt = subIfacePorts.find(portName); ifIt != subIfacePorts.end()) {
+        resolveInterfacePortConnection(named, graph, binding, resolvedSub,
+                                       ifIt->second, ctx);
+        return;
+    }
 
     // Check if input
     if (subInputNames.contains(portName)) {
@@ -7748,15 +8204,23 @@ void resolvePortConnection(
         Module& resolvedSub,
         const std::set<std::string>& subInputNames,
         const std::set<std::string>& subOutputNames,
+        const SubIfacePortMap& subIfacePorts,
         ResolutionContext& ctx) {
     switch (conn->kind) {
         case SyntaxKind::NamedPortConnection:
             resolveNamedPortConnection(conn->as<NamedPortConnectionSyntax>(),
                                        graph, binding, resolvedSub,
                                        subInputNames, subOutputNames,
+                                       subIfacePorts,
                                        ctx);
             break;
         case SyntaxKind::WildcardPortConnection:
+            if (!subIfacePorts.empty()) {
+                throw CompilerError(
+                    "Wildcard port connections are not supported on modules with "
+                    "interface ports",
+                    resolveSourceLoc(*conn, ctx.sm));
+            }
             resolveWildcardPortConnection(graph, binding, resolvedSub, ctx);
             break;
         default:
@@ -7773,8 +8237,62 @@ static void instantiateSubmoduleInstance(
         const ParameterContext& instCtx,
         const InstancePath& childOccurrencePath,
         ResolutionContext& ctx) {
-    auto resolvedSub = resolveModule(unresolvedSubmodule, instCtx,
-                                     ctx.moduleLookup, ctx.sm,
+    SubIfacePortMap subIfacePorts;
+    for (const auto& ip : unresolvedSubmodule.interfacePorts) {
+        auto it = ctx.interfaceLookup->find(ip.interface_name);
+        if (it == ctx.interfaceLookup->end()) {
+            throw CompilerError(
+                "Module '" + submoduleName + "': unknown interface '" +
+                ip.interface_name + "' for port '" + ip.port_name + "'");
+        }
+        subIfacePorts.emplace(ip.port_name, SubIfacePortInfo{
+            .idef = it->second,
+            .interface_name = ip.interface_name,
+            .modport_name = ip.modport_name,
+        });
+    }
+
+    // Interface ports make the child implicitly generic: its effective
+    // parameter signature includes each interface port's parameters, whose
+    // values flow in from the connected parent-side interface. Inject them as
+    // qualified names ("<port>.<param>") before resolving the child.
+    ParameterContext effectiveCtx = instCtx;
+    for (const auto* conn : instanceSyntax.connections) {
+        if (conn->kind != SyntaxKind::NamedPortConnection) continue;
+        const auto& named = conn->as<NamedPortConnectionSyntax>();
+        std::string portName(named.name.valueText());
+        auto ipIt = subIfacePorts.find(portName);
+        if (ipIt == subIfacePorts.end()) continue;
+        if (!named.expr) {
+            throw CompilerError(
+                "Interface port '" + portName + "' requires a connection expression",
+                resolveSourceLoc(named, ctx.sm));
+        }
+        auto* expr = extractPortExpr(*named.expr);
+        auto loc = resolveSourceLoc(*expr, ctx.sm);
+        const std::string parentBase = parseIfaceConnExpr(expr, portName, loc);
+        parentIfaceNameOrThrow(ctx, parentBase, portName, loc);
+        if (const auto* inst = lookupIfaceInstanceView(ctx, parentBase)) {
+            for (const auto& [pname, value] : inst->param_values) {
+                effectiveCtx.values[portName + "." + pname] = value;
+            }
+        } else {
+            // Pass-through of this module's own interface port: forward its
+            // qualified parameter values under the child port's name.
+            for (const auto& p : ipIt->second.idef->parameters) {
+                auto it = ctx.params.values.find(parentBase + "." + p.name);
+                if (it == ctx.params.values.end()) {
+                    throw CompilerError(
+                        "Interface parameter '" + parentBase + "." + p.name +
+                        "' not found in parent context", loc);
+                }
+                effectiveCtx.values[portName + "." + p.name] = it->second;
+            }
+        }
+    }
+
+    auto resolvedSub = resolveModule(unresolvedSubmodule, effectiveCtx,
+                                     ctx.moduleLookup, *ctx.interfaceLookup, ctx.sm,
                                      ctx.pkgRegistry, ctx.globalImports,
                                      childOccurrencePath,
                                      ctx.domain_facts);
@@ -7782,6 +8300,16 @@ static void instantiateSubmoduleInstance(
     std::set<std::string> subInputNames, subOutputNames;
     forEachInputNode(resolvedSub, [&](const ModuleNode& inp) { subInputNames.insert(inp.name); });
     forEachOutputNode(resolvedSub, [&](const ModuleNode& out) { subOutputNames.insert(out.name); });
+    // Interface member nodes are wired through the interface-port path, not by
+    // their individual (dotted) port names.
+    for (const auto& [portName, info] : subIfacePorts) {
+        std::erase_if(subInputNames, [&](const std::string& n) {
+            return n.starts_with(portName + ".");
+        });
+        std::erase_if(subOutputNames, [&](const std::string& n) {
+            return n.starts_with(portName + ".");
+        });
+    }
 
     ModuleInstanceBinding binding{
         .instance_name = effectiveInstanceName,
@@ -7793,7 +8321,8 @@ static void instantiateSubmoduleInstance(
 
     for (const auto* conn : instanceSyntax.connections) {
         resolvePortConnection(conn, ctx.graph, binding,
-                              resolvedSub, subInputNames, subOutputNames, ctx);
+                              resolvedSub, subInputNames, subOutputNames,
+                              subIfacePorts, ctx);
     }
 
     resolvedSub.instance_name = effectiveInstanceName;
@@ -8308,6 +8837,7 @@ void resolveGenerateMembersInPlace(
         scopeEnumMemberValues, ctx.pkgRegistry, ctx.moduleLookup, ctx.globalImports,
         ctx.current_write_origin, ctx.partial_drivers, ctx.write_states, ctx.subroutineRegistry,
         ctx.subroutine_locals, ctx.currently_inlining, ctx.is_subroutine_scope, ctx.current_return_var};
+    scopeCtx.inheritInterfaceViews(ctx);
     // Pre-scan NBA targets in this scope, then intersect with local declarations.
     // Only locally-declared signals that have NBA assignments are generate-local flops.
     // Module-level flops assigned inside a generate block must NOT be added here —
@@ -8451,6 +8981,7 @@ void resolveGenerateMemberInPlace(
                     ctx.namedTypeRegistry, ctx.enumMemberValues, ctx.pkgRegistry,
                     ctx.moduleLookup, ctx.globalImports,
                     ctx.current_write_origin, ctx.partial_drivers, ctx.write_states};
+                iterResCtx.inheritInterfaceViews(ctx);
 
                 if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
                     resolveGenerateMembersInPlace(
@@ -8555,6 +9086,12 @@ void resolveGenerateMemberInPlace(
         case SyntaxKind::HierarchyInstantiation: {
             auto& moduleInst = member->as<HierarchyInstantiationSyntax>();
             std::string submoduleName(moduleInst.type.valueText());
+            if (ctx.interfaceLookup && ctx.interfaceLookup->contains(submoduleName)) {
+                throw CompilerError(
+                    "Interface instances inside generate blocks are not supported: " +
+                    submoduleName,
+                    resolveSourceLoc(*member, ctx.sm));
+            }
             auto it = ctx.moduleLookup.find(submoduleName);
             if (it == ctx.moduleLookup.end())
                 throw CompilerError(
@@ -8794,6 +9331,7 @@ static void applyImports(
 
 Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext& topCtx,
                              const ModuleLookup& moduleLookup,
+                             const InterfaceLookup& interfaceLookup,
                              const slang::SourceManager& sourceManager,
                              const PackageRegistry& pkgRegistry,
                              const std::vector<ImportSpec>& globalImports,
@@ -8869,6 +9407,75 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         addOutputNode(resolved, resolveModuleNode(
             output, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
     }
+
+    // Interface-typed ports: lower each member to a ModuleNode
+    // "<port>.<member>" with the direction given by the declaration-site
+    // modport. Interface parameters become qualified Params "<port>.<param>"
+    // whose values arrive from the instantiation site (or defaults).
+    std::map<std::string, IfacePortView> ifacePortViews;
+    for (const auto& ip : unresolved.interfacePorts) {
+        auto ifIt = interfaceLookup.find(ip.interface_name);
+        if (ifIt == interfaceLookup.end()) {
+            throw CompilerError(
+                "Module '" + unresolved.name + "': unknown interface '" +
+                ip.interface_name + "' for port '" + ip.port_name + "'");
+        }
+        const UnresolvedInterface& idef = *ifIt->second;
+        const UnresolvedModport* modport = findModport(idef, ip.modport_name);
+        if (!modport) {
+            throw CompilerError(
+                "Module '" + unresolved.name + "', port '" + ip.port_name +
+                "': interface '" + ip.interface_name + "' has no modport '" +
+                ip.modport_name + "'");
+        }
+
+        std::map<std::string, ConstantValue> overrides;
+        for (const auto& p : idef.parameters) {
+            if (auto it = mergedCtx->values.find(ip.port_name + "." + p.name);
+                it != mergedCtx->values.end()) {
+                overrides.emplace(p.name, it->second);
+            }
+        }
+        ParameterContext ifaceCtx =
+            resolveInterfaceParams(idef, ip.port_name, overrides, pkgRegistry);
+
+        IfacePortView view;
+        view.interface_name = ip.interface_name;
+        view.modport_name = ip.modport_name;
+
+        for (const auto& p : idef.parameters) {
+            const std::string qname = ip.port_name + "." + p.name;
+            const ConstantValue& value = ifaceCtx.values.at(p.name);
+            Param param;
+            param.name = qname;
+            param.type = value.type();
+            param.value = value;
+            resolved.parameters.push_back(std::move(param));
+            localCtx->values[qname] = value;
+        }
+
+        auto addMember = [&](const UnresolvedSignal& sig, bool isOutput) {
+            UnresolvedSignal qualified{
+                .name = ip.port_name + "." + sig.name,
+                .type = sig.type,
+                .dimensions = sig.dimensions,
+            };
+            ModuleNode node = resolveModuleNode(
+                qualified, ifaceCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
+            if (isOutput) addOutputNode(resolved, node);
+            else addInputNode(resolved, node);
+            view.member_is_output[sig.name] = isOutput;
+        };
+        std::map<std::string, bool> modportDirs;
+        for (const auto& [name, isOutput] : modport->member_is_output) {
+            modportDirs[name] = isOutput;
+        }
+        for (const auto& sig : idef.input_ports) addMember(sig, false);
+        for (const auto& sig : idef.signal_decls) addMember(sig, modportDirs.at(sig.name));
+
+        ifacePortViews.emplace(ip.port_name, std::move(view));
+    }
+    if (!unresolved.interfacePorts.empty()) mergedCtx = mergeLocalCtx();
 
     // The extractor groups body members by kind, so body imports are currently
     // module-body-wide rather than lexically ordered within the body.
@@ -8978,6 +9585,81 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
     }
 
+    // Interface instances declared in this module: lower each member to an
+    // internal ModuleNode "<instance>.<member>". Port connections (e.g. the
+    // interface's clk input) are deferred until the resolution context exists.
+    std::map<std::string, IfaceInstanceView> ifaceInstanceViews;
+    struct PendingIfaceInstance {
+        const UnresolvedInterface* idef;
+        const slang::syntax::HierarchicalInstanceSyntax* inst;
+        std::string instance_name;
+    };
+    std::vector<PendingIfaceInstance> pendingIfaceInstances;
+    for (const auto& moduleInst : unresolved.hierarchyInstantiation) {
+        std::string typeName(moduleInst->type.valueText());
+        auto ifIt = interfaceLookup.find(typeName);
+        if (ifIt == interfaceLookup.end()) continue;
+        const UnresolvedInterface& idef = *ifIt->second;
+
+        std::map<std::string, ConstantValue> overrides = parseInterfaceParamOverrides(
+            moduleInst->parameters, idef, *mergedCtx, pkgRegistry, sourceManager,
+            namedTypeRegistry);
+
+        for (const auto* inst : moduleInst->instances) {
+            if (!inst->decl) {
+                throw CompilerError(
+                    "Interface instance of '" + typeName + "' requires a name",
+                    resolveSourceLoc(*inst, sourceManager));
+            }
+            std::string instName(inst->decl->name.valueText());
+            if (inst->decl->dimensions.size() != 0) {
+                throw CompilerError(
+                    "Arrays of interface instances are not supported: " + instName,
+                    resolveSourceLoc(*inst, sourceManager));
+            }
+            if (ifaceInstanceViews.contains(instName)) {
+                throw CompilerError(
+                    "Duplicate interface instance name: " + instName,
+                    resolveSourceLoc(*inst, sourceManager));
+            }
+            ParameterContext ifaceCtx =
+                resolveInterfaceParams(idef, instName, overrides, pkgRegistry);
+
+            IfaceInstanceView view;
+            view.interface_name = typeName;
+            for (const auto& [pname, value] : ifaceCtx.values) {
+                view.param_values.emplace(pname, value);
+            }
+            for (const auto& p : idef.parameters) {
+                const std::string qname = instName + "." + p.name;
+                const ConstantValue& value = ifaceCtx.values.at(p.name);
+                Param param;
+                param.name = qname;
+                param.type = value.type();
+                param.value = value;
+                resolved.parameters.push_back(std::move(param));
+                localCtx->values[qname] = value;
+            }
+
+            auto addMember = [&](const UnresolvedSignal& sig) {
+                UnresolvedSignal qualified{
+                    .name = instName + "." + sig.name,
+                    .type = sig.type,
+                    .dimensions = sig.dimensions,
+                };
+                addInternalNode(resolved, resolveModuleNode(
+                    qualified, ifaceCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+                view.member_names.insert(sig.name);
+            };
+            for (const auto& sig : idef.input_ports)  addMember(sig);
+            for (const auto& sig : idef.signal_decls) addMember(sig);
+
+            ifaceInstanceViews.emplace(instName, std::move(view));
+            pendingIfaceInstances.push_back(PendingIfaceInstance{&idef, inst, instName});
+        }
+    }
+    if (!ifaceInstanceViews.empty()) mergedCtx = mergeLocalCtx();
+
     // === Build subroutine registry from module-local functions ===
     std::map<std::string, const FunctionDeclarationSyntax*> subroutineRegistry;
     for (const auto* fn : unresolved.functions)
@@ -9057,6 +9739,59 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         "", {}, {}, {}, {}, {}, namedTypeRegistry, enumMemberValues, pkgRegistry,
         moduleLookup, globalImports, "", {}, {}, subroutineRegistry
     };
+    resCtx.interfaceLookup = &interfaceLookup;
+    resCtx.interface_ports = std::move(ifacePortViews);
+    resCtx.interface_instances = std::move(ifaceInstanceViews);
+
+    // Connect the interface's own input ports (e.g. clk) for each interface
+    // instance, now that expressions can be built.
+    for (const auto& pending : pendingIfaceInstances) {
+        std::set<std::string> connected;
+        for (const auto* conn : pending.inst->connections) {
+            if (conn->kind != SyntaxKind::NamedPortConnection) {
+                throw CompilerError(
+                    "Interface instance '" + pending.instance_name +
+                    "': only named port connections are supported",
+                    resolveSourceLoc(*conn, sourceManager));
+            }
+            const auto& named = conn->as<NamedPortConnectionSyntax>();
+            std::string portName(named.name.valueText());
+            bool isInputPort = std::any_of(
+                pending.idef->input_ports.begin(), pending.idef->input_ports.end(),
+                [&](const auto& sig) { return sig.name == portName; });
+            if (!isInputPort) {
+                throw CompilerError(
+                    "Interface '" + pending.idef->name + "' has no input port '" +
+                    portName + "'", resolveSourceLoc(named, sourceManager));
+            }
+            if (!named.expr) {
+                throw CompilerError(
+                    "Interface instance '" + pending.instance_name + "': input port '" +
+                    portName + "' requires a connection expression",
+                    resolveSourceLoc(named, sourceManager));
+            }
+            auto* expr = extractPortExpr(*named.expr);
+            auto loc = resolveSourceLoc(*expr, sourceManager);
+            auto* driver = buildExprDFG(expr, resCtx);
+            const std::string targetName = pending.instance_name + "." + portName;
+            recordFullWrite(resCtx, targetName, loc,
+                            "iface-input:" + pending.instance_name + ":" + portName);
+            auto* target = lookupTargetNode(resCtx, targetName);
+            if (!target) {
+                throw CompilerError(
+                    "Cannot find interface member node: " + targetName, loc);
+            }
+            graph.connectDriver(target, DFGOutput(driver));
+            connected.insert(portName);
+        }
+        for (const auto& port : pending.idef->input_ports) {
+            if (!connected.contains(port.name)) {
+                throw CompilerError(
+                    "Interface instance '" + pending.instance_name + "': input port '" +
+                    port.name + "' must be connected");
+            }
+        }
+    }
 
     for (const auto& block : unresolved.proceduralComboBlocks) {
         resolveProceduralComboInPlace(block, resCtx);
@@ -9078,6 +9813,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Resolve submodules and record instance bindings for downstream DFG inlining
     for (const auto& moduleInst: unresolved.hierarchyInstantiation){
         std::string submoduleName(moduleInst->type.valueText());
+        if (interfaceLookup.contains(submoduleName)) continue;  // lowered above
         auto it = moduleLookup.find(submoduleName);
         if (it == moduleLookup.end()) {
             throw CompilerError(
@@ -9110,9 +9846,26 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     return resolved;
 }
 
+static InterfaceLookup buildInterfaceLookup(
+        const std::vector<std::unique_ptr<UnresolvedInterface>>& interfaces,
+        const ModuleLookup& moduleLookup) {
+    InterfaceLookup interfaceLookup;
+    for (const auto& iface : interfaces) {
+        if (moduleLookup.contains(iface->name)) {
+            throw CompilerError(
+                "Name collision between module and interface: " + iface->name);
+        }
+        if (!interfaceLookup.emplace(iface->name, iface.get()).second) {
+            throw CompilerError("Duplicate interface declaration: " + iface->name);
+        }
+    }
+    return interfaceLookup;
+}
+
 Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
+    const std::vector<std::unique_ptr<UnresolvedInterface>>& interfaces,
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     FrontendDomainFacts* domainFacts) {
@@ -9130,15 +9883,18 @@ Module resolveModules(
     for (const auto& module : modules) {
         moduleLookup[module->name] = module.get();
     }
+    InterfaceLookup interfaceLookup = buildInterfaceLookup(interfaces, moduleLookup);
 
     ParameterContext emptyCtx;
-    return resolveModule(*modules[0], emptyCtx, moduleLookup, sourceManager, pkgRegistry,
+    return resolveModule(*modules[0], emptyCtx, moduleLookup, interfaceLookup,
+                         sourceManager, pkgRegistry,
                          globalImports, {}, domainFacts);
 }
 
 Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
+    const std::vector<std::unique_ptr<UnresolvedInterface>>& interfaces,
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     const std::string& topModuleName,
@@ -9151,6 +9907,7 @@ Module resolveModules(
     for (const auto& module : modules) {
         moduleLookup[module->name] = module.get();
     }
+    InterfaceLookup interfaceLookup = buildInterfaceLookup(interfaces, moduleLookup);
 
     auto it = moduleLookup.find(topModuleName);
     if (it == moduleLookup.end()) {
@@ -9158,7 +9915,8 @@ Module resolveModules(
             "Top module '{}' not found in input files", topModuleName));
     }
 
-    return resolveModule(*it->second, topParams, moduleLookup, sourceManager, pkgRegistry,
+    return resolveModule(*it->second, topParams, moduleLookup, interfaceLookup,
+                         sourceManager, pkgRegistry,
                          globalImports, {}, domainFacts);
 }
 

@@ -20,10 +20,14 @@ namespace mate {
 // Module lookup table: maps module name -> unresolved module
 using ModuleLookup = std::unordered_map<std::string, const UnresolvedModule*>;
 
+// Interface lookup table: maps interface name -> unresolved interface
+using InterfaceLookup = std::unordered_map<std::string, const UnresolvedInterface*>;
+
 // Resolve the single module in the input (errors if there are multiple — use --top)
 Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
+    const std::vector<std::unique_ptr<UnresolvedInterface>>& interfaces,
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     FrontendDomainFacts* domainFacts = nullptr);
@@ -32,6 +36,7 @@ Module resolveModules(
 Module resolveModules(
     const std::vector<std::unique_ptr<UnresolvedModule>>& modules,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages,
+    const std::vector<std::unique_ptr<UnresolvedInterface>>& interfaces,
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     const std::string& topModuleName,

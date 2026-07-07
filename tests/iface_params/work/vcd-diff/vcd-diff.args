@@ -1,0 +1,1 @@
+--alias-scope verilator:u_p12.bus=TOP.tb.uut.b12 --alias-scope verilator:u_p16.bus=TOP.tb.uut.b16 --alias-scope verilator:u_chk.bus=TOP.tb.uut.b12

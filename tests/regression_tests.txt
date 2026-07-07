@@ -143,3 +143,15 @@ ibex_compressed_decoder PASS
 arithmetic_ops PASS
 shift_operator_matrix PASS
 ibex_core PASS
+iface_params PASS
+iface_top_port PASS
+iface_task_fail FAIL unsupported interface member
+iface_modport_missing_dir_fail FAIL is not assigned a direction in modport
+iface_bare_port_fail FAIL declaration-site modport is required
+iface_conn_site_modport_fail FAIL connection-site modport selection is not supported
+iface_output_port_fail FAIL output ports on interfaces are not supported
+iface_array_fail FAIL Arrays of interface instances are not supported
+iface_nba_member_fail FAIL Non-blocking assignment to a member of interface port
+iface_drive_input_member_fail FAIL Cannot drive interface member
+iface_clk_member PASS
+iface_clk_member_data_fail FAIL uses clock signal

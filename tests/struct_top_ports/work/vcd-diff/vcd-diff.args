@@ -1,0 +1,1 @@
+--alias-scope verilator:_my_modport_if=TOP.tb._if._my_modport_if --alias-scope verilator:m_my_if=TOP.tb._if.m_my_if

@@ -348,6 +348,32 @@ FlopInfo extractFlopClockAndReset(
     return flop;
 }
 
+// A pure passthrough of a clock/reset input — a SIGNAL/OUTPUT chain with no
+// logic in between — is a clock alias (e.g. an interface member carrying the
+// clock into child instances), not data logic, and is exempt from the
+// clock-in-logic check. This does not weaken the check for real consumers:
+// any data logic reading the alias has its own root whose traversal passes
+// through the alias chain and still reaches the clock INPUT node.
+static bool isClockResetAlias(const DFGNode* node,
+                              const std::vector<std::string>& clocks,
+                              const std::vector<std::string>& resets) {
+    std::set<const DFGNode*> seen;
+    const DFGNode* current = node;
+    while (current && seen.insert(current).second) {
+        if (current->kind() == DFGOp::INPUT) {
+            return std::ranges::find(clocks, current->name) != clocks.end() ||
+                   std::ranges::find(resets, current->name) != resets.end();
+        }
+        if (current->kind() != DFGOp::SIGNAL && current->kind() != DFGOp::OUTPUT) {
+            return false;
+        }
+        auto driver = current->driver();
+        if (!driver || driver->port != 0) return false;
+        current = driver->node;
+    }
+    return false;
+}
+
 void check_logic_no_clock_reset(
     DFGNode* root,
     const std::string& rootName,
@@ -528,8 +554,13 @@ static void resolveFlopsForModule(Module& resolved,
     // Check that module-visible logic and resolved flop functional .d logic do
     // not depend on clock/reset signals.
     forEachDrivenNode(resolved, [&](const ModuleNode& module_node) {
+        const bool alias_exempt = isInternalNode(module_node);
         for (const auto& leaf : moduleNodeLeafRefs(module_node)) {
             if (!leaf.node) continue;
+            // Internal clock aliases (e.g. interface members carrying the
+            // clock to child instances) are exempt; module outputs are not —
+            // exporting a clock as a data output remains an error.
+            if (alias_exempt && isClockResetAlias(leaf.node, clocks, resets)) continue;
             check_logic_no_clock_reset(leaf.node, leaf.leaf_name, resolved.name, clocks, resets);
         }
     });

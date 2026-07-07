@@ -83,7 +83,28 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
 
             // Get direction and dataType from header
             if (port.header->kind == SyntaxKind::InterfacePortHeader) {
-                throw CompilerError("Can't parse interface ports.");
+                auto& ifaceHeader = port.header->as<InterfacePortHeaderSyntax>();
+                if (ifaceHeader.nameOrKeyword.kind == TokenKind::InterfaceKeyword) {
+                    throw CompilerError(
+                        "Generic 'interface' ports are not supported; name the interface "
+                        "type with a modport (e.g. my_if.master " + portName + ")");
+                }
+                if (!ifaceHeader.modport) {
+                    throw CompilerError(
+                        "Interface port '" + portName + "' requires a declaration-site "
+                        "modport (e.g. " +
+                        std::string(ifaceHeader.nameOrKeyword.valueText()) +
+                        ".<modport> " + portName + ")");
+                }
+                if (port.declarator->dimensions.size() != 0) {
+                    throw CompilerError(
+                        "Arrays of interface ports are not supported: " + portName);
+                }
+                info.interfacePorts.push_back(UnresolvedInterfacePort{
+                    .port_name = portName,
+                    .interface_name = std::string(ifaceHeader.nameOrKeyword.valueText()),
+                    .modport_name = std::string(ifaceHeader.modport->member.valueText()),
+                });
             }
             else if (port.header->kind == SyntaxKind::VariablePortHeader) {
                 auto& varHeader = port.header->as<VariablePortHeaderSyntax>();
@@ -100,6 +121,11 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
                     info.inputs.push_back(portInfo);
                 } else if (dir == TokenKind::OutputKeyword) {
                     info.outputs.push_back(portInfo);
+                } else if (dir == TokenKind::Unknown) {
+                    throw CompilerError(
+                        "Port '" + portName + "' has no direction. If this is an "
+                        "interface port, a declaration-site modport is required "
+                        "(e.g. my_if.master " + portName + ")");
                 } else {
                     throw CompilerError("Unsupported port direction");
                 }
@@ -119,6 +145,11 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
                     info.inputs.push_back(portInfo);
                 } else if (dir == TokenKind::OutputKeyword) {
                     info.outputs.push_back(portInfo);
+                } else if (dir == TokenKind::Unknown) {
+                    throw CompilerError(
+                        "Port '" + portName + "' has no direction. If this is an "
+                        "interface port, a declaration-site modport is required "
+                        "(e.g. my_if.master " + portName + ")");
                 } else {
                     throw CompilerError("Unsupported port direction");
                 }

@@ -49,6 +49,7 @@ tests/**/work/**/output
 tests/**/work/**/*.log
 tests/**/work/**/*.hash
 tests/**/work/**/*.vcd
+tests/**/work/**/*.fst
 **/*.gtkw
 **/debug_output
 external/slang-install/

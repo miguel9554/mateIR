@@ -1076,18 +1076,94 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     return out.str();
 }
 
+// A top-level interface port of the original module, recovered from the
+// language-metadata sidecar: the wrapper re-emits it as `<iface>.<modport>
+// <name>`, referencing the original interface definition by name (the
+// interface sources are compiled alongside the wrapper; it is never
+// redeclared or monomorphized here).
+struct IfacePortGroup {
+    std::string port_name;
+    std::string interface_name;
+    std::string modport_name;
+    // Full member node names ("bus.data") — these appear as individual
+    // entries in ModelPorts and must not become wrapper ports themselves.
+    std::set<std::string> member_ports;
+    // Monomorphized interface parameter values for the elaboration-time guard.
+    std::vector<std::pair<std::string, int64_t>> params;
+};
+
+std::vector<IfacePortGroup> collectTopIfacePortGroups(const RtlRuntimeModel& model) {
+    std::vector<IfacePortGroup> groups;
+    const Module& top = model.top();
+    for (const auto& record : model.ir().lang_metadata.records) {
+        if (record.kind != "sv.interface_port") continue;
+        if (record.bindings.empty()) continue;
+        // Only interface ports of the top module become wrapper ports.
+        if (!record.bindings.front().anchor.module_path.empty()) continue;
+
+        IfacePortGroup group;
+        group.port_name = record.name;
+        group.interface_name = record.attrs.at("interface");
+        group.modport_name = record.attrs.at("modport");
+        for (const auto& binding : record.bindings) {
+            if (binding.role.starts_with("member:")) {
+                group.member_ports.insert(binding.anchor.name);
+            } else if (binding.role.starts_with("param:")) {
+                const std::string param_name = binding.role.substr(6);
+                const Param* param = nullptr;
+                for (const auto& p : top.parameters) {
+                    if (p.name == binding.anchor.name) { param = &p; break; }
+                }
+                if (!param) {
+                    throw CompilerError(std::format(
+                        "mate-dpi-codegen: interface parameter anchor '{}' not "
+                        "found in top module parameters", binding.anchor.name));
+                }
+                auto value = param->value.asInt64();
+                if (!value) {
+                    throw CompilerError(std::format(
+                        "mate-dpi-codegen: interface parameter '{}' has a "
+                        "non-integer value", binding.anchor.name));
+                }
+                group.params.emplace_back(param_name, *value);
+            }
+        }
+        groups.push_back(std::move(group));
+    }
+    return groups;
+}
+
 std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
     const auto input_leaves = allInputLeaves(ports);
     const auto output_leaves = allOutputLeaves(ports);
+    const auto iface_groups = collectTopIfacePortGroups(model);
+    std::set<std::string> iface_member_ports;
+    for (const auto& group : iface_groups) {
+        iface_member_ports.insert(group.member_ports.begin(), group.member_ports.end());
+    }
+
     out << "module " << config.module_name << "\n";
     out << "    import " << config.module_name << "_pkg::*;\n";
     out << "(\n";
-    for (size_t i = 0; i < ports.inputs.size(); ++i) {
-        out << svPortDecl("input ", ports.inputs[i]) << ",\n";
+    std::vector<std::string> port_decls;
+    for (const auto& port : ports.inputs) {
+        if (iface_member_ports.contains(port.name)) continue;
+        port_decls.push_back(svPortDecl("input ", port));
     }
-    for (size_t i = 0; i < ports.outputs.size(); ++i) {
-        out << svPortDecl("output", ports.outputs[i]) << (i + 1 == ports.outputs.size() ? "\n" : ",\n");
+    for (const auto& port : ports.outputs) {
+        if (iface_member_ports.contains(port.name)) continue;
+        port_decls.push_back(svPortDecl("output", port));
+    }
+    for (const auto& group : iface_groups) {
+        // The original interface definition is referenced by name; its
+        // members are accessed hierarchically through this port below.
+        port_decls.push_back(std::format(
+            "    {}.{} {}", group.interface_name, group.modport_name,
+            group.port_name));
+    }
+    for (size_t i = 0; i < port_decls.size(); ++i) {
+        out << port_decls[i] << (i + 1 == port_decls.size() ? "\n" : ",\n");
     }
     out << ");\n\n";
     for (LeafIndex index : output_leaves) {
@@ -1109,6 +1185,20 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     for (size_t index : ports.resets) out << "    logic last_" << ports.inputs[index].name << ";\n";
     out << "\n";
     out << "    initial begin\n";
+    for (const auto& group : iface_groups) {
+        for (const auto& [param_name, value] : group.params) {
+            // The compiled model is monomorphized for these parameter values;
+            // connecting a differently-parameterized interface instance must
+            // fail loudly instead of silently mis-wiring.
+            out << "        if (" << group.port_name << "." << param_name
+                << " != " << value << ") begin\n";
+            out << "            $fatal(1, \"" << config.module_name
+                << ": interface port '" << group.port_name
+                << "' expects " << group.interface_name << " parameter "
+                << param_name << " == " << value << "\");\n";
+            out << "        end\n";
+        }
+    }
     out << "        ctx = " << config.function_prefix << "_create_context();\n";
     out << "        initialized = 1'b0;\n";
     for (size_t index : ports.clocks) {

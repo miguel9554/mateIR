@@ -1031,6 +1031,8 @@ std::string hierarchyToJson(const MateIR& ir) {
         ss << "    " << resetDomainToJson(ir.resets[i]);
     }
     ss << "\n  ],\n";
+    ss << "  \"lang_metadata\": ";
+    ss << langMetadataToJson(ir.lang_metadata, 1) << ",\n";
     ss << "  \"top\": ";
     ss << moduleToJson(ir.top, 1) << "\n";
     ss << "}\n";

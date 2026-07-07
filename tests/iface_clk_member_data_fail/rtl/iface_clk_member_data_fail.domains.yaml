@@ -1,0 +1,9 @@
+module_name: iface_clk_member_data_fail
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge

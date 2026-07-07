@@ -88,12 +88,164 @@ private:
     }
 };
 
+// Extract the supported interface subset: parameters, input ports, signal
+// declarations, and modports. Everything else throws.
+UnresolvedInterface extractInterface(const ModuleDeclarationSyntax& node,
+                                     const slang::SourceManager& sm) {
+    auto headerInfo = extractModuleHeader(*node.header);
+
+    UnresolvedInterface iface;
+    iface.name = std::move(headerInfo.name);
+    iface.parameters = std::move(headerInfo.parameters);
+    iface.input_ports = std::move(headerInfo.inputs);
+
+    if (!headerInfo.outputs.empty()) {
+        throw CompilerError(
+            "Interface '" + iface.name + "': output ports on interfaces are not "
+            "supported (only input ports, e.g. a clock)",
+            resolveSourceLoc(node, sm));
+    }
+    if (!headerInfo.interfacePorts.empty()) {
+        throw CompilerError(
+            "Interface '" + iface.name + "': interface-typed ports inside an "
+            "interface are not supported",
+            resolveSourceLoc(node, sm));
+    }
+
+    auto extractSignals = [&](const auto& declSyntax) {
+        const auto type = extractDataType(*declSyntax.type);
+        for (auto* declarator : declSyntax.declarators) {
+            if (declarator->initializer) {
+                throw CompilerError(
+                    "Interface '" + iface.name + "': signal initializers are not supported",
+                    resolveSourceLoc(*declarator, sm));
+            }
+            iface.signal_decls.push_back(UnresolvedSignal{
+                .name = std::string(declarator->name.valueText()),
+                .type = type,
+                .dimensions = {&(declarator->dimensions)},
+            });
+        }
+    };
+
+    for (auto* member : node.members) {
+        switch (member->kind) {
+            case SyntaxKind::DataDeclaration:
+                extractSignals(member->as<DataDeclarationSyntax>());
+                break;
+            case SyntaxKind::NetDeclaration: {
+                auto& net = member->as<NetDeclarationSyntax>();
+                if (net.strength) throw CompilerError(
+                        "Strength not allowed.", resolveSourceLoc(net, sm));
+                if (net.delay) throw CompilerError(
+                        "Delay not allowed.", resolveSourceLoc(net, sm));
+                extractSignals(net);
+                break;
+            }
+            case SyntaxKind::ModportDeclaration: {
+                auto& modportDecl = member->as<ModportDeclarationSyntax>();
+                for (auto* item : modportDecl.items) {
+                    UnresolvedModport modport;
+                    modport.name = std::string(item->name.valueText());
+                    for (auto* portMember : item->ports->ports) {
+                        if (portMember->kind != SyntaxKind::ModportSimplePortList) {
+                            throw CompilerError(
+                                "Interface '" + iface.name + "', modport '" + modport.name +
+                                "': only simple input/output port lists are supported (got " +
+                                std::string(toString(portMember->kind)) + ")",
+                                resolveSourceLoc(*portMember, sm));
+                        }
+                        auto& simpleList = portMember->as<ModportSimplePortListSyntax>();
+                        bool isOutput;
+                        if (simpleList.direction.kind == slang::parsing::TokenKind::OutputKeyword) {
+                            isOutput = true;
+                        } else if (simpleList.direction.kind == slang::parsing::TokenKind::InputKeyword) {
+                            isOutput = false;
+                        } else {
+                            throw CompilerError(
+                                "Interface '" + iface.name + "', modport '" + modport.name +
+                                "': only input/output directions are supported",
+                                resolveSourceLoc(*portMember, sm));
+                        }
+                        for (auto* port : simpleList.ports) {
+                            if (port->kind != SyntaxKind::ModportNamedPort) {
+                                throw CompilerError(
+                                    "Interface '" + iface.name + "', modport '" + modport.name +
+                                    "': only named modport ports are supported",
+                                    resolveSourceLoc(*port, sm));
+                            }
+                            modport.member_is_output.emplace_back(
+                                std::string(port->as<ModportNamedPortSyntax>().name.valueText()),
+                                isOutput);
+                        }
+                    }
+                    iface.modports.push_back(std::move(modport));
+                }
+                break;
+            }
+            case SyntaxKind::EmptyMember:
+                break;
+            default:
+                throw CompilerError(
+                    "Interface '" + iface.name + "': unsupported interface member: " +
+                    std::string(toString(member->kind)),
+                    resolveSourceLoc(*member, sm));
+        }
+    }
+
+    // Validate modports: every entry names a declared signal (or an interface
+    // input port, which may only be listed as input), no duplicates, and every
+    // signal is assigned a direction in every modport.
+    std::set<std::string> signalNames;
+    for (const auto& sig : iface.signal_decls) signalNames.insert(sig.name);
+    std::set<std::string> inputNames;
+    for (const auto& sig : iface.input_ports) inputNames.insert(sig.name);
+
+    for (const auto& modport : iface.modports) {
+        std::set<std::string> seen;
+        for (const auto& [name, isOutput] : modport.member_is_output) {
+            if (!seen.insert(name).second) {
+                throw CompilerError(
+                    "Interface '" + iface.name + "', modport '" + modport.name +
+                    "': member '" + name + "' listed more than once",
+                    resolveSourceLoc(node, sm));
+            }
+            if (inputNames.contains(name)) {
+                if (isOutput) {
+                    throw CompilerError(
+                        "Interface '" + iface.name + "', modport '" + modport.name +
+                        "': interface input port '" + name + "' cannot be a modport output",
+                        resolveSourceLoc(node, sm));
+                }
+                continue;
+            }
+            if (!signalNames.contains(name)) {
+                throw CompilerError(
+                    "Interface '" + iface.name + "', modport '" + modport.name +
+                    "': unknown signal '" + name + "'",
+                    resolveSourceLoc(node, sm));
+            }
+        }
+        for (const auto& sigName : signalNames) {
+            if (!seen.contains(sigName)) {
+                throw CompilerError(
+                    "Interface '" + iface.name + "': signal '" + sigName +
+                    "' is not assigned a direction in modport '" + modport.name + "'",
+                    resolveSourceLoc(node, sm));
+            }
+        }
+    }
+
+    return iface;
+}
+
 // Visitor class that builds our custom IR from slang syntax tree
 class IRBuilderVisitor : public SyntaxVisitor<IRBuilderVisitor> {
 public:
     const slang::SourceManager& sm;
     std::vector<std::unique_ptr<UnresolvedModule>> modules;
     std::vector<std::unique_ptr<UnresolvedPackage>> packages;
+    std::vector<std::unique_ptr<UnresolvedInterface>> interfaces;
     std::vector<ImportSpec> globalImports;
     UnresolvedModule* currentModule = nullptr;
     UnresolvedPackage* currentPackage = nullptr;
@@ -136,6 +288,11 @@ public:
     }
 
     void handle(const ModuleDeclarationSyntax& node) {
+        if (node.kind == SyntaxKind::InterfaceDeclaration) {
+            interfaces.push_back(std::make_unique<UnresolvedInterface>(
+                extractInterface(node, sm)));
+            return;
+        }
         if (node.kind == SyntaxKind::PackageDeclaration) {
             auto pkg = std::make_unique<UnresolvedPackage>();
             auto& pkgHeader = node.header->as<ModuleHeaderSyntax>();
@@ -166,6 +323,7 @@ public:
         module->parameters = std::move(headerInfo.parameters);
         module->inputs = std::move(headerInfo.inputs);
         module->outputs = std::move(headerInfo.outputs);
+        module->interfacePorts = std::move(headerInfo.interfacePorts);
         module->headerImports = std::move(headerInfo.headerImports);
 
         // Set current module context
@@ -199,6 +357,17 @@ public:
                                        [&](const auto& o) { return o.name == flopName; });
 
             if (sigIt == currentModule->signals.end() && outIt == currentModule->outputs.end()) {
+                auto ifaceIt = std::find_if(
+                    currentModule->interfacePorts.begin(),
+                    currentModule->interfacePorts.end(),
+                    [&](const auto& ip) { return ip.port_name == flopName; });
+                if (ifaceIt != currentModule->interfacePorts.end()) {
+                    throw CompilerError(
+                        "Non-blocking assignment to a member of interface port '" +
+                        flopName + "' is not supported; register the value in a "
+                        "local flop and drive the member with a continuous assign",
+                        resolveSourceLoc(node, sm));
+                }
                 throw CompilerError("Flop '" + flopName + "' not found in signals or outputs",
                                     resolveSourceLoc(node, sm));
             }
@@ -433,6 +602,7 @@ ExtractedIR buildIR(const SyntaxTree& tree) {
     return ExtractedIR{
         std::move(visitor.modules),
         std::move(visitor.packages),
+        std::move(visitor.interfaces),
         std::move(visitor.globalImports)
     };
 }

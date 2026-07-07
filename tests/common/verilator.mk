@@ -1,6 +1,17 @@
 .PHONY: simulate clean force prep
 
-WAVES = waves.vcd
+TRACE_FORMAT ?= VCD
+ifeq ($(TRACE_FORMAT),VCD)
+TRACE_FLAG = --trace --trace-underscore
+TRACE_EXT = vcd
+else ifeq ($(TRACE_FORMAT),FST)
+TRACE_FLAG = --trace-fst --trace-underscore
+TRACE_EXT = fst
+else
+$(error TRACE_FORMAT must be VCD or FST)
+endif
+
+WAVES ?= waves.$(TRACE_EXT)
 
 ROOT_DIR       = ../..
 PROJECT_ROOT   = $(ROOT_DIR)/../..
@@ -23,6 +34,7 @@ DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 TOP_MODULE   = tb
 OUT          = obj_dir/V$(TOP_MODULE)
 GEN_TB_SCRIPT = $(PROJECT_ROOT)/tools/gen_tb.py
+GEN_TB_OUTPUTS = $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv
 
 VERILATOR_WARNS ?= -Wno-TIMESCALEMOD -Wno-WIDTHTRUNC
 VERILATOR_WARNS += $(shell cat verilator.warns 2>/dev/null)
@@ -30,6 +42,14 @@ SEED_ARG = $(if $(seed),+verilator+seed+$(seed))
 
 # Set DPI=1 to build and run against the compiled DPI model instead of RTL-only.
 DPI ?= 0
+# Set GENERATE_TB=0 to use existing files in tb/generated without rerunning gen_tb.py.
+GENERATE_TB ?= 1
+
+ifneq ($(GENERATE_TB),0)
+ifneq ($(GENERATE_TB),1)
+$(error GENERATE_TB must be 0 or 1)
+endif
+endif
 
 ifeq ($(DPI),1)
 
@@ -60,8 +80,10 @@ prep: force
 		$(MAKE) -C $(PROJECT_ROOT) $(DPI_BUILD_TARGET); \
 	fi
 
-$(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv: $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
+ifeq ($(GENERATE_TB),1)
+$(GEN_TB_OUTPUTS): $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi $(MODULE_NAME)
+endif
 
 $(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate | prep
 	mkdir -p $(DPI_GEN_DIR)
@@ -82,7 +104,7 @@ $(GEN_SV_PKG) $(GEN_SV) $(DPI_LIB): $(GEN_STAMP)
 
 $(OUT): $(GEN_DIR)/tb.sv $(DPI_LIB) | prep
 	rm -rf obj_dir
-	verilator --trace --timing --cc --exe --build --main \
+	verilator $(TRACE_FLAG) --timing --cc --exe --build --main \
 		$(VERILATOR_WARNS) \
 		--top-module $(TOP_MODULE) \
 		-I$(RTL_DIR) \
@@ -91,7 +113,7 @@ $(OUT): $(GEN_DIR)/tb.sv $(DPI_LIB) | prep
 		$(DPI_TIME_C)
 
 clean:
-	rm -rf obj_dir $(WAVES) $(DPI_GEN_DIR)
+	rm -rf obj_dir waves.vcd waves.fst $(DPI_GEN_DIR)
 
 else
 
@@ -101,16 +123,18 @@ $(info RTL_SRCS=$(RTL_SRCS))
 $(info TB_SRCS=$(TB_SRCS))
 $(info GEN_SRCS=$(GEN_SRCS))
 
-$(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv: $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
+ifeq ($(GENERATE_TB),1)
+$(GEN_TB_OUTPUTS): $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py $(MODULE_NAME)
+endif
 
 $(OUT): $(SRCS) $(GEN_DIR)/tb.sv
 	rm -rf obj_dir
-	verilator --trace --binary --x-initial unique --main-top-name TOP \
+	verilator $(TRACE_FLAG) --binary --x-initial unique --main-top-name TOP \
 		$(VERILATOR_WARNS) --top $(TOP_MODULE) -I$(RTL_DIR) $(SRCS) $(DPI_TIME_C)
 
 clean:
-	rm -rf obj_dir $(WAVES)
+	rm -rf obj_dir waves.vcd waves.fst
 
 endif
 

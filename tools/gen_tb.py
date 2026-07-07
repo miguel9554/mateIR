@@ -28,6 +28,12 @@ class Port:
     named_struct_type: str  # preserved named type text for struct ports
     struct_leaves: list[tuple[str, str]]  # [("field.sub", "logic [N:0]"), ...]
     unpacked_dims: str = ""  # unpacked dimensions on the declarator, e.g. "[IC_NUM_WAYS]"
+    interface_type: str = ""  # interface type for interface ports, e.g. "my_if"
+    interface_modport: str = ""  # optional modport on interface ports, e.g. "master"
+    # True for pseudo-ports representing interface-port members ("bus.data"),
+    # used for domains validation and stimulus recording only. They are never
+    # declared as uut_if signals or connected as real ports.
+    iface_member: bool = False
 
 
 @dataclass
@@ -183,8 +189,29 @@ def parse_module(filepath: Path) -> ModuleInfo:
         for port in header.ports.ports:
             if not hasattr(port, 'header'):
                 continue  # skip comma tokens
-            direction = port.header.direction.rawText
             port_name = port.declarator.name.valueText
+
+            if 'InterfacePortHeader' in str(port.header.kind):
+                modport = ""
+                try:
+                    modport = port.header.modport.member.valueText
+                except AttributeError:
+                    pass
+                ports.append(Port(
+                    name=port_name,
+                    direction="",
+                    is_signed=False,
+                    param_dims="",
+                    resolved_dims="",
+                    named_struct_type="",
+                    struct_leaves=[],
+                    unpacked_dims="",
+                    interface_type=port.header.nameOrKeyword.valueText,
+                    interface_modport=modport,
+                ))
+                continue
+
+            direction = port.header.direction.rawText
 
             dt = port.header.dataType
             kind_name = str(dt.kind)
@@ -205,13 +232,27 @@ def parse_module(filepath: Path) -> ModuleInfo:
                     if 'StructType' in td_kind:
                         named_struct_type = type_name
                         struct_leaves = struct_leaves_map.get(lookup_name, [])
+                    interface_type = ""
+                    interface_modport = ""
+                elif not direction:
+                    # Slang's Python bindings expose a plain interface ANSI port
+                    # like `my_if p` as a directionless NamedType port.
+                    is_signed, param_dims = False, ''
+                    named_struct_type = ""
+                    struct_leaves = []
+                    interface_type = type_name
+                    interface_modport = ""
                 else:
                     # Unknown typedef — fall back to scalar logic
                     is_signed, param_dims = False, ''
                     named_struct_type = ""
                     struct_leaves = []
+                    interface_type = ""
+                    interface_modport = ""
                 resolved_dims = resolve_dims(param_dims)
             else:
+                if not direction:
+                    raise ValueError(f"Unsupported directionless port '{port_name}'")
                 # Standard integer / implicit / logic type
                 try:
                     is_signed = (dt.signing.kind == pyslang.TokenKind.SignedKeyword)
@@ -224,6 +265,8 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 resolved_dims = resolve_dims(param_dims)
                 named_struct_type = ""
                 struct_leaves = []
+                interface_type = ""
+                interface_modport = ""
 
             port_unpacked_dims = ""
             try:
@@ -241,13 +284,104 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 named_struct_type=named_struct_type,
                 struct_leaves=struct_leaves,
                 unpacked_dims=port_unpacked_dims,
+                interface_type=interface_type,
+                interface_modport=interface_modport,
             ))
 
     return ModuleInfo(name=mod_name, parameters=params, ports=ports, imports=imports)
 
 
+def parse_interfaces(rtl_dir: Path) -> dict:
+    """Parse interface declarations in the RTL dir.
+
+    Returns {name: {"signals": [(name, type_str)], "modports": {mp: {sig: dir}}}}.
+    """
+    interfaces = {}
+    for f in sorted(list(rtl_dir.glob('*.sv')) + list(rtl_dir.glob('*.v'))):
+        tree = pyslang.SyntaxTree.fromFile(str(f))
+        for member in tree.root.members:
+            if 'InterfaceDeclaration' not in str(member.kind):
+                continue
+            name = member.header.name.valueText
+            signals = []
+            modports = {}
+            params = {}
+            header = member.header
+            if header.parameters is not None:
+                for decl in header.parameters.declarations:
+                    if not hasattr(decl, 'declarators'):
+                        continue  # skip comma tokens
+                    for d in decl.declarators:
+                        if d.initializer is not None:
+                            params[d.name.valueText] = str(d.initializer.expr).strip()
+            for m in member.members:
+                kind = str(m.kind)
+                if 'DataDeclaration' in kind or 'NetDeclaration' in kind:
+                    type_str = str(m.type).strip()
+                    for decl in m.declarators:
+                        signals.append((decl.name.valueText, type_str))
+                elif 'ModportDeclaration' in kind:
+                    for item in m.items:
+                        dirs = {}
+                        for plist in item.ports.ports:
+                            if 'ModportSimplePortList' not in str(plist.kind):
+                                continue
+                            direction = plist.direction.valueText
+                            for p in plist.ports:
+                                dirs[p.name.valueText] = direction
+                        modports[item.name.valueText] = dirs
+            interfaces[name] = {"signals": signals, "modports": modports,
+                                "params": params}
+    return interfaces
+
+
+def add_iface_member_ports(module: ModuleInfo, interfaces: dict) -> None:
+    """Append pseudo-ports for interface-port members that the UUT reads.
+
+    A member is an input of the UUT when the port's modport marks it 'input'.
+    These pseudo-ports drive domains validation and stimulus recording; they
+    are skipped everywhere a real port would be declared or connected.
+    """
+    for port in list(module.ports):
+        if not port.interface_type or port.iface_member:
+            continue
+        iface = interfaces.get(port.interface_type)
+        if iface is None:
+            continue
+        dirs = iface["modports"].get(port.interface_modport, {})
+        for sig_name, type_str in iface["signals"]:
+            direction = dirs.get(sig_name)
+            if direction not in ('input', 'output'):
+                continue
+            dims_match = re.search(r'\[[^\]]+\]', type_str)
+            dims = dims_match.group(0) if dims_match else ''
+            # The TB instantiates interfaces with default parameters, so
+            # substitute parameter defaults into parameterized member dims
+            # (e.g. "[W-1:0]" with W=8 becomes "[8-1:0]").
+            resolved = dims
+            for pname, pdefault in iface.get("params", {}).items():
+                resolved = re.sub(rf'\b{re.escape(pname)}\b', pdefault, resolved)
+            module.ports.append(Port(
+                name=f'{port.name}.{sig_name}',
+                direction=direction,
+                is_signed=False,
+                param_dims=resolved,
+                resolved_dims=resolved,
+                named_struct_type='',
+                struct_leaves=[],
+                unpacked_dims='',
+                interface_type='',
+                interface_modport='',
+                iface_member=True,
+            ))
+
+
 def port_type_str(port: Port, use_resolved: bool = False) -> str:
     """Build type string like 'logic signed [WL-1:0]' or 'logic [8-1:0]'."""
+    if port.interface_type:
+        if port.interface_modport:
+            return f'{port.interface_type}.{port.interface_modport}'
+        return port.interface_type
     if port.named_struct_type:
         return port.named_struct_type
     parts = ['logic']
@@ -408,8 +542,9 @@ def gen_uut_if(module: ModuleInfo) -> str:
         lines.append(f'interface uut_if{import_clause};')
 
     # Input signals
-    inputs = [p for p in module.ports if p.direction == 'input']
-    outputs = [p for p in module.ports if p.direction == 'output']
+    inputs = [p for p in module.ports if p.direction == 'input' and not p.iface_member]
+    outputs = [p for p in module.ports if p.direction == 'output' and not p.iface_member]
+    interfaces = [p for p in module.ports if p.interface_type]
 
     lines.append('    // Inputs')
     for p in inputs:
@@ -422,12 +557,20 @@ def gen_uut_if(module: ModuleInfo) -> str:
         dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
         lines.append(f'    {port_type_str(p)} {p.name}{dim_part};')
 
+    if interfaces:
+        lines.append('')
+        lines.append('    // Interfaces')
+        for p in interfaces:
+            lines.append(f'    {p.interface_type} {p.name}();')
+
     # Modports
     lines.append('')
 
     def modport_line(name: str, flip: bool) -> str:
         parts = []
         for p in module.ports:
+            if p.interface_type or p.iface_member:
+                continue
             if flip:
                 d = 'output' if p.direction == 'input' else 'input'
             else:
@@ -460,8 +603,8 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     lines.append(f'    localparam bit INCLUDE_DPI_MODULE = {dpi_val};')
     lines.append('    localparam bit INCLUDE_UUT_RECORDER = !INCLUDE_DPI_MODULE;')
 
-    inputs = [p for p in module.ports if p.direction == 'input']
-    outputs = [p for p in module.ports if p.direction == 'output']
+    inputs = [p for p in module.ports if p.direction == 'input' and not p.iface_member]
+    outputs = [p for p in module.ports if p.direction == 'output' and not p.iface_member]
 
     # Parameters section
     if has_params:
@@ -517,11 +660,21 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
 
     # Module instantiations
     lines.append('    // modules')
+    port_conns = []
+    for p in module.ports:
+        if p.iface_member:
+            continue
+        if p.interface_type:
+            port_conns.append(f'        .{p.name}(_if.{p.name})')
+        else:
+            port_conns.append(f'        .{p.name}({p.name})')
     if has_params:
         param_list = ', '.join(p.name for p in module.parameters)
-        lines.append(f'    {module.name} #({param_list}) uut(.*);')
+        lines.append(f'    {module.name} #({param_list}) uut(')
     else:
-        lines.append(f'    {module.name} uut(.*);')
+        lines.append(f'    {module.name} uut(')
+    lines.append(',\n'.join(port_conns))
+    lines.append('    );')
     lines.append('    uut_tb uut_tb(.*);')
     lines.append('    if (INCLUDE_UUT_RECORDER) begin : g_recorder')
     lines.append('        uut_recorder u_recorder(.*);')
@@ -542,8 +695,12 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
         lines.append('        uut_if dpi_if();')
     lines.append('')
     lines.append(f'        {module.name}_dpi dpi_uut(')
-    port_conns = [f'            .{p.name}(dpi_if.{p.name})' for p in module.ports]
-    lines.append(',\n'.join(port_conns))
+    dpi_port_conns = [
+        f'            .{p.name}(dpi_if.{p.name})'
+        for p in module.ports
+        if not p.iface_member
+    ]
+    lines.append(',\n'.join(dpi_port_conns))
     lines.append('        );')
     lines.append('')
     lines.append('        uut_tb dpi_tb(._if(dpi_if));')
@@ -588,12 +745,18 @@ def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
 
     all_imports = ['import tb_pkg::*;'] + list(module.imports)
 
+    has_ifaces = any(p.interface_type for p in module.ports)
     lines.append('module checker_dpi')
     for imp in all_imports:
         lines.append(f'    {imp}')
     lines.append('(')
-    lines.append('    uut_if.master dpi_if,')
-    lines.append('    uut_if.master rtl_if')
+    # Nested interface instances are not reachable through a modport'd port.
+    if has_ifaces:
+        lines.append('    uut_if dpi_if,')
+        lines.append('    uut_if rtl_if')
+    else:
+        lines.append('    uut_if.master dpi_if,')
+        lines.append('    uut_if.master rtl_if')
     lines.append(');')
     lines.append(f'    localparam int N = {n};')
     lines.append('    int fails[N];')
@@ -616,7 +779,7 @@ def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
             type_str = leaf_type
         else:
             sig_name = port.name
-            inst = f'u_{port.name}'
+            inst = f"u_{port.name.replace('.', '_')}"
             type_str = port_type_str(port, use_resolved=True)
         lines.append(
             f'    signal_checker #(.TYPE({type_str}), .NAME("{sig_name}")) {inst}'
@@ -645,8 +808,11 @@ def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
 def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
     lines = []
     import_clause = (' ' + ' '.join(module.imports)) if module.imports else ''
+    has_ifaces = any(p.interface_type for p in module.ports)
     lines.append(f'module uut_recorder{import_clause}(')
-    lines.append('    uut_if.slave _if')
+    # Nested interface instances are not reachable through a modport'd port,
+    # so use a plain interface port when the UUT has interface ports.
+    lines.append('    uut_if _if' if has_ifaces else '    uut_if.slave _if')
     lines.append(');')
     lines.append('    localparam string base_dir = "../custom-sim/stimuli";')
     lines.append('')
@@ -699,7 +865,7 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
         lines.append('')
         lines.append('    // Async recorders')
         for sig in async_ports:
-            inst_name = f'u_{sig}_recorder'
+            inst_name = f'u_{sig.replace(".", "_")}_recorder'
             # Shorten reset instance name
             if sig in all_resets:
                 inst_name = f'u_{sig.replace("_n", "").replace("rst", "rst")}_recorder'
@@ -732,13 +898,13 @@ def gen_recorder(module: ModuleInfo, domains: DomainConfig) -> str:
                 for leaf_name, leaf_type in port.struct_leaves:
                     leaf_suffix = leaf_name.replace('.', '_')
                     length_expr, data_expr = length_and_data(port, f'_if.{port.name}.{leaf_name}')
-                    recorder_inst(f'u_{port.name}_{leaf_suffix}_recorder',
+                    recorder_inst(f'u_{port.name.replace(".", "_")}_{leaf_suffix}_recorder',
                                   f'path("{port.name}.{leaf_name}.txt")',
                                   leaf_type, True, length_expr, clk, data_expr)
             else:
                 type_str = port_type_str(port, use_resolved=True)
                 length_expr, data_expr = length_and_data(port, f'_if.{port.name}')
-                recorder_inst(f'u_{port.name}_recorder',
+                recorder_inst(f'u_{port.name.replace(".", "_")}_recorder',
                               f'path("{port.name}.txt")',
                               type_str, True, length_expr, clk, data_expr)
 
@@ -773,6 +939,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     module = parse_module(rtl_path)
+    interfaces = parse_interfaces(rtl_dir)
+    add_iface_member_ports(module, interfaces)
     port_names = {p.name for p in module.ports}
     domains = load_domains(domains_path, port_names)
     validate(module, domains)

@@ -17,6 +17,7 @@ REPO_ROOT = TESTS_DIR.parent
 MANIFEST = TESTS_DIR / "regression_tests.txt"
 DFG_API_GUARD = TESTS_DIR / "check_dfg_api_surface.py"
 MODULE_NODE_API_GUARD = TESTS_DIR / "check_module_node_api_surface.py"
+LANG_METADATA_CHECK = TESTS_DIR / "check_lang_metadata.py"
 FIXED_VALUE_DIFF_TEST = "mate-fixed-value-diff-test"
 
 GREEN = "\033[32m"
@@ -107,7 +108,12 @@ def filter_cases_by_name(cases, names):
 
 
 def select_cases_for_mode(cases, run_mode):
-    """Return the cases that can be run by the requested mode."""
+    """Return the cases that can be run by the requested mode.
+
+    A test with a `dpi.skip` marker file in its directory is excluded from
+    verilator-dpi mode (used for features the DPI path does not support yet,
+    e.g. interface-typed top-level ports).
+    """
     if run_mode == RUN_MODE_VALIDATE:
         return cases
     if run_mode != RUN_MODE_VERILATOR_DPI:
@@ -116,7 +122,10 @@ def select_cases_for_mode(cases, run_mode):
         case
         for case in cases
         if case["kind"] != "validate"
-        or (TESTS_DIR / case["name"] / "work" / "verilator").is_dir()
+        or (
+            (TESTS_DIR / case["name"] / "work" / "verilator").is_dir()
+            and not (TESTS_DIR / case["name"] / "dpi.skip").exists()
+        )
     ]
 
 
@@ -211,6 +220,17 @@ def run_fixed_value_diff_test(build_target):
     test_binary = REPO_ROOT / "build" / build_target / FIXED_VALUE_DIFF_TEST
     result = subprocess.run(
         [str(test_binary)],
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+    return result.returncode == 0, output
+
+
+def run_lang_metadata_check(simulator):
+    """Assert the language-metadata sidecar artifact for interface tests."""
+    result = subprocess.run(
+        [sys.executable, str(LANG_METADATA_CHECK), str(simulator)],
         capture_output=True,
         text=True,
     )
@@ -469,6 +489,25 @@ def main():
     if not ok:
         write_summary(run_logs_dir, summary)
         print(f"{RED}FixedValue differential test failed{RESET}")
+        print(output)
+        sys.exit(1)
+
+    print("Checking language-metadata sidecar artifacts...", flush=True)
+    ok, output = run_lang_metadata_check(simulator)
+    summary["steps"]["lang_metadata_check"] = {
+        "log": str((run_logs_dir / "lang_metadata_check.log").relative_to(REPO_ROOT)),
+        "ok": ok,
+    }
+    write_text_log(
+        run_logs_dir / "lang_metadata_check.log",
+        "Language-metadata artifact check",
+        output,
+        ok=ok,
+        metadata={"step": "lang_metadata_check"},
+    )
+    if not ok:
+        write_summary(run_logs_dir, summary)
+        print(f"{RED}Language-metadata artifact check failed{RESET}")
         print(output)
         sys.exit(1)
 

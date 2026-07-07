@@ -15,6 +15,7 @@ Commands:
   find    <name>          Find all signals/flops named <name> anywhere in the hierarchy
   clocks                  List all distinct clock domains used across the hierarchy
   stats                   Print signal/flop counts per module
+  interfaces              List language-metadata interface groupings (ports/instances)
 """
 
 import json
@@ -31,6 +32,7 @@ def load(path):
         top = data["top"]
         top["__clock_domains"] = data.get("clock_domains", [])
         top["__reset_domains"] = data.get("reset_domains", [])
+        top["__lang_metadata"] = data.get("lang_metadata", [])
         return top
     return data
 
@@ -252,6 +254,26 @@ def cmd_stats(root, args):
         print(f"{path:<{col_w}}  {ni:>4}  {no:>4}  {ns:>4}  {nf:>5}  {nb:>4}")
 
 
+def cmd_interfaces(root, args):
+    records = root.get("__lang_metadata", [])
+    iface_records = [r for r in records
+                     if r.get("kind") in ("sv.interface_port", "sv.interface_instance")]
+    if not iface_records:
+        print("No interface records in lang_metadata.")
+        return
+    for r in iface_records:
+        attrs = r.get("attrs", {})
+        kind = "port" if r["kind"] == "sv.interface_port" else "instance"
+        bindings = r.get("bindings", [])
+        module_path = bindings[0]["anchor"]["module_path"] if bindings else ""
+        where = module_path or "<top>"
+        modport = f" modport={attrs['modport']}" if "modport" in attrs else ""
+        print(f"{where}: {r['name']}  ({kind} of {attrs.get('interface', '?')}{modport})")
+        for b in bindings:
+            anchor = b["anchor"]
+            print(f"    {b['role']:<20} -> {anchor['entity']} {anchor['name']}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -264,6 +286,7 @@ COMMANDS = {
     "find":    cmd_find,
     "clocks":  cmd_clocks,
     "stats":   cmd_stats,
+    "interfaces": cmd_interfaces,
 }
 
 if __name__ == "__main__":

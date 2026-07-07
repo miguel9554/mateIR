@@ -90,6 +90,36 @@ struct UnresolvedTypes {
 };
 
 // ============================================================================
+// Unresolved Interface structures
+// ============================================================================
+
+// One modport declaration: every interface signal must appear exactly once.
+struct UnresolvedModport {
+    std::string name;
+    // signal name -> true if the modport holder drives it (output direction)
+    std::vector<std::pair<std::string, bool>> member_is_output;
+};
+
+// A SystemVerilog interface restricted to the supported subset:
+// parameters, input ports, signal declarations, and modports.
+struct UnresolvedInterface {
+    std::string name;
+    std::vector<UnresolvedParam> parameters;
+    // The interface's own ports. Only inputs are supported (e.g. a clock).
+    std::vector<UnresolvedSignal> input_ports;
+    std::vector<UnresolvedSignal> signal_decls;
+    std::vector<UnresolvedModport> modports;
+};
+
+// An interface-typed module port. The modport is mandatory and must be
+// specified at the port declaration (declaration-site modport only).
+struct UnresolvedInterfacePort {
+    std::string port_name;
+    std::string interface_name;
+    std::string modport_name;
+};
+
+// ============================================================================
 // Unresolved Module structure
 // ============================================================================
 
@@ -99,6 +129,8 @@ struct UnresolvedModule {
     std::vector<UnresolvedTypes::Param> localparams;
     std::vector<UnresolvedTypes::Signal> inputs;
     std::vector<UnresolvedTypes::Signal> outputs;
+    // Interface-typed ports (declaration-site modport mandatory).
+    std::vector<UnresolvedInterfacePort> interfacePorts;
     std::vector<UnresolvedTypes::Signal> signals;
     std::vector<UnresolvedTypes::Signal> flops;
 

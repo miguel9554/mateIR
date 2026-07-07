@@ -89,6 +89,7 @@ endif()
 set(MATEIR_SOURCES
     src/mateir/constant_value.cpp
     src/mateir/dfg.cpp
+    src/mateir/lang_metadata.cpp
     src/mateir/module.cpp
     src/mateir/types.cpp
 )

@@ -149,7 +149,6 @@ void NativeSimEngine::generateAndBuildSharedObject(const SimConfig& config) {
 
     DpiCodegenConfig codegen;
     codegen.top_module = config.top_module;
-    codegen.sources = config.source_files;
     codegen.out_dir = build_dir_;
     codegen.module_name = config.top_module + "_native";
     codegen.function_prefix = "mate_" + config.top_module + "_native";

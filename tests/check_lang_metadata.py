@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Assert the language-metadata sidecar artifact for interface testcases.
+"""Assert the language-metadata sidecar artifact for interface and
+port-type testcases.
 
 Compiles two interface tests with the vector simulator (the sidecar artifact
 is written by the frontend pipeline before simulation starts, so the run's
@@ -106,7 +107,12 @@ def check_struct_top_ports(records):
         "param:W": ("param", "_my_modport_if.W"),
     }, roles(r)
 
-    assert len(records) == 2, f"expected 2 records, got {len(records)}"
+    for port in ("in_s", "out_s"):
+        r = by_key[("sv.port_type", "", port)]
+        assert r["attrs"] == {"type": "struct_top_ports_pkg::payload_t"}, r["attrs"]
+        assert roles(r) == {"port": ("module_node", port)}, roles(r)
+
+    assert len(records) == 4, f"expected 4 records, got {len(records)}"
 
 
 def main() -> int:

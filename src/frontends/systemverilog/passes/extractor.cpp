@@ -592,9 +592,94 @@ public:
     }
 };
 
+// Does the package define an enum or struct typedef with this name?
+bool packageDefinesType(const UnresolvedPackage& package, std::string_view type_name) {
+    const auto matches = [&](const UnresolvedTypedef& td) {
+        return td.name == type_name;
+    };
+    return std::any_of(package.enumTypedefs.begin(), package.enumTypedefs.end(), matches) ||
+           std::any_of(package.structTypedefs.begin(), package.structTypedefs.end(), matches);
+}
+
+// Resolve a bare type name through package imports to a qualified name.
+std::optional<std::string> resolveImportedTypeName(
+    std::string_view type_name,
+    const std::vector<ImportSpec>& global_imports,
+    const std::vector<ImportSpec>& header_imports,
+    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages) {
+
+    auto find_package = [&](std::string_view package_name) -> const UnresolvedPackage* {
+        for (const auto& package : packages) {
+            if (package->name == package_name) return package.get();
+        }
+        return nullptr;
+    };
+
+    std::vector<std::string> candidates;
+    auto consider_imports = [&](const std::vector<ImportSpec>& imports) {
+        for (const auto& spec : imports) {
+            if (spec.item && *spec.item != type_name) continue;
+            const auto* package = find_package(spec.package_name);
+            if (!package) {
+                throw CompilerError("externalPortTypeName: unknown package import '" +
+                                    spec.package_name + "'");
+            }
+            if (!packageDefinesType(*package, type_name)) continue;
+            const std::string qualified = spec.package_name + "::" + std::string(type_name);
+            if (std::find(candidates.begin(), candidates.end(), qualified) == candidates.end()) {
+                candidates.push_back(qualified);
+            }
+        }
+    };
+
+    consider_imports(global_imports);
+    consider_imports(header_imports);
+
+    if (candidates.empty()) return std::nullopt;
+    if (candidates.size() > 1) {
+        std::string msg = "externalPortTypeName: type '" + std::string(type_name) +
+                          "' is imported from multiple packages:";
+        for (const auto& candidate : candidates) msg += " " + candidate;
+        throw CompilerError(msg);
+    }
+    return candidates.front();
+}
+
 } // anonymous namespace
 
 namespace mate {
+
+std::optional<std::string> externalPortTypeName(
+    const UnresolvedSignal& signal,
+    const std::vector<ImportSpec>& global_imports,
+    const std::vector<ImportSpec>& header_imports,
+    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages) {
+
+    if (!signal.type.syntax || signal.type.syntax->kind != SyntaxKind::NamedType) {
+        return std::nullopt;
+    }
+
+    const auto& named = signal.type.syntax->as<NamedTypeSyntax>();
+    if (named.name->kind == SyntaxKind::ScopedName) {
+        const auto& scoped = named.name->as<ScopedNameSyntax>();
+        if (scoped.left->kind != SyntaxKind::IdentifierName ||
+            scoped.right->kind != SyntaxKind::IdentifierName) {
+            return std::nullopt;
+        }
+        const std::string package_name(
+            scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+        const std::string type_name(
+            scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+        return package_name + "::" + type_name;
+    }
+
+    if (named.name->kind != SyntaxKind::IdentifierName) {
+        return std::nullopt;
+    }
+    const std::string type_name(
+        named.name->as<IdentifierNameSyntax>().identifier.valueText());
+    return resolveImportedTypeName(type_name, global_imports, header_imports, packages);
+}
 
 ExtractedIR buildIR(const SyntaxTree& tree) {
     IRBuilderVisitor visitor(tree.sourceManager());

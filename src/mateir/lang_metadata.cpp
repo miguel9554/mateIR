@@ -114,6 +114,15 @@ void validateLangMetadata(const LangMetadata& meta, const Module& top) {
             if (!record.attrs.contains("modport")) fail("missing attr 'modport'");
         } else if (record.kind == "sv.interface_instance") {
             if (!record.attrs.contains("interface")) fail("missing attr 'interface'");
+        } else if (record.kind == "sv.port_type") {
+            if (!record.attrs.contains("type")) fail("missing attr 'type'");
+            if (record.bindings.size() != 1 ||
+                record.bindings.front().role != "port") {
+                fail("must have exactly one binding with role 'port'");
+            }
+            if (!record.bindings.front().anchor.module_path.empty()) {
+                fail("'port' binding must anchor in the top module");
+            }
         } else {
             fail("unknown record kind");
         }
@@ -122,7 +131,8 @@ void validateLangMetadata(const LangMetadata& meta, const Module& top) {
         for (const auto& binding : record.bindings) {
             const bool isMember = binding.role.starts_with("member:");
             const bool isParam = binding.role.starts_with("param:");
-            if (!isMember && !isParam) {
+            const bool isPort = binding.role == "port";
+            if (!isMember && !isParam && !isPort) {
                 fail(std::format("unknown binding role '{}'", binding.role));
             }
             const auto& anchor = binding.anchor;
@@ -132,7 +142,7 @@ void validateLangMetadata(const LangMetadata& meta, const Module& top) {
                                  anchor.module_path));
             }
             if (anchor.entity == "module_node") {
-                if (!isMember) fail(std::format(
+                if (!isMember && !isPort) fail(std::format(
                     "role '{}' must anchor to a param", binding.role));
                 if (!findNode(*module, anchor.name)) {
                     fail(std::format(

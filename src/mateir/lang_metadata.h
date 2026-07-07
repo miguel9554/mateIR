@@ -31,6 +31,13 @@
 //     attrs: interface = source interface type name
 //     bindings: role "member:<member>" -> module_node "<inst>.<member>"
 //               role "param:<param>"   -> param       "<inst>.<param>"
+//
+//   kind "sv.port_type" — a top-level port declared with an externally
+//     referenceable named type (package-scoped in source, or a bare typedef
+//     name resolved through package imports).
+//     name:  the port name (e.g. "in_s")
+//     attrs: type = qualified source type name (e.g. "pkg::payload_t")
+//     bindings: exactly one, role "port" -> module_node "<port>" in the top
 
 #include <map>
 #include <set>

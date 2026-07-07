@@ -413,6 +413,40 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
     ir.source_files = options.source_files;
     ir.frontend_module_count = extracted.modules.size();
 
+    // sv.port_type records: the externally-referenceable qualified type name
+    // of a top-level port (e.g. "pkg::payload_t") is a source fact destroyed
+    // by lowering and not recomputable from the IR.
+    {
+        const UnresolvedModule* topUnresolved = nullptr;
+        for (const auto& module : extracted.modules) {
+            if (module->name == ir.top.name) {
+                topUnresolved = module.get();
+                break;
+            }
+        }
+        if (!topUnresolved) {
+            throw CompilerError(std::format(
+                "top module '{}' not found in extracted modules", ir.top.name));
+        }
+        auto emitPortTypes = [&](const std::vector<UnresolvedSignal>& signals) {
+            for (const auto& signal : signals) {
+                auto qualified = externalPortTypeName(
+                    signal, extracted.globalImports, topUnresolved->headerImports,
+                    extracted.packages);
+                if (!qualified) continue;
+                LangMetaRecord record;
+                record.kind = "sv.port_type";
+                record.name = signal.name;
+                record.attrs["type"] = *qualified;
+                record.bindings.push_back(
+                    {"port", {"", "module_node", signal.name}});
+                langMeta.records.push_back(std::move(record));
+            }
+        };
+        emitPortTypes(topUnresolved->inputs);
+        emitPortTypes(topUnresolved->outputs);
+    }
+
     std::optional<std::string> topDomainPath;
     if (options.top_domain_mode == TopDomainMode::Yaml) {
         topDomainPath = loadTopDomainPath(options.domain_files, ir.top.name);

@@ -1,12 +1,9 @@
 #include "dpi_codegen/dpi_codegen.h"
 
-#include "frontends/systemverilog/passes/extractor.h"
 #include "mateir/module.h"
 #include "sim/runtime_model.h"
 #include "sim/word_ops.h"
 #include "util/source_loc.h"
-
-#include "slang/syntax/SyntaxTree.h"
 
 #include <algorithm>
 #include <cctype>
@@ -68,9 +65,18 @@ struct ModelPorts {
 
 using Config = DpiCodegenConfig;
 
-struct SvSurfaceFacts {
-    std::map<std::string, std::string> port_type_names;
-};
+// port name -> externally-referenceable qualified SV type name, read from the
+// language-metadata sidecar ("sv.port_type" records emitted by the frontend).
+using PortTypeNames = std::map<std::string, std::string>;
+
+PortTypeNames collectPortTypeNames(const RtlRuntimeModel& model) {
+    PortTypeNames names;
+    for (const auto& record : model.ir().lang_metadata.records) {
+        if (record.kind != "sv.port_type") continue;
+        names[record.name] = record.attrs.at("type");
+    }
+    return names;
+}
 
 std::string sanitizeIdentifier(std::string_view text) {
     std::string out;
@@ -98,150 +104,6 @@ std::string cppString(std::string_view text) {
     }
     out += "\"";
     return out;
-}
-
-std::shared_ptr<slang::syntax::SyntaxTree> loadSyntaxTree(const std::vector<std::string>& sources) {
-    if (sources.empty()) {
-        throw CompilerError("mate-dpi-codegen: no source files provided");
-    }
-
-    if (sources.size() == 1) {
-        auto tree_result = slang::syntax::SyntaxTree::fromFile(sources.front());
-        if (!tree_result) {
-            throw CompilerError("mate-dpi-codegen: failed to load source file: " + sources.front());
-        }
-        return std::move(tree_result).value();
-    }
-
-    std::vector<std::string_view> paths(sources.begin(), sources.end());
-    auto tree_result =
-        slang::syntax::SyntaxTree::fromFiles(std::span<const std::string_view>(paths));
-    if (!tree_result) {
-        throw CompilerError("mate-dpi-codegen: failed to load source files");
-    }
-    return std::move(tree_result).value();
-}
-
-bool packageDefinesType(const UnresolvedPackage& package, std::string_view type_name) {
-    const auto matches = [&](const UnresolvedTypedef& td) {
-        return td.name == type_name;
-    };
-    return std::any_of(package.enumTypedefs.begin(), package.enumTypedefs.end(), matches) ||
-           std::any_of(package.structTypedefs.begin(), package.structTypedefs.end(), matches);
-}
-
-std::optional<std::string> resolveImportedTypeName(
-    std::string_view type_name,
-    const std::vector<ImportSpec>& global_imports,
-    const std::vector<ImportSpec>& header_imports,
-    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages) {
-
-    auto find_package = [&](std::string_view package_name) -> const UnresolvedPackage* {
-        for (const auto& package : packages) {
-            if (package->name == package_name) return package.get();
-        }
-        return nullptr;
-    };
-
-    std::vector<std::string> candidates;
-    auto consider_imports = [&](const std::vector<ImportSpec>& imports) {
-        for (const auto& spec : imports) {
-            if (spec.item && *spec.item != type_name) continue;
-            const auto* package = find_package(spec.package_name);
-            if (!package) {
-                throw CompilerError("mate-dpi-codegen: unknown package import '" +
-                                    spec.package_name + "'");
-            }
-            if (!packageDefinesType(*package, type_name)) continue;
-            const std::string qualified = spec.package_name + "::" + std::string(type_name);
-            if (std::find(candidates.begin(), candidates.end(), qualified) == candidates.end()) {
-                candidates.push_back(qualified);
-            }
-        }
-    };
-
-    consider_imports(global_imports);
-    consider_imports(header_imports);
-
-    if (candidates.empty()) return std::nullopt;
-    if (candidates.size() > 1) {
-        std::ostringstream msg;
-        msg << "mate-dpi-codegen: type '" << type_name
-            << "' is imported from multiple packages:";
-        for (const auto& candidate : candidates) msg << " " << candidate;
-        throw CompilerError(msg.str());
-    }
-    return candidates.front();
-}
-
-std::optional<std::string> externalTypeNameForPort(
-    const UnresolvedSignal& signal,
-    const std::vector<ImportSpec>& global_imports,
-    const std::vector<ImportSpec>& header_imports,
-    const std::vector<std::unique_ptr<UnresolvedPackage>>& packages) {
-
-    if (!signal.type.syntax || signal.type.syntax->kind != slang::syntax::SyntaxKind::NamedType) {
-        return std::nullopt;
-    }
-
-    const auto& named = signal.type.syntax->as<slang::syntax::NamedTypeSyntax>();
-    if (named.name->kind == slang::syntax::SyntaxKind::ScopedName) {
-        const auto& scoped = named.name->as<slang::syntax::ScopedNameSyntax>();
-        if (scoped.left->kind != slang::syntax::SyntaxKind::IdentifierName ||
-            scoped.right->kind != slang::syntax::SyntaxKind::IdentifierName) {
-            return std::nullopt;
-        }
-        const std::string package_name(
-            scoped.left->as<slang::syntax::IdentifierNameSyntax>().identifier.valueText());
-        const std::string type_name(
-            scoped.right->as<slang::syntax::IdentifierNameSyntax>().identifier.valueText());
-        return package_name + "::" + type_name;
-    }
-
-    if (named.name->kind != slang::syntax::SyntaxKind::IdentifierName) {
-        return std::nullopt;
-    }
-    const std::string type_name(
-        named.name->as<slang::syntax::IdentifierNameSyntax>().identifier.valueText());
-    return resolveImportedTypeName(type_name, global_imports, header_imports, packages);
-}
-
-SvSurfaceFacts collectSvSurfaceFacts(const Config& config) {
-    auto tree = loadSyntaxTree(config.sources);
-    auto& diagnostics = tree->diagnostics();
-    for (const auto& diag : diagnostics) {
-        if (diag.isError()) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: syntax errors found while extracting SV surface facts: {} diagnostic(s)",
-                diagnostics.size()));
-        }
-    }
-
-    ExtractedIR extracted = buildIR(*tree);
-    const UnresolvedModule* top = nullptr;
-    for (const auto& module : extracted.modules) {
-        if (module->name == config.top_module) {
-            top = module.get();
-            break;
-        }
-    }
-    if (!top) {
-        throw CompilerError("mate-dpi-codegen: top module '" + config.top_module +
-                            "' not found while extracting SV surface facts");
-    }
-
-    SvSurfaceFacts facts;
-    auto collect = [&](const std::vector<UnresolvedSignal>& signals) {
-        for (const auto& signal : signals) {
-            if (auto external_name = externalTypeNameForPort(
-                    signal, extracted.globalImports, top->headerImports, extracted.packages)) {
-                facts.port_type_names[signal.name] = *external_name;
-            }
-        }
-    };
-    collect(top->inputs);
-    collect(top->outputs);
-    return facts;
 }
 
 std::string svRange(const Type& type) {
@@ -475,12 +337,12 @@ void validateDpiSupportedPort(const ModuleNode& node) {
     }
 }
 
-std::optional<std::string> svTypeNameForPort(const SvSurfaceFacts& facts, const ModuleNode& node) {
+std::optional<std::string> svTypeNameForPort(const PortTypeNames& port_type_names, const ModuleNode& node) {
     if (node.type.kind != TypeKind::Enum && node.type.kind != TypeKind::Struct) {
         return std::nullopt;
     }
-    auto it = facts.port_type_names.find(node.name);
-    if (it == facts.port_type_names.end()) {
+    auto it = port_type_names.find(node.name);
+    if (it == port_type_names.end()) {
         throw CompilerError(std::format(
             "mate-dpi-codegen: top port '{}' has no externally referenceable SystemVerilog type",
             node.name));
@@ -488,7 +350,7 @@ std::optional<std::string> svTypeNameForPort(const SvSurfaceFacts& facts, const 
     return it->second;
 }
 
-ModelPorts collectPorts(const RtlRuntimeModel& model, const SvSurfaceFacts& sv_facts) {
+ModelPorts collectPorts(const RtlRuntimeModel& model, const PortTypeNames& port_type_names) {
     ModelPorts ports;
     const auto& top = model.top();
     const auto& metadata = model.metadata();
@@ -499,7 +361,7 @@ ModelPorts collectPorts(const RtlRuntimeModel& model, const SvSurfaceFacts& sv_f
         Port port{
             .name = node.name,
             .type = node.type,
-            .sv_type_name = svTypeNameForPort(sv_facts, node),
+            .sv_type_name = svTypeNameForPort(port_type_names, node),
             .leaves = {},
             .input_kind = RuntimeInputKind::Async,
             .clock_domain = std::nullopt,
@@ -570,7 +432,7 @@ ModelPorts collectPorts(const RtlRuntimeModel& model, const SvSurfaceFacts& sv_f
         Port port{
             .name = node.name,
             .type = node.type,
-            .sv_type_name = svTypeNameForPort(sv_facts, node),
+            .sv_type_name = svTypeNameForPort(port_type_names, node),
             .leaves = {},
             .input_kind = RuntimeInputKind::Async,
             .clock_domain = std::nullopt,
@@ -2170,8 +2032,7 @@ void writeFile(const std::filesystem::path& path, const std::string& text) {
 namespace mate {
 
 DpiCodegenOutput generateDpiCodegen(const DpiCodegenConfig& config, const RtlRuntimeModel& model) {
-    SvSurfaceFacts sv_facts = collectSvSurfaceFacts(config);
-    ModelPorts ports = collectPorts(model, sv_facts);
+    ModelPorts ports = collectPorts(model, collectPortTypeNames(model));
 
     std::filesystem::create_directories(config.out_dir);
 

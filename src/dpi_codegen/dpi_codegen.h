@@ -15,10 +15,6 @@ namespace mate {
 
 struct DpiCodegenConfig {
     std::string top_module;
-    // Only used for a lightweight direct slang parse (surface-level facts
-    // like port type names as written in source); the heavy MateIR compile
-    // is expected to have already happened to produce `model`.
-    std::vector<std::string> sources;
     std::filesystem::path out_dir;
     std::string module_name;
     std::string function_prefix;

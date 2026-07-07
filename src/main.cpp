@@ -347,7 +347,6 @@ int main(int argc, char** argv) {
 
             DpiCodegenConfig dpiConfig;
             dpiConfig.top_module = topModule;
-            dpiConfig.sources = sourceFiles;
             dpiConfig.out_dir = outputDir;
             dpiConfig.module_name = moduleName;
             dpiConfig.function_prefix = functionPrefix;

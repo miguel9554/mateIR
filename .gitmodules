@@ -10,3 +10,6 @@
 [submodule "external/verilog-vcd-parser"]
 	path = external/verilog-vcd-parser
 	url = git@github.com:miguel9554/verilog-vcd-parser.git
+[submodule "external/taxi"]
+	path = external/taxi
+	url = git@github.com:fpganinja/taxi.git

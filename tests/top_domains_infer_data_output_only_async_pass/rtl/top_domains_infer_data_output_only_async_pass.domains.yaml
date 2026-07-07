@@ -1,0 +1,10 @@
+module_name: top_domains_infer_data_output_only_async_pass
+resets:
+  rst_n:
+    polarity: negative
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+async_domain:
+  - passthrough_in

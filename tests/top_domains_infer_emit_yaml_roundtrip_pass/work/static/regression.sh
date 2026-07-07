@@ -11,4 +11,9 @@ rm -f "$emitted_yaml" infer.log roundtrip.log
 make analyze INFER_TOP_DOMAINS=1 \
     EXTRA_ARGS="--emit-inferred-domains $emitted_yaml" 2>&1 | tee infer.log
 diff -u "$expected_yaml" "$emitted_yaml"
-make analyze EXTRA_ARGS="--domains $emitted_yaml" 2>&1 | tee roundtrip.log
+# DOMAINS_YAML is overridden to a nonexistent path: a real
+# <module>.domains.yaml now sits next to the RTL (for tb generation), and
+# static.mk auto-adds --domains for it when INFER_TOP_DOMAINS is unset, which
+# would collide with the explicit --domains below.
+make analyze EXTRA_ARGS="--domains $emitted_yaml" \
+    DOMAINS_YAML=/nonexistent-suppressed.domains.yaml 2>&1 | tee roundtrip.log

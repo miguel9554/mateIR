@@ -8,8 +8,9 @@ STATIC_BUILD_TARGET ?= dev
 STATIC_BUILD_PRESET ?= $(if $(filter noop,$(STATIC_BUILD_TARGET)),dev,$(STATIC_BUILD_TARGET))
 STATIC_BUILD_DIR = $(PROJECT_ROOT)/build/$(STATIC_BUILD_PRESET)
 
-RTL_PKGS = $(shell find -L $(RTL_DIR) -type f -name "*_pkg.sv")
-RTL_SRCS = $(RTL_PKGS) $(shell find -L $(RTL_DIR) -type f \( -name "*.v" -o -name "*.sv" \) | grep -v "_pkg.sv")
+RTL_GEN_DIR = $(RTL_DIR)/generated
+RTL_PKGS = $(shell find -L $(RTL_DIR) -path $(RTL_GEN_DIR) -prune -o -type f -name "*_pkg.sv" -print)
+RTL_SRCS = $(RTL_PKGS) $(shell find -L $(RTL_DIR) -path $(RTL_GEN_DIR) -prune -o -type f \( -name "*.v" -o -name "*.sv" \) -print | grep -v "_pkg.sv")
 DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).domains.yaml
 INFERRED_DOMAINS_YAML = $(RTL_DIR)/$(MODULE_NAME).inferred.domains.yaml
 INFER_TOP_DOMAINS_ARG = $(if $(INFER_TOP_DOMAINS),--infer-top-domains,)

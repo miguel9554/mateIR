@@ -110,9 +110,9 @@ def filter_cases_by_name(cases, names):
 def select_cases_for_mode(cases, run_mode):
     """Return the cases that can be run by the requested mode.
 
-    A test with a `dpi.skip` marker file in its directory is excluded from
-    verilator-dpi mode (used for features the DPI path does not support yet,
-    e.g. interface-typed top-level ports).
+    Every PASS ("validate"-kind) test must be runnable under both modes: there
+    is no per-test opt-out. A test is only excluded from verilator-dpi mode if
+    it has no work/verilator directory at all (no DPI harness exists yet).
     """
     if run_mode == RUN_MODE_VALIDATE:
         return cases
@@ -122,10 +122,7 @@ def select_cases_for_mode(cases, run_mode):
         case
         for case in cases
         if case["kind"] != "validate"
-        or (
-            (TESTS_DIR / case["name"] / "work" / "verilator").is_dir()
-            and not (TESTS_DIR / case["name"] / "dpi.skip").exists()
-        )
+        or (TESTS_DIR / case["name"] / "work" / "verilator").is_dir()
     ]
 
 
@@ -146,8 +143,36 @@ def run_clean(name, run_mode):
     )
 
 
-def run_validate(name, build_target, run_mode):
-    """Run a PASS test's specialized script or default validation recipe."""
+def run_static_check(name, build_target):
+    """Run a test's work/static/regression.sh, if it has one.
+
+    Returns None if the test has no such script (nothing to require).
+    Some tests carry a hand-written static check (e.g. domain/CDC
+    classification or top-domain inference) alongside the standard
+    simulation-based validation; that check is not a substitute for
+    simulation and must keep passing in both run modes.
+    """
+    static_work_dir = TESTS_DIR / name / "work" / "static"
+    regression_script = static_work_dir / "regression.sh"
+    if not regression_script.exists():
+        return None
+    env = os.environ.copy()
+    # The simulator is built once upfront; avoid racing cmake in parallel tests.
+    env["STATIC_BUILD_TARGET"] = "noop"
+    env.setdefault("VCD_COMPARE_BUILD_TARGET", build_target)
+    result = subprocess.run(
+        ["bash", str(regression_script)],
+        cwd=static_work_dir,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    output = result.stdout + result.stderr
+    return result.returncode == 0, output
+
+
+def run_simulate(name, build_target, run_mode):
+    """Run the mode-appropriate simulation-based validation recipe."""
     if run_mode == RUN_MODE_VERILATOR_DPI:
         work_dir = TESTS_DIR / name / "work" / "verilator"
         result = subprocess.run(
@@ -172,23 +197,6 @@ def run_validate(name, build_target, run_mode):
             )
         return True, output
 
-    static_work_dir = TESTS_DIR / name / "work" / "static"
-    regression_script = static_work_dir / "regression.sh"
-    if regression_script.exists():
-        env = os.environ.copy()
-        # The simulator is built once upfront; avoid racing cmake in parallel tests.
-        env["STATIC_BUILD_TARGET"] = "noop"
-        env.setdefault("VCD_COMPARE_BUILD_TARGET", build_target)
-        result = subprocess.run(
-            ["bash", str(regression_script)],
-            cwd=static_work_dir,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        output = result.stdout + result.stderr
-        return result.returncode == 0, output
-
     work_dir = TESTS_DIR / name / "work" / "validate"
     result = subprocess.run(
         # SIM_BUILD_TARGET=noop prevents each per-test sub-make from re-invoking
@@ -202,6 +210,30 @@ def run_validate(name, build_target, run_mode):
     )
     output = result.stdout + result.stderr
     return result.returncode == 0, output
+
+
+def run_validate(name, build_target, run_mode):
+    """Run a PASS test's full validation for the given mode.
+
+    The pass condition is: (static check, if the test has one) AND (the
+    mode-appropriate simulation run). A static regression.sh check (domain/CDC
+    classification, top-domain inference, etc.) is informative but does not
+    exercise simulation, so it augments rather than replaces the simulate step.
+    """
+    static_result = run_static_check(name, build_target)
+    if static_result is not None:
+        static_ok, static_output = static_result
+        if not static_ok:
+            return False, "=== static check (work/static/regression.sh) ===\n" + static_output
+
+    sim_ok, sim_output = run_simulate(name, build_target, run_mode)
+    if static_result is not None:
+        output = (
+            "=== static check (work/static/regression.sh) ===\n" + static_output +
+            "\n=== simulate check ===\n" + sim_output
+        )
+        return sim_ok, output
+    return sim_ok, sim_output
 
 
 def ensure_simulator(build_target):

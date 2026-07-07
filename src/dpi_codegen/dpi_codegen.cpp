@@ -500,11 +500,10 @@ std::vector<LeafIndex> allOutputLeaves(const ModelPorts& ports) {
     return result;
 }
 
-std::vector<LeafIndex> syncInputsForClock(const ModelPorts& ports, const Port& clock) {
+std::vector<LeafIndex> syncInputsForClockDomain(const ModelPorts& ports, ClockId clock_domain) {
     std::vector<LeafIndex> result;
-    if (!clock.clock_domain) return result;
     for (LeafIndex index : ports.sync_inputs) {
-        if (inputLeaf(ports, index).clock_domain == clock.clock_domain) {
+        if (inputLeaf(ports, index).clock_domain == clock_domain) {
             result.push_back(index);
         }
     }
@@ -513,6 +512,51 @@ std::vector<LeafIndex> syncInputsForClock(const ModelPorts& ports, const Port& c
 
 std::string edgeName(edge_t edge) {
     return edge == POSEDGE ? "posedge" : "negedge";
+}
+
+std::string clockHandleIdentifier(const MateIRRuntimeMetadata& metadata,
+                                  const RuntimeClockMetadata& clock) {
+    const auto& source = metadata.input_leaves.at(clock.source_input.value);
+    return leafIdentifier(source.leaf_name) + "_" + edgeName(clock.edge);
+}
+
+std::vector<const RuntimeClockMetadata*> runtimeClocksForPort(
+        const RtlRuntimeModel& model,
+        const Port& port) {
+    if (port.leaves.size() != 1) {
+        throw CompilerError(std::format(
+            "mate-dpi-codegen: clock input '{}' must be scalar", port.name));
+    }
+    const std::string& source_leaf = port.leaves.front().leaf_name;
+    std::vector<const RuntimeClockMetadata*> result;
+    for (const auto& clock : model.metadata().clocks) {
+        const auto& source = model.metadata().input_leaves.at(clock.source_input.value);
+        if (source.leaf_name == source_leaf) result.push_back(&clock);
+    }
+    return result;
+}
+
+const RuntimeClockMetadata& runtimeClockForPortEdge(
+        const RtlRuntimeModel& model,
+        const Port& port,
+        edge_t edge) {
+    const auto clocks = runtimeClocksForPort(model, port);
+    const RuntimeClockMetadata* fallback = nullptr;
+    const RuntimeClockMetadata* match = nullptr;
+    for (const RuntimeClockMetadata* clock : clocks) {
+        if (!fallback) fallback = clock;
+        if (clock->edge != edge) continue;
+        if (match) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: clock input '{}' has multiple {} domains",
+                port.name, edgeName(edge)));
+        }
+        match = clock;
+    }
+    if (match) return *match;
+    if (fallback) return *fallback;
+    throw CompilerError(std::format(
+        "mate-dpi-codegen: clock '{}' has no runtime clock domain", port.name));
 }
 
 std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
@@ -538,10 +582,9 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
         out << "constexpr size_t kOutput_" << leafIdentifier(leaf.leaf_name)
             << " = " << i << ";\n";
     }
-    for (size_t i = 0; i < ports.clocks.size(); ++i) {
-        const auto& clock = ports.inputs[ports.clocks[i]];
-        out << "constexpr size_t kClock_" << leafIdentifier(clock.leaves.front().leaf_name)
-            << " = " << i << ";\n";
+    for (const auto& clock : model.metadata().clocks) {
+        out << "constexpr size_t kClock_" << clockHandleIdentifier(model.metadata(), clock)
+            << " = " << clock.id.value << ";\n";
     }
     for (size_t i = 0; i < ports.resets.size(); ++i) {
         const auto& reset = ports.inputs[ports.resets[i]];
@@ -613,7 +656,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    MateInstance* instance = nullptr;\n";
     out << "    std::array<int32_t, " << input_leaves.size() << "> inputs{};\n";
     out << "    std::array<int32_t, " << output_leaves.size() << "> outputs{};\n";
-    out << "    std::array<int32_t, " << ports.clocks.size() << "> clocks{};\n";
+    out << "    std::array<int32_t, " << model.metadata().clocks.size() << "> clocks{};\n";
     out << "    std::array<int32_t, " << ports.resets.size() << "> resets{};\n";
     out << "\n";
     out << "    ~Context() {\n";
@@ -669,12 +712,9 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
         out << "    context->outputs.at(kOutput_" << ident << ") = checkedHandle(mate_output_id(context->model, "
             << cppString(output.leaf_name) << "), \"output\", " << cppString(output.leaf_name) << ");\n";
     }
-    for (size_t i = 0; i < ports.clocks.size(); ++i) {
-        const auto& clock = ports.inputs[ports.clocks[i]];
-        const auto& leaf = clock.leaves.front();
-        const std::string ident = leafIdentifier(leaf.leaf_name);
-        out << "    context->clocks.at(kClock_" << ident << ") = checkedHandle(mate_clock_id(context->model, "
-            << cppString(leaf.leaf_name) << "), \"clock\", " << cppString(leaf.leaf_name) << ");\n";
+    for (const auto& clock : model.metadata().clocks) {
+        out << "    context->clocks.at(kClock_" << clockHandleIdentifier(model.metadata(), clock)
+            << ") = " << clock.id.value << ";\n";
     }
     for (size_t i = 0; i < ports.resets.size(); ++i) {
         const auto& reset = ports.inputs[ports.resets[i]];
@@ -782,22 +822,13 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
 
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs[clock_index];
-        const auto runtime_clock = std::find_if(
-            model.metadata().clocks.begin(), model.metadata().clocks.end(),
-            [&](const RuntimeClockMetadata& metadata) {
-                return ports.inputs[clock_index].clock_domain &&
-                       metadata.domain_id == *ports.inputs[clock_index].clock_domain;
-            });
-        if (runtime_clock == model.metadata().clocks.end()) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: clock '{}' has no runtime clock domain", clock.name));
-        }
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
-            const bool active_edge = runtime_clock->edge == edge;
+            const auto& runtime_clock = runtimeClockForPortEdge(model, clock, edge);
+            const bool active_edge = runtime_clock.edge == edge;
             std::vector<LeafIndex> edge_inputs;
             if (active_edge) {
                 edge_inputs = ports.async_inputs;
-                const auto sync_indices = syncInputsForClock(ports, clock);
+                const auto sync_indices = syncInputsForClockDomain(ports, runtime_clock.domain_id);
                 edge_inputs.insert(edge_inputs.end(), sync_indices.begin(), sync_indices.end());
             }
             emitFunctionHeader(sanitizeIdentifier(clock.name) + "_" + edgeName(edge), edge_inputs, true);
@@ -806,7 +837,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
             out << "        MateStatus status{};\n";
             emitUpdateArrayWithCount("edge_updates", edge_inputs);
             out << "        check(mate_apply_clock(context.instance, context.clocks.at(kClock_"
-                << leafIdentifier(clock.leaves.front().leaf_name) << "), " << edgeAbiName(edge)
+                << clockHandleIdentifier(model.metadata(), runtime_clock) << "), " << edgeAbiName(edge)
                 << ", edge_updates, edge_updates_count, &status), status, \"" << config.function_prefix << "_"
                 << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\");\n";
             out << "        writeOutputs(context";
@@ -901,20 +932,12 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
 
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs[clock_index];
-        const auto runtime_clock = std::find_if(
-            model.metadata().clocks.begin(), model.metadata().clocks.end(),
-            [&](const RuntimeClockMetadata& metadata) {
-                return clock.clock_domain && metadata.domain_id == *clock.clock_domain;
-            });
-        if (runtime_clock == model.metadata().clocks.end()) {
-            throw CompilerError(std::format(
-                "mate-dpi-codegen: clock '{}' has no runtime clock domain", clock.name));
-        }
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
+            const auto& runtime_clock = runtimeClockForPortEdge(model, clock, edge);
             std::vector<LeafIndex> event_inputs;
-            if (runtime_clock->edge == edge) {
+            if (runtime_clock.edge == edge) {
                 event_inputs.insert(event_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
-                const auto sync_indices = syncInputsForClock(ports, clock);
+                const auto sync_indices = syncInputsForClockDomain(ports, runtime_clock.domain_id);
                 event_inputs.insert(event_inputs.end(), sync_indices.begin(), sync_indices.end());
             }
             out << "    import \"DPI-C\" function void " << config.function_prefix << "_"
@@ -1173,20 +1196,16 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
 
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs[clock_index];
-        const auto runtime_clock = std::find_if(
-            model.metadata().clocks.begin(), model.metadata().clocks.end(),
-            [&](const RuntimeClockMetadata& metadata) {
-                return clock.clock_domain && metadata.domain_id == *clock.clock_domain;
-            });
         out << "            if (" << clock.name << "_changed) begin\n";
         out << "                last_" << clock.name << " = " << clock.name << ";\n";
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
+            const auto& runtime_clock = runtimeClockForPortEdge(model, clock, edge);
             out << (edge == POSEDGE ? "                if" : "                else if")
                 << " (" << clock.name << " === 1'b" << (edge == POSEDGE ? "1" : "0") << ") begin\n";
             std::vector<LeafIndex> event_inputs;
-            if (runtime_clock->edge == edge) {
+            if (runtime_clock.edge == edge) {
                 event_inputs.insert(event_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
-                const auto sync_indices = syncInputsForClock(ports, clock);
+                const auto sync_indices = syncInputsForClockDomain(ports, runtime_clock.domain_id);
                 event_inputs.insert(event_inputs.end(), sync_indices.begin(), sync_indices.end());
             }
             out << "                    " << config.function_prefix << "_"

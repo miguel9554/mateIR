@@ -463,11 +463,15 @@ def load_domains(filepath: Path, port_names: set[str]) -> DomainConfig:
         resets.append(port)
 
     # clock_domains: object {name: {polarity, input_name?, inputs_outputs: [...]}}
+    # Multiple domain entries (e.g. posedge/negedge) can share one physical
+    # clock port via input_name; merge their signal lists rather than letting
+    # a later entry silently overwrite an earlier one under the same key.
     clock_domains = {}
     for domain_name, domain_cfg in (data.get('clock_domains') or {}).items():
         clock_port = domain_cfg.get('input_name', domain_name)
         raw_signals = domain_cfg.get('inputs_outputs') or []
-        clock_domains[clock_port] = _expand_patterns(raw_signals, port_names)
+        clock_domains.setdefault(clock_port, [])
+        clock_domains[clock_port].extend(_expand_patterns(raw_signals, port_names))
 
     # async_domain: list of names/wildcards
     raw_async = data.get('async_domain') or []

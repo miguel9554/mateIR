@@ -1,170 +1,253 @@
-# Verilog → Circuit IR Compiler
+# Mate
 
-A compiler that ingests synchronous RTL written in SystemVerilog/Verilog and
-produces a structured, clock-aware circuit IR. It is not a general-purpose
-Verilog simulator or synthesis tool — it only accepts designs that are valid
-synchronous netlists, and rejects anything that falls outside that subset.
+Mate is an IR and compiler stack for synchronous hardware. Its core
+representation, `MateIR`, models RTL as hardware structure rather than as an
+event-driven simulator program: module hierarchy, ports, flops, global clock and
+reset registries, and combinational dataflow are first-class parts of the IR.
 
-## Scope and design philosophy
+The current frontend compiles a supported subset of SystemVerilog into
+`MateIR`. The main consumers today are:
 
-The compiler targets a well-defined class of RTL: purely synchronous digital
-circuits. The accepted subset is intentionally narrow:
+- a static analysis tool for inspecting the compiled design and validating
+  clock/reset/domain facts;
+- a DPI simulation backend that emits a SystemVerilog replacement module, a DPI
+  package, and a native static library for use from Verilator or another
+  SystemVerilog simulator.
 
-- All sequential logic must be expressed as edge-triggered flip-flops inside
-  `always_ff` (or `always @(posedge/negedge ...)`) blocks.
-- Combinational logic lives in `always_comb` / `assign` blocks. It must be
-  purely combinational — no latches, no clock or reset signals used as data.
-- Asynchronous logic, tri-state buses, initial blocks, and event-driven
-  simulation constructs are not supported and will be rejected.
+## MateIR
 
-The goal is correctness and machine-readability of the output IR, not broad
-Verilog compatibility. Verilog is used as a familiar input syntax; the real
-target is the internal circuit representation.
+`MateIR` is the project boundary between frontends and consumers. It contains
+the top `Module` hierarchy, global clock/reset registries, and source metadata.
+Each `Module` owns its ports, internal module nodes, flops, combinational DFG,
+and submodule hierarchy.
 
-## The circuit IR
+The important hardware concepts are native to the IR:
 
-The output of compilation is mateir rooted at a `Module` tree. Each module contains:
+- **Clock domains** are global registry entries with source signal and edge
+  polarity.
+- **Reset domains** are global registry entries with source signal and active
+  polarity.
+- **Flops** carry clock/reset domain IDs, reset values, and D/Q bindings.
+- **Combinational logic** is represented as a DFG and checked for invalid
+  dependency cycles.
+- **Hierarchy** is preserved so consumers can reason about the structural design
+  as well as the flattened data dependencies used by analysis and codegen.
 
-- **Ports**: inputs and outputs with resolved types, clock/reset classification,
-  and clock domain assignment.
-- **Flops**: every flip-flop extracted from sequential blocks, with its clock
-  signal, optional async reset signal and reset value, and data-path driver.
-- **DFG** (Data Flow Graph): a purely combinational DAG of the register-transfer
-  logic. Flops appear only as `.d` sink nodes and `.q` source nodes. Clock and
-  reset signals are absent from the DFG — they are metadata on the flop, not
-  graph edges.
-- **Hierarchy**: submodule instantiations are resolved recursively and inlined
-  into the top-level flat DFG for analysis, while the module hierarchy is
-  preserved in the IR for structural information.
+The DFG is not the source of truth for module structure. Consumers that need
+ports, signals, or flops should iterate the `Module` data structures and their
+bindings.
 
-## Domain sidecar files
+## SystemVerilog Compiler
 
-Verilog ports carry no clock or IO domain information. Each RTL module is
-accompanied by a `.domains.yaml` sidecar file that supplies this metadata:
+The SystemVerilog frontend accepts synchronous RTL and lowers it to `MateIR`.
+The supported subset is intentionally hardware-oriented:
 
-```yaml
-module_name: counter_top
+- sequential logic is represented as edge-triggered flops from `always_ff` or
+  equivalent edge-triggered `always` blocks;
+- combinational logic comes from `always_comb` and continuous assignments;
+- packages, parameters, generate constructs, packed structs, arrays, hierarchy,
+  and module instantiation are supported where they lower to the synchronous
+  model;
+- event-driven simulation constructs, latches, tri-state behavior, and
+  unsupported dynamic SystemVerilog features are rejected.
 
-resets:
-  a_rst:
-    polarity: positive
+Top-level clock, reset, synchronous input, and asynchronous input facts are
+provided by a `.domains.yaml` sidecar or inferred with `--infer-top-domains`.
+Intentional CDC synchronizer flops are provided by `.cdc.yaml` sidecars or
+inferred with `--infer-synchronizers`.
 
-clock_domains:
-  clk:
-    polarity: posedge
-    inputs_outputs:
-      - count
-```
+Example compile:
 
-The schema is in `src/domains.schema.json`. Every port must be assigned to a
-clock domain, a reset, or the async domain.
+```bash
+scripts/docker-run.sh make dev
 
-Top-level domain inference is also available for the top module with
-`--infer-top-domains`. In that mode the compiler infers top-level clocks,
-resets, synchronous inputs, and async inputs from flop trigger facts, flop D
-cones, and optional `.cdc.yaml` sidecars. Inference can optionally emit a
-schema-valid `.domains.yaml` with `--emit-inferred-domains <file>`.
-
-## Usage
-
-The executable now has two explicit boundaries: a frontend (`--frontend
-systemverilog` by default) compiles HDL into final mateir, and optional
-consumers such as static analysis or simulation consume that mateir. The current
-architecture is described in `docs/mateir_architecture.md`.
-
-**Compile a single-module design:**
-```
-./build/dev/mate --domains module.domains.yaml module.v
-```
-
-**Compile by inferring top-level domains and emit a reusable YAML sidecar:**
-```
-./build/dev/mate --top module --infer-top-domains \
-    --emit-inferred-domains module.inferred.domains.yaml \
-    module.v
-```
-
-**Run static analysis:**
-```
-./build/dev/mate --analyze --domains module.domains.yaml module.v
-```
-
-**Simulate a hierarchical design:**
-```
-./build/dev/mate --simulate \
+scripts/docker-run.sh ./build/dev/mate \
     --top counter_top \
-    --inputs-dir tests/counter_top/work/custom-sim/stimuli \
-    --output-dir output \
     --domains tests/counter_top/rtl/counter_top.domains.yaml \
-             tests/counter_top/rtl/counter.domains.yaml \
     tests/counter_top/rtl/counter.v \
     tests/counter_top/rtl/counter_top.v
 ```
 
-When multiple source files are provided, `--top` is required to identify the
-root module. Submodules are resolved automatically from the same file set.
+Example with inferred top domains:
 
-**Optional flags:**
-- `--params KEY=VAL,...` — override top-module parameters
-- `--infer-top-domains` — infer top-level clocks, resets, and input domains instead of loading `--domains`
-- `--emit-inferred-domains FILE` — write inferred top-level domains YAML; requires `--infer-top-domains`
-- `--flops-initial zeros|ones|random` — flip-flop initial state for simulation
-- `--flops-seed N` — seed for random initialisation
+```bash
+scripts/docker-run.sh ./build/dev/mate \
+    --top counter_top \
+    --infer-top-domains \
+    --emit-inferred-domains counter_top.inferred.domains.yaml \
+    tests/counter_top/rtl/counter.v \
+    tests/counter_top/rtl/counter_top.v
+```
+
+Useful compiler flags:
+
+- `--top <module>` selects the top module and is required for multi-file
+  designs.
+- `--domains <file>` loads top-level domain facts.
+- `--infer-top-domains` infers top-level clock/reset/input domains instead of
+  loading `--domains`.
+- `--infer-synchronizers` infers CDC synchronizer flops instead of loading
+  `.cdc.yaml` sidecars.
+- `--params K=V,...` overrides top-level parameters.
+- `--dump-passes` emits debug DFG artifacts under `debug_output/<top>/`.
+
+## Static Analysis
+
+The static analysis consumer runs after SystemVerilog lowering and frontend
+validation. It prints a `MateIR` summary, clock/reset registries, module domain
+usage, flops, ports, hierarchy, and optional debug views of selected DFG
+dependencies.
+
+Run it directly:
+
+```bash
+scripts/docker-run.sh ./build/dev/mate \
+    --analyze \
+    --top counter_top \
+    --domains tests/counter_top/rtl/counter_top.domains.yaml \
+    tests/counter_top/rtl/counter.v \
+    tests/counter_top/rtl/counter_top.v
+```
+
+Run a test's static check:
+
+```bash
+scripts/docker-run.sh make -C tests/counter_top/work/static analyze
+```
+
+Helpful analysis flags:
+
+- `--debug-node-deps <node,...>` prints direct DFG inputs for selected nodes.
+- `--debug-node-paths <source=target,...>` prints one dependency chain between
+  selected nodes.
+- `--debug-nodes <module:node,...>` asks frontend debug dumps to focus on
+  selected nodes.
+
+## DPI Simulation Backend
+
+The DPI backend turns compiled `MateIR` into simulator-ready artifacts:
+
+- `<top>_dpi.sv`: a generated SystemVerilog module with the same external port
+  shape as the compiled top, backed by DPI calls;
+- `<top>_dpi_pkg.sv`: a generated package containing DPI imports and helper
+  declarations;
+- `<top>_dpi.a`: a native static library containing the generated C++ model and
+  DPI glue.
+
+Generate those artifacts with `--dpi-lib`:
+
+```bash
+scripts/docker-run.sh ./build/dev/mate \
+    --dpi-lib \
+    --top counter_top \
+    --domains tests/counter_top/rtl/counter_top.domains.yaml \
+    --output-dir tests/counter_top/rtl/generated \
+    --module-name counter_top_dpi \
+    --function-prefix mate_counter_top \
+    --dpi-out-lib tests/counter_top/rtl/generated/counter_top_dpi.a \
+    --dpi-include-dirs "$(pwd)/src,$(pwd)/external/slang/external/ieee1800" \
+    --dpi-link-libs "$(pwd)/build/dev/libmate-abi-native.a" \
+    tests/counter_top/rtl/counter.v \
+    tests/counter_top/rtl/counter_top.v
+```
+
+The generated static library is self-contained apart from the simulator process
+that links it. Verilator does not need to compile the generated C++ sources
+itself; it only needs the generated SystemVerilog files on the source list and
+the archive passed through linker flags.
+
+### Using the Artifacts with Verilator
+
+1. Build Mate and the ABI support library:
+
+```bash
+scripts/docker-run.sh make dev
+```
+
+2. Generate the DPI artifacts with `mate --dpi-lib`, as shown above.
+
+3. Add the generated SystemVerilog package and module to the Verilator source
+   list before the testbench instantiates the DPI-backed module.
+
+4. Link the generated archive into the Verilator executable:
+
+```bash
+verilator --timing --cc --exe --build --main \
+    --top-module tb \
+    -Itests/counter_top/rtl \
+    -LDFLAGS "$(pwd)/tests/counter_top/rtl/generated/counter_top_dpi.a" \
+    tests/counter_top/rtl/generated/counter_top_dpi_pkg.sv \
+    tests/counter_top/rtl/generated/counter_top_dpi.sv \
+    tests/counter_top/tb/tb.sv
+```
+
+In the repository test harness, this flow is wrapped by the Verilator work
+directories:
+
+```bash
+scripts/docker-run.sh make -C tests/counter_top/work/verilator simulate DPI=1
+```
+
+The harness regenerates the DPI package/module/archive, builds the Verilator
+binary, runs it, and checks the DPI-backed model against the RTL testbench.
 
 ## Building
 
-Slang (the SystemVerilog parser) is a submodule that must be built and installed
-before building the compiler:
+The canonical environment is the repository Docker image:
 
 ```bash
-bash scripts/build_slang.sh   # once, or after updating the slang submodule
+scripts/docker-build.sh
+scripts/docker-run.sh make dev
 ```
 
-Then build the compiler with the default development preset:
+The wrapper expects the `mate-dev:latest` image. Native builds use the same
+targets:
 
 ```bash
-cmake --preset dev
-cmake --build --preset dev --parallel
+make dev
+make sanitized
+make debug
+make release
 ```
 
-The build requires CMake 3.20+, a C++20 compiler, and the yaml-cpp library.
-
-Other build presets:
+Slang is vendored as a submodule. If the local Slang install is missing or stale,
+rebuild it before building Mate:
 
 ```bash
-cmake --preset sanitized && cmake --build --preset sanitized --parallel  # ASan/UBSan, used by tests
-cmake --preset debug && cmake --build --preset debug --parallel          # debugger build, requires Debug slang
-cmake --preset release && cmake --build --preset release --parallel      # optimized binary
+bash scripts/build_slang.sh
 ```
 
-## Pass pipeline
+## Regression
 
-The compiler runs the following passes in order on the top module's flat DFG:
+Run the default regression:
 
-| # | Pass | Description |
-|---|------|-------------|
-| 0 | elaboration | Verilog AST → Module + DFG per module |
-| 1 | dfg_inline | Inline submodule DFGs into the top-level flat DFG |
-| 2 | constant_fold | Fold constant expressions; simplify constant-selector MUXes |
-| 3 | type_propagation | Infer bit-widths across the DFG |
-| 4–7 | condition_normalization + constant_fold (×2) | Normalise and re-fold MUX conditions |
-| 8 | flop_resolve | Identify clock/reset from `always_ff` triggers; strip reset MUX; tag ports |
-| 9 | load_top_io_domains / infer_top_clock_reset_domains | Apply top-level YAML or infer top-level clocks/resets |
-| 10 | cdc_annotations | Load explicit CDC synchronizer annotations |
-| 11 | global_domain_resolve | Propagate clock domains through hierarchy |
-| 12 | infer_top_data_input_domains | Infer top-level data inputs in infer mode |
-| 13 | dce | Dead-code elimination |
-
-After the pipeline, combinational dependency analysis validates that there are
-no combinational loops in the design.
-
-## Tests
-
-Tests live under `tests/<name>/`. Each test has:
-- `rtl/` — Verilog source and `.domains.yaml` sidecar files
-- `work/custom-sim/` — simulation Makefile, input stimuli CSVs, expected output CSVs
-
-Run a test:
 ```bash
-make -C tests/counter_top/work/validate
+scripts/docker-run.sh python tests/regression.py
+```
+
+Run the Verilator DPI regression:
+
+```bash
+scripts/docker-run.sh python tests/regression.py --mode verilator-dpi
+```
+
+Additional API-surface checks:
+
+```bash
+scripts/docker-run.sh python tests/check_dfg_api_surface.py
+scripts/docker-run.sh python tests/check_module_node_api_surface.py
+```
+
+## Debug Artifacts
+
+Compiler debug output is written under `debug_output/<top>/`, usually inside a
+test work directory. Common artifacts include per-pass DFG `.json` and `.dot`
+files, `hierarchy.json`, and flop snapshots around domain and flop passes.
+
+Prefer the repository inspection tools over ad hoc scripts:
+
+```bash
+tools/dfg_inspect.py
+tools/hierarchy_inspect.py
+tools/vcd_inspect.py
 ```

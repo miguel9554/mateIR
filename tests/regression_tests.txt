@@ -153,3 +153,5 @@ iface_output_port_fail FAIL output ports on interfaces are not supported
 iface_array_fail FAIL Arrays of interface instances are not supported
 iface_nba_member_fail FAIL Non-blocking assignment to a member of interface port
 iface_drive_input_member_fail FAIL Cannot drive interface member
+iface_clk_member PASS
+iface_clk_member_data_fail FAIL uses clock signal

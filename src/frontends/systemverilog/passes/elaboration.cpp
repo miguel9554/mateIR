@@ -7313,12 +7313,37 @@ std::vector<EventTriggerFact> extractSignalEventExpression(
         std::vector<EventTriggerFact> triggers,
         const slang::SourceManager& sm
 ){
-    if (sigEventExpr.expr->kind != SyntaxKind::IdentifierName) {
+    // Accepted: a plain identifier, or a single-level dotted reference
+    // ("bus.clk") for interface-member clocks/resets. The dotted name is the
+    // lowered node name; downstream clock/reset validation rejects anything
+    // that does not resolve to a suitable signal.
+    const std::string name = [&]() -> std::string {
+        const auto* expr = sigEventExpr.expr.get();
+        if (expr->kind == SyntaxKind::IdentifierName) {
+            return std::string(expr->as<IdentifierNameSyntax>().identifier.valueText());
+        }
+        if (expr->kind == SyntaxKind::MemberAccessExpression) {
+            const auto& member = expr->as<MemberAccessExpressionSyntax>();
+            if (member.left->kind == SyntaxKind::IdentifierName) {
+                return std::string(
+                           member.left->as<IdentifierNameSyntax>().identifier.valueText()) +
+                       "." + std::string(member.name.valueText());
+            }
+        }
+        if (expr->kind == SyntaxKind::ScopedName) {
+            const auto& scoped = expr->as<ScopedNameSyntax>();
+            if (!isPackageScopedName(scoped) &&
+                scoped.left->kind == SyntaxKind::IdentifierName &&
+                scoped.right->kind == SyntaxKind::IdentifierName) {
+                return std::string(
+                           scoped.left->as<IdentifierNameSyntax>().identifier.valueText()) +
+                       "." + std::string(
+                           scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+            }
+        }
         throw CompilerError(
                 "Expression not supported on sensitibility list");
-    }
-    const auto& idExpr = sigEventExpr.expr->as<IdentifierNameSyntax>();
-    const std::string name (idExpr.identifier.valueText());
+    }();
     edge_t edge;
     if (sigEventExpr.edge.valueText() == "posedge"){
         edge = edge_t::POSEDGE;

@@ -305,6 +305,15 @@ def parse_interfaces(rtl_dir: Path) -> dict:
             name = member.header.name.valueText
             signals = []
             modports = {}
+            params = {}
+            header = member.header
+            if header.parameters is not None:
+                for decl in header.parameters.declarations:
+                    if not hasattr(decl, 'declarators'):
+                        continue  # skip comma tokens
+                    for d in decl.declarators:
+                        if d.initializer is not None:
+                            params[d.name.valueText] = str(d.initializer.expr).strip()
             for m in member.members:
                 kind = str(m.kind)
                 if 'DataDeclaration' in kind or 'NetDeclaration' in kind:
@@ -321,7 +330,8 @@ def parse_interfaces(rtl_dir: Path) -> dict:
                             for p in plist.ports:
                                 dirs[p.name.valueText] = direction
                         modports[item.name.valueText] = dirs
-            interfaces[name] = {"signals": signals, "modports": modports}
+            interfaces[name] = {"signals": signals, "modports": modports,
+                                "params": params}
     return interfaces
 
 
@@ -340,16 +350,23 @@ def add_iface_member_ports(module: ModuleInfo, interfaces: dict) -> None:
             continue
         dirs = iface["modports"].get(port.interface_modport, {})
         for sig_name, type_str in iface["signals"]:
-            if dirs.get(sig_name) != 'input':
+            direction = dirs.get(sig_name)
+            if direction not in ('input', 'output'):
                 continue
             dims_match = re.search(r'\[[^\]]+\]', type_str)
             dims = dims_match.group(0) if dims_match else ''
+            # The TB instantiates interfaces with default parameters, so
+            # substitute parameter defaults into parameterized member dims
+            # (e.g. "[W-1:0]" with W=8 becomes "[8-1:0]").
+            resolved = dims
+            for pname, pdefault in iface.get("params", {}).items():
+                resolved = re.sub(rf'\b{re.escape(pname)}\b', pdefault, resolved)
             module.ports.append(Port(
                 name=f'{port.name}.{sig_name}',
-                direction='input',
+                direction=direction,
                 is_signed=False,
-                param_dims=dims,
-                resolved_dims=dims,
+                param_dims=resolved,
+                resolved_dims=resolved,
                 named_struct_type='',
                 struct_leaves=[],
                 unpacked_dims='',
@@ -526,7 +543,7 @@ def gen_uut_if(module: ModuleInfo) -> str:
 
     # Input signals
     inputs = [p for p in module.ports if p.direction == 'input' and not p.iface_member]
-    outputs = [p for p in module.ports if p.direction == 'output']
+    outputs = [p for p in module.ports if p.direction == 'output' and not p.iface_member]
     interfaces = [p for p in module.ports if p.interface_type]
 
     lines.append('    // Inputs')
@@ -587,7 +604,7 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     lines.append('    localparam bit INCLUDE_UUT_RECORDER = !INCLUDE_DPI_MODULE;')
 
     inputs = [p for p in module.ports if p.direction == 'input' and not p.iface_member]
-    outputs = [p for p in module.ports if p.direction == 'output']
+    outputs = [p for p in module.ports if p.direction == 'output' and not p.iface_member]
 
     # Parameters section
     if has_params:
@@ -681,7 +698,7 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     dpi_port_conns = [
         f'            .{p.name}(dpi_if.{p.name})'
         for p in module.ports
-        if not p.interface_type and not p.iface_member
+        if not p.iface_member
     ]
     lines.append(',\n'.join(dpi_port_conns))
     lines.append('        );')
@@ -728,12 +745,18 @@ def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
 
     all_imports = ['import tb_pkg::*;'] + list(module.imports)
 
+    has_ifaces = any(p.interface_type for p in module.ports)
     lines.append('module checker_dpi')
     for imp in all_imports:
         lines.append(f'    {imp}')
     lines.append('(')
-    lines.append('    uut_if.master dpi_if,')
-    lines.append('    uut_if.master rtl_if')
+    # Nested interface instances are not reachable through a modport'd port.
+    if has_ifaces:
+        lines.append('    uut_if dpi_if,')
+        lines.append('    uut_if rtl_if')
+    else:
+        lines.append('    uut_if.master dpi_if,')
+        lines.append('    uut_if.master rtl_if')
     lines.append(');')
     lines.append(f'    localparam int N = {n};')
     lines.append('    int fails[N];')
@@ -756,7 +779,7 @@ def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
             type_str = leaf_type
         else:
             sig_name = port.name
-            inst = f'u_{port.name}'
+            inst = f"u_{port.name.replace('.', '_')}"
             type_str = port_type_str(port, use_resolved=True)
         lines.append(
             f'    signal_checker #(.TYPE({type_str}), .NAME("{sig_name}")) {inst}'

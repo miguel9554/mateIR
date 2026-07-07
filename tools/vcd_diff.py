@@ -85,7 +85,10 @@ def parse_vcd(path):
                                 break
                         scope = ".".join(scope_stack)
                         signal = VCDSignal(scope, name, width, id_code)
-                        signals_by_code[id_code] = signal
+                        # The same id code can appear under several hierarchy
+                        # paths (e.g. interface instances traced in multiple
+                        # scopes); record the change list on every alias.
+                        signals_by_code.setdefault(id_code, []).append(signal)
                         signals_by_path[signal.full_name] = signal
                     elif token == "$enddefinitions":
                         for inner in tokens:
@@ -99,13 +102,13 @@ def parse_vcd(path):
                 elif token[0] in "01xzXZ" and len(token) > 1 and not token[0].isalpha():
                     value = token[0]
                     id_code = token[1:]
-                    if id_code in signals_by_code:
-                        signals_by_code[id_code].changes.append((current_time, value))
+                    for signal in signals_by_code.get(id_code, ()):
+                        signal.changes.append((current_time, value))
                 elif token[0] in "bBrR":
                     value = token[1:]
                     id_code = next(tokens)
-                    if id_code in signals_by_code:
-                        signals_by_code[id_code].changes.append((current_time, value))
+                    for signal in signals_by_code.get(id_code, ()):
+                        signal.changes.append((current_time, value))
         except StopIteration:
             pass
 

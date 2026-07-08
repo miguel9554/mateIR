@@ -1,7 +1,9 @@
 # Plan: Refactor procedural-block compilation (elaboration.cpp)
 
-Status: **Phases 1 and 2 complete** (2026-07-08). Subphases 2a–2e all done
-(2d/2e at revised scope, documented below). Remaining known-deferred items:
+Status: **Phases 1–3 complete** (2026-07-08). Subphases 2a–2e all done
+(2d/2e at revised scope, documented below); Phase 3 extractions done except
+the orchestrator split (deliberately left, see Phase 3 section).
+Remaining known-deferred items:
 the 2^selector-width case enumeration (contained in mergeCaseBranches'
 combiners; removing it means changing MUX lowering), the
 `partialStatesEqual`-based branch diff (exact post-2a, replace only if a
@@ -286,10 +288,23 @@ membership checks remain to decide routing) without removing them, and
 The real fix is a scoped value environment pushed per function inline —
 worth doing only alongside a rework of `inlineSubroutineCall`.
 
-### Phase 3 — optional extractions
+### Phase 3 — optional extractions (DONE except orchestrator)
 
-Hierarchy/instantiation, generate handling, orchestrator — extract when
-next touched; not blocking.
+Done (commit 844213a, pure code motion, DPI 151/151 + validate 150/151):
+- `hierarchy_elaboration.{h,cpp}` — node pre-population, parameter value
+  assignment, port connections, interface lowering,
+  instantiateSubmoduleInstance.
+- `generate_elaboration.{h,cpp}` — NBA target scanning, generate-scope
+  declaration pre-population, local typedef/param registration,
+  resolveGenerateMember(s)InPlace.
+- `evaluateStepExpr` moved to constant_eval.
+
+elaboration.cpp (3,601 lines) now holds procedural statement elaboration +
+driver machinery plus the `resolveModule`/`resolveModules` orchestrator
+(~650 lines at the bottom). Splitting the orchestrator out (and renaming
+elaboration.cpp to procedural_elaboration.cpp) is left for whenever the
+procedural core is next reworked — a rename now would churn blame history
+for no structural gain.
 
 ## Verification anchor
 

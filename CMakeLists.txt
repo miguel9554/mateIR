@@ -107,6 +107,7 @@ set(SYSTEMVERILOG_FRONTEND_SOURCES
     src/frontends/systemverilog/passes/dfg_inline.cpp
     src/frontends/systemverilog/passes/domains_propagate_and_check.cpp
     src/frontends/systemverilog/passes/elaboration.cpp
+    src/frontends/systemverilog/passes/expr_build.cpp
     src/frontends/systemverilog/passes/extractor.cpp
     src/frontends/systemverilog/passes/flop_resolve.cpp
     src/frontends/systemverilog/passes/global_domain_resolve.cpp

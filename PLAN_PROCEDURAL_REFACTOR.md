@@ -167,15 +167,28 @@ exception safety for free (abandoned child envs are just dropped).
 
 Steps (regression-clean after each, one commit each):
 
-1. Baseline: `make dev` + `python tests/regression.py --mode verilator-dpi`
-   on the untouched tree (via `scripts/docker-run.sh`). Record result below.
-2. Create `elaboration_internal.h` with the shared types currently defined
-   at the top of elaboration.cpp (`ResolutionContext`, registries,
-   `IfacePortView`, `ExprValue` users, etc.) so extracted TUs can see them.
-3. Extract constant evaluation → `constant_eval.{h,cpp}`.
-4. Extract type/registry resolution → `type_resolve.{h,cpp}`.
-5. Extract expression building → `expr_build.{h,cpp}`.
-6. Re-run DPI regression (and default `validate` mode as secondary check).
+1. DONE — Baseline: 151/151 verilator-dpi on untouched tree (commit 8cf899d).
+2. DONE — `elaboration_internal.h` created; after step 5 it holds the shared
+   registries, `PartialSliceDriver`/`PartialTargetState`/`PartialDriverMap`,
+   `IfacePortView`/`IfaceInstanceView`, `ResolutionContext`, the inline
+   interface-view helpers, `ExprValue`, `ReturnValue`, and cross-TU decls
+   (`resolveStatementInPlace`, `inlineSubroutineCall`, `connectDriver`,
+   `lookupNamedNodeInModule`).
+3. DONE — constant_eval.{h,cpp} extracted (commit 801f4ec, 151/151).
+   extractPortExpr/isPackageScopedName moved to syntax_helpers.
+4. DONE — type_resolve.{h,cpp} extracted (commit 28c1684, 151/151).
+   getFuncName moved to syntax_helpers.
+5. DONE — expr_build.{h,cpp} extracted (~2800 lines): expression→DFG
+   building, selectors, aggregates, assignment patterns, coercion, name/type
+   lookup (resolveIdentifier, lookupDeclaredType[WithSuffix], lookupLeafNode,
+   aggregate leaf lookups). The anonymous namespace in elaboration.cpp was
+   removed (its non-static functions have unique names; statics stay
+   static). elaboration.cpp is now ~5,450 lines and contains procedural
+   statement elaboration + driver machinery, hierarchy/instantiation,
+   generate handling, and the resolveModule orchestrator.
+   Note: `isPackedAggregateTarget` in expr_build.cpp is pre-existing dead
+   code (only a comment references it) — delete during Phase 2.
+6. DPI regression after step 5 + default `validate` mode as secondary check.
 
 Constraints:
 - Pure code motion: no behavior changes, no renames beyond what linkage

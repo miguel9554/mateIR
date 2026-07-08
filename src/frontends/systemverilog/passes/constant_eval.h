@@ -91,4 +91,12 @@ ConstantValue evaluateConstantValue(const slang::syntax::ExpressionSyntax* expr,
                                     const NamedTypeRegistry* namedTypeRegistry,
                                     const slang::SourceManager& sm);
 
+
+// Evaluate the next genvar value from a for-loop iteration expression.
+// Supports: i = expr, i++, i--, ++i, --i
+int64_t evaluateStepExpr(
+    const slang::syntax::ExpressionSyntax* iterExpr,
+    const std::string& genvarName,
+    const ParameterContext& ctx);
+
 } // namespace mate

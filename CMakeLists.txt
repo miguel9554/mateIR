@@ -110,6 +110,8 @@ set(SYSTEMVERILOG_FRONTEND_SOURCES
     src/frontends/systemverilog/passes/expr_build.cpp
     src/frontends/systemverilog/passes/extractor.cpp
     src/frontends/systemverilog/passes/flop_resolve.cpp
+    src/frontends/systemverilog/passes/generate_elaboration.cpp
+    src/frontends/systemverilog/passes/hierarchy_elaboration.cpp
     src/frontends/systemverilog/passes/global_domain_resolve.cpp
     src/frontends/systemverilog/passes/io_domains_set.cpp
     src/frontends/systemverilog/passes/sync_domain_propagate.cpp

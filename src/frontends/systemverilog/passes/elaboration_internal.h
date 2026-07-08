@@ -258,4 +258,39 @@ DFGNode* inlineSubroutineCall(
 void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNode* driver);
 DFGNode* lookupNamedNodeInModule(const ResolutionContext& ctx, const std::string& name);
 
+
+// Cross-TU functions defined in elaboration.cpp, used by the hierarchy and
+// generate elaboration TUs.
+InstancePath appendInstancePath(InstancePath path, const std::string& instanceName);
+void recordFullWrite(ResolutionContext& ctx,
+                     const std::string& targetName,
+                     const std::optional<SourceLoc>& writeLoc,
+                     const std::string& origin);
+DFGNode* lookupTargetNode(ResolutionContext& ctx, const std::string& name);
+void writePartialTargetSlice(ResolutionContext& ctx,
+                             const std::string& targetName,
+                             int64_t high,
+                             int64_t low,
+                             DFGNode* expr,
+                             const std::optional<SourceLoc>& loc);
+void resolveAssignInPlace(
+        const slang::syntax::ContinuousAssignSyntax* syntax,
+        ResolutionContext& ctx);
+void resolveProceduralComboInPlace(
+        const UnresolvedTypes::ProceduralCombo& statement,
+        ResolutionContext& ctx);
+void resolveProceduralTimingInPlace(
+        const UnresolvedTypes::ProceduralTiming& timingStatement,
+        ResolutionContext& ctx);
+Module resolveModule(const UnresolvedModule& unresolved,
+                     const ParameterContext& topCtx,
+                     const ModuleLookup& moduleLookup,
+                     const InterfaceLookup& interfaceLookup,
+                     const slang::SourceManager& sourceManager,
+                     const PackageRegistry& pkgRegistry,
+                     const std::vector<ImportSpec>& globalImports,
+                     const InstancePath& occurrencePath,
+                     FrontendDomainFacts* domainFacts,
+                     LangMetadata* langMeta);
+
 } // namespace mate

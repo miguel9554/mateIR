@@ -999,4 +999,36 @@ ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
     return ConstantValue::bits(expectedType, evaluateConstantExpr(expr, ctx, &pkgRegistry, namedTypeRegistry));
 }
 
+
+// Evaluate the next genvar value from a for-loop iteration expression.
+// Supports: i = expr, i++, i--, ++i, --i
+int64_t evaluateStepExpr(
+        const ExpressionSyntax* iterExpr,
+        const std::string& loopVar,
+        const ParameterContext& ctx) {
+    switch (iterExpr->kind) {
+        case SyntaxKind::AssignmentExpression: {
+            auto& assign = iterExpr->as<BinaryExpressionSyntax>();
+            return evaluateConstantExpr(assign.right, ctx);
+        }
+        case SyntaxKind::PostincrementExpression:
+        case SyntaxKind::UnaryPreincrementExpression: {
+            auto it = ctx.values.find(loopVar);
+            if (it == ctx.values.end())
+                throw CompilerError("Loop variable '" + loopVar + "' not found in context during increment");
+            return it->second.requireInt64("Loop variable '" + loopVar + "'") + 1;
+        }
+        case SyntaxKind::PostdecrementExpression:
+        case SyntaxKind::UnaryPredecrementExpression: {
+            auto it = ctx.values.find(loopVar);
+            if (it == ctx.values.end())
+                throw CompilerError("Loop variable '" + loopVar + "' not found in context during decrement");
+            return it->second.requireInt64("Loop variable '" + loopVar + "'") - 1;
+        }
+        default:
+            throw CompilerError(
+                "Unsupported loop step expression: " + std::string(toString(iterExpr->kind)));
+    }
+}
+
 } // namespace mate

@@ -27,9 +27,6 @@ using namespace slang::syntax;
 namespace mate {
 
 // Forward declarations for file-local helpers (definitions below, original order).
-static bool isPackedAggregateTarget(const std::string& baseName,
-                                    const std::string& indexSuffix,
-                                    const ResolutionContext& ctx);
 static bool isFlopBaseName(const ResolutionContext& ctx, const std::string& baseName);
 static DFGNode* lookupLeafNode(ResolutionContext& ctx, const std::string& name);
 static const ModuleNodeBinding* lookupAggregateBinding(const ResolutionContext& ctx,
@@ -220,15 +217,6 @@ int64_t packedSuffixWidth(const Type& type, size_t fromDim) {
         width *= type.packed_dims[i].size();
     }
     return width;
-}
-
-static bool isPackedAggregateTarget(const std::string& baseName,
-                                    const std::string& indexSuffix,
-                                    const ResolutionContext& ctx) {
-    if (!indexSuffix.empty()) return false;
-    const auto* declaredType = lookupDeclaredType(baseName, ctx);
-    if (!declaredType) return false;
-    return declaredType->unpacked_dims.empty() && declaredType->width > 0;
 }
 
 static bool isFlopBaseName(const ResolutionContext& ctx, const std::string& baseName) {

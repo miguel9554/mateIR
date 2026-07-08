@@ -503,6 +503,24 @@ static void executeConditionalBranch(const StatementSyntax& stmt, ResolutionCont
     }
 }
 
+// The .q leaf name a sequential read of a ".d" write target resolves to.
+static std::string qNameForTarget(const std::string& targetName) {
+    if (targetName.ends_with(".d")) {
+        return targetName.substr(0, targetName.length() - 2) + ".q";
+    }
+    return targetName;
+}
+
+// Resolve the .q node that serves as the retained value of a sequential
+// target (checks generate-scope locals first, then module leaves).
+static DFGNode* lookupSequentialQNode(ResolutionContext& ctx, const std::string& targetName) {
+    const std::string qName = qNameForTarget(targetName);
+    if (auto localIt = ctx.local_nodes.find(qName); localIt != ctx.local_nodes.end()) {
+        return localIt->second;
+    }
+    return lookupNamedNodeInModule(ctx, qName);
+}
+
 static DFGNode* getRetainedDriver(ResolutionContext& ctx,
                                   const std::string& targetName,
                                   const DriverSnapshot& baseline,
@@ -527,18 +545,9 @@ static DFGNode* getRetainedDriver(ResolutionContext& ctx,
     }
     if (!ctx.is_sequential) return nullptr;
 
-    std::string qName = targetName;
-    if (qName.ends_with(".d")) {
-        qName = qName.substr(0, qName.length() - 2) + ".q";
-    }
-    DFGNode* qNode = nullptr;
-    if (auto localIt = ctx.local_nodes.find(qName); localIt != ctx.local_nodes.end()) {
-        qNode = localIt->second;
-    } else {
-        qNode = lookupNamedNodeInModule(ctx, qName);
-    }
+    DFGNode* qNode = lookupSequentialQNode(ctx, targetName);
     if (!qNode) {
-        throw CompilerError("Could not find .q signal: " + qName, loc);
+        throw CompilerError("Could not find .q signal: " + qNameForTarget(targetName), loc);
     }
     return qNode;
 }
@@ -1077,15 +1086,8 @@ static DFGNode* currentWholeDriverForTarget(ResolutionContext& ctx,
     if (auto* driver = envDriver(ctx, targetName)) return driver;
     if (!ctx.is_sequential) return nullptr;
 
-    std::string qName = targetName;
-    if (qName.ends_with(".d")) {
-        qName = qName.substr(0, qName.length() - 2) + ".q";
-    }
-    if (auto localIt = ctx.local_nodes.find(qName); localIt != ctx.local_nodes.end()) {
-        return localIt->second;
-    }
-    if (auto* qNode = lookupNamedNodeInModule(ctx, qName)) return qNode;
-    throw CompilerError("Could not find .q signal: " + qName, loc);
+    if (auto* qNode = lookupSequentialQNode(ctx, targetName)) return qNode;
+    throw CompilerError("Could not find .q signal: " + qNameForTarget(targetName), loc);
 }
 
 static void setPartialSlice(ResolutionContext& ctx,
@@ -1241,6 +1243,30 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         ctx.graph.connectDriver(lookupTargetNode(ctx, outputName), driver);
     };
 
+    // The elaborated write name for a target: sequential blocks write the
+    // flop's .d leaf and require the base to actually be a flop.
+    auto seqWriteName = [&](const std::string& base,
+                            const std::string& suffix) -> std::string {
+        if (!ctx.is_sequential) return base + suffix;
+        if (!isFlopName(base)) {
+            throw CompilerError(
+                std::format("{} NOT a flop and assigned on seq. block", base),
+                assignLoc);
+        }
+        return base + suffix + ".d";
+    };
+
+    // Single write path for a whole-target assignment: multi-driver check,
+    // connect into the block environment, refresh the comb read-cache.
+    auto writeTarget = [&](const std::string& outputName, DFGNode* driver) {
+        if (!ctx.subroutine_locals.count(outputName))
+            recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
+        connectNode(outputName, driver);
+        if (!ctx.is_sequential) {
+            ctx.combDrivers[outputName] = driver;
+        }
+    };
+
     auto enumerateIndices = [](const Dimension& dim) {
         std::vector<int64_t> indices;
         int64_t step = dim.left <= dim.right ? 1 : -1;
@@ -1265,25 +1291,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         for (size_t i = 0; i < suffixes.size(); ++i) {
             DFGNode* elemNode = coerceAssignmentExprToWidth(ctx, elementDrivers[i],
                                                             elementType, assignLoc);
-            std::string outputName;
-            if (ctx.is_sequential) {
-                if (!isFlopName(baseName)) {
-                    throw CompilerError(
-                        std::format("{} NOT a flop and assigned on seq. block", baseName),
-                        assignLoc);
-                }
-                outputName = baseName + suffixes[i] + ".d";
-            } else {
-                outputName = baseName + suffixes[i];
-            }
-
-            if (!ctx.subroutine_locals.count(outputName))
-                recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
-            connectNode(outputName, elemNode);
-
-            if (!ctx.is_sequential) {
-                ctx.combDrivers[outputName] = elemNode;
-            }
+            writeTarget(seqWriteName(baseName, suffixes[i]), elemNode);
         }
 
         if (ctx.is_sequential) {
@@ -1446,25 +1454,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             auto* sliceNode = ctx.graph.slice(RHSexprNode, highConst, lowConst);
             sliceNode->loc = resolveSourceLoc(assignExpr, ctx.sm);
 
-            std::string outputName;
-            if (ctx.is_sequential) {
-                if (!isFlopName(elem.baseName)) {
-                    throw CompilerError(
-                        std::format("{} NOT a flop and assigned on seq. block", elem.baseName),
-                        resolveSourceLoc(assignExpr, ctx.sm));
-                }
-                outputName = elem.baseName + ".d";
-            } else {
-                outputName = elem.baseName;
-            }
-
-            if (!ctx.subroutine_locals.count(outputName))
-                recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
-            connectNode(outputName, sliceNode);
-
-            if (!ctx.is_sequential) {
-                ctx.combDrivers[outputName] = sliceNode;
-            }
+            writeTarget(seqWriteName(elem.baseName, ""), sliceNode);
         }
 
         if (ctx.is_sequential) {
@@ -1614,16 +1604,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                     DFGNode* rhsLeaf = coerceAssignmentExprToWidth(
                         ctx, rhsLeafValue, lhsPlan[j].leaf_type, assignLoc).scalar;
 
-                    std::string outputName = lhsPlan[j].name;
-                    if (ctx.is_sequential) outputName += ".d";
-
-                    if (!ctx.subroutine_locals.count(outputName)) {
-                        recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
-                    }
-                    connectNode(outputName, rhsLeaf);
-                    if (!ctx.is_sequential) {
-                        ctx.combDrivers[outputName] = rhsLeaf;
-                    }
+                    writeTarget(lhsPlan[j].name + (ctx.is_sequential ? ".d" : ""), rhsLeaf);
                 }
             }
 
@@ -1878,16 +1859,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             DFGNode* rhsLeaf = coerceAssignmentExprToWidth(
                 ctx, rhsLeafValue, lhsPlan[i].leaf_type, assignLoc).scalar;
 
-            std::string outputName = lhsPlan[i].name;
-            if (ctx.is_sequential) outputName += ".d";
-
-            if (!ctx.subroutine_locals.count(outputName)) {
-                recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
-            }
-            connectNode(outputName, rhsLeaf);
-            if (!ctx.is_sequential) {
-                ctx.combDrivers[outputName] = rhsLeaf;
-            }
+            writeTarget(lhsPlan[i].name + (ctx.is_sequential ? ".d" : ""), rhsLeaf);
         }
 
         if (ctx.is_sequential) {
@@ -1929,18 +1901,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 assignLoc);
         }
 
-        std::string outputName;
-        if (ctx.is_sequential) {
-            if (isFlopName(baseName)) {
-                outputName = baseName + indexSuffix + ".d";
-            } else {
-                throw CompilerError(
-                    std::format("{} NOT a flop and assigned on seq. block", baseName),
-                    resolveSourceLoc(assignExpr, ctx.sm));
-            }
-        } else {
-            outputName = baseName + indexSuffix;
-        }
+        const std::string outputName = seqWriteName(baseName, indexSuffix);
 
         if (!ctx.subroutine_locals.count(outputName))
             recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
@@ -1948,12 +1909,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         // Get the current driver (may come from a whole assignment or a materialized partial state).
         DFGNode* currentDriver = envDriver(ctx, outputName);
         if (!currentDriver && ctx.is_sequential) {
-            std::string qName = outputName;
-            if (qName.ends_with(".d")) qName = qName.substr(0, qName.length() - 2) + ".q";
-            if (auto it = ctx.local_nodes.find(qName); it != ctx.local_nodes.end())
-                currentDriver = it->second;
-            else if (auto* qNode = lookupNamedNodeInModule(ctx, qName))
-                currentDriver = qNode;
+            currentDriver = lookupSequentialQNode(ctx, outputName);
         }
         if (!currentDriver) {
             throw CompilerError(
@@ -2007,19 +1963,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
 
     // Range-select on LHS: canonical partial-write update
     if (hasRangeSelect) {
-        // Build the target name (no index suffix for range assigns)
-        std::string outputName;
-        if (ctx.is_sequential) {
-            if (isFlopName(baseName)) {
-                outputName = baseName + indexSuffix + ".d";
-            } else {
-                throw CompilerError(
-                    std::format("{} NOT a flop and assigned on seq. block", baseName),
-                    resolveSourceLoc(assignExpr, ctx.sm));
-            }
-        } else {
-            outputName = baseName + indexSuffix;
-        }
+        const std::string outputName = seqWriteName(baseName, indexSuffix);
 
         writePartialTargetSlice(ctx, outputName, rangeHigh, rangeLow, RHSexprNode, assignLoc);
 
@@ -2028,46 +1972,20 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
     } else {
         // Normal (non-range) assign path
+        const std::string outputName = seqWriteName(baseName, indexSuffix);
 
-        // Build the full output name
-        // For sequential blocks with flops: base[idx].d
-        // For combinational: base[idx] or just base
-        std::string outputName;
-        if (ctx.is_sequential) {
-            if (isFlopName(baseName)) {
-                outputName = baseName + indexSuffix + ".d";
-            } else {
-                throw CompilerError(
-                    std::format("{} NOT a flop and assigned on seq. block", baseName),
-                    resolveSourceLoc(assignExpr, ctx.sm));
-            }
-        } else {
-            outputName = baseName + indexSuffix;
-        }
-
-        // If this target has a live partial state, a whole write must replace that
-        // state — not just call connectNode, which would leave a stale partial that
-        // restoreDrivers re-materialises (overwriting the correct driver).  The
-        // isPackedAggregateTarget check was too narrow: it rejected array-element
-        // targets (non-empty indexSuffix) even though they can also accumulate
-        // partial state from bit-select writes.
-        bool usePartialAggregate = ctx.partial_drivers.contains(outputName);
-        if (!ctx.subroutine_locals.count(outputName))
-            recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
-
-        if (usePartialAggregate) {
+        // A whole write onto a target with live partial state must replace
+        // that state, not just the aggregate driver, so later partial writes
+        // and branch merges see the correct slice structure.
+        if (ctx.partial_drivers.contains(outputName)) {
+            if (!ctx.subroutine_locals.count(outputName))
+                recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
             writeWholeTargetAsPartial(ctx, outputName, RHSexprNode, assignLoc);
             if (!ctx.is_sequential) {
                 if (auto* driver = envDriver(ctx, outputName)) ctx.combDrivers[outputName] = driver;
             }
         } else {
-            // Connect driver to existing output/internal node (checks local nodes first).
-            connectNode(outputName, RHSexprNode);
-
-            // Track the current driver so subsequent reads in this block see it
-            if (!ctx.is_sequential) {
-                ctx.combDrivers[outputName] = RHSexprNode;
-            }
+            writeTarget(outputName, RHSexprNode);
         }
     }
 

@@ -258,13 +258,29 @@ selector table). `stripDQSuffix` introduced (partial 2d). The
 combiners; removing it means changing MUX lowering and is its own effort.
 2b+2c verified: verilator-dpi 151/151.
 
-**2d — TargetRef.** Replace string keys with a typed target reference
-(base, selectors, field path, d/q role); collapse the `.d`/`.q` suffix
-parsers and unify `canonicalTargetKey` handling across all maps.
+**2d (DONE, revised scope) — target-name construction/parsing centralized.**
+Original idea was a typed `TargetRef` replacing string keys everywhere.
+Revised: the string names *are* the module's canonical leaf addressing
+(bindings, flop leaves), so a wrapper type would add churn without deleting
+complexity. What actually hurt was scattered construction/parsing, now
+centralized: `stripDQSuffix` (2c), `qNameForTarget` +
+`lookupSequentialQNode` (the three inline `.d`→`.q` swap/lookup copies),
+`seqWriteName` (the five inline "flop check + `.d` append" copies), and
+`writeTarget` (the repeated recordFullWrite + connectNode + comb-cache
+ritual — the "miss one sync spot" bug class from the original analysis).
+`resolveAssignExpression`'s write sites now each construct the name once
+and call one write path. Revisit a real `TargetRef` only if
+`canonicalTargetKey` inconsistency (write_states vs other maps) produces
+an actual bug.
 
-**2e — subroutine env.** Locals and return values get a scoped env instead
-of riding on `combDrivers`; fold combDrivers read-through into the env.
-Delete pre-existing dead `isPackedAggregateTarget`.
+**2e (DONE, revised scope) — dead code removed; subroutine env deferred.**
+Dead `isPackedAggregateTarget` deleted (build is warning-clean). Moving
+subroutine locals off `combDrivers` into a separate map was assessed and
+deferred: it relocates the special cases (the `subroutine_locals`
+membership checks remain to decide routing) without removing them, and
+`writeTarget` already hides the local-vs-module routing behind one call.
+The real fix is a scoped value environment pushed per function inline —
+worth doing only alongside a rework of `inlineSubroutineCall`.
 
 ### Phase 3 — optional extractions
 

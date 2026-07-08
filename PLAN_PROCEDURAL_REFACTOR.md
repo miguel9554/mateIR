@@ -1,9 +1,13 @@
 # Plan: Refactor procedural-block compilation (elaboration.cpp)
 
-Status: **Phase 1 complete; Phase 2a complete** (2026-07-08). Next: Phase 2b
-(single slice-tree representation for retained/partial state) and 2c
-(child-env branch elaboration + env join) — best done together in a fresh
-session.
+Status: **Phases 1 and 2 complete** (2026-07-08). Subphases 2a–2e all done
+(2d/2e at revised scope, documented below). Remaining known-deferred items:
+the 2^selector-width case enumeration (contained in mergeCaseBranches'
+combiners; removing it means changing MUX lowering), the
+`partialStatesEqual`-based branch diff (exact post-2a, replace only if a
+TargetRef effort happens), and the scoped subroutine env (do alongside an
+inlineSubroutineCall overhaul). Phase 3 (optional extractions of
+hierarchy/generate/orchestrator from elaboration.cpp) remains opportunistic.
 Anchor: clean `python tests/regression.py --mode verilator-dpi` run before and
 after every extraction step.
 

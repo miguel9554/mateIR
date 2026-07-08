@@ -239,15 +239,24 @@ subphases): string target keys, combDrivers as separate read cache,
 execute/diff/merge branch protocol, `makeWholeDriverState` un-lowering,
 2^width case enumeration.
 
-**2b — retained-state without un-lowering.** Make partial/whole state one
-representation per target in the env (slice-tree), so
-`makeWholeDriverState` (CONCAT pattern-matching) and `partialStatesEqual`
-disappear; record "assigned in branch" directly instead of diffing.
+**2b (DONE) — retained-state without un-lowering.**
+`makeWholeDriverState` no longer decomposes CONCAT drivers to reconstruct
+slice structure from the lowered graph; a retained whole driver is one
+full-range slice and sub-interval reads slice into it. (Deferred from the
+original 2b scope: `partialStatesEqual` still backs
+`modifiedPartialDriversSince`; replacing the diff with direct
+assigned-in-branch recording folds into 2d/2e.)
 
-**2c — branch elaboration into child environments + env join.** Replace
-execute→diff→restore with child envs; one join function for if and case
-(delete `mergeIfBranches`/`mergeCaseBranches` duplication); contain or
-remove the 2^selector-width enumeration.
+**2c (DONE) — one merge engine for if and case.**
+`BranchDelta` (whole writes + partial state per arm), shared
+`collectAssignedSignals` / `isPartialMergeTarget` /
+`applyMergedPartialTarget` / `applyMergedWholeTarget`, and a
+`forEachMergedTarget` walk; `mergeIfBranches` / `mergeCaseBranches` are
+thin adapters providing only the shape-specific combiners (mux chain vs
+selector table). `stripDQSuffix` introduced (partial 2d). The
+2^selector-width enumeration remains, contained in `mergeCaseBranches`'
+combiners; removing it means changing MUX lowering and is its own effort.
+2b+2c verified: verilator-dpi 151/151.
 
 **2d — TargetRef.** Replace string keys with a typed target reference
 (base, selectors, field path, d/q role); collapse the `.d`/`.q` suffix

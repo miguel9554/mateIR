@@ -3,7 +3,7 @@
 // Type, dimension, parameter, and package resolution for elaboration (pass 2).
 // Extracted verbatim from elaboration.cpp; internal to the elaboration pass.
 
-#include "frontends/systemverilog/passes/elaboration_internal.h"
+#include "frontends/systemverilog/elaboration/elaboration_internal.h"
 #include "frontends/systemverilog/unresolved.h"
 #include "mateir/module.h"
 

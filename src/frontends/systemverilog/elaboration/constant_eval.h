@@ -3,7 +3,7 @@
 // Constant-expression evaluation for elaboration (pass 2).
 // Extracted verbatim from elaboration.cpp; internal to the elaboration pass.
 
-#include "frontends/systemverilog/passes/elaboration_internal.h"
+#include "frontends/systemverilog/elaboration/elaboration_internal.h"
 #include "mateir/module.h"
 #include "util/source_loc.h"
 

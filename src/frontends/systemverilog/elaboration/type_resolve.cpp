@@ -1,6 +1,6 @@
-#include "frontends/systemverilog/passes/type_resolve.h"
+#include "frontends/systemverilog/elaboration/type_resolve.h"
 
-#include "frontends/systemverilog/passes/constant_eval.h"
+#include "frontends/systemverilog/elaboration/constant_eval.h"
 #include "frontends/systemverilog/syntax_helpers.h"
 #include "util/source_loc_resolve.h"
 

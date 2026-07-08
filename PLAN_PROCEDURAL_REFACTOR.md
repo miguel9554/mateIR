@@ -3,6 +3,11 @@
 Status: **Phases 1–3 complete** (2026-07-08). Subphases 2a–2e all done
 (2d/2e at revised scope, documented below); Phase 3 extractions done except
 the orchestrator split (deliberately left, see Phase 3 section).
+Final layout: the elaboration stage lives in
+`src/frontends/systemverilog/elaboration/` (elaboration.{h,cpp},
+elaboration_internal.h, constant_eval, type_resolve, expr_build,
+hierarchy_elaboration, generate_elaboration);
+`src/frontends/systemverilog/passes/` holds only actual DFG passes.
 Remaining known-deferred items:
 the 2^selector-width case enumeration (contained in mergeCaseBranches'
 combiners; removing it means changing MUX lowering), the

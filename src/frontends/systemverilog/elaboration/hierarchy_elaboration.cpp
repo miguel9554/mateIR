@@ -1,10 +1,10 @@
-#include "frontends/systemverilog/passes/hierarchy_elaboration.h"
+#include "frontends/systemverilog/elaboration/hierarchy_elaboration.h"
 
-#include "frontends/systemverilog/passes/constant_eval.h"
-#include "frontends/systemverilog/passes/elaboration_internal.h"
-#include "frontends/systemverilog/passes/expr_build.h"
+#include "frontends/systemverilog/elaboration/constant_eval.h"
+#include "frontends/systemverilog/elaboration/elaboration_internal.h"
+#include "frontends/systemverilog/elaboration/expr_build.h"
 #include "frontends/systemverilog/passes/type_propagation.h"
-#include "frontends/systemverilog/passes/type_resolve.h"
+#include "frontends/systemverilog/elaboration/type_resolve.h"
 #include "frontends/systemverilog/syntax_helpers.h"
 #include "util/source_loc_resolve.h"
 

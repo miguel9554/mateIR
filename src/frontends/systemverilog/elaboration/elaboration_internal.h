@@ -2,12 +2,12 @@
 
 // Internal shared types for the elaboration pass translation units
 // (elaboration.cpp, constant_eval.cpp, ...). Not part of the public
-// frontend surface; include only from src/frontends/systemverilog/passes/.
+// frontend surface; include only from src/frontends/systemverilog/elaboration/.
 
 #include "mateir/constant_value.h"
 #include "mateir/types.h"
 #include "frontends/systemverilog/domain_facts.h"
-#include "frontends/systemverilog/passes/elaboration.h"
+#include "frontends/systemverilog/elaboration/elaboration.h"
 #include "frontends/systemverilog/unresolved.h"
 #include "mateir/dfg.h"
 #include "mateir/lang_metadata.h"

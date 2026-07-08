@@ -101,24 +101,24 @@ set(SYSTEMVERILOG_FRONTEND_SOURCES
     src/frontends/systemverilog/passes/cdc_emit.cpp
     src/frontends/systemverilog/passes/clock_reset_demands.cpp
     src/frontends/systemverilog/passes/condition_normalization.cpp
-    src/frontends/systemverilog/passes/constant_eval.cpp
+    src/frontends/systemverilog/elaboration/constant_eval.cpp
     src/frontends/systemverilog/passes/constant_fold.cpp
     src/frontends/systemverilog/passes/dce.cpp
     src/frontends/systemverilog/passes/dfg_inline.cpp
     src/frontends/systemverilog/passes/domains_propagate_and_check.cpp
-    src/frontends/systemverilog/passes/elaboration.cpp
-    src/frontends/systemverilog/passes/expr_build.cpp
+    src/frontends/systemverilog/elaboration/elaboration.cpp
+    src/frontends/systemverilog/elaboration/expr_build.cpp
     src/frontends/systemverilog/passes/extractor.cpp
     src/frontends/systemverilog/passes/flop_resolve.cpp
-    src/frontends/systemverilog/passes/generate_elaboration.cpp
-    src/frontends/systemverilog/passes/hierarchy_elaboration.cpp
+    src/frontends/systemverilog/elaboration/generate_elaboration.cpp
+    src/frontends/systemverilog/elaboration/hierarchy_elaboration.cpp
     src/frontends/systemverilog/passes/global_domain_resolve.cpp
     src/frontends/systemverilog/passes/io_domains_set.cpp
     src/frontends/systemverilog/passes/sync_domain_propagate.cpp
     src/frontends/systemverilog/passes/top_io_domains_emit.cpp
     src/frontends/systemverilog/passes/top_io_domains_infer.cpp
     src/frontends/systemverilog/passes/type_propagation.cpp
-    src/frontends/systemverilog/passes/type_resolve.cpp
+    src/frontends/systemverilog/elaboration/type_resolve.cpp
     src/frontends/systemverilog/syntax_helpers.cpp
     src/frontends/systemverilog/systemverilog_frontend.cpp
     src/frontends/systemverilog/systemverilog_pipeline.cpp

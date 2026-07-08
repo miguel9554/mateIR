@@ -7,7 +7,7 @@
 #include "frontends/systemverilog/passes/dce.h"
 #include "frontends/systemverilog/passes/dfg_inline.h"
 #include "frontends/systemverilog/passes/domains_propagate_and_check.h"
-#include "frontends/systemverilog/passes/elaboration.h"
+#include "frontends/systemverilog/elaboration/elaboration.h"
 #include "frontends/systemverilog/passes/flop_resolve.h"
 #include "frontends/systemverilog/passes/global_domain_resolve.h"
 #include "frontends/systemverilog/passes/io_domains_set.h"

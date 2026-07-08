@@ -202,8 +202,11 @@ enum class CaseExpressionKind {
     Variable,
 };
 
+// Branch baseline: value state only (block environment + partial state +
+// comb read-cache). The shared DFG is not touched while a block elaborates,
+// so snapshot/restore are plain map copies.
 struct DriverSnapshot {
-    DriverMap visibleDrivers;
+    std::map<std::string, DFGNode*> blockDrivers;
     PartialDriverMap partialDrivers;
     std::map<std::string, DFGNode*> combDrivers;
 };
@@ -238,42 +241,8 @@ static DFGNode* lookupDrivenNodeInModule(const ResolutionContext& ctx,
     return nullptr;
 }
 
-template<typename Fn>
-static void forEachVisibleDriverTarget(const ResolutionContext& ctx, Fn&& fn) {
-    forEachDrivenNode(*ctx.thisModule, [&](const ModuleNode& module_node) {
-        for (const auto& leaf : moduleNodeLeafRefs(module_node)) {
-            if (leaf.node) fn(leaf.leaf_name, leaf.node);
-        }
-    });
-    for (const auto& flop : ctx.thisModule->flops) {
-        for (const auto& leaf : flopDLeafRefs(flop)) {
-            if (leaf.node) {
-                fn(leaf.leaf_name, leaf.node);
-            }
-        }
-    }
-    for (const auto& [name, node] : ctx.local_nodes) {
-        if (node) fn(name, node);
-    }
-}
-
 static DriverSnapshot snapshotDrivers(const ResolutionContext& ctx) {
-    DriverSnapshot snapshot;
-    snapshot.combDrivers = ctx.combDrivers;
-    snapshot.partialDrivers = ctx.partial_drivers;
-    DriverMap drivers;
-    if (!ctx.is_subroutine_scope) {
-        forEachVisibleDriverTarget(ctx, [&](const std::string& name, DFGNode* node) {
-            if (!ctx.partial_drivers.contains(name)) {
-                if (auto driver = maybeDriver(node)) drivers[name] = driver->node;
-            }
-        });
-    }
-    for (const auto& [name, node] : ctx.combDrivers) {
-        if (ctx.subroutine_locals.count(name)) drivers[name] = node;
-    }
-    snapshot.visibleDrivers = std::move(drivers);
-    return snapshot;
+    return {ctx.block_drivers, ctx.partial_drivers, ctx.combDrivers};
 }
 
 static DFGNode* lookupTargetNode(ResolutionContext& ctx, const std::string& name) {
@@ -288,6 +257,10 @@ void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNode* dri
         ctx.combDrivers[name] = driver;
         return;
     }
+    if (ctx.in_procedural_block) {
+        ctx.block_drivers[name] = driver;
+        return;
+    }
     if (auto localIt = ctx.local_nodes.find(name); localIt != ctx.local_nodes.end()) {
         ctx.graph.connectDriver(localIt->second, driver);
         return;
@@ -297,16 +270,27 @@ void connectDriver(ResolutionContext& ctx, const std::string& name, DFGNode* dri
     }
 }
 
-static void clearVisibleDrivers(ResolutionContext& ctx) {
-    auto clearNodeDriver = [](DFGNode* node) {
-        if (node->kind() == DFGOp::OUTPUT || node->kind() == DFGOp::SIGNAL) {
-            node->clearDriver();
+// Current driver for a target as seen at this point of the block: the block
+// environment first, then whatever is already committed on the bound node.
+static DFGNode* envDriver(ResolutionContext& ctx, const std::string& name) {
+    if (ctx.in_procedural_block) {
+        if (auto it = ctx.block_drivers.find(name); it != ctx.block_drivers.end()) {
+            return it->second;
         }
-    };
-    if (ctx.is_subroutine_scope) return;
-    forEachVisibleDriverTarget(ctx, [&](const std::string&, DFGNode* node) {
-        clearNodeDriver(node);
-    });
+    }
+    if (auto* node = lookupTargetNode(ctx, name)) {
+        if (auto driver = maybeDriver(node)) return driver->node;
+    }
+    return nullptr;
+}
+
+// Commit the block environment to the shared DFG once, at block end.
+static void commitBlockDrivers(ResolutionContext& ctx) {
+    ctx.in_procedural_block = false;
+    for (const auto& [name, driver] : ctx.block_drivers) {
+        if (driver) connectDriver(ctx, name, driver);
+    }
+    ctx.block_drivers.clear();
 }
 
 static void sortSlices(PartialTargetState& state) {
@@ -457,6 +441,8 @@ static DFGNode* materializePartialTarget(ResolutionContext& ctx,
         driver->type = state.type;
         if (loc) driver->loc = *loc;
         connectDriver(ctx, targetName, driver);
+    } else if (ctx.in_procedural_block) {
+        ctx.block_drivers.erase(targetName);
     } else if (auto* node = targetNode) {
         node->clearDriver();
     }
@@ -466,41 +452,25 @@ static DFGNode* materializePartialTarget(ResolutionContext& ctx,
 static void restoreDrivers(ResolutionContext& ctx, const DriverSnapshot& snapshot) {
     ctx.combDrivers = snapshot.combDrivers;
     ctx.partial_drivers = snapshot.partialDrivers;
-    clearVisibleDrivers(ctx);
-    for (const auto& [name, driver] : snapshot.visibleDrivers) {
-        connectDriver(ctx, name, driver);
-    }
-    for (auto& [name, state] : ctx.partial_drivers) {
-        materializePartialTarget(ctx, name, state, std::nullopt);
-    }
-    if (!ctx.is_subroutine_scope) {
-        forEachVisibleDriverTarget(ctx, [&](const std::string& name, DFGNode* node) {
-            if ((!node->type || node->type->unpacked_dims.empty()) &&
-                    maybeDriver(node) && !snapshot.visibleDrivers.contains(name) &&
-                    !snapshot.partialDrivers.contains(name)) {
-                node->clearDriver();
-            }
-        });
-    }
+    ctx.block_drivers = snapshot.blockDrivers;
 }
 
 static DriverMap modifiedDriversSince(const ResolutionContext& ctx, const DriverSnapshot& baseline) {
     DriverMap modified;
     if (!ctx.is_subroutine_scope) {
-        forEachVisibleDriverTarget(ctx, [&](const std::string& name, DFGNode* node) {
-            if (ctx.partial_drivers.contains(name)) return;
-            if (auto driver = maybeDriver(node)) {
-                auto it = baseline.visibleDrivers.find(name);
-                if (it == baseline.visibleDrivers.end() || it->second != driver->node) {
-                    modified[name] = driver->node;
-                }
+        for (const auto& [name, node] : ctx.block_drivers) {
+            if (ctx.partial_drivers.contains(name)) continue;
+            if (!node) continue;
+            auto it = baseline.blockDrivers.find(name);
+            if (it == baseline.blockDrivers.end() || it->second != node) {
+                modified[name] = node;
             }
-        });
+        }
     }
     for (const auto& [name, node] : ctx.combDrivers) {
         if (!ctx.subroutine_locals.count(name)) continue;
-        auto it = baseline.visibleDrivers.find(name);
-        if (it == baseline.visibleDrivers.end() || it->second != node) {
+        auto it = baseline.combDrivers.find(name);
+        if (it == baseline.combDrivers.end() || it->second != node) {
             modified[name] = node;
         }
     }
@@ -532,8 +502,23 @@ static DFGNode* getRetainedDriver(ResolutionContext& ctx,
                                   const std::string& targetName,
                                   const DriverSnapshot& baseline,
                                   const std::optional<SourceLoc>& loc) {
-    if (auto it = baseline.visibleDrivers.find(targetName); it != baseline.visibleDrivers.end()) {
-        return it->second;
+    // Subroutine locals live in combDrivers (they have no bound DFG node).
+    if (ctx.subroutine_locals.count(targetName)) {
+        if (auto it = baseline.combDrivers.find(targetName); it != baseline.combDrivers.end()) {
+            return it->second;
+        }
+    }
+    // Whole-driver retention does not apply to targets with partial state at
+    // the baseline; those are retained via getRetainedPartialState instead.
+    if (!baseline.partialDrivers.contains(targetName)) {
+        if (auto it = baseline.blockDrivers.find(targetName); it != baseline.blockDrivers.end()) {
+            if (it->second) return it->second;
+        }
+        if (!ctx.is_subroutine_scope) {
+            if (auto* node = lookupTargetNode(ctx, targetName)) {
+                if (auto driver = maybeDriver(node)) return driver->node;
+            }
+        }
     }
     if (!ctx.is_sequential) return nullptr;
 
@@ -1014,9 +999,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
             ctx.partial_drivers[signalName] = std::move(merged);
             materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
             if (!ctx.is_sequential) {
-                if (auto* node = lookupTargetNode(ctx, signalName)) {
-                    if (auto driver = maybeDriver(node)) ctx.combDrivers[signalName] = driver->node;
-                }
+                if (auto* driver = envDriver(ctx, signalName)) ctx.combDrivers[signalName] = driver;
             }
             continue;
         }
@@ -1136,9 +1119,7 @@ static DFGNode* currentWholeDriverForTarget(ResolutionContext& ctx,
                                             const std::string& targetName,
                                             const std::optional<SourceLoc>& loc) {
     if (ctx.partial_drivers.contains(targetName)) return nullptr;
-    if (auto* node = lookupTargetNode(ctx, targetName)) {
-        if (auto driver = maybeDriver(node)) return driver->node;
-    }
+    if (auto* driver = envDriver(ctx, targetName)) return driver;
     if (!ctx.is_sequential) return nullptr;
 
     std::string qName = targetName;
@@ -1290,16 +1271,19 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     auto connectNode = [&](const std::string& outputName, DFGOutput driver) {
         if (ctx.subroutine_locals.count(outputName)) return;  // local var: combDrivers only
         auto localIt = ctx.local_nodes.find(outputName);
+        if (localIt == ctx.local_nodes.end() && !lookupTargetNode(ctx, outputName)) {
+            throw CompilerError("Cannot assign to undeclared: " + outputName,
+                                assignLoc);
+        }
+        if (ctx.in_procedural_block) {
+            ctx.block_drivers[outputName] = driver.node;
+            return;
+        }
         if (localIt != ctx.local_nodes.end()) {
             ctx.graph.connectDriver(localIt->second, driver);
             return;
         }
-        if (auto* target = lookupTargetNode(ctx, outputName)) {
-            ctx.graph.connectDriver(target, driver);
-        } else {
-            throw CompilerError("Cannot assign to undeclared: " + outputName,
-                                assignLoc);
-        }
+        ctx.graph.connectDriver(lookupTargetNode(ctx, outputName), driver);
     };
 
     auto enumerateIndices = [](const Dimension& dim) {
@@ -2007,10 +1991,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             recordFullWrite(ctx, outputName, assignLoc, ctx.current_write_origin);
 
         // Get the current driver (may come from a whole assignment or a materialized partial state).
-        DFGNode* currentDriver = nullptr;
-        if (auto* node = lookupTargetNode(ctx, outputName)) {
-            if (auto d = maybeDriver(node)) currentDriver = d->node;
-        }
+        DFGNode* currentDriver = envDriver(ctx, outputName);
         if (!currentDriver && ctx.is_sequential) {
             std::string qName = outputName;
             if (qName.ends_with(".d")) qName = qName.substr(0, qName.length() - 2) + ".q";
@@ -2088,9 +2069,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         writePartialTargetSlice(ctx, outputName, rangeHigh, rangeLow, RHSexprNode, assignLoc);
 
         if (!ctx.is_sequential) {
-            if (auto* targetNode = lookupTargetNode(ctx, outputName)) {
-                if (auto driver = maybeDriver(targetNode)) ctx.combDrivers[outputName] = driver->node;
-            }
+            if (auto* driver = envDriver(ctx, outputName)) ctx.combDrivers[outputName] = driver;
         }
     } else {
         // Normal (non-range) assign path
@@ -2124,9 +2103,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         if (usePartialAggregate) {
             writeWholeTargetAsPartial(ctx, outputName, RHSexprNode, assignLoc);
             if (!ctx.is_sequential) {
-                if (auto* targetNode = lookupTargetNode(ctx, outputName)) {
-                    if (auto driver = maybeDriver(targetNode)) ctx.combDrivers[outputName] = driver->node;
-                }
+                if (auto* driver = envDriver(ctx, outputName)) ctx.combDrivers[outputName] = driver;
             }
         } else {
             // Connect driver to existing output/internal node (checks local nodes first).
@@ -2390,6 +2367,10 @@ DFGNode* inlineSubroutineCall(
         result = r.value;
     }
 
+    // Module-level writes made inside the body landed in the sub-context's
+    // block environment; carry them back to the caller.
+    ctx.block_drivers = std::move(sub.block_drivers);
+
     // Copy output formals back to caller context
     for (const auto& [formalOut, actualExpr] : outputBindings) {
         if (actualExpr->kind != SyntaxKind::IdentifierName)
@@ -2401,10 +2382,11 @@ DFGNode* inlineSubroutineCall(
             throw CompilerError("Output argument '" + formalOut + "' not assigned in task body",
                                 resolveSourceLoc(invoc, ctx.sm));
         ctx.combDrivers[actualIdent] = it->second;
-        // Also wire to the DFG graph node for module-level outputs/internals.
+        // Also wire to the DFG graph node (or the block environment, when
+        // inside a procedural block) for module-level outputs/internals.
         if (!ctx.subroutine_locals.count(actualIdent)) {
-            if (auto* target = lookupTargetNode(ctx, actualIdent))
-                ctx.graph.connectDriver(target, it->second);
+            if (lookupTargetNode(ctx, actualIdent))
+                connectDriver(ctx, actualIdent, it->second);
         }
     }
 
@@ -2875,10 +2857,13 @@ void resolveForLoopStatementInPlace(
             ctx.currently_inlining, ctx.is_subroutine_scope
         };
         iterBodyCtx.inheritInterfaceViews(ctx);
+        iterBodyCtx.in_procedural_block = ctx.in_procedural_block;
+        iterBodyCtx.block_drivers = ctx.block_drivers;
         resolveStatementInPlace(forLoop->statement.get(), iterBodyCtx);
         ctx.combDrivers = iterBodyCtx.combDrivers;
         ctx.partial_drivers = iterBodyCtx.partial_drivers;
         ctx.write_states = iterBodyCtx.write_states;
+        ctx.block_drivers = std::move(iterBodyCtx.block_drivers);
 
         iterCtx.values[loopVar] =
             integerConstant(evaluateStepExpr(forLoop->steps[0], loopVar, iterCtx));
@@ -2947,7 +2932,10 @@ void resolveProceduralComboInPlace(
     ctx.combDrivers.clear();
     ctx.current_write_origin = std::format("procedural-block:{}",
                                            reinterpret_cast<uintptr_t>(statement));
+    ctx.in_procedural_block = true;
+    ctx.block_drivers.clear();
     resolveStatementInPlace(statement, ctx);
+    commitBlockDrivers(ctx);
 }
 
 std::vector<EventTriggerFact> extractSignalEventExpression(
@@ -3056,7 +3044,10 @@ void resolveProceduralTimingInPlace(
     ctx.triggers = std::move(triggerFacts);
     ctx.current_write_origin = std::format("procedural-block:{}",
                                            reinterpret_cast<uintptr_t>(timingStatement));
+    ctx.in_procedural_block = true;
+    ctx.block_drivers.clear();
     resolveStatementInPlace(statement, ctx);
+    commitBlockDrivers(ctx);
 }
 
 ModuleNode resolveModuleNode(const UnresolvedSignal& signal, const ParameterContext& ctx,

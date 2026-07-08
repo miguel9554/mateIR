@@ -213,25 +213,45 @@ Constraints:
 
 ### Phase 2 — block-environment refactor of procedural compilation
 
-1. Define `TargetRef` and the slice-tree value type (`block_env.h`).
-2. Implement env-based statement elaboration for assignments and reads
-   (comb first, then sequential `.d`/`.q`).
-3. Replace if/case handling with child-env elaboration + env join (single
-   merge function; avoid 2^width selector enumeration where feasible — at
-   minimum contain it in one place).
-4. Single commit-to-DFG step per block: connect drivers, fully-driven
-   validation, write-origin / multi-driver checks.
-5. Delete: `DriverSnapshot`, `snapshotDrivers`, `restoreDrivers`,
-   `modifiedDriversSince`, `modifiedPartialDriversSince`,
-   `partialStatesEqual`, `makeWholeDriverState`, `mergeIfBranches`,
-   `mergeCaseBranches`, `clearVisibleDrivers`, and the `combDrivers`
-   read-through paths.
-6. Subroutine locals and return values get their own scoped env instead of
-   riding on `combDrivers`.
+Executed as regression-clean subphases (DPI 151/151 after each):
 
-Phase 2 must also end regression-clean; intermediate subphases (assignments
-only, then if, then case, then sequential) should each end at a clean DPI
-regression point.
+**2a (IN PROGRESS) — block environment replaces the DFG-as-scratch.**
+`ResolutionContext` gains `in_procedural_block` + `block_drivers`
+(target name → driver node). While a procedural block elaborates, all
+target writes (`connectDriver`, the `connectNode` lambda, partial-state
+materialization, subroutine output copy-back) land in the environment; the
+shared DFG is untouched until `commitBlockDrivers` connects the final
+environment once at block end. Mid-block driver reads go through
+`envDriver` (env first, then committed node driver). Branch baselines
+(`DriverSnapshot`) become plain map copies of {block_drivers,
+partial_drivers, combDrivers}; `restoreDrivers` is a map assignment — no
+graph clearing, no re-materialization, no module-wide node walks
+(`forEachVisibleDriverTarget` and `clearVisibleDrivers` deleted).
+For-loop per-iteration contexts and `inlineSubroutineCall` sub-contexts
+propagate the environment in and back out. This kills: the
+restore-re-materialization node churn, the graph-corruption-on-throw
+hazard, and the whole-module snapshot walks. Still present (later
+subphases): string target keys, combDrivers as separate read cache,
+execute/diff/merge branch protocol, `makeWholeDriverState` un-lowering,
+2^width case enumeration.
+
+**2b — retained-state without un-lowering.** Make partial/whole state one
+representation per target in the env (slice-tree), so
+`makeWholeDriverState` (CONCAT pattern-matching) and `partialStatesEqual`
+disappear; record "assigned in branch" directly instead of diffing.
+
+**2c — branch elaboration into child environments + env join.** Replace
+execute→diff→restore with child envs; one join function for if and case
+(delete `mergeIfBranches`/`mergeCaseBranches` duplication); contain or
+remove the 2^selector-width enumeration.
+
+**2d — TargetRef.** Replace string keys with a typed target reference
+(base, selectors, field path, d/q role); collapse the `.d`/`.q` suffix
+parsers and unify `canonicalTargetKey` handling across all maps.
+
+**2e — subroutine env.** Locals and return values get a scoped env instead
+of riding on `combDrivers`; fold combDrivers read-through into the env.
+Delete pre-existing dead `isPackedAggregateTarget`.
 
 ### Phase 3 — optional extractions
 

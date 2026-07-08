@@ -165,6 +165,17 @@ struct ResolutionContext {
     // Language-metadata sidecar collector (frontend-owned; may be null).
     LangMetadata* lang_meta = nullptr;
 
+    // Block environment (Phase 2a of the procedural refactor): while a
+    // procedural block is being elaborated (in_procedural_block == true),
+    // target writes land in block_drivers instead of on the shared DFG
+    // nodes. The block resolver commits the final environment to the graph
+    // once, at the end of the block (commitBlockDrivers). Keyed by the same
+    // elaborated target names connectDriver uses ("x", "x[2].f", "x.d").
+    // NOTE: keep these fields last — several sites construct
+    // ResolutionContext with positional aggregate initialization.
+    bool in_procedural_block = false;
+    std::map<std::string, DFGNode*> block_drivers = {};
+
     // Child contexts (generate scopes, loop bodies) must inherit the parent's
     // interface views so interface member references keep resolving.
     void inheritInterfaceViews(const ResolutionContext& parent) {

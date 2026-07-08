@@ -1,7 +1,9 @@
 # Plan: Refactor procedural-block compilation (elaboration.cpp)
 
-Status: **Phase 1 complete** (2026-07-08). Next: Phase 2 (block-environment
-refactor of procedural compilation).
+Status: **Phase 1 complete; Phase 2a complete** (2026-07-08). Next: Phase 2b
+(single slice-tree representation for retained/partial state) and 2c
+(child-env branch elaboration + env join) — best done together in a fresh
+session.
 Anchor: clean `python tests/regression.py --mode verilator-dpi` run before and
 after every extraction step.
 
@@ -215,7 +217,9 @@ Constraints:
 
 Executed as regression-clean subphases (DPI 151/151 after each):
 
-**2a (IN PROGRESS) — block environment replaces the DFG-as-scratch.**
+**2a (DONE, commit 483e80c) — block environment replaces the DFG-as-scratch.**
+Verified: verilator-dpi 151/151; validate mode 150/151 (sole failure is the
+pre-existing `global_domains_opposite_edges`, see Verification anchor).
 `ResolutionContext` gains `in_procedural_block` + `block_drivers`
 (target name → driver node). While a procedural block elaborates, all
 target writes (`connectDriver`, the `connectNode` lambda, partial-state

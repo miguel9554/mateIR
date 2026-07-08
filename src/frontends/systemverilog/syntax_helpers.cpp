@@ -181,4 +181,9 @@ bool isPackageScopedName(const ScopedNameSyntax& scoped) {
     return scoped.separator.rawText() == "::";
 }
 
+
+std::string getFuncName(const FunctionDeclarationSyntax& decl) {
+    return std::string(decl.prototype->name->as<IdentifierNameSyntax>().identifier.valueText());
+}
+
 } // namespace mate

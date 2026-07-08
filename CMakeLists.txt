@@ -115,6 +115,7 @@ set(SYSTEMVERILOG_FRONTEND_SOURCES
     src/frontends/systemverilog/passes/top_io_domains_emit.cpp
     src/frontends/systemverilog/passes/top_io_domains_infer.cpp
     src/frontends/systemverilog/passes/type_propagation.cpp
+    src/frontends/systemverilog/passes/type_resolve.cpp
     src/frontends/systemverilog/syntax_helpers.cpp
     src/frontends/systemverilog/systemverilog_frontend.cpp
     src/frontends/systemverilog/systemverilog_pipeline.cpp

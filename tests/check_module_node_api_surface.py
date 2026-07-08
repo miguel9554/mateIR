@@ -11,7 +11,12 @@ REPO_ROOT = TESTS_DIR.parent
 GUARDED_FILES = [
     REPO_ROOT / "src/mateir/module.h",
     REPO_ROOT / "src/mateir/module.cpp",
-    REPO_ROOT / "src/frontends/systemverilog/passes/elaboration.cpp",
+    REPO_ROOT / "src/frontends/systemverilog/elaboration/elaboration.cpp",
+    REPO_ROOT / "src/frontends/systemverilog/elaboration/constant_eval.cpp",
+    REPO_ROOT / "src/frontends/systemverilog/elaboration/type_resolve.cpp",
+    REPO_ROOT / "src/frontends/systemverilog/elaboration/expr_build.cpp",
+    REPO_ROOT / "src/frontends/systemverilog/elaboration/hierarchy_elaboration.cpp",
+    REPO_ROOT / "src/frontends/systemverilog/elaboration/generate_elaboration.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/dfg_inline.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/flop_resolve.cpp",
     REPO_ROOT / "src/frontends/systemverilog/passes/global_domain_resolve.cpp",

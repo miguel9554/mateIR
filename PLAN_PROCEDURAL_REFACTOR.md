@@ -1,6 +1,7 @@
 # Plan: Refactor procedural-block compilation (elaboration.cpp)
 
-Status: **Phase 1 in progress** (started 2026-07-08).
+Status: **Phase 1 complete** (2026-07-08). Next: Phase 2 (block-environment
+refactor of procedural compilation).
 Anchor: clean `python tests/regression.py --mode verilator-dpi` run before and
 after every extraction step.
 
@@ -188,7 +189,22 @@ Steps (regression-clean after each, one commit each):
    generate handling, and the resolveModule orchestrator.
    Note: `isPackedAggregateTarget` in expr_build.cpp is pre-existing dead
    code (only a comment references it) — delete during Phase 2.
-6. DPI regression after step 5 + default `validate` mode as secondary check.
+6. DONE — DPI regression after step 5: 151/151 (commit e75ef31).
+   Secondary `validate`-mode regression: 147/151 in the parallel run;
+   3 of the 4 failures (func_test, cdc_sidecar_cross_clock_pass, cordic)
+   were a build race on the shared vcd-compare tool ("Text file busy" /
+   "Permission denied" while parallel tests compiled it concurrently) and
+   pass when re-run; the 4th, `global_domains_opposite_edges`, fails
+   identically on the untouched baseline snapshot (verified in a worktree
+   at 8cf899d): "Mate ABI: inactive edge on clock domain 'clk' cannot
+   sample inputs" in custom-sim. PRE-EXISTING, out of scope — not fixed.
+
+**Phase 1 result:** elaboration.cpp 10,014 → 5,463 lines. New TUs:
+constant_eval.cpp (1,002), type_resolve.cpp (488), expr_build.cpp (2,939),
+plus elaboration_internal.h (ResolutionContext & shared types),
+constant_eval.h, type_resolve.h, expr_build.h; extractPortExpr,
+isPackageScopedName, getFuncName moved to syntax_helpers. DPI regression
+151/151 at every step. Phase 1 complete.
 
 Constraints:
 - Pure code motion: no behavior changes, no renames beyond what linkage

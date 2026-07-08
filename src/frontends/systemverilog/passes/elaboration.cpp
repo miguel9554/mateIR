@@ -185,16 +185,21 @@ static CasezItemPattern evaluateCasezPattern(
 
 using DriverMap = std::unordered_map<std::string, DFGNode*>;
 
+// A branch arm's effect on targets, relative to the shared baseline:
+// whole-target writes and partial-slice state accumulated in that arm.
+struct BranchDelta {
+    DriverMap drivers;
+    PartialDriverMap partials;
+};
+
 struct ConditionalBranch {
     DFGNode* condition;
-    DriverMap modifiedDrivers;
-    PartialDriverMap modifiedPartialDrivers;
+    BranchDelta delta;
 };
 
 struct CaseBranch {
     std::vector<int64_t> selectorValues;
-    DriverMap modifiedDrivers;
-    PartialDriverMap modifiedPartialDrivers;
+    BranchDelta delta;
 };
 
 enum class CaseExpressionKind {
@@ -546,57 +551,29 @@ static DFGNode* buildXValueForTarget(ResolutionContext& ctx,
     return node;
 }
 
+// Wrap a whole-target driver as canonical partial state: one full-range
+// slice. Sub-interval reads slice into it via buildRelativeSliceExpr.
 static PartialTargetState makeWholeDriverState(const Type& type, DFGNode* driver) {
     PartialTargetState state{type, {}};
     if (!driver || type.width <= 0) {
         return state;
     }
-
-    if (driver->kind() == DFGOp::CONCAT && !driver->concatParts().empty()) {
-        std::vector<PartialSliceDriver> slices;
-        slices.reserve(driver->concatParts().size());
-        int64_t nextHigh = type.width - 1;
-        bool ok = true;
-
-        for (const auto& input : driver->concatParts()) {
-            DFGNode* part = input.node;
-            if (!part) {
-                ok = false;
-                break;
-            }
-
-            int partWidth = 0;
-            if (part->type.has_value()) {
-                partWidth = part->type->width;
-            }
-            if (partWidth <= 0 || nextHigh - partWidth + 1 < 0) {
-                ok = false;
-                break;
-            }
-            int64_t low = nextHigh - partWidth + 1;
-            slices.push_back({low, nextHigh, part, std::nullopt, std::nullopt});
-            nextHigh = low - 1;
-        }
-
-        if (ok && nextHigh == -1) {
-            state.slices = std::move(slices);
-            sortSlices(state);
-            return state;
-        }
-    }
-
     state.slices.push_back({0, type.width - 1, driver, std::nullopt, std::nullopt});
     return state;
+}
+
+// Strip a trailing ".d"/".q" flop-role suffix from an elaborated target name.
+static std::string stripDQSuffix(const std::string& targetName) {
+    if (targetName.ends_with(".d") || targetName.ends_with(".q")) {
+        return targetName.substr(0, targetName.size() - 2);
+    }
+    return targetName;
 }
 
 static const Type& lookupTargetTypeOrThrow(const std::string& targetName,
                                                    ResolutionContext& ctx,
                                                    const std::optional<SourceLoc>& loc) {
-    std::string baseName = targetName;
-    if (baseName.ends_with(".d") || baseName.ends_with(".q")) {
-        baseName = baseName.substr(0, baseName.size() - 2);
-    }
-    if (const auto* type = lookupDeclaredType(baseName, ctx)) return *type;
+    if (const auto* type = lookupDeclaredType(stripDQSuffix(targetName), ctx)) return *type;
     throw CompilerError("Could not find declared type for target '" + targetName + "'", loc);
 }
 
@@ -624,13 +601,13 @@ static std::optional<PartialTargetState> buildXPartialState(ResolutionContext& c
 static std::optional<PartialTargetState> branchPartialStateValue(
         ResolutionContext& ctx,
         const std::string& targetName,
-        const ConditionalBranch& branch,
+        const BranchDelta& delta,
         const std::optional<PartialTargetState>& retained,
         const std::optional<SourceLoc>& loc) {
-    if (auto it = branch.modifiedPartialDrivers.find(targetName); it != branch.modifiedPartialDrivers.end()) {
+    if (auto it = delta.partials.find(targetName); it != delta.partials.end()) {
         return it->second;
     }
-    if (auto it = branch.modifiedDrivers.find(targetName); it != branch.modifiedDrivers.end()) {
+    if (auto it = delta.drivers.find(targetName); it != delta.drivers.end()) {
         return makeWholeDriverState(lookupTargetTypeOrThrow(targetName, ctx, loc), it->second);
     }
     return retained;
@@ -708,7 +685,7 @@ static std::optional<PartialTargetState> buildMergedPartialDriver(
     std::vector<std::optional<PartialTargetState>> states;
     states.push_back(defaultState);
     for (const auto& branch : branches) {
-        states.push_back(branchPartialStateValue(ctx, targetName, branch, retained, loc));
+        states.push_back(branchPartialStateValue(ctx, targetName, branch.delta, retained, loc));
     }
 
     auto intervals = computeSlicePartition(states);
@@ -722,7 +699,7 @@ static std::optional<PartialTargetState> buildMergedPartialDriver(
     for (const auto& [low, high] : intervals) {
         DFGNode* result = defaultState ? exprForSliceInterval(ctx, *defaultState, low, high, loc) : nullptr;
         for (auto it = branches.rbegin(); it != branches.rend(); ++it) {
-            auto selectedState = branchPartialStateValue(ctx, targetName, *it, retained, loc);
+            auto selectedState = branchPartialStateValue(ctx, targetName, it->delta, retained, loc);
             DFGNode* selected = selectedState ? exprForSliceInterval(ctx, *selectedState, low, high, loc) : nullptr;
             if (!selected && !result) continue;
             if (!selected || !result) {
@@ -747,11 +724,7 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
                                   const std::optional<DriverMap>& fallbackBranch,
                                   const DriverSnapshot& baseline,
                                   const std::optional<SourceLoc>& loc) {
-    std::string targetBaseName = targetName;
-    if (targetBaseName.ends_with(".d") || targetBaseName.ends_with(".q")) {
-        targetBaseName = targetBaseName.substr(0, targetBaseName.size() - 2);
-    }
-    const Type* targetType = lookupDeclaredType(targetBaseName, ctx);
+    const Type* targetType = lookupDeclaredType(stripDQSuffix(targetName), ctx);
     DFGNode* retained = getRetainedDriver(ctx, targetName, baseline, loc);
     auto branchValue = [&](const DriverMap& modified) -> DFGNode* {
         if (auto it = modified.find(targetName); it != modified.end()) {
@@ -768,7 +741,7 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
     }
 
     for (auto it = branches.rbegin(); it != branches.rend(); ++it) {
-        DFGNode* selected = branchValue(it->modifiedDrivers);
+        DFGNode* selected = branchValue(it->delta.drivers);
         if (!selected) {
             throw CompilerError(
                 "Target '" + targetName + "' not assigned in all branches and has no default/fallback",
@@ -785,54 +758,87 @@ static DFGNode* buildMergedDriver(ResolutionContext& ctx,
     return result;
 }
 
-static std::set<std::string> collectAssignedSignals(const std::vector<ConditionalBranch>& branches,
-                                                    const std::optional<DriverMap>& fallbackBranch,
-                                                    const std::optional<PartialDriverMap>& fallbackPartialBranch) {
+static std::set<std::string> collectAssignedSignals(
+        const std::vector<const BranchDelta*>& deltas,
+        const std::optional<DriverMap>& fallbackBranch,
+        const std::optional<PartialDriverMap>& fallbackPartialBranch) {
     std::set<std::string> assignedSignals;
-    for (const auto& branch : branches) {
-        for (const auto& [name, _] : branch.modifiedDrivers) {
-            assignedSignals.insert(name);
-        }
-        for (const auto& [name, _] : branch.modifiedPartialDrivers) {
-            assignedSignals.insert(name);
-        }
+    for (const auto* delta : deltas) {
+        for (const auto& [name, _] : delta->drivers) assignedSignals.insert(name);
+        for (const auto& [name, _] : delta->partials) assignedSignals.insert(name);
     }
     if (fallbackBranch) {
-        for (const auto& [name, _] : *fallbackBranch) {
-            assignedSignals.insert(name);
-        }
+        for (const auto& [name, _] : *fallbackBranch) assignedSignals.insert(name);
     }
     if (fallbackPartialBranch) {
-        for (const auto& [name, _] : *fallbackPartialBranch) {
-            assignedSignals.insert(name);
-        }
+        for (const auto& [name, _] : *fallbackPartialBranch) assignedSignals.insert(name);
     }
     return assignedSignals;
 }
 
-static std::set<std::string> collectAssignedSignals(const std::vector<CaseBranch>& branches,
-                                                    const std::optional<DriverMap>& fallbackBranch,
-                                                    const std::optional<PartialDriverMap>& fallbackPartialBranch) {
-    std::set<std::string> assignedSignals;
-    for (const auto& branch : branches) {
-        for (const auto& [name, _] : branch.modifiedDrivers) {
-            assignedSignals.insert(name);
-        }
-        for (const auto& [name, _] : branch.modifiedPartialDrivers) {
-            assignedSignals.insert(name);
+// A target merges through the partial (slice-interval) path if any arm,
+// the fallback, or the baseline carries partial state for it.
+static bool isPartialMergeTarget(const std::string& signalName,
+                                 const std::vector<const BranchDelta*>& deltas,
+                                 const std::optional<PartialDriverMap>& fallbackPartialBranch,
+                                 const DriverSnapshot& baseline) {
+    if (baseline.partialDrivers.contains(signalName)) return true;
+    for (const auto* delta : deltas) {
+        if (delta->partials.contains(signalName)) return true;
+    }
+    return fallbackPartialBranch && fallbackPartialBranch->contains(signalName);
+}
+
+// Shared write-back for a merged partial target: stamp the merged slices
+// with this block's origin, record the state, and materialize it into the
+// block environment (refreshing the comb read-cache).
+static void applyMergedPartialTarget(ResolutionContext& ctx,
+                                     const std::string& signalName,
+                                     PartialTargetState merged,
+                                     const std::optional<SourceLoc>& loc) {
+    for (auto& slice : merged.slices) {
+        slice.origin = ctx.current_write_origin;
+        slice.loc = loc;
+    }
+    auto& state = ctx.partial_drivers[signalName] = std::move(merged);
+    DFGNode* aggregate = materializePartialTarget(ctx, signalName, state, loc);
+    if (!ctx.is_sequential && aggregate) {
+        ctx.combDrivers[signalName] = aggregate;
+    }
+}
+
+// Shared write-back for a merged whole target.
+static void applyMergedWholeTarget(ResolutionContext& ctx,
+                                   const std::string& signalName,
+                                   DFGNode* merged) {
+    connectDriver(ctx, signalName, merged);
+    if (!ctx.is_sequential) {
+        ctx.combDrivers[signalName] = merged;
+    }
+}
+
+// Shared branch-merge walk: for every target assigned in any arm or the
+// fallback, combine the arm values with the shape-specific combiner
+// (if-chain of muxes vs. case selector table) and write the result back.
+template <typename MergePartialFn, typename MergeWholeFn>
+static void forEachMergedTarget(ResolutionContext& ctx,
+                                const std::vector<const BranchDelta*>& deltas,
+                                const std::optional<DriverMap>& fallbackBranch,
+                                const std::optional<PartialDriverMap>& fallbackPartialBranch,
+                                const DriverSnapshot& baseline,
+                                const std::optional<SourceLoc>& loc,
+                                MergePartialFn&& mergePartial,
+                                MergeWholeFn&& mergeWhole) {
+    for (const auto& signalName :
+             collectAssignedSignals(deltas, fallbackBranch, fallbackPartialBranch)) {
+        if (isPartialMergeTarget(signalName, deltas, fallbackPartialBranch, baseline)) {
+            if (auto merged = mergePartial(signalName)) {
+                applyMergedPartialTarget(ctx, signalName, std::move(*merged), loc);
+            }
+        } else {
+            applyMergedWholeTarget(ctx, signalName, mergeWhole(signalName));
         }
     }
-    if (fallbackBranch) {
-        for (const auto& [name, _] : *fallbackBranch) {
-            assignedSignals.insert(name);
-        }
-    }
-    if (fallbackPartialBranch) {
-        for (const auto& [name, _] : *fallbackPartialBranch) {
-            assignedSignals.insert(name);
-        }
-    }
-    return assignedSignals;
 }
 
 static int64_t selectorCodeCountOrThrow(DFGNode* selectorNode,
@@ -863,43 +869,19 @@ static void mergeIfBranches(ResolutionContext& ctx,
                             const std::optional<PartialDriverMap>& fallbackPartialBranch,
                             const DriverSnapshot& baseline,
                             const std::optional<SourceLoc>& loc) {
-    std::set<std::string> assignedSignals = collectAssignedSignals(
-        branches, fallbackBranch, fallbackPartialBranch);
+    std::vector<const BranchDelta*> deltas;
+    deltas.reserve(branches.size());
+    for (const auto& branch : branches) deltas.push_back(&branch.delta);
 
-    for (const auto& signalName : assignedSignals) {
-        bool partialTarget = baseline.partialDrivers.contains(signalName);
-        if (!partialTarget) {
-            partialTarget = std::any_of(branches.begin(), branches.end(),
-                [&](const ConditionalBranch& branch) {
-                    return branch.modifiedPartialDrivers.contains(signalName);
-                });
-        }
-        if (!partialTarget && fallbackPartialBranch) {
-            partialTarget = fallbackPartialBranch->contains(signalName);
-        }
-
-        if (partialTarget) {
-            auto merged = buildMergedPartialDriver(
+    forEachMergedTarget(
+        ctx, deltas, fallbackBranch, fallbackPartialBranch, baseline, loc,
+        [&](const std::string& signalName) {
+            return buildMergedPartialDriver(
                 ctx, signalName, branches, fallbackBranch, fallbackPartialBranch, baseline, loc);
-            if (merged) {
-                ctx.partial_drivers[signalName] = *merged;
-                for (auto& slice : ctx.partial_drivers[signalName].slices) {
-                    slice.origin = ctx.current_write_origin;
-                    slice.loc = loc;
-                }
-                DFGNode* aggregate = materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
-                if (!ctx.is_sequential && aggregate) {
-                    ctx.combDrivers[signalName] = aggregate;
-                }
-            }
-        } else {
-            DFGNode* merged = buildMergedDriver(ctx, signalName, branches, fallbackBranch, baseline, loc);
-            connectDriver(ctx, signalName, merged);
-            if (!ctx.is_sequential) {
-                ctx.combDrivers[signalName] = merged;
-            }
-        }
-    }
+        },
+        [&](const std::string& signalName) {
+            return buildMergedDriver(ctx, signalName, branches, fallbackBranch, baseline, loc);
+        });
 }
 
 static void mergeCaseBranches(ResolutionContext& ctx,
@@ -911,103 +893,80 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                               const std::optional<SourceLoc>& loc,
                               const std::vector<int64_t>& xSelectorValues = {},
                               bool uncoveredToX = false) {
-    std::set<std::string> assignedSignals = collectAssignedSignals(
-        branches, fallbackBranch, fallbackPartialBranch);
+    std::vector<const BranchDelta*> deltas;
+    deltas.reserve(branches.size());
+    for (const auto& branch : branches) deltas.push_back(&branch.delta);
     int64_t numValues = selectorCodeCountOrThrow(selectorNode, loc);
 
-    auto branchValue = [&](const std::string& targetName, const DriverMap& modified, DFGNode* retained) -> DFGNode* {
-        if (auto it = modified.find(targetName); it != modified.end()) {
-            return it->second;
+    auto mergePartial = [&](const std::string& signalName)
+            -> std::optional<PartialTargetState> {
+        auto retained = getRetainedPartialState(ctx, signalName, baseline, loc);
+        auto defaultValue = fallbackPartialStateValue(
+            ctx, signalName, fallbackBranch, fallbackPartialBranch, retained, loc);
+        if (!defaultValue && uncoveredToX) {
+            defaultValue = buildXPartialState(ctx, signalName, loc);
         }
-        return retained;
-    };
-
-    for (const auto& signalName : assignedSignals) {
-        bool partialTarget = baseline.partialDrivers.contains(signalName);
-        if (!partialTarget) {
-            partialTarget = std::any_of(branches.begin(), branches.end(),
-                [&](const CaseBranch& branch) {
-                    return branch.modifiedPartialDrivers.contains(signalName);
-                });
+        auto xState = xSelectorValues.empty()
+            ? std::optional<PartialTargetState>{}
+            : buildXPartialState(ctx, signalName, loc);
+        std::vector<std::optional<PartialTargetState>> states(static_cast<size_t>(numValues), defaultValue);
+        std::vector<bool> assigned(static_cast<size_t>(numValues), false);
+        for (int64_t selectorValue : xSelectorValues) {
+            size_t index = static_cast<size_t>(selectorValue);
+            states[index] = xState;
+            assigned[index] = true;
         }
-        if (!partialTarget && fallbackPartialBranch) {
-            partialTarget = fallbackPartialBranch->contains(signalName);
-        }
-
-        if (partialTarget) {
-            auto retained = getRetainedPartialState(ctx, signalName, baseline, loc);
-            auto defaultValue = fallbackPartialStateValue(
-                ctx, signalName, fallbackBranch, fallbackPartialBranch, retained, loc);
-            if (!defaultValue && uncoveredToX) {
-                defaultValue = buildXPartialState(ctx, signalName, loc);
-            }
-            auto xState = xSelectorValues.empty()
-                ? std::optional<PartialTargetState>{}
-                : buildXPartialState(ctx, signalName, loc);
-            std::vector<std::optional<PartialTargetState>> states(static_cast<size_t>(numValues), defaultValue);
-            std::vector<bool> assigned(static_cast<size_t>(numValues), false);
-            for (int64_t selectorValue : xSelectorValues) {
+        for (const auto& branch : branches) {
+            auto branchState = branchPartialStateValue(
+                ctx, signalName, branch.delta, retained, loc);
+            for (int64_t selectorValue : branch.selectorValues) {
                 size_t index = static_cast<size_t>(selectorValue);
-                states[index] = xState;
+                if (assigned[index]) continue;
+                states[index] = branchState;
                 assigned[index] = true;
             }
-            for (const auto& branch : branches) {
-                auto branchState = branchPartialStateValue(
-                    ctx,
-                    signalName,
-                    ConditionalBranch{nullptr, branch.modifiedDrivers, branch.modifiedPartialDrivers},
-                    retained,
-                    loc);
-                for (int64_t selectorValue : branch.selectorValues) {
-                    size_t index = static_cast<size_t>(selectorValue);
-                    if (assigned[index]) continue;
-                    states[index] = branchState;
-                    assigned[index] = true;
-                }
-            }
-            auto intervals = computeSlicePartition(states);
-            PartialTargetState merged;
-            if (defaultValue) merged.type = defaultValue->type;
-            else if (retained) merged.type = retained->type;
-            else merged.type = lookupTargetTypeOrThrow(signalName, ctx, loc);
-
-            for (const auto& [low, high] : intervals) {
-                std::vector<int64_t> selectorValues;
-                std::vector<DFGNode*> dataValues;
-                selectorValues.reserve(static_cast<size_t>(numValues));
-                dataValues.reserve(static_cast<size_t>(numValues));
-                for (int64_t selectorValue = 0; selectorValue < numValues; ++selectorValue) {
-                    const auto& state = states[static_cast<size_t>(selectorValue)];
-                    DFGNode* value = state ? exprForSliceInterval(ctx, *state, low, high, loc) : nullptr;
-                    if (!value) {
-                        throw CompilerError(
-                            "Target '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
-                            loc);
-                    }
-                    selectorValues.push_back(selectorValue);
-                    dataValues.push_back(value);
-                }
-                DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
-                result->loc = loc;
-                if (result) merged.slices.push_back({low, high, result, std::nullopt, std::nullopt});
-            }
-            sortSlices(merged);
-            for (auto& slice : merged.slices) {
-                slice.origin = ctx.current_write_origin;
-                slice.loc = loc;
-            }
-            ctx.partial_drivers[signalName] = std::move(merged);
-            materializePartialTarget(ctx, signalName, ctx.partial_drivers[signalName], loc);
-            if (!ctx.is_sequential) {
-                if (auto* driver = envDriver(ctx, signalName)) ctx.combDrivers[signalName] = driver;
-            }
-            continue;
         }
+        auto intervals = computeSlicePartition(states);
+        PartialTargetState merged;
+        if (defaultValue) merged.type = defaultValue->type;
+        else if (retained) merged.type = retained->type;
+        else merged.type = lookupTargetTypeOrThrow(signalName, ctx, loc);
 
+        for (const auto& [low, high] : intervals) {
+            std::vector<int64_t> selectorValues;
+            std::vector<DFGNode*> dataValues;
+            selectorValues.reserve(static_cast<size_t>(numValues));
+            dataValues.reserve(static_cast<size_t>(numValues));
+            for (int64_t selectorValue = 0; selectorValue < numValues; ++selectorValue) {
+                const auto& state = states[static_cast<size_t>(selectorValue)];
+                DFGNode* value = state ? exprForSliceInterval(ctx, *state, low, high, loc) : nullptr;
+                if (!value) {
+                    throw CompilerError(
+                        "Target '" + signalName + "' not assigned in all case selector codes and has no default/fallback",
+                        loc);
+                }
+                selectorValues.push_back(selectorValue);
+                dataValues.push_back(value);
+            }
+            DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
+            result->loc = loc;
+            merged.slices.push_back({low, high, result, std::nullopt, std::nullopt});
+        }
+        sortSlices(merged);
+        return merged;
+    };
+
+    auto mergeWhole = [&](const std::string& signalName) -> DFGNode* {
         DFGNode* retained = getRetainedDriver(ctx, signalName, baseline, loc);
+        auto branchValue = [&](const DriverMap& modified) -> DFGNode* {
+            if (auto it = modified.find(signalName); it != modified.end()) {
+                return it->second;
+            }
+            return retained;
+        };
         DFGNode* defaultValue = nullptr;
         if (fallbackBranch) {
-            defaultValue = branchValue(signalName, *fallbackBranch, retained);
+            defaultValue = branchValue(*fallbackBranch);
         } else if (uncoveredToX) {
             defaultValue = buildXValueForTarget(ctx, signalName, loc);
         } else {
@@ -1027,7 +986,7 @@ static void mergeCaseBranches(ResolutionContext& ctx,
                 for (const auto& branch : branches) {
                     if (std::find(branch.selectorValues.begin(), branch.selectorValues.end(), selectorValue) !=
                             branch.selectorValues.end()) {
-                        value = branchValue(signalName, branch.modifiedDrivers, retained);
+                        value = branchValue(branch.delta.drivers);
                         break;
                     }
                 }
@@ -1043,20 +1002,16 @@ static void mergeCaseBranches(ResolutionContext& ctx,
 
         DFGNode* result = ctx.graph.mux(selectorNode, selectorValues, dataValues);
         result->loc = loc;
-        std::string targetBaseName = signalName;
-        if (targetBaseName.ends_with(".d") || targetBaseName.ends_with(".q")) {
-            targetBaseName = targetBaseName.substr(0, targetBaseName.size() - 2);
-        }
-        const Type* targetType = lookupDeclaredType(targetBaseName, ctx);
+        const Type* targetType = lookupDeclaredType(
+            stripDQSuffix(signalName), ctx);
         if (targetType && targetType->isEnum()) {
             result->type = *targetType;
         }
+        return result;
+    };
 
-        connectDriver(ctx, signalName, result);
-        if (!ctx.is_sequential) {
-            ctx.combDrivers[signalName] = result;
-        }
-    }
+    forEachMergedTarget(ctx, deltas, fallbackBranch, fallbackPartialBranch,
+                        baseline, loc, mergePartial, mergeWhole);
 }
 
 static std::optional<int64_t> tryEvaluateCaseConstantExpr(const ExpressionSyntax* expr,
@@ -2510,7 +2465,7 @@ void resolveConditionalStatementInPlace(
 
     restoreDrivers(ctx, baselineDrivers);
     mergeIfBranches(ctx,
-                    {{conditionNode, std::move(ifDrivers), std::move(ifPartialDrivers)}},
+                    {{conditionNode, {std::move(ifDrivers), std::move(ifPartialDrivers)}}},
                     elseDrivers,
                     elsePartialDrivers,
                     baselineDrivers,
@@ -2643,8 +2598,8 @@ void resolveCaseStatementInPlace(
             executeConditionalBranch(caseItem.clause->as<StatementSyntax>(), ctx);
             normalCases.push_back({
                 std::move(caseValues),
-                modifiedDriversSince(ctx, baselineDrivers),
-                modifiedPartialDriversSince(ctx, baselineDrivers)
+                {modifiedDriversSince(ctx, baselineDrivers),
+                 modifiedPartialDriversSince(ctx, baselineDrivers)}
             });
         } else {
             throw CompilerError(
@@ -2682,8 +2637,8 @@ void resolveCaseStatementInPlace(
             itemSelectorBits.push_back(itemMatch);
             normalCases.push_back({
                 {},
-                std::move(branch.modifiedDrivers),
-                std::move(branch.modifiedPartialDrivers)
+                {std::move(branch.modifiedDrivers),
+                 std::move(branch.modifiedPartialDrivers)}
             });
         }
 

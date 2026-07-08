@@ -160,4 +160,25 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
     return info;
 }
 
+
+// Extract ExpressionSyntax from a PropertyExpr
+// Port connection expressions are: PropertyExpr -> SimplePropertyExpr -> SimpleSequenceExpr -> Expression
+const ExpressionSyntax* extractPortExpr(const PropertyExprSyntax& propExpr) {
+    if (propExpr.kind != SyntaxKind::SimplePropertyExpr) {
+        throw CompilerError(
+            "Unsupported port connection expression kind: " + std::string(toString(propExpr.kind)));
+    }
+    auto& simpleProp = propExpr.as<SimplePropertyExprSyntax>();
+    if (simpleProp.expr->kind != SyntaxKind::SimpleSequenceExpr) {
+        throw CompilerError(
+            "Unsupported port connection expression kind: " + std::string(toString(simpleProp.expr->kind)));
+    }
+    auto& simpleSeq = simpleProp.expr->as<SimpleSequenceExprSyntax>();
+    return simpleSeq.expr;
+}
+
+bool isPackageScopedName(const ScopedNameSyntax& scoped) {
+    return scoped.separator.rawText() == "::";
+}
+
 } // namespace mate

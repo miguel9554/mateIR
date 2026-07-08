@@ -6,9 +6,19 @@
 namespace slang::syntax {
 struct ModuleHeaderSyntax;
 struct DataTypeSyntax;
+struct ExpressionSyntax;
+struct PropertyExprSyntax;
+struct ScopedNameSyntax;
 }
 
 namespace mate {
+
+// Extract ExpressionSyntax from a PropertyExpr
+// Port connection expressions are: PropertyExpr -> SimplePropertyExpr -> SimpleSequenceExpr -> Expression
+const slang::syntax::ExpressionSyntax* extractPortExpr(
+    const slang::syntax::PropertyExprSyntax& propExpr);
+
+bool isPackageScopedName(const slang::syntax::ScopedNameSyntax& scoped);
 
 // Extract type information - just captures the syntax pointer (no resolution)
 UnresolvedType extractDataType(const slang::syntax::DataTypeSyntax& syntax);

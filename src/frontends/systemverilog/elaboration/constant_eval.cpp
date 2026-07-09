@@ -451,6 +451,17 @@ int constantExprWidth(const ExpressionSyntax* expr,
             if (constIt != pkgIt->second.constants.end()) return bitstreamWidth(constIt->second.type());
             break;
         }
+        case SyntaxKind::CastExpression: {
+            if (!paramCtx) {
+                throw CompilerError("Cannot determine width of constant cast without parameter context", loc);
+            }
+            const auto& castExpr = expr->as<CastExpressionSyntax>();
+            const auto target = resolveCastTarget(
+                *castExpr.left, *paramCtx, pkgRegistry, namedTypeRegistry, sm);
+            return target.kind == CastTargetResolution::Kind::NamedType
+                ? bitstreamWidth(target.type)
+                : target.width;
+        }
         default:
             break;
     }
@@ -520,6 +531,146 @@ std::optional<int64_t> staticBitsWidth(
         if (enumIt != pkgIt->second.enumMembers.end()) return bitstreamWidth(enumIt->second.second);
     }
     return std::nullopt;
+}
+
+CastTargetResolution resolveCastTarget(const SyntaxNode& castTargetSyntax,
+                                       const ParameterContext& ctx,
+                                       const PackageRegistry* pkgRegistry,
+                                       const NamedTypeRegistry* namedTypeRegistry,
+                                       const slang::SourceManager* sm) {
+    auto loc = sm ? std::optional<SourceLoc>(resolveSourceLoc(castTargetSyntax, *sm)) : std::nullopt;
+
+    const auto resolveWidth = [&](const ExpressionSyntax& widthExpr,
+                                  const std::string& debugName) -> CastTargetResolution {
+        int64_t widthValue = evaluateConstantExpr(&widthExpr, ctx, pkgRegistry, namedTypeRegistry, sm);
+        if (widthValue <= 0) {
+            throw CompilerError(
+                std::format("Width cast '{}' must have positive width, got {}", debugName, widthValue),
+                loc);
+        }
+        if (widthValue > std::numeric_limits<int>::max()) {
+            throw CompilerError(
+                std::format("Width cast '{}' exceeds supported width {}", debugName, widthValue),
+                loc);
+        }
+        return CastTargetResolution{
+            .kind = CastTargetResolution::Kind::Width,
+            .type = Type::makeInteger(static_cast<int>(widthValue), false),
+            .width = static_cast<int>(widthValue),
+        };
+    };
+
+    const auto tryResolvePackageNamedType = [&](const ScopedNameSyntax& scoped)
+        -> std::optional<CastTargetResolution> {
+        if (!pkgRegistry || scoped.separator.rawText() != "::") return std::nullopt;
+        std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+        std::string typeName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+        auto pkgIt = pkgRegistry->find(pkgName);
+        if (pkgIt == pkgRegistry->end()) {
+            throw CompilerError("Unknown package in cast: " + pkgName, loc);
+        }
+        auto it = pkgIt->second.namedTypes.find(typeName);
+        if (it == pkgIt->second.namedTypes.end()) return std::nullopt;
+        return CastTargetResolution{
+            .kind = CastTargetResolution::Kind::NamedType,
+            .type = it->second,
+            .width = it->second.width,
+        };
+    };
+
+    switch (castTargetSyntax.kind) {
+        case SyntaxKind::NamedType: {
+            const auto& namedType = castTargetSyntax.as<NamedTypeSyntax>();
+            if (namedType.name->kind == SyntaxKind::ScopedName) {
+                const auto& scoped = namedType.name->as<ScopedNameSyntax>();
+                if (auto resolved = tryResolvePackageNamedType(scoped)) {
+                    return *resolved;
+                }
+                throw CompilerError(
+                    "Unknown type in cast: " +
+                        std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText()) +
+                        "::" +
+                        std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText()),
+                    loc);
+            }
+
+            std::string name(namedType.name->as<IdentifierNameSyntax>().identifier.valueText());
+            if (namedTypeRegistry) {
+                auto it = namedTypeRegistry->find(name);
+                if (it != namedTypeRegistry->end()) {
+                    return CastTargetResolution{
+                        .kind = CastTargetResolution::Kind::NamedType,
+                        .type = it->second,
+                        .width = it->second.width,
+                    };
+                }
+            }
+            return resolveWidth(namedType.name->as<IdentifierNameSyntax>(), name);
+        }
+
+        case SyntaxKind::IdentifierName: {
+            const auto& ident = castTargetSyntax.as<IdentifierNameSyntax>();
+            std::string name(ident.identifier.valueText());
+            if (namedTypeRegistry) {
+                auto it = namedTypeRegistry->find(name);
+                if (it != namedTypeRegistry->end()) {
+                    return CastTargetResolution{
+                        .kind = CastTargetResolution::Kind::NamedType,
+                        .type = it->second,
+                        .width = it->second.width,
+                    };
+                }
+            }
+            return resolveWidth(ident, name);
+        }
+
+        case SyntaxKind::ScopedName: {
+            const auto& scoped = castTargetSyntax.as<ScopedNameSyntax>();
+            if (auto resolved = tryResolvePackageNamedType(scoped)) {
+                return *resolved;
+            }
+            throw CompilerError(
+                "Unknown type in cast: " +
+                    std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText()) +
+                    "::" +
+                    std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText()),
+                loc);
+        }
+
+        case SyntaxKind::MemberAccessExpression: {
+            const auto& member = castTargetSyntax.as<MemberAccessExpressionSyntax>();
+            if (member.left->kind != SyntaxKind::IdentifierName) {
+                throw CompilerError("Unsupported width-cast target expression", loc);
+            }
+            const std::string qualified =
+                std::string(member.left->as<IdentifierNameSyntax>().identifier.valueText()) +
+                "." + std::string(member.name.valueText());
+            return resolveWidth(member, qualified);
+        }
+
+        case SyntaxKind::IntegerLiteralExpression: {
+            const auto& literal = castTargetSyntax.as<LiteralExpressionSyntax>();
+            int64_t widthValue = std::stoll(std::string(literal.literal.rawText()));
+            if (widthValue <= 0) {
+                throw CompilerError(
+                    std::format("Width cast '{}' must have positive width, got {}", literal.literal.rawText(), widthValue),
+                    loc);
+            }
+            if (widthValue > std::numeric_limits<int>::max()) {
+                throw CompilerError(
+                    std::format("Width cast '{}' exceeds supported width {}", literal.literal.rawText(), widthValue),
+                    loc);
+            }
+            return CastTargetResolution{
+                .kind = CastTargetResolution::Kind::Width,
+                .type = Type::makeInteger(static_cast<int>(widthValue), false),
+                .width = static_cast<int>(widthValue),
+            };
+        }
+
+        default:
+            throw CompilerError("Only named-type and width casts are supported", loc);
+    }
 }
 
 // Evaluate a constant expression given a parameter context
@@ -833,13 +984,15 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
         case SyntaxKind::CastExpression: {
             auto& castExpr = expr->as<CastExpressionSyntax>();
             int64_t val = evaluateConstantExpr(castExpr.right->expression, ctx, pkgRegistry, namedTypeRegistry, sm);
-            // Width cast: mask to the specified number of bits
-            if (castExpr.left->kind == SyntaxKind::IntegerLiteralExpression) {
-                int64_t width = std::stoll(std::string(
-                    castExpr.left->as<LiteralExpressionSyntax>().literal.rawText()));
-                if (width > 0 && width < 64) {
-                    val = static_cast<int64_t>(static_cast<uint64_t>(val) & ((uint64_t(1) << width) - 1));
+            const auto target = resolveCastTarget(
+                *castExpr.left, ctx, pkgRegistry, namedTypeRegistry, sm);
+            if (target.kind == CastTargetResolution::Kind::Width) {
+                if (target.width > 64) {
+                    throw CompilerError(
+                        std::format("Constant width cast '{}' does not fit in int64_t", target.width),
+                        constantExprLoc(expr, sm));
                 }
+                val = static_cast<int64_t>(maskToWidth(static_cast<uint64_t>(val), target.width));
             }
             return val;
         }

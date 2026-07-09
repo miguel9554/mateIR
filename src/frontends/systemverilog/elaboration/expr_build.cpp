@@ -59,9 +59,6 @@ static ExprValue applySelector(const ExprValue& input,
                                ResolutionContext& ctx,
                                const std::optional<SourceLoc>& loc);
 static std::string frontendTypeName(const Type& type);
-static Type resolveNamedTypeCast(const CastExpressionSyntax& castExpr,
-                                 ResolutionContext& ctx,
-                                 const std::optional<SourceLoc>& loc);
 static void validateNamedTypeCastWidth(const ExprValue& sourceValue,
                                        const Type& targetType,
                                        const std::optional<SourceLoc>& loc);
@@ -755,67 +752,6 @@ static std::string frontendTypeName(const Type& type) {
     return "integer";
 }
 
-static Type resolveNamedTypeCast(const CastExpressionSyntax& castExpr,
-                                 ResolutionContext& ctx,
-                                 const std::optional<SourceLoc>& loc) {
-    if (castExpr.left->kind == SyntaxKind::NamedType) {
-        auto& namedType = castExpr.left->as<NamedTypeSyntax>();
-        if (namedType.name->kind == SyntaxKind::ScopedName) {
-            auto& scoped = namedType.name->as<ScopedNameSyntax>();
-            std::string pkgName = std::string(
-                scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
-            std::string typeName = std::string(
-                scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
-            auto pkgIt = ctx.pkgRegistry.find(pkgName);
-            if (pkgIt == ctx.pkgRegistry.end()) {
-                throw CompilerError("Unknown package in cast: " + pkgName, loc);
-            }
-            auto it = pkgIt->second.namedTypes.find(typeName);
-            if (it == pkgIt->second.namedTypes.end()) {
-                throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
-            }
-            return it->second;
-        }
-
-        std::string typeName = std::string(
-            namedType.name->as<IdentifierNameSyntax>().identifier.valueText());
-        auto it = ctx.namedTypeRegistry.find(typeName);
-        if (it == ctx.namedTypeRegistry.end()) {
-            throw CompilerError("Unknown type in cast: " + typeName, loc);
-        }
-        return it->second;
-    }
-
-    if (castExpr.left->kind == SyntaxKind::IdentifierName) {
-        std::string typeName = std::string(
-            castExpr.left->as<IdentifierNameSyntax>().identifier.valueText());
-        auto it = ctx.namedTypeRegistry.find(typeName);
-        if (it == ctx.namedTypeRegistry.end()) {
-            throw CompilerError("Unknown type in cast: " + typeName, loc);
-        }
-        return it->second;
-    }
-
-    if (castExpr.left->kind == SyntaxKind::ScopedName) {
-        auto& scoped = castExpr.left->as<ScopedNameSyntax>();
-        std::string pkgName = std::string(
-            scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
-        std::string typeName = std::string(
-            scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
-        auto pkgIt = ctx.pkgRegistry.find(pkgName);
-        if (pkgIt == ctx.pkgRegistry.end()) {
-            throw CompilerError("Unknown package in cast: " + pkgName, loc);
-        }
-        auto it = pkgIt->second.namedTypes.find(typeName);
-        if (it == pkgIt->second.namedTypes.end()) {
-            throw CompilerError("Unknown type in cast: " + pkgName + "::" + typeName, loc);
-        }
-        return it->second;
-    }
-
-    throw CompilerError("Only named-type casts are supported (e.g. my_t'(expr))", loc);
-}
-
 static void validateNamedTypeCastWidth(const ExprValue& sourceValue,
                                        const Type& targetType,
                                        const std::optional<SourceLoc>& loc) {
@@ -1249,13 +1185,104 @@ ExprValue buildExprValue(
     if (expr->kind == SyntaxKind::CastExpression) {
         auto loc = resolveSourceLoc(*expr, ctx.sm);
         auto& castExpr = expr->as<CastExpressionSyntax>();
-        Type castType = resolveNamedTypeCast(castExpr, ctx, loc);
+        CastTargetResolution castTarget = resolveCastTarget(
+            *castExpr.left, ctx.params, &ctx.pkgRegistry, &ctx.namedTypeRegistry, &ctx.sm);
+        Type castType = castTarget.type;
         ExprValue inner = buildScalarExprValue(castExpr.right->expression, ctx);
-        validateNamedTypeCastWidth(inner, castType, loc);
-        if (castType.isStruct() && castType.unpacked_dims.empty()) {
-            return buildAggregateLeavesFromScalar(inner, castType, ctx, loc);
+        if (castTarget.kind == CastTargetResolution::Kind::NamedType) {
+            validateNamedTypeCastWidth(inner, castType, loc);
+            if (castType.isStruct() && castType.unpacked_dims.empty()) {
+                return buildAggregateLeavesFromScalar(inner, castType, ctx, loc);
+            }
+            return retagConstOrReturnValue(inner, castType, ctx, loc);
         }
-        return retagConstOrReturnValue(inner, castType, ctx, loc);
+
+        if (!inner.scalar) {
+            throw CompilerError("Width cast requires a scalar expression", loc);
+        }
+
+        // Compute the bit-width of a DFG node when it may not be typed yet.
+        // Returns 0 if width cannot be determined without running type_propagation.
+        static const auto computeKnownWidth = [](auto& self, const DFGNode* node) -> int {
+            if (node->hasType()) return node->type->width;
+            if (node->kind() == DFGOp::CONCAT) {
+                int total = 0;
+                for (const auto& part : node->concatParts()) {
+                    int w = self(self, part.node);
+                    if (w <= 0) return 0;
+                    total += w;
+                }
+                return total;
+            }
+            if (node->kind() == DFGOp::ADD || node->kind() == DFGOp::SUB ||
+                node->kind() == DFGOp::MUL ||
+                node->kind() == DFGOp::BITWISE_AND ||
+                node->kind() == DFGOp::BITWISE_OR ||
+                node->kind() == DFGOp::BITWISE_XOR ||
+                node->kind() == DFGOp::BITWISE_XNOR) {
+                auto inputs = node->binaryInputs();
+                int lw = self(self, inputs.lhs.node);
+                int rw = self(self, inputs.rhs.node);
+                if (lw <= 0 || rw <= 0) return 0;
+                return std::max(lw, rw);
+            }
+            if (node->kind() == DFGOp::SHL || node->kind() == DFGOp::SHR ||
+                node->kind() == DFGOp::ASR) {
+                return self(self, node->binaryInputs().lhs.node);
+            }
+            if (node->kind() == DFGOp::BITWISE_NOT ||
+                node->kind() == DFGOp::UNARY_NEGATE) {
+                return self(self, node->unaryInputs().operand.node);
+            }
+            if (node->kind() == DFGOp::EQ || node->kind() == DFGOp::LT ||
+                node->kind() == DFGOp::LE || node->kind() == DFGOp::GT ||
+                node->kind() == DFGOp::GE ||
+                node->kind() == DFGOp::REDUCTION_AND ||
+                node->kind() == DFGOp::REDUCTION_NAND ||
+                node->kind() == DFGOp::REDUCTION_OR ||
+                node->kind() == DFGOp::REDUCTION_NOR ||
+                node->kind() == DFGOp::REDUCTION_XOR ||
+                node->kind() == DFGOp::REDUCTION_XNOR) {
+                return 1;
+            }
+            if (node->kind() == DFGOp::MUX) {
+                int width = 0;
+                for (size_t i = 0; i < node->muxArmCount(); ++i) {
+                    int armWidth = self(self, node->muxArmData(i).node);
+                    if (armWidth <= 0) return 0;
+                    width = std::max(width, armWidth);
+                }
+                return width;
+            }
+            if (node->kind() == DFGOp::SIGNAL) {
+                auto drv = node->driver();
+                if (drv) return self(self, drv->node);
+            }
+            return 0;
+        };
+
+        int sourceWidth = computeKnownWidth(computeKnownWidth, inner.scalar);
+        if (sourceWidth <= 0) sourceWidth = inner.type.width;
+        if (inner.scalar->kind() == DFGOp::CONST) {
+            inner.scalar->type = castType;
+        } else if (sourceWidth > castType.width) {
+            auto* highNode = ctx.graph.constant(castType.width - 1);
+            auto* lowNode = ctx.graph.constant(0);
+            highNode->loc = loc;
+            lowNode->loc = loc;
+            auto* truncated = ctx.graph.slice(inner.scalar, highNode, lowNode);
+            truncated->type = castType;
+            truncated->loc = loc;
+            inner.scalar = truncated;
+        } else {
+            auto* cast = ctx.graph.placeholderSignal(inner.scalar->instance_path);
+            cast->type = castType;
+            if (inner.scalar->loc) cast->loc = inner.scalar->loc;
+            ctx.graph.connectDriver(cast, DFGOutput{inner.scalar, 0});
+            inner.scalar = cast;
+        }
+        inner.type = castType;
+        return inner;
     }
 
     // Compute the bit-width of a DFG node when it may not be typed yet.

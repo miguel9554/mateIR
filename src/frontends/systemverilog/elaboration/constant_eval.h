@@ -26,6 +26,17 @@ struct InvocationExpressionSyntax;
 
 namespace mate {
 
+struct CastTargetResolution {
+    enum class Kind {
+        NamedType,
+        Width,
+    };
+
+    Kind kind;
+    Type type;
+    int width = 0;
+};
+
 ConstantValue integerConstant(int64_t value);
 
 // TODO should be double? or parametrized by type.
@@ -66,6 +77,13 @@ std::optional<int64_t> staticBitsWidth(
     const ParameterContext& ctx,
     const PackageRegistry* pkgRegistry,
     const NamedTypeRegistry* namedTypeRegistry);
+
+CastTargetResolution resolveCastTarget(
+    const slang::syntax::SyntaxNode& castTargetSyntax,
+    const ParameterContext& ctx,
+    const PackageRegistry* pkgRegistry = nullptr,
+    const NamedTypeRegistry* namedTypeRegistry = nullptr,
+    const slang::SourceManager* sm = nullptr);
 
 // Evaluate a constant expression given a parameter context
 // Throws if a referenced parameter is not in the context

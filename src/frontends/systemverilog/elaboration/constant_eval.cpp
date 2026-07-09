@@ -174,6 +174,85 @@ ConstantValue lowerStringLiteralConstant(std::string_view text, const Type& expe
         expectedType, lowerFrontendStringLiteralToWords(text, expectedType.width));
 }
 
+std::optional<SourceLoc> constantExprLoc(const ExpressionSyntax* expr,
+                                         const slang::SourceManager* sm) {
+    if (!expr || !sm) return std::nullopt;
+    return resolveSourceLoc(*expr, *sm);
+}
+
+uint64_t maskToWidth(uint64_t value, int width) {
+    if (width <= 0 || width > 64) {
+        throw CompilerError("Constant concatenation item width is out of range");
+    }
+    if (width == 64) return value;
+    return value & ((uint64_t(1) << width) - 1);
+}
+
+template <typename ExpressionListT>
+int concatenationItemListWidth(const ExpressionListT& expressions,
+                               const slang::SourceManager* sm,
+                               const ParameterContext* paramCtx,
+                               const NamedTypeRegistry* namedTypeRegistry,
+                               const PackageRegistry* pkgRegistry) {
+    int width = 0;
+    for (const auto* item : expressions) {
+        const int itemWidth = constantExprWidth(
+            item, sm, paramCtx, namedTypeRegistry, pkgRegistry);
+        if (itemWidth <= 0) {
+            throw CompilerError("Constant concatenation item must have a positive width");
+        }
+        if (itemWidth > std::numeric_limits<int>::max() - width) {
+            throw CompilerError("Constant concatenation width exceeds supported range");
+        }
+        width += itemWidth;
+    }
+    return width;
+}
+
+int64_t multipleConcatenationRepeatCount(const MultipleConcatenationExpressionSyntax& multiConcat,
+                                         const ParameterContext& ctx,
+                                         const PackageRegistry* pkgRegistry,
+                                         const NamedTypeRegistry* namedTypeRegistry,
+                                         const slang::SourceManager* sm) {
+    const int64_t repeatCount = evaluateConstantExpr(
+        multiConcat.expression, ctx, pkgRegistry, namedTypeRegistry, sm);
+    if (repeatCount < 0) {
+        throw CompilerError(
+            "Constant multiple concatenation repeat count cannot be negative",
+            constantExprLoc(&multiConcat, sm));
+    }
+    if (repeatCount == 0) {
+        throw CompilerError(
+            "Constant multiple concatenation repeat count must be positive",
+            constantExprLoc(&multiConcat, sm));
+    }
+    return repeatCount;
+}
+
+template <typename ExpressionListT>
+uint64_t evaluateConcatenationToUint64(const ExpressionListT& expressions,
+                                       const ParameterContext& ctx,
+                                       const PackageRegistry* pkgRegistry,
+                                       const NamedTypeRegistry* namedTypeRegistry,
+                                       const slang::SourceManager* sm) {
+    uint64_t result = 0;
+    int resultWidth = 0;
+    for (const auto* item : expressions) {
+        const int itemWidth = constantExprWidth(item, sm, &ctx, namedTypeRegistry, pkgRegistry);
+        if (itemWidth > 64 || resultWidth > 64 - itemWidth) {
+            throw CompilerError("Constant concatenation does not fit in int64_t",
+                                constantExprLoc(item, sm));
+        }
+        const uint64_t itemValue = static_cast<uint64_t>(
+            evaluateConstantExpr(item, ctx, pkgRegistry, namedTypeRegistry, sm));
+        result = itemWidth == 64
+            ? itemValue
+            : (result << itemWidth) | maskToWidth(itemValue, itemWidth);
+        resultWidth += itemWidth;
+    }
+    return result;
+}
+
 }  // namespace
 
 IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionSyntax& vecExpr){
@@ -325,16 +404,25 @@ int constantExprWidth(const ExpressionSyntax* expr,
             return constantExprWidth(expr->as<ParenthesizedExpressionSyntax>().expression,
                                      sm, paramCtx, namedTypeRegistry, pkgRegistry);
         case SyntaxKind::ConcatenationExpression: {
-            int width = 0;
-            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
-                const int itemWidth = constantExprWidth(item, sm, paramCtx,
-                                                        namedTypeRegistry, pkgRegistry);
-                if (itemWidth > std::numeric_limits<int>::max() - width) {
-                    throw CompilerError("Constant concatenation width exceeds supported range");
-                }
-                width += itemWidth;
+            return concatenationItemListWidth(
+                expr->as<ConcatenationExpressionSyntax>().expressions,
+                sm, paramCtx, namedTypeRegistry, pkgRegistry);
+        }
+        case SyntaxKind::MultipleConcatenationExpression: {
+            if (!paramCtx) {
+                throw CompilerError("Cannot evaluate constant multiple concatenation width without parameter context",
+                                    loc);
             }
-            return width;
+            const auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
+            const int64_t repeatCount = multipleConcatenationRepeatCount(
+                multiConcat, *paramCtx, pkgRegistry, namedTypeRegistry, sm);
+            const int itemWidth = concatenationItemListWidth(
+                multiConcat.concatenation->expressions,
+                sm, paramCtx, namedTypeRegistry, pkgRegistry);
+            if (repeatCount > std::numeric_limits<int>::max() / itemWidth) {
+                throw CompilerError("Constant multiple concatenation width exceeds supported range", loc);
+            }
+            return static_cast<int>(repeatCount) * itemWidth;
         }
         case SyntaxKind::IdentifierName: {
             std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
@@ -567,22 +655,32 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
         }
 
         case SyntaxKind::ConcatenationExpression: {
+            return static_cast<int64_t>(evaluateConcatenationToUint64(
+                expr->as<ConcatenationExpressionSyntax>().expressions,
+                ctx, pkgRegistry, namedTypeRegistry, sm));
+        }
+
+        case SyntaxKind::MultipleConcatenationExpression: {
+            const auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
+            const int64_t repeatCount = multipleConcatenationRepeatCount(
+                multiConcat, ctx, pkgRegistry, namedTypeRegistry, sm);
             uint64_t result = 0;
             int resultWidth = 0;
-            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
-                const int itemWidth = constantExprWidth(item, sm, &ctx, namedTypeRegistry, pkgRegistry);
-                if (itemWidth > 64 || resultWidth > 64 - itemWidth) {
-                    throw CompilerError("Constant concatenation does not fit in int64_t");
+            for (int64_t i = 0; i < repeatCount; ++i) {
+                for (const auto* item : multiConcat.concatenation->expressions) {
+                    const int itemWidth = constantExprWidth(
+                        item, sm, &ctx, namedTypeRegistry, pkgRegistry);
+                    if (itemWidth > 64 || resultWidth > 64 - itemWidth) {
+                        throw CompilerError("Constant multiple concatenation does not fit in int64_t",
+                                            constantExprLoc(expr, sm));
+                    }
+                    const uint64_t itemValue = static_cast<uint64_t>(
+                        evaluateConstantExpr(item, ctx, pkgRegistry, namedTypeRegistry, sm));
+                    result = itemWidth == 64
+                        ? itemValue
+                        : (result << itemWidth) | maskToWidth(itemValue, itemWidth);
+                    resultWidth += itemWidth;
                 }
-                const uint64_t itemValue = static_cast<uint64_t>(
-                    evaluateConstantExpr(item, ctx, pkgRegistry, namedTypeRegistry, sm));
-                const uint64_t mask = itemWidth == 64
-                    ? UINT64_MAX
-                    : (uint64_t(1) << itemWidth) - 1;
-                result = itemWidth == 64
-                    ? itemValue
-                    : (result << itemWidth) | (itemValue & mask);
-                resultWidth += itemWidth;
             }
             return static_cast<int64_t>(result);
         }
@@ -887,6 +985,33 @@ ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
                 values.push_back(evaluateConstantValue(
                     item, Type::makeInteger(constantExprWidth(item, &sm, &ctx, namedTypeRegistry, &pkgRegistry), false),
                     ctx, pkgRegistry, namedTypeRegistry, sm));
+            }
+            return ConstantValue::concatenate(expectedType, values);
+        }
+        case SyntaxKind::MultipleConcatenationExpression: {
+            const auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
+            const int64_t repeatCount = multipleConcatenationRepeatCount(
+                multiConcat, ctx, &pkgRegistry, namedTypeRegistry, &sm);
+            std::vector<ConstantValue> values;
+            const size_t concatItemCount = multiConcat.concatenation->expressions.size();
+            if (concatItemCount == 0) {
+                throw CompilerError("Empty constant multiple concatenation",
+                                    resolveSourceLoc(*expr, sm));
+            }
+            const size_t repeatCountSize = static_cast<size_t>(repeatCount);
+            if (repeatCountSize > std::numeric_limits<size_t>::max() / concatItemCount) {
+                throw CompilerError("Constant multiple concatenation element count exceeds supported range",
+                                    resolveSourceLoc(*expr, sm));
+            }
+            values.reserve(repeatCountSize * concatItemCount);
+            for (int64_t i = 0; i < repeatCount; ++i) {
+                for (const auto* item : multiConcat.concatenation->expressions) {
+                    values.push_back(evaluateConstantValue(
+                        item,
+                        Type::makeInteger(
+                            constantExprWidth(item, &sm, &ctx, namedTypeRegistry, &pkgRegistry), false),
+                        ctx, pkgRegistry, namedTypeRegistry, sm));
+                }
             }
             return ConstantValue::concatenate(expectedType, values);
         }

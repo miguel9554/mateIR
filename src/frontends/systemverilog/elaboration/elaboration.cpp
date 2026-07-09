@@ -1644,6 +1644,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     Type dynamicBitTargetType;
 
     bool hasDynamicRangeSelect = false;
+    bool dynamicRangeIsAscending = true;
     DFGNode* dynamicRangeBaseNode = nullptr;
     int64_t dynamicRangeWidth = 0;
     Type dynamicRangeTargetType;
@@ -1730,8 +1731,12 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                         resolveSourceLoc(assignExpr, ctx.sm));
                 }
                 hasRangeSelect = true;
-            } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
+            } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect ||
+                       elemSelect->selector->kind == SyntaxKind::DescendingRangeSelect) {
                 // base +: width → high = base + width - 1, low = base
+                // base -: width → high = base, low = base - width + 1
+                const bool isAscending =
+                    elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect;
                 const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                 try {
                     int64_t base  = evaluateConstantExpr(rangeSelect.left, ctx.params,
@@ -1740,8 +1745,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                     int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
                                                          ctx.sm, *rangeSelect.right,
                                                          &ctx.pkgRegistry, &ctx.namedTypeRegistry);
-                    rangeLow  = base;
-                    rangeHigh = base + width - 1;
+                    rangeLow  = isAscending ? base : base - width + 1;
+                    rangeHigh = isAscending ? base + width - 1 : base;
                     hasRangeSelect = true;
                 } catch (const std::runtime_error&) {
                     // Dynamic base: lower to per-bit muxes over the previous
@@ -1753,44 +1758,45 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                                                      &ctx.pkgRegistry, &ctx.namedTypeRegistry);
                     } catch (const std::runtime_error&) {
                         throw CompilerError(
-                            "Dynamic ascending range on LHS requires a constant width: " + baseName,
+                            "Dynamic range on LHS requires a constant width: " + baseName,
                             resolveSourceLoc(assignExpr, ctx.sm));
                     }
                     if (!currentSelectedType || currentSelectedType->isStruct() ||
                         !currentSelectedType->unpacked_dims.empty() ||
                         currentSelectedType->packed_dims.empty()) {
                         throw CompilerError(
-                            "Dynamic ascending range on LHS only supported on packed integer targets: " + baseName,
+                            "Dynamic range on LHS only supported on packed integer targets: " + baseName,
                             resolveSourceLoc(assignExpr, ctx.sm));
                     }
                     if (packedSuffixWidth(*currentSelectedType, 1) != 1) {
                         throw CompilerError(
-                            "Dynamic ascending range on LHS only supported for single-bit elements: " + baseName,
+                            "Dynamic range on LHS only supported for single-bit elements: " + baseName,
                             resolveSourceLoc(assignExpr, ctx.sm));
                     }
                     if (hasRangeSelect) {
                         throw CompilerError(
-                            "Dynamic ascending range on LHS after a static range select is not supported: " + baseName,
+                            "Dynamic range on LHS after a static range select is not supported: " + baseName,
                             resolveSourceLoc(assignExpr, ctx.sm));
                     }
                     if (elemSelect != selectors.back()) {
                         throw CompilerError(
-                            "Dynamic ascending range on LHS must be the last selector: " + baseName,
+                            "Dynamic range on LHS must be the last selector: " + baseName,
                             resolveSourceLoc(assignExpr, ctx.sm));
                     }
                     if (width <= 0 || width > currentSelectedType->width) {
                         throw CompilerError(
-                            std::format("Dynamic ascending range on LHS has invalid width {} for {}-bit target: {}",
+                            std::format("Dynamic range on LHS has invalid width {} for {}-bit target: {}",
                                         width, currentSelectedType->width, baseName),
                             resolveSourceLoc(assignExpr, ctx.sm));
                     }
                     const auto& dim = currentSelectedType->packed_dims.front();
                     if (dim.left < dim.right) {
                         throw CompilerError(
-                            "Dynamic ascending range on LHS not supported for ascending packed dimensions: " + baseName,
+                            "Dynamic range on LHS not supported for ascending packed dimensions: " + baseName,
                             resolveSourceLoc(assignExpr, ctx.sm));
                     }
                     hasDynamicRangeSelect = true;
+                    dynamicRangeIsAscending = isAscending;
                     dynamicRangeWidth = width;
                     dynamicRangeTargetType = *currentSelectedType;
                     dynamicRangeBaseNode = buildExprDFG(rangeSelect.left, ctx);
@@ -2032,12 +2038,12 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         return;
     }
 
-    // Dynamic ascending part-select on LHS: target[base +: width] = rhs.
-    // Per target bit i: selected_i = (i >= base) && (i < base + width);
-    // when selected, bit i takes (rhs << base)[i], otherwise it keeps the
-    // previous value. The full-width result goes through the canonical
-    // partial-write machinery so conflict detection and branch merging stay
-    // centralized.
+    // Dynamic part-select on LHS: target[base +: width] = rhs or
+    // target[base -: width] = rhs.
+    // Per target bit i: selected_i = (i inside the selected window);
+    // when selected, bit i takes the RHS bit shifted into position,
+    // otherwise it keeps the previous value. The result covers the whole
+    // target, so it is committed as an ordinary whole-target write.
     if (hasDynamicRangeSelect) {
         if (!memberSuffix.empty()) {
             throw CompilerError(
@@ -2061,40 +2067,63 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         const int64_t totalWidth = dynamicRangeTargetType.width;
         const Type bitType = Type::makeInteger(1, false);
 
-        // Zero-extend the RHS to the full target width and shift it into
-        // position once, so per-bit new values are static slices.
+        // Zero-extend the RHS with headroom of width-1 bits above the target
+        // so a descending select (window low = base - width + 1, possibly
+        // negative) can shift left by base and back right by width-1 without
+        // losing top bits. Shift once, so per-bit new values are static
+        // slices.
+        const int64_t extWidth = totalWidth + dynamicRangeWidth - 1;
         DFGNode* wideValue = RHSexprNode;
-        if (dynamicRangeWidth < totalWidth) {
+        if (dynamicRangeWidth < extWidth) {
             auto* padNode = ctx.graph.constant(0);
             padNode->type = Type::makeInteger(
-                static_cast<int>(totalWidth - dynamicRangeWidth), false);
+                static_cast<int>(extWidth - dynamicRangeWidth), false);
             padNode->loc = assignLoc;
             wideValue = ctx.graph.concat(std::vector<DFGNode*>{padNode, RHSexprNode});
-            wideValue->type = Type::makeInteger(static_cast<int>(totalWidth), false);
+            wideValue->type = Type::makeInteger(static_cast<int>(extWidth), false);
             wideValue->loc = assignLoc;
         }
-        auto* shifted = ctx.graph.shl(wideValue, dynamicRangeBaseNode);
-        shifted->type = Type::makeInteger(static_cast<int>(totalWidth), false);
+        DFGNode* shifted = ctx.graph.shl(wideValue, dynamicRangeBaseNode);
+        shifted->type = Type::makeInteger(static_cast<int>(extWidth), false);
         shifted->loc = assignLoc;
+        if (!dynamicRangeIsAscending && dynamicRangeWidth > 1) {
+            shifted = ctx.graph.shr(shifted, ctx.graph.constant(dynamicRangeWidth - 1));
+            shifted->type = Type::makeInteger(static_cast<int>(extWidth), false);
+            shifted->loc = assignLoc;
+        }
 
-        auto* windowEnd = ctx.graph.add(
-            dynamicRangeBaseNode, ctx.graph.constant(dynamicRangeWidth));
-        windowEnd->loc = assignLoc;
+        DFGNode* windowEnd = nullptr;
+        if (dynamicRangeIsAscending) {
+            windowEnd = ctx.graph.add(
+                dynamicRangeBaseNode, ctx.graph.constant(dynamicRangeWidth));
+            windowEnd->loc = assignLoc;
+        }
 
         // Per-bit muxes, assembled MSB-first. Out-of-range selected lanes
-        // simply have no mux arm and retain their previous value.
+        // simply have no mux arm and therefore retain their previous value.
         std::vector<DFGNode*> parts;
         parts.reserve(static_cast<size_t>(totalWidth));
         for (int64_t i = totalWidth - 1; i >= 0; --i) {
             auto* idxConst = ctx.graph.constant(i);
 
-            auto* geBase = ctx.graph.ge(idxConst, dynamicRangeBaseNode);
-            geBase->type = bitType;
-            geBase->loc = assignLoc;
-            auto* ltEnd = ctx.graph.lt(idxConst, windowEnd);
-            ltEnd->type = bitType;
-            ltEnd->loc = assignLoc;
-            auto* selected = ctx.graph.binaryOp(DFGOp::BITWISE_AND, geBase, ltEnd);
+            // Ascending window is [base, base + width);
+            // descending window is (base - width, base], phrased without
+            // negative intermediates as base >= i && base < i + width.
+            DFGNode* condA = nullptr;
+            DFGNode* condB = nullptr;
+            if (dynamicRangeIsAscending) {
+                condA = ctx.graph.ge(idxConst, dynamicRangeBaseNode);
+                condB = ctx.graph.lt(idxConst, windowEnd);
+            } else {
+                condA = ctx.graph.ge(dynamicRangeBaseNode, idxConst);
+                condB = ctx.graph.lt(dynamicRangeBaseNode,
+                                     ctx.graph.constant(i + dynamicRangeWidth));
+            }
+            condA->type = bitType;
+            condA->loc = assignLoc;
+            condB->type = bitType;
+            condB->loc = assignLoc;
+            auto* selected = ctx.graph.binaryOp(DFGOp::BITWISE_AND, condA, condB);
             selected->type = bitType;
             selected->loc = assignLoc;
 
@@ -2114,11 +2143,13 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         result->type = dynamicRangeTargetType;
         result->loc = assignLoc;
 
-        writePartialTargetSlice(ctx, outputName, totalWidth - 1, 0, result, assignLoc);
+        // The result covers every bit of the target, so it is a whole-target
+        // write: writeTarget keeps multi-driver conflict detection and any
+        // live partial-slice state centralized, and branch merging sees an
+        // ordinary whole driver.
+        writeTarget(outputName, result);
 
-        if (!ctx.is_sequential) {
-            if (auto* driver = envDriver(ctx, outputName)) ctx.combDrivers[outputName] = driver;
-        } else {
+        if (ctx.is_sequential) {
             recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
         }
         return;

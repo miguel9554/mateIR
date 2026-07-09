@@ -1,7 +1,9 @@
-module uut_tb(
+module uut_tb
+(
     uut_if.master _if
 );
-    logic [7:0] cycle;
+    logic [127-1:0] _lfsr;
+    lfsr#(128) _lfsr_gen = new(128'h1);
 
     initial begin
         _if.clk = 1'b0;
@@ -21,13 +23,10 @@ module uut_tb(
 
     always @(posedge _if.clk) begin
         if (!_if.rst_n) begin
-            cycle <= 8'h00;
-            _if.lane <= 2'd0;
-            _if.data <= 8'h00;
+            {_if.lane, _if.lane3, _if.sel, _if.data, _if.data_narrow, _if.data_wide, _if.data16} <= '0;
         end else begin
-            cycle <= cycle + 8'h1;
-            _if.lane <= cycle[1:0];
-            _if.data <= (cycle * 8'h13) ^ 8'h5A;
+            _lfsr <= _lfsr_gen.get_next();
+            {_if.lane, _if.lane3, _if.sel, _if.data, _if.data_narrow, _if.data_wide, _if.data16} <= _lfsr;
         end
     end
 endmodule

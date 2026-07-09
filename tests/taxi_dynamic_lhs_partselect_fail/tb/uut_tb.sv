@@ -11,7 +11,7 @@ module uut_tb
     end
 
     initial begin
-        _i8.rst_n = 1'b1;
+        _if.rst_n = 1'b1;
         #1 _if.rst_n = 1'b0;
         #14 _if.rst_n = 1'b1;
     end

@@ -64,9 +64,9 @@ module taxi_dynamic_lhs_partselect_fail (
     always_comb begin
         wide_next = 64'h0;
         case (sel)
-            2'b00: wide_next[lane3 * 8 -: 8] = data;
-            2'b01: wide_next[lane3 * 8 -: 8] = data16;
-            2'b10: wide_next[lane3 * 8 -: 8] = data_wide;
+            2'b00: wide_next[lane3 * 8 + 7 -: 8] = data;
+            2'b01: wide_next[lane3 * 8 + 7 -: 8] = data16;
+            2'b10: wide_next[lane3 * 8 + 7 -: 8] = data_wide;
             // 2'b11 intentionally unspecified -> falls through to the
             // 64'h0 default above, no latch inferred.
         endcase
@@ -79,7 +79,7 @@ module taxi_dynamic_lhs_partselect_fail (
     always_comb begin
         narrow_next = 16'h0;
         casez (sel)
-            2'b0?: narrow_next[lane[0] * 8 +: 8] = data_wide[lane3 * 4 +: 8];
+            2'b0?: narrow_next[lane[0] * 8 +: 8] = data_wide[lane3[1:0] * 8 +: 8];
             2'b1?: narrow_next[lane[0] * 8 +: 8] = data_wide[7:0];
         endcase
     end
@@ -144,8 +144,8 @@ module taxi_dynamic_lhs_partselect_fail (
             case (sel)
                 2'b00: packed_q[lane  * 8 +: 8] <= data;
                 2'b01: packed_q[lane  * 8 +: 8] <= data_wide;
-                2'b10: packed_q[lane3 * 4 -: 4] <= data_narrow;
-                default: packed_q[lane3 * 4 -: 4] <= data16[3:0];
+                2'b10: packed_q[lane3 * 4 + 3 -: 4] <= data_narrow;
+                default: packed_q[lane3 * 4 + 3 -: 4] <= data16[3:0];
             endcase
         end
     end
@@ -184,7 +184,7 @@ module taxi_dynamic_lhs_partselect_fail (
                 packed3b_q[lane * 8 +: 8] <= packed3b_next[lane * 8 +: 8];
             end
             if (lane[0]) begin
-                packed3b_q[lane3 * 4 -: 4] <= data16[3:0];
+                packed3b_q[lane3 * 4 + 3 -: 4] <= data16[3:0];
             end
         end
     end

@@ -87,6 +87,10 @@ package tb_pkg;
                  total_sim * US_PER_S, total_real, speed);
     endfunction
 
+// Keep the parameterized class out of the VCD: Verilator emits its
+// specialization as a '$scope module tb_pkg::lfsr__...' entry, and the
+// '::' in that scope name breaks the vcd-compare parser.
+/* verilator tracing_off */
 class lfsr #(int unsigned WIDTH = 64);
 
     typedef logic [WIDTH-1:0] value_t;
@@ -95,16 +99,29 @@ class lfsr #(int unsigned WIDTH = 64);
     value_t tap_mask;
 
     function new(value_t seed);
-        state = seed;
+        int rng;
 
-        if (state == '0) begin
+        if (seed == '0) begin
             $fatal(1, "LFSR seed cannot be zero");
         end
 
+        // Densify: a sparse seed (e.g. 'h1) with the high-bit tap masks below
+        // would degenerate into a plain shift register for the first ~WIDTH
+        // cycles. Spread the seed over the whole state with deterministic
+        // $random draws so stimulus is dense from cycle 1.
+        rng = int'(seed[31:0]) ^ int'(seed >> 32) ^ int'(seed >> 64) ^ int'(seed >> 96);
+        state = '0;
+        for (int unsigned i = 0; i < (WIDTH + 31) / 32; i++) begin
+            state = value_t'({state, $random(rng)});
+        end
+        if (state == '0) begin
+            state = value_t'(1);
+        end
+
         case (WIDTH)
-            32:  tap_mask = 32'h8020_0003;
-            64:  tap_mask = 64'hD800_0000_0000_0000;
-            128: tap_mask = 128'hA000_0014_0000_0000_0000_0000_0000_0000;
+            32:  tap_mask = value_t'(32'h8020_0003);
+            64:  tap_mask = value_t'(64'hD800_0000_0000_0000);
+            128: tap_mask = value_t'(128'hA000_0014_0000_0000_0000_0000_0000_0000);
             default: begin
                 $fatal(1, "Unsupported LFSR width: %0d", WIDTH);
             end
@@ -125,4 +142,5 @@ class lfsr #(int unsigned WIDTH = 64);
     endfunction
 
 endclass
+/* verilator tracing_on */
 endpackage

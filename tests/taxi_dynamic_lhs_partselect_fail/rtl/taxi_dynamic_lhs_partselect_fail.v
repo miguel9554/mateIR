@@ -1,3 +1,7 @@
+// Incomplete cases and width-mismatched RHS values on dynamic part-selects
+// are intentional coverage in this test.
+/* verilator lint_off CASEINCOMPLETE */
+/* verilator lint_off WIDTHEXPAND */
 module taxi_dynamic_lhs_partselect_fail (
     input  logic        clk,
     input  logic        rst_n,

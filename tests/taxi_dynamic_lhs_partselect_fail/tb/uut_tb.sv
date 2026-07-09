@@ -2,8 +2,8 @@ module uut_tb
 (
     uut_if.master _if
 );
-    logic [127-1:0] _lfsr;
-    lfsr#(128) _lfsr_gen = new(128'h1);
+    logic [128-1:0] _lfsr;
+    tb_pkg::lfsr#(128) _lfsr_gen = new(128'h1);
 
     initial begin
         _if.clk = 1'b0;
@@ -11,7 +11,7 @@ module uut_tb
     end
 
     initial begin
-        _if.rst_n = 1'b1;
+        _i8.rst_n = 1'b1;
         #1 _if.rst_n = 1'b0;
         #14 _if.rst_n = 1'b1;
     end

@@ -1,5 +1,0 @@
-module_name: taxi_clockless_dpi_top_fail
-
-async_domain:
-  - a
-  - b

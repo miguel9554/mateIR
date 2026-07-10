@@ -1,4 +1,4 @@
-module_name: taxi_partial_modport_fail
+module_name: iface_array
 
 resets:
   rst_n:
@@ -8,4 +8,6 @@ clock_domains:
   clk:
     polarity: posedge
     inputs_outputs:
-      - awready
+      - in_a
+      - in_b
+      - sel

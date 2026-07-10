@@ -96,14 +96,11 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
                         std::string(ifaceHeader.nameOrKeyword.valueText()) +
                         ".<modport> " + portName + ")");
                 }
-                if (port.declarator->dimensions.size() != 0) {
-                    throw CompilerError(
-                        "Arrays of interface ports are not supported: " + portName);
-                }
                 info.interfacePorts.push_back(UnresolvedInterfacePort{
                     .port_name = portName,
                     .interface_name = std::string(ifaceHeader.nameOrKeyword.valueText()),
                     .modport_name = std::string(ifaceHeader.modport->member.valueText()),
+                    .dimensions = {&(port.declarator->dimensions)},
                 });
             }
             else if (port.header->kind == SyntaxKind::VariablePortHeader) {

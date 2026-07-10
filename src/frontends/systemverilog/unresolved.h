@@ -121,6 +121,7 @@ struct UnresolvedInterfacePort {
     std::string port_name;
     std::string interface_name;
     std::string modport_name;
+    UnresolvedDimension dimensions;
 };
 
 // ============================================================================

@@ -42,9 +42,27 @@ using namespace slang::syntax;
 
 namespace mate {
 
-
-
-
+static ModuleNode resolveInterfaceMemberNode(
+        const std::string& qualifiedName,
+        const UnresolvedSignal& sig,
+        const std::vector<Dimension>& interfaceDims,
+        const ParameterContext& ifaceCtx,
+        const NamedTypeRegistry& namedTypeRegistry,
+        const PackageRegistry* pkgRegistry,
+        const slang::SourceManager* sourceManager) {
+    UnresolvedSignal qualified{
+        .name = qualifiedName,
+        .type = sig.type,
+        .dimensions = sig.dimensions,
+    };
+    ModuleNode node = resolveModuleNode(
+        qualified, ifaceCtx, namedTypeRegistry, pkgRegistry, sourceManager);
+    if (!interfaceDims.empty()) {
+        node.type.unpacked_dims.insert(
+            node.type.unpacked_dims.begin(), interfaceDims.begin(), interfaceDims.end());
+    }
+    return node;
+}
 
 // ============================================================================
 // Resolution functions
@@ -1522,8 +1540,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     // false when baseName is not an interface port/instance.
     auto foldIfaceMember = [&](std::string& baseName,
                                const std::string& memberName) -> bool {
-        if (!memberSuffix.empty() || !selectors.empty() ||
-                !isIfaceBaseName(ctx, baseName)) {
+        if (!memberSuffix.empty() || !isIfaceBaseName(ctx, baseName)) {
             return false;
         }
         if (ctx.is_sequential) {
@@ -3335,6 +3352,11 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         IfacePortView view;
         view.interface_name = ip.interface_name;
         view.modport_name = ip.modport_name;
+        if (ip.dimensions.syntax && !ip.dimensions.syntax->empty()) {
+            view.dimensions = ResolveDimensions(*ip.dimensions.syntax, *mergedCtx,
+                                                &pkgRegistry, &sourceManager,
+                                                &namedTypeRegistry);
+        }
 
         for (const auto& p : idef.parameters) {
             const std::string qname = ip.port_name + "." + p.name;
@@ -3348,13 +3370,9 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
 
         auto addMember = [&](const UnresolvedSignal& sig, bool isOutput) {
-            UnresolvedSignal qualified{
-                .name = ip.port_name + "." + sig.name,
-                .type = sig.type,
-                .dimensions = sig.dimensions,
-            };
-            ModuleNode node = resolveModuleNode(
-                qualified, ifaceCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
+            ModuleNode node = resolveInterfaceMemberNode(
+                ip.port_name + "." + sig.name, sig, view.dimensions, ifaceCtx,
+                namedTypeRegistry, &pkgRegistry, &sourceManager);
             if (isOutput) addOutputNode(resolved, node);
             else addInputNode(resolved, node);
             view.member_is_output[sig.name] = isOutput;
@@ -3566,11 +3584,6 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                     resolveSourceLoc(*inst, sourceManager));
             }
             std::string instName(inst->decl->name.valueText());
-            if (inst->decl->dimensions.size() != 0) {
-                throw CompilerError(
-                    "Arrays of interface instances are not supported: " + instName,
-                    resolveSourceLoc(*inst, sourceManager));
-            }
             if (ifaceInstanceViews.contains(instName)) {
                 throw CompilerError(
                     "Duplicate interface instance name: " + instName,
@@ -3581,6 +3594,11 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
             IfaceInstanceView view;
             view.interface_name = typeName;
+            if (!inst->decl->dimensions.empty()) {
+                view.dimensions = ResolveDimensions(inst->decl->dimensions, *mergedCtx,
+                                                    &pkgRegistry, &sourceManager,
+                                                    &namedTypeRegistry);
+            }
             for (const auto& [pname, value] : ifaceCtx.values) {
                 view.param_values.emplace(pname, value);
             }
@@ -3596,13 +3614,9 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
             }
 
             auto addMember = [&](const UnresolvedSignal& sig) {
-                UnresolvedSignal qualified{
-                    .name = instName + "." + sig.name,
-                    .type = sig.type,
-                    .dimensions = sig.dimensions,
-                };
-                addInternalNode(resolved, resolveModuleNode(
-                    qualified, ifaceCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+                addInternalNode(resolved, resolveInterfaceMemberNode(
+                    instName + "." + sig.name, sig, view.dimensions, ifaceCtx,
+                    namedTypeRegistry, &pkgRegistry, &sourceManager));
                 view.member_names.insert(sig.name);
             };
             for (const auto& sig : idef.input_ports)  addMember(sig);

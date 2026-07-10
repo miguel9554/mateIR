@@ -67,6 +67,7 @@ using PartialDriverMap = std::unordered_map<std::string, PartialTargetState>;
 struct IfacePortView {
     std::string interface_name;
     std::string modport_name;
+    std::vector<Dimension> dimensions;
     // member base name -> true if this module drives it (modport output).
     // Interface input ports (e.g. clk) appear as is_output=false.
     std::map<std::string, bool> member_is_output;
@@ -76,6 +77,7 @@ struct IfacePortView {
 // Members become internal ModuleNodes named "<instance>.<member>".
 struct IfaceInstanceView {
     std::string interface_name;
+    std::vector<Dimension> dimensions;
     // interface parameter name (unqualified) -> resolved value
     std::map<std::string, ConstantValue> param_values;
     std::set<std::string> member_names;

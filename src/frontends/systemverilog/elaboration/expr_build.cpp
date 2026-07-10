@@ -1467,6 +1467,50 @@ ExprValue buildExprValue(
                     loc, ctx);
             }
         }
+        if (member.left->kind == SyntaxKind::IdentifierSelectName) {
+            const auto& name = member.left->as<IdentifierSelectNameSyntax>();
+            std::string baseName(name.identifier.valueText());
+            if (isIfaceBaseName(ctx, baseName)) {
+                auto loc = resolveSourceLoc(*expr, ctx.sm);
+                ExprValue value = exprValueFromIdentifier(
+                    resolveIfaceMemberName(
+                        ctx, baseName, std::string(member.name.valueText()), loc),
+                    loc, ctx);
+                for (const auto& elemSelect : name.selectors) {
+                    if (!elemSelect->selector) {
+                        throw CompilerError("Empty selector not allowed.", loc);
+                    }
+                    value = applySelector(value, *elemSelect->selector, ctx, loc);
+                }
+                return value;
+            }
+        }
+        if (member.left->kind == SyntaxKind::ElementSelectExpression) {
+            std::vector<const ElementSelectSyntax*> selectors;
+            const ExpressionSyntax* baseExpr = member.left;
+            while (baseExpr->kind == SyntaxKind::ElementSelectExpression) {
+                const auto& selectExpr = baseExpr->as<ElementSelectExpressionSyntax>();
+                selectors.push_back(selectExpr.select);
+                baseExpr = selectExpr.left;
+            }
+            if (baseExpr->kind == SyntaxKind::IdentifierName) {
+                std::string baseName(baseExpr->as<IdentifierNameSyntax>().identifier.valueText());
+                if (isIfaceBaseName(ctx, baseName)) {
+                    auto loc = resolveSourceLoc(*expr, ctx.sm);
+                    ExprValue value = exprValueFromIdentifier(
+                        resolveIfaceMemberName(
+                            ctx, baseName, std::string(member.name.valueText()), loc),
+                        loc, ctx);
+                    for (auto it = selectors.rbegin(); it != selectors.rend(); ++it) {
+                        if (!(*it)->selector) {
+                            throw CompilerError("Empty selector not allowed.", loc);
+                        }
+                        value = applySelector(value, *(*it)->selector, ctx, loc);
+                    }
+                    return value;
+                }
+            }
+        }
         ExprValue base = buildExprValue(member.left, ctx);
         return selectStructField(base, std::string(member.name.valueText()), resolveSourceLoc(*expr, ctx.sm));
     }
@@ -1498,6 +1542,41 @@ ExprValue buildExprValue(
                     }
                     ExprValue value = exprValueFromIdentifier(
                         resolveIfaceMemberName(ctx, baseName, memberName, loc), loc, ctx);
+                    if (scoped.right->kind == SyntaxKind::IdentifierSelectName) {
+                        const auto& name = scoped.right->as<IdentifierSelectNameSyntax>();
+                        for (const auto& elemSelect : name.selectors) {
+                            if (!elemSelect->selector) {
+                                throw CompilerError("Empty selector not allowed.", loc);
+                            }
+                            value = applySelector(value, *elemSelect->selector, ctx, loc);
+                        }
+                    }
+                    return value;
+                }
+            }
+            if (scoped.left->kind == SyntaxKind::IdentifierSelectName) {
+                const auto& leftName = scoped.left->as<IdentifierSelectNameSyntax>();
+                std::string baseName(leftName.identifier.valueText());
+                if (isIfaceBaseName(ctx, baseName)) {
+                    auto loc = resolveSourceLoc(*expr, ctx.sm);
+                    std::string memberName;
+                    if (scoped.right->kind == SyntaxKind::IdentifierName) {
+                        memberName = std::string(
+                            scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+                    } else if (scoped.right->kind == SyntaxKind::IdentifierSelectName) {
+                        memberName = std::string(
+                            scoped.right->as<IdentifierSelectNameSyntax>().identifier.valueText());
+                    } else {
+                        throw CompilerError("Unsupported interface member selector", loc);
+                    }
+                    ExprValue value = exprValueFromIdentifier(
+                        resolveIfaceMemberName(ctx, baseName, memberName, loc), loc, ctx);
+                    for (const auto& elemSelect : leftName.selectors) {
+                        if (!elemSelect->selector) {
+                            throw CompilerError("Empty selector not allowed.", loc);
+                        }
+                        value = applySelector(value, *elemSelect->selector, ctx, loc);
+                    }
                     if (scoped.right->kind == SyntaxKind::IdentifierSelectName) {
                         const auto& name = scoped.right->as<IdentifierSelectNameSyntax>();
                         for (const auto& elemSelect : name.selectors) {

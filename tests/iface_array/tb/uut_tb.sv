@@ -1,8 +1,6 @@
 module uut_tb(
     uut_if.master _if
 );
-    logic [7:0] cycle;
-
     initial begin
         _if.clk = 1'b0;
         forever #5 _if.clk = ~_if.clk;
@@ -11,7 +9,7 @@ module uut_tb(
     initial begin
         _if.rst_n = 1'b1;
         #1 _if.rst_n = 1'b0;
-        #14 _if.rst_n = 1'b1;
+        #12 _if.rst_n = 1'b1;
     end
 
     initial begin
@@ -21,11 +19,13 @@ module uut_tb(
 
     always @(posedge _if.clk) begin
         if (!_if.rst_n) begin
-            cycle <= 8'h00;
-            _if.awready <= 1'b0;
+            _if.in_a <= 8'h0;
+            _if.in_b <= 8'h0;
+            _if.sel  <= 1'b0;
         end else begin
-            cycle <= cycle + 8'h1;
-            _if.awready <= cycle[0] ^ cycle[3];
+            _if.in_a <= _if.in_a + 8'h7;
+            _if.in_b <= _if.in_b + 8'h3;
+            _if.sel  <= ~_if.sel;
         end
     end
 endmodule

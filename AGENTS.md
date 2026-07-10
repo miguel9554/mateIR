@@ -60,31 +60,30 @@ Build:
 - `make debug`
 
 Per-test:
-- `make -C tests/<name>/work/validate validate`
+- `make -C tests/<name>/work/verilator simulate DPI=1` (Verilator vs DPI model)
 - `make -C tests/<name>/work/static analyze`
-- `make -C tests/<name>/work/custom-sim simulate`
+- Manual-only (not run by regression): the legacy vector-sim path via
+  `make -C tests/<name>/work/validate validate` and
+  `make -C tests/<name>/work/custom-sim simulate`
 
 Regression uses:
 - `python tests/regression.py`
 - `tests/check_dfg_api_surface.py`
 - `tests/check_module_node_api_surface.py`
 
-Regression has two mutually exclusive `--mode` values for PASS tests
-(`--mode` default is `validate`):
-- `validate` (default): runs `make validate` in `tests/<name>/work/validate`,
-  the custom vector-based simulator compared against a VCD reference. Judged
-  by the `make` process exit code.
-- `verilator-dpi`: runs `make simulate DPI=1` in `tests/<name>/work/verilator`,
-  which builds the generated native DPI model and compares it against
-  Verilator/RTL. Only applies to tests that have a `work/verilator` dir;
-  others are skipped in this mode. The DPI checker's mismatch signal is a
-  `$fatal(1)` inside a `final` block, which does not set a non-zero process
-  exit code, so pass/fail is judged by scanning stdout/stderr for the
-  `PASS: 100% match` sentinel (or a `DPI and RTL mismatched` line), not the
-  `make` return code.
+Regression is DPI-only: every PASS test runs `make simulate DPI=1` in
+`tests/<name>/work/verilator`, which builds the generated native DPI model and
+compares it against Verilator/RTL. The DPI checker's mismatch signal is a
+`$fatal(1)` inside a `final` block, which does not set a non-zero process
+exit code, so pass/fail is judged by scanning stdout/stderr for the
+`PASS: 100% match` sentinel (or a `DPI and RTL mismatched` line), not the
+`make` return code. FAIL tests run a plain `mate` compile and match the
+expected error substring.
 
-`make regression` was removed; run `python tests/regression.py` directly
-(add `--mode verilator-dpi` for the DPI path).
+`--build sanitized` (default `dev`) runs the whole regression — mate, the
+generated DPI model, and the final Verilator link — under ASan/UBSan.
+
+`make regression` was removed; run `python tests/regression.py` directly.
 
 ## Important files
 

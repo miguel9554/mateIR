@@ -21,6 +21,10 @@ struct DpiLibLinkConfig {
     // Static libraries whose object members get folded into out_lib
     // alongside the freshly compiled DPI/model objects.
     std::vector<std::filesystem::path> link_libs;
+    // Extra flags appended to every compile command (e.g. sanitizer flags).
+    // The final executable link must use matching flags; folded-in link_libs
+    // must come from a matching build.
+    std::vector<std::string> extra_cxx_flags;
     std::string cxx = "c++";
     std::string ar = "ar";
 };

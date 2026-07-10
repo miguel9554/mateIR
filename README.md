@@ -1,4 +1,4 @@
-# Mate
+# 🧉 Mate IR
 
 Mate is an IR and compiler stack for synchronous hardware. Its core
 representation, `MateIR`, models RTL as hardware structure rather than as an
@@ -219,16 +219,18 @@ bash scripts/build_slang.sh
 
 ## Regression
 
-Run the default regression:
+Run the regression (Verilator vs generated DPI model for PASS tests, plain
+`mate` compile for FAIL tests):
 
 ```bash
 scripts/docker-run.sh python tests/regression.py
 ```
 
-Run the Verilator DPI regression:
+Run it under ASan/UBSan (mate, the generated DPI model, and the Verilator
+link are all sanitized):
 
 ```bash
-scripts/docker-run.sh python tests/regression.py --mode verilator-dpi
+scripts/docker-run.sh python tests/regression.py --build sanitized
 ```
 
 Additional API-surface checks:

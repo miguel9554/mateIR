@@ -7,7 +7,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -24,8 +23,6 @@ GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"
 
-RUN_MODE_VALIDATE = "validate"
-RUN_MODE_VERILATOR_DPI = "verilator-dpi"
 LOGS_ROOT = REPO_ROOT / "test-results" / "regression"
 
 
@@ -70,11 +67,11 @@ def load_test_cases():
         if expected == "PASS":
             if len(parts) != 2:
                 raise RuntimeError(f"{MANIFEST}:{lineno}: PASS entries cannot include extra fields")
-            if not (test_dir / "work" / "validate" / "Makefile").exists():
+            if not (test_dir / "work" / "verilator" / "Makefile").exists():
                 raise RuntimeError(
-                    f"{MANIFEST}:{lineno}: PASS test '{name}' is missing work/validate/Makefile"
+                    f"{MANIFEST}:{lineno}: PASS test '{name}' is missing work/verilator/Makefile"
                 )
-            cases.append({"name": name, "kind": "validate"})
+            cases.append({"name": name, "kind": "simulate"})
         else:
             if len(parts) != 3 or not parts[2].strip():
                 raise RuntimeError(
@@ -107,36 +104,12 @@ def filter_cases_by_name(cases, names):
     return selected
 
 
-def select_cases_for_mode(cases, run_mode):
-    """Return the cases that can be run by the requested mode.
-
-    Every PASS ("validate"-kind) test must be runnable under both modes: there
-    is no per-test opt-out. A test is only excluded from verilator-dpi mode if
-    it has no work/verilator directory at all (no DPI harness exists yet).
-    """
-    if run_mode == RUN_MODE_VALIDATE:
-        return cases
-    if run_mode != RUN_MODE_VERILATOR_DPI:
-        raise RuntimeError(f"unknown run mode '{run_mode}'")
-    return [
-        case
-        for case in cases
-        if case["kind"] != "validate"
-        or (TESTS_DIR / case["name"] / "work" / "verilator").is_dir()
-    ]
-
-
-def run_clean(name, run_mode):
-    """Run make clean for a test case in the work dir used by run_mode."""
-    if run_mode == RUN_MODE_VERILATOR_DPI:
-        work_dir = TESTS_DIR / name / "work" / "verilator"
-        # DPI=1 selects the clean recipe that also removes the generated DPI dir.
-        clean_cmd = ["make", "clean", "DPI=1"]
-    else:
-        work_dir = TESTS_DIR / name / "work" / "validate"
-        clean_cmd = ["make", "clean"]
+def run_clean(name):
+    """Run make clean for a test case in its verilator work dir."""
+    work_dir = TESTS_DIR / name / "work" / "verilator"
+    # DPI=1 selects the clean recipe that also removes the generated DPI dir.
     subprocess.run(
-        clean_cmd,
+        ["make", "clean", "DPI=1"],
         cwd=work_dir,
         capture_output=True,
         text=True,
@@ -150,16 +123,16 @@ def run_static_check(name, build_target):
     Some tests carry a hand-written static check (e.g. domain/CDC
     classification or top-domain inference) alongside the standard
     simulation-based validation; that check is not a substitute for
-    simulation and must keep passing in both run modes.
+    simulation and must keep passing.
     """
     static_work_dir = TESTS_DIR / name / "work" / "static"
     regression_script = static_work_dir / "regression.sh"
     if not regression_script.exists():
         return None
     env = os.environ.copy()
-    # The simulator is built once upfront; avoid racing cmake in parallel tests.
+    # The tree is built once upfront; avoid racing cmake in parallel tests.
     env["STATIC_BUILD_TARGET"] = "noop"
-    env.setdefault("VCD_COMPARE_BUILD_TARGET", build_target)
+    env.setdefault("STATIC_BUILD_PRESET", build_target)
     result = subprocess.run(
         ["bash", str(regression_script)],
         cwd=static_work_dir,
@@ -171,49 +144,44 @@ def run_static_check(name, build_target):
     return result.returncode == 0, output
 
 
-def run_simulate(name, build_target, run_mode):
-    """Run the mode-appropriate simulation-based validation recipe."""
-    if run_mode == RUN_MODE_VERILATOR_DPI:
-        work_dir = TESTS_DIR / name / "work" / "verilator"
-        result = subprocess.run(
-            ["make", "simulate", "DPI=1", "DPI_BUILD_TARGET=noop"],
-            cwd=work_dir,
-            capture_output=True,
-            text=True,
-        )
-        output = result.stdout + result.stderr
-        # The Verilator DPI harness reports a value mismatch via $fatal(1) in a
-        # `final` block, which does NOT set a non-zero process exit code, so the
-        # `make` return code only reflects build/elaboration failures. Judge the
-        # actual DPI-vs-RTL comparison by the checker's sentinel line instead.
-        if result.returncode != 0:
-            return False, output
-        if "DPI and RTL mismatched" in output:
-            return False, output
-        if "PASS: 100% match" not in output:
-            return False, output + (
-                "\n[regression] DPI checker PASS sentinel not found; "
-                "treating as failure.\n"
-            )
-        return True, output
-
-    work_dir = TESTS_DIR / name / "work" / "validate"
+def run_simulate(name, build_target):
+    """Run the Verilator-vs-DPI simulation recipe for a PASS test."""
+    work_dir = TESTS_DIR / name / "work" / "verilator"
+    # DPI_BUILD_TARGET=noop prevents each per-test sub-make from re-invoking
+    # cmake on the shared build directory, which would race when tests run in
+    # parallel; the tree is built once upfront. DPI_BUILD_PRESET still selects
+    # which prebuilt build dir (dev or sanitized) the test uses.
     result = subprocess.run(
-        # SIM_BUILD_TARGET=noop prevents each per-test sub-make from re-invoking
-        # cmake on the shared build directory, which would race when tests run in
-        # parallel. The simulator is built once upfront before this point.
-        ["make", "validate", "SIM_BUILD_TARGET=noop"],
+        [
+            "make",
+            "simulate",
+            "DPI=1",
+            "DPI_BUILD_TARGET=noop",
+            f"DPI_BUILD_PRESET={build_target}",
+        ],
         cwd=work_dir,
         capture_output=True,
         text=True,
-        env={**os.environ, "VCD_COMPARE_BUILD_TARGET": build_target},
     )
     output = result.stdout + result.stderr
-    return result.returncode == 0, output
+    # The Verilator DPI harness reports a value mismatch via $fatal(1) in a
+    # `final` block, which does NOT set a non-zero process exit code, so the
+    # `make` return code only reflects build/elaboration failures. Judge the
+    # actual DPI-vs-RTL comparison by the checker's sentinel line instead.
+    if result.returncode != 0:
+        return False, output
+    if "DPI and RTL mismatched" in output:
+        return False, output
+    if "PASS: 100% match" not in output:
+        return False, output + (
+            "\n[regression] DPI checker PASS sentinel not found; "
+            "treating as failure.\n"
+        )
+    return True, output
 
 
-def run_validate(name, build_target, run_mode):
-    """Run a PASS test's full validation for the given mode.
+def run_validate(name, build_target):
+    """Run a PASS test's full validation.
 
     The pass condition is: (static check, if the test has one) AND (the
     mode-appropriate simulation run). A static regression.sh check (domain/CDC
@@ -226,7 +194,7 @@ def run_validate(name, build_target, run_mode):
         if not static_ok:
             return False, "=== static check (work/static/regression.sh) ===\n" + static_output
 
-    sim_ok, sim_output = run_simulate(name, build_target, run_mode)
+    sim_ok, sim_output = run_simulate(name, build_target)
     if static_result is not None:
         output = (
             "=== static check (work/static/regression.sh) ===\n" + static_output +
@@ -259,10 +227,10 @@ def run_fixed_value_diff_test(build_target):
     return result.returncode == 0, output
 
 
-def run_lang_metadata_check(simulator):
+def run_lang_metadata_check(mate_binary):
     """Assert the language-metadata sidecar artifact for interface tests."""
     result = subprocess.run(
-        [sys.executable, str(LANG_METADATA_CHECK), str(simulator)],
+        [sys.executable, str(LANG_METADATA_CHECK), str(mate_binary)],
         capture_output=True,
         text=True,
     )
@@ -291,8 +259,19 @@ def run_module_node_api_guard():
     return result.returncode == 0, output
 
 
-def run_expected_failure(name, expected, simulator):
-    """Run an expected-failure compile test. Returns (success, output)."""
+SANITIZER_ENV = {
+    "ASAN_OPTIONS": "symbolize=1,detect_leaks=0,abort_on_error=1",
+    "UBSAN_OPTIONS": "print_stacktrace=1,halt_on_error=1",
+}
+
+
+def run_expected_failure(name, expected, mate_binary, build_target):
+    """Run an expected-failure compile test. Returns (success, output).
+
+    A plain `mate` invocation (no mode flag) runs the full frontend pipeline,
+    which is where every expected failure originates; no simulation harness
+    is needed.
+    """
     test_dir = TESTS_DIR / name
     extra_args_path = test_dir / "custom-sim.args"
     extra_args = shlex.split(extra_args_path.read_text()) if extra_args_path.exists() else []
@@ -301,54 +280,43 @@ def run_expected_failure(name, expected, simulator):
     rtl_sources += sorted(str(p) for p in test_dir.joinpath("rtl").glob("*.sv"))
     domain_file = test_dir / "rtl" / f"{name}.domains.yaml"
 
-    with tempfile.TemporaryDirectory(prefix=f"{name}_stimuli_") as stimuli_dir, \
-         tempfile.TemporaryDirectory(prefix=f"{name}_output_") as output_dir:
-        cmd = [
-            str(simulator),
-            "--simulate",
-            "--top",
-            name,
-            "--inputs-dir",
-            stimuli_dir,
-            "--output-dir",
-            output_dir,
-            "--flops-initial",
-            "zeros",
-        ]
-        if domain_file.exists():
-            cmd.append("--domains")
-            cmd.append(str(domain_file))
-        cmd.extend(extra_args)
-        cmd.extend(rtl_sources)
+    cmd = [str(mate_binary), "--top", name]
+    if domain_file.exists():
+        cmd.append("--domains")
+        cmd.append(str(domain_file))
+    cmd.extend(extra_args)
+    cmd.extend(rtl_sources)
 
-        result = subprocess.run(
-            cmd,
-            cwd=test_dir,
-            capture_output=True,
-            text=True,
-        )
+    env = os.environ.copy()
+    if build_target == "sanitized":
+        env.update(SANITIZER_ENV)
+    result = subprocess.run(
+        cmd,
+        cwd=test_dir,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
     output = result.stdout + result.stderr
     ok = result.returncode != 0 and expected in output
     return ok, output
 
 
-def run_case(case, build_target, simulator, run_mode):
+def run_case(case, build_target, mate_binary):
     """Run a single test case. Returns (name, ok, output)."""
     name = case["name"]
-    if case["kind"] == "validate":
-        if run_mode not in {RUN_MODE_VALIDATE, RUN_MODE_VERILATOR_DPI}:
-            raise RuntimeError(f"unknown run mode '{run_mode}'")
-        run_clean(name, run_mode)
-        ok, output = run_validate(name, build_target, run_mode)
+    if case["kind"] == "simulate":
+        run_clean(name)
+        ok, output = run_validate(name, build_target)
     else:
-        ok, output = run_expected_failure(name, case["expected_error"], simulator)
+        ok, output = run_expected_failure(name, case["expected_error"], mate_binary, build_target)
     return name, ok, output
 
 
-def make_run_logs_dir(build, run_mode):
+def make_run_logs_dir(build):
     """Create a fresh directory for one regression invocation's logs."""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_logs_dir = LOGS_ROOT / f"{stamp}-{build}-{run_mode}"
+    run_logs_dir = LOGS_ROOT / f"{stamp}-{build}"
     run_logs_dir.mkdir(parents=True, exist_ok=False)
     latest = LOGS_ROOT / "latest"
     if latest.exists() or latest.is_symlink():
@@ -399,30 +367,19 @@ def main():
         help="Build preset to use for mate and helper tools (default: dev)",
     )
     parser.add_argument(
-        "--mode",
-        choices=(RUN_MODE_VALIDATE, RUN_MODE_VERILATOR_DPI),
-        default=RUN_MODE_VALIDATE,
-        help=(
-            "Per-PASS-test command mode. 'validate' runs the validate target; "
-            "'verilator-dpi' runs make simulate DPI=1 in "
-            "tests/<test>/work/verilator/ (default: validate)"
-        ),
-    )
-    parser.add_argument(
         "--test",
         action="append",
         dest="tests",
         help="Run only the named manifest test. May be passed more than once.",
     )
     args = parser.parse_args()
-    simulator = REPO_ROOT / "build" / args.build / "mate"
-    run_logs_dir = make_run_logs_dir(args.build, args.mode)
+    mate_binary = REPO_ROOT / "build" / args.build / "mate"
+    run_logs_dir = make_run_logs_dir(args.build)
     test_logs_dir = run_logs_dir / "tests"
     test_logs_dir.mkdir(parents=True, exist_ok=True)
     summary = {
         "build": args.build,
         "jobs": args.jobs,
-        "mode": args.mode,
         "run_logs_dir": str(run_logs_dir.relative_to(REPO_ROOT)),
         "selected_tests": [],
         "steps": {},
@@ -436,7 +393,6 @@ def main():
         sys.exit(1)
     try:
         cases = filter_cases_by_name(cases, args.tests)
-        cases = select_cases_for_mode(cases, args.mode)
     except RuntimeError as exc:
         print(f"{RED}{exc}{RESET}")
         sys.exit(1)
@@ -525,7 +481,7 @@ def main():
         sys.exit(1)
 
     print("Checking language-metadata sidecar artifacts...", flush=True)
-    ok, output = run_lang_metadata_check(simulator)
+    ok, output = run_lang_metadata_check(mate_binary)
     summary["steps"]["lang_metadata_check"] = {
         "log": str((run_logs_dir / "lang_metadata_check.log").relative_to(REPO_ROOT)),
         "ok": ok,
@@ -551,7 +507,7 @@ def main():
     total = len(cases)
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
-            executor.submit(run_case, case, args.build, simulator, args.mode): case
+            executor.submit(run_case, case, args.build, mate_binary): case
             for case in cases
         }
         for future in as_completed(futures):
@@ -561,7 +517,6 @@ def main():
             case = futures[future]
             metadata = {
                 "kind": case["kind"],
-                "mode": args.mode,
                 "test": name,
             }
             if case["kind"] == "expected_failure":

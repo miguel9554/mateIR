@@ -22,7 +22,7 @@ jobs:
         run: bash scripts/docker-build.sh
 
       - name: Run full regression in Docker
-        run: scripts/docker-run.sh python tests/regression.py --mode verilator-dpi
+        run: scripts/docker-run.sh python tests/regression.py
 
       - name: Upload regression logs
         if: always()

@@ -651,6 +651,7 @@ MateStatusCode mate_instance_destroy(MateInstance* instance, MateStatus* status)
 
 MateStatusCode mate_instance_init(MateInstance* instance,
                                   MateFlopsInitial flops_initial,
+                                  int32_t use_initial_values,
                                   uint64_t seed,
                                   const MateInputUpdate* async_inputs,
                                   int32_t async_count,
@@ -660,7 +661,8 @@ MateStatusCode mate_instance_init(MateInstance* instance,
     return guard(status, [&]() {
         MateInstance& checked = checkedInstance(instance);
         std::mt19937_64 rng(seed);
-        checked.model->flops_init(checked.observable_slots, flops_initial, rng);
+        checked.model->flops_init(checked.observable_slots, flops_initial,
+                                  use_initial_values != 0, rng);
         applyRawInputUpdates(checked, async_inputs, async_count);
         applyRawInputUpdates(checked, sync_inputs, sync_count);
         // Reset-at-power-up: apply every reset domain that reads active right

@@ -128,6 +128,12 @@ submodule_multi_output_partial PASS
 undriven_packed_bits_fail FAIL Undriven bits for packed target 'bus'
 subword_assign PASS
 task_func_test PASS
+taxi_arrayed_interface_port_fail PASS
+taxi_const_repl_localparam_fail PASS
+taxi_dynamic_lhs_partselect_fail PASS
+taxi_module_scope_initializer_fail PASS
+taxi_param_width_cast_fail PASS
+taxi_partial_modport_fail PASS
 uart PASS
 unpacked_array_copy PASS
 unpacked_reverse_index PASS

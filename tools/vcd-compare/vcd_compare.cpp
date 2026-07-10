@@ -303,6 +303,23 @@ static std::string structured_leaf_flat_name(const ExpectedSignal &expected,
     return out;
 }
 
+static std::optional<std::string> structured_leaf_interface_array_name(
+    const ExpectedSignal &expected,
+    const std::string &leaf_name) {
+    if (leaf_name.rfind(expected.name, 0) != 0) {
+        return std::nullopt;
+    }
+    size_t dot = expected.name.find('.');
+    if (dot == std::string::npos) {
+        return std::nullopt;
+    }
+    std::string suffix = leaf_name.substr(expected.name.size());
+    if (suffix.empty() || suffix.front() != '[') {
+        return std::nullopt;
+    }
+    return expected.name.substr(0, dot) + suffix + expected.name.substr(dot);
+}
+
 static std::string signal_name_for_file(const std::string &name) {
     std::string normalized = normalize_signal_name(name);
     return normalized;
@@ -441,6 +458,11 @@ static std::optional<MatchedSignalValue> match_expected_signal(
             if (!signal) {
                 std::string flat_leaf_name = structured_leaf_flat_name(expected, leaf->name);
                 signal = lookup_signal(signals, flat_leaf_name, &leaf_match_name);
+            }
+            if (!signal) {
+                if (auto iface_array_name = structured_leaf_interface_array_name(expected, leaf->name)) {
+                    signal = lookup_signal(signals, *iface_array_name, &leaf_match_name);
+                }
             }
             if (!signal) {
                 return std::nullopt;
@@ -1016,6 +1038,12 @@ static bool has_structured_signal(
                 if (leaf_it == signals.end() || leaf_it->second.empty()) {
                     std::string normalized = normalize_signal_name(leaf_name);
                     leaf_it = signals.find(normalized);
+                }
+                if (leaf_it == signals.end() || leaf_it->second.empty()) {
+                    if (auto iface_array_name =
+                            structured_leaf_interface_array_name(expected, leaf_name)) {
+                        leaf_it = signals.find(*iface_array_name);
+                    }
                 }
                 if (leaf_it == signals.end() || leaf_it->second.empty()) {
                     return false;

@@ -1,0 +1,17 @@
+module_name: taxi_dynamic_lhs_partselect_fail
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - lane
+      - data
+      - lane3
+      - sel
+      - data_narrow
+      - data_wide
+      - data16

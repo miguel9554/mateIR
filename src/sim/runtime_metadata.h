@@ -115,6 +115,9 @@ struct RuntimeFlopLeafMetadata {
     Type type;
     const DFGNode* d_node = nullptr;
     const DFGNode* q_node = nullptr;
+    // Declaration initializer value, applied at time 0 when the runtime
+    // enables initial values (instead of the FlopsInitial policy).
+    std::optional<int64_t> initial_value;
 };
 
 struct RuntimeFlopMetadata {
@@ -124,7 +127,7 @@ struct RuntimeFlopMetadata {
     Type type;
     ClockId clock_domain = InvalidClockId;
     ResetDomains reset_domains;
-    std::optional<int> reset_value;
+    std::optional<int64_t> reset_value;
     std::vector<RuntimeFlopLeafMetadata> leaves;
 };
 

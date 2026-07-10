@@ -32,7 +32,8 @@ Module resolveModules(
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     FrontendDomainFacts* domainFacts = nullptr,
-    LangMetadata* langMeta = nullptr);
+    LangMetadata* langMeta = nullptr,
+    bool allowFlopInitialValues = true);
 
 // Resolve only the named top module, embedding submodules in its hierarchy
 Module resolveModules(
@@ -44,6 +45,7 @@ Module resolveModules(
     const std::string& topModuleName,
     const ParameterContext& topParams,
     FrontendDomainFacts* domainFacts = nullptr,
-    LangMetadata* langMeta = nullptr);
+    LangMetadata* langMeta = nullptr,
+    bool allowFlopInitialValues = true);
 
 } // namespace mate

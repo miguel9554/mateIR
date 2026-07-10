@@ -233,6 +233,22 @@ static void resolveGenerateScopeDecls(
                 throw CompilerError(
                     "Generate-scope flop arrays not yet supported: " + name);
 
+            std::vector<int64_t> initialValues;
+            if (decl.initializer) {
+                if (!ctx.allow_flop_initial_values) {
+                    throw CompilerError(
+                        "Initializers on variable declarations are not "
+                        "supported in ASIC-strict mode (flop '" + name + "'). "
+                        "Use an explicit reset instead.",
+                        resolveSourceLoc(decl, ctx.sm));
+                }
+                const ConstantValue initValue = evaluateConstantValue(
+                    decl.initializer->expr, type, ctx.params, ctx.pkgRegistry,
+                    &ctx.namedTypeRegistry, ctx.sm);
+                initialValues = flattenConstantToLeaves(
+                    initValue, type, resolveSourceLoc(decl, ctx.sm));
+            }
+
             // Qualified name used for FlopInfo and frontend-private trigger facts
             std::string qualifiedName = ctx.instance_path.empty()
                 ? name : ctx.instance_path + "." + name;
@@ -241,6 +257,7 @@ static void resolveGenerateScopeDecls(
                 .type       = type,
                 .flop_type  = FLOP_D,
                 .reset_value = std::nullopt,
+                .initial_values = std::move(initialValues),
                 .clock_domain = InvalidClockId,
                 .reset_domains = {},
                 .binding    = {},
@@ -307,7 +324,15 @@ static void resolveGenerateScopeDecls(
             auto& dataDecl = m->as<DataDeclarationSyntax>();
             for (auto* decl : dataDecl.declarators) {
                 std::string name(decl->name.valueText());
-                processDeclarator(*dataDecl.type, *decl, nbaTargets.count(name) > 0);
+                const bool isFlop = nbaTargets.count(name) > 0;
+                if (!isFlop && decl->initializer) {
+                    throw CompilerError(
+                        "Initializer on variable declaration '" + name +
+                        "' is not supported: only flops (non-blocking "
+                        "assignment targets) may have declaration initializers",
+                        resolveSourceLoc(*decl, ctx.sm));
+                }
+                processDeclarator(*dataDecl.type, *decl, isFlop);
             }
         } else if (m->kind == SyntaxKind::NetDeclaration) {
             auto& netDecl = m->as<NetDeclarationSyntax>();
@@ -480,6 +505,7 @@ void resolveGenerateMembersInPlace(
         ctx.current_write_origin, ctx.partial_drivers, ctx.write_states, ctx.subroutineRegistry,
         ctx.subroutine_locals, ctx.currently_inlining, ctx.is_subroutine_scope, ctx.current_return_var};
     scopeCtx.inheritInterfaceViews(ctx);
+    scopeCtx.allow_flop_initial_values = ctx.allow_flop_initial_values;
     // Pre-scan NBA targets in this scope, then intersect with local declarations.
     // Only locally-declared signals that have NBA assignments are generate-local flops.
     // Module-level flops assigned inside a generate block must NOT be added here —
@@ -624,6 +650,7 @@ void resolveGenerateMemberInPlace(
                     ctx.moduleLookup, ctx.globalImports,
                     ctx.current_write_origin, ctx.partial_drivers, ctx.write_states};
                 iterResCtx.inheritInterfaceViews(ctx);
+                iterResCtx.allow_flop_initial_values = ctx.allow_flop_initial_values;
 
                 if (loopGen.block->kind == SyntaxKind::GenerateBlock) {
                     resolveGenerateMembersInPlace(

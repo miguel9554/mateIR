@@ -23,6 +23,9 @@ struct SimConfig {
     std::map<std::string, int64_t> parameters;
     FlopsInitial flops_initial = FlopsInitial::Random;
     std::optional<uint64_t> flops_initial_seed;
+    // Honor flop declaration initializers (e.g. `logic q = 1'b0;`); flops
+    // without one fall back to the flops_initial policy.
+    bool flops_use_initial_values = true;
 };
 
 struct AsyncEvent {

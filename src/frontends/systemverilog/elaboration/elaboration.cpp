@@ -42,9 +42,27 @@ using namespace slang::syntax;
 
 namespace mate {
 
-
-
-
+static ModuleNode resolveInterfaceMemberNode(
+        const std::string& qualifiedName,
+        const UnresolvedSignal& sig,
+        const std::vector<Dimension>& interfaceDims,
+        const ParameterContext& ifaceCtx,
+        const NamedTypeRegistry& namedTypeRegistry,
+        const PackageRegistry* pkgRegistry,
+        const slang::SourceManager* sourceManager) {
+    UnresolvedSignal qualified{
+        .name = qualifiedName,
+        .type = sig.type,
+        .dimensions = sig.dimensions,
+    };
+    ModuleNode node = resolveModuleNode(
+        qualified, ifaceCtx, namedTypeRegistry, pkgRegistry, sourceManager);
+    if (!interfaceDims.empty()) {
+        node.type.unpacked_dims.insert(
+            node.type.unpacked_dims.begin(), interfaceDims.begin(), interfaceDims.end());
+    }
+    return node;
+}
 
 // ============================================================================
 // Resolution functions
@@ -60,7 +78,8 @@ Module resolveModule(const UnresolvedModule& unresolved,
                                     const std::vector<ImportSpec>& globalImports,
                                     const InstancePath& occurrencePath,
                                     FrontendDomainFacts* domainFacts,
-                                    LangMetadata* langMeta);
+                                    LangMetadata* langMeta,
+                                    bool allowFlopInitialValues);
 
 // (anonymous namespace removed: split across elaboration TUs)
 
@@ -1330,16 +1349,51 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             auto& patternExpr = right->as<AssignmentPatternExpressionSyntax>();
 
             if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
-                auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
-                if (pattern.items.size() != suffixes.size()) {
+                // Multi-dimensional arrays use nested ordered patterns
+                // ('{'{...}, '{...}}); recurse one dimension at a time and
+                // flatten into leaf order.
+                std::vector<DFGNode*> collected;
+                std::function<void(const ExpressionSyntax*, const Type&)> collectLeafDrivers =
+                    [&](const ExpressionSyntax* elemExpr, const Type& elemType) {
+                        if (elemType.unpacked_dims.empty()) {
+                            collected.push_back(buildExprDFG(elemExpr, ctx));
+                            return;
+                        }
+                        if (elemExpr->kind != SyntaxKind::AssignmentPatternExpression) {
+                            throw CompilerError(
+                                "Nested assignment pattern expected for unpacked array dimension",
+                                assignLoc);
+                        }
+                        const auto& nestedExpr = elemExpr->as<AssignmentPatternExpressionSyntax>();
+                        if (nestedExpr.pattern->kind != SyntaxKind::SimpleAssignmentPattern) {
+                            throw CompilerError(
+                                "Only ordered patterns are supported in nested array assignment patterns",
+                                assignLoc);
+                        }
+                        const auto& nested = nestedExpr.pattern->as<SimpleAssignmentPatternSyntax>();
+                        Type innerType = elemType;
+                        const auto dim = innerType.unpacked_dims.front();
+                        innerType.unpacked_dims.erase(innerType.unpacked_dims.begin());
+                        const size_t count =
+                            static_cast<size_t>(std::abs(dim.right - dim.left)) + 1;
+                        if (nested.items.size() != count) {
+                            throw CompilerError(
+                                std::format("Assignment pattern for '{}' requires {} elements but {} were provided",
+                                            baseName, count, nested.items.size()),
+                                assignLoc);
+                        }
+                        for (const auto* item : nested.items) {
+                            collectLeafDrivers(item, innerType);
+                        }
+                    };
+                collectLeafDrivers(right, *declaredType);
+                if (collected.size() != suffixes.size()) {
                     throw CompilerError(
                         std::format("Assignment pattern for '{}' requires {} elements but {} were provided",
-                                    baseName, suffixes.size(), pattern.items.size()),
+                                    baseName, suffixes.size(), collected.size()),
                         assignLoc);
                 }
-                for (size_t i = 0; i < suffixes.size(); ++i) {
-                    elementDrivers[i] = buildExprDFG(pattern.items[i], ctx);
-                }
+                elementDrivers = std::move(collected);
             } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
                 if (declaredType->unpacked_dims.size() != 1) {
                     throw CompilerError(
@@ -1486,8 +1540,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     // false when baseName is not an interface port/instance.
     auto foldIfaceMember = [&](std::string& baseName,
                                const std::string& memberName) -> bool {
-        if (!memberSuffix.empty() || !selectors.empty() ||
-                !isIfaceBaseName(ctx, baseName)) {
+        if (!memberSuffix.empty() || !isIfaceBaseName(ctx, baseName)) {
             return false;
         }
         if (ctx.is_sequential) {
@@ -1576,9 +1629,17 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     if (selectors.empty()) {
         if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
             declaredType && !declaredType->unpacked_dims.empty()) {
+            // Deferred assignment patterns are normally built after full LHS
+            // normalization, but this whole-array path returns early — build
+            // the RHS against the declared array type here.
+            if (rhsNeedsAssignmentPatternContext) {
+                RHSvalue = buildValueForTargetType(
+                    right, *declaredType, ctx, assignLoc, false);
+                RHSexprNode = RHSvalue.scalar;
+            }
             if (RHSvalue.type.unpacked_dims != declaredType->unpacked_dims ||
                     RHSvalue.leaves.size() != aggregateValueLeafCount(*declaredType)) {
-                throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+                throw CompilerError("Whole-array assignment shape mismatch (dims/leaf count)", assignLoc);
             }
 
             if (!typeContainsStructValue(*declaredType)) {
@@ -1594,7 +1655,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             const size_t leavesPerElement = elementPlan.size();
             if (leavesPerElement == 0 ||
                 RHSvalue.leaves.size() != suffixes.size() * leavesPerElement) {
-                throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+                throw CompilerError("Whole-array assignment shape mismatch (element plan)", assignLoc);
             }
 
             for (size_t i = 0; i < suffixes.size(); ++i) {
@@ -1602,7 +1663,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 std::vector<AggregateLeafBinding> lhsPlan;
                 collectAggregateLeafPlan(elementType, lhsBase, {}, lhsPlan);
                 if (lhsPlan.size() != leavesPerElement) {
-                    throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+                    throw CompilerError("Whole-array assignment shape mismatch (lhs plan)", assignLoc);
                 }
 
                 for (size_t j = 0; j < leavesPerElement; ++j) {
@@ -1642,6 +1703,12 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     DFGNode* dynamicBitSelectorNode = nullptr;
     Dimension dynamicBitDim;
     Type dynamicBitTargetType;
+
+    bool hasDynamicRangeSelect = false;
+    bool dynamicRangeIsAscending = true;
+    DFGNode* dynamicRangeBaseNode = nullptr;
+    int64_t dynamicRangeWidth = 0;
+    Type dynamicRangeTargetType;
 
     if (!selectors.empty()) {
         for (const auto* elemSelect : selectors) {
@@ -1725,8 +1792,12 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                         resolveSourceLoc(assignExpr, ctx.sm));
                 }
                 hasRangeSelect = true;
-            } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect) {
+            } else if (elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect ||
+                       elemSelect->selector->kind == SyntaxKind::DescendingRangeSelect) {
                 // base +: width → high = base + width - 1, low = base
+                // base -: width → high = base, low = base - width + 1
+                const bool isAscending =
+                    elemSelect->selector->kind == SyntaxKind::AscendingRangeSelect;
                 const auto& rangeSelect = elemSelect->selector->as<RangeSelectSyntax>();
                 try {
                     int64_t base  = evaluateConstantExpr(rangeSelect.left, ctx.params,
@@ -1735,14 +1806,67 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                     int64_t width = evaluateConstantExpr(rangeSelect.right, ctx.params,
                                                          ctx.sm, *rangeSelect.right,
                                                          &ctx.pkgRegistry, &ctx.namedTypeRegistry);
-                    rangeLow  = base;
-                    rangeHigh = base + width - 1;
+                    rangeLow  = isAscending ? base : base - width + 1;
+                    rangeHigh = isAscending ? base + width - 1 : base;
+                    hasRangeSelect = true;
                 } catch (const std::runtime_error&) {
-                    throw CompilerError(
-                        "Dynamic ascending range on LHS not supported for: " + baseName,
-                        resolveSourceLoc(assignExpr, ctx.sm));
+                    // Dynamic base: lower to per-bit muxes over the previous
+                    // value. The width must still be constant.
+                    int64_t width = 0;
+                    try {
+                        width = evaluateConstantExpr(rangeSelect.right, ctx.params,
+                                                     ctx.sm, *rangeSelect.right,
+                                                     &ctx.pkgRegistry, &ctx.namedTypeRegistry);
+                    } catch (const std::runtime_error&) {
+                        throw CompilerError(
+                            "Dynamic range on LHS requires a constant width: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    if (!currentSelectedType || currentSelectedType->isStruct() ||
+                        !currentSelectedType->unpacked_dims.empty() ||
+                        currentSelectedType->packed_dims.empty()) {
+                        throw CompilerError(
+                            "Dynamic range on LHS only supported on packed integer targets: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    if (packedSuffixWidth(*currentSelectedType, 1) != 1) {
+                        throw CompilerError(
+                            "Dynamic range on LHS only supported for single-bit elements: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    if (hasRangeSelect) {
+                        throw CompilerError(
+                            "Dynamic range on LHS after a static range select is not supported: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    if (elemSelect != selectors.back()) {
+                        throw CompilerError(
+                            "Dynamic range on LHS must be the last selector: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    if (width <= 0 || width > currentSelectedType->width) {
+                        throw CompilerError(
+                            std::format("Dynamic range on LHS has invalid width {} for {}-bit target: {}",
+                                        width, currentSelectedType->width, baseName),
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    const auto& dim = currentSelectedType->packed_dims.front();
+                    if (dim.left < dim.right) {
+                        throw CompilerError(
+                            "Dynamic range on LHS not supported for ascending packed dimensions: " + baseName,
+                            resolveSourceLoc(assignExpr, ctx.sm));
+                    }
+                    hasDynamicRangeSelect = true;
+                    dynamicRangeIsAscending = isAscending;
+                    dynamicRangeWidth = width;
+                    dynamicRangeTargetType = *currentSelectedType;
+                    dynamicRangeBaseNode = buildExprDFG(rangeSelect.left, ctx);
+                    if (dim.right != 0) {
+                        dynamicRangeBaseNode = ctx.graph.sub(
+                            dynamicRangeBaseNode, ctx.graph.constant(dim.right));
+                        dynamicRangeBaseNode->loc = assignLoc;
+                    }
                 }
-                hasRangeSelect = true;
             } else {
                 throw CompilerError(
                     "Unsupported selector kind on LHS: " +
@@ -1780,6 +1904,8 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     std::optional<Type> assignmentTargetType;
     if (hasDynamicBitSelect) {
         assignmentTargetType = Type::makeInteger(1, false);
+    } else if (hasDynamicRangeSelect) {
+        assignmentTargetType = Type::makeInteger(static_cast<int>(dynamicRangeWidth), false);
     } else if (hasRangeSelect) {
         if (currentSelectedType) {
             assignmentTargetType = *currentSelectedType;
@@ -1858,7 +1984,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
 
         if (RHSvalue.leaves.size() != lhsPlan.size()) {
-            throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+            throw CompilerError("Whole-array assignment shape mismatch (struct leaves)", assignLoc);
         }
 
         for (size_t i = 0; i < lhsPlan.size(); ++i) {
@@ -1968,6 +2094,123 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         if (!ctx.is_sequential) {
             ctx.combDrivers[outputName] = result;
         } else {
+            recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
+        }
+        return;
+    }
+
+    // Dynamic part-select on LHS: target[base +: width] = rhs or
+    // target[base -: width] = rhs.
+    // Per target bit i: selected_i = (i inside the selected window);
+    // when selected, bit i takes the RHS bit shifted into position,
+    // otherwise it keeps the previous value. The result covers the whole
+    // target, so it is committed as an ordinary whole-target write.
+    if (hasDynamicRangeSelect) {
+        if (!memberSuffix.empty()) {
+            throw CompilerError(
+                "Member access after dynamic part-select on LHS is not supported",
+                assignLoc);
+        }
+
+        const std::string outputName = seqWriteName(baseName, indexSuffix);
+
+        // Previous value: earlier accumulation in this block, else the flop's
+        // old value for sequential targets.
+        DFGNode* currentDriver = envDriver(ctx, outputName);
+        if (!currentDriver && ctx.is_sequential) {
+            currentDriver = lookupSequentialQNode(ctx, outputName);
+        }
+        if (!currentDriver) {
+            throw CompilerError(
+                "Dynamic part-select on LHS: no prior value for " + outputName, assignLoc);
+        }
+
+        const int64_t totalWidth = dynamicRangeTargetType.width;
+        const Type bitType = Type::makeInteger(1, false);
+
+        // Zero-extend the RHS with headroom of width-1 bits above the target
+        // so a descending select (window low = base - width + 1, possibly
+        // negative) can shift left by base and back right by width-1 without
+        // losing top bits. Shift once, so per-bit new values are static
+        // slices.
+        const int64_t extWidth = totalWidth + dynamicRangeWidth - 1;
+        DFGNode* wideValue = RHSexprNode;
+        if (dynamicRangeWidth < extWidth) {
+            auto* padNode = ctx.graph.constant(0);
+            padNode->type = Type::makeInteger(
+                static_cast<int>(extWidth - dynamicRangeWidth), false);
+            padNode->loc = assignLoc;
+            wideValue = ctx.graph.concat(std::vector<DFGNode*>{padNode, RHSexprNode});
+            wideValue->type = Type::makeInteger(static_cast<int>(extWidth), false);
+            wideValue->loc = assignLoc;
+        }
+        DFGNode* shifted = ctx.graph.shl(wideValue, dynamicRangeBaseNode);
+        shifted->type = Type::makeInteger(static_cast<int>(extWidth), false);
+        shifted->loc = assignLoc;
+        if (!dynamicRangeIsAscending && dynamicRangeWidth > 1) {
+            shifted = ctx.graph.shr(shifted, ctx.graph.constant(dynamicRangeWidth - 1));
+            shifted->type = Type::makeInteger(static_cast<int>(extWidth), false);
+            shifted->loc = assignLoc;
+        }
+
+        DFGNode* windowEnd = nullptr;
+        if (dynamicRangeIsAscending) {
+            windowEnd = ctx.graph.add(
+                dynamicRangeBaseNode, ctx.graph.constant(dynamicRangeWidth));
+            windowEnd->loc = assignLoc;
+        }
+
+        // Per-bit muxes, assembled MSB-first. Out-of-range selected lanes
+        // simply have no mux arm and therefore retain their previous value.
+        std::vector<DFGNode*> parts;
+        parts.reserve(static_cast<size_t>(totalWidth));
+        for (int64_t i = totalWidth - 1; i >= 0; --i) {
+            auto* idxConst = ctx.graph.constant(i);
+
+            // Ascending window is [base, base + width);
+            // descending window is (base - width, base], phrased without
+            // negative intermediates as base >= i && base < i + width.
+            DFGNode* condA = nullptr;
+            DFGNode* condB = nullptr;
+            if (dynamicRangeIsAscending) {
+                condA = ctx.graph.ge(idxConst, dynamicRangeBaseNode);
+                condB = ctx.graph.lt(idxConst, windowEnd);
+            } else {
+                condA = ctx.graph.ge(dynamicRangeBaseNode, idxConst);
+                condB = ctx.graph.lt(dynamicRangeBaseNode,
+                                     ctx.graph.constant(i + dynamicRangeWidth));
+            }
+            condA->type = bitType;
+            condA->loc = assignLoc;
+            condB->type = bitType;
+            condB->loc = assignLoc;
+            auto* selected = ctx.graph.binaryOp(DFGOp::BITWISE_AND, condA, condB);
+            selected->type = bitType;
+            selected->loc = assignLoc;
+
+            auto* newBit = ctx.graph.slice(shifted, idxConst, idxConst);
+            newBit->type = bitType;
+            newBit->loc = assignLoc;
+            auto* prevBit = ctx.graph.slice(currentDriver, idxConst, idxConst);
+            prevBit->type = bitType;
+            prevBit->loc = assignLoc;
+
+            auto* bitMux = ctx.graph.mux(selected, newBit, prevBit);
+            bitMux->type = bitType;
+            bitMux->loc = assignLoc;
+            parts.push_back(bitMux);
+        }
+        DFGNode* result = ctx.graph.concat(parts);
+        result->type = dynamicRangeTargetType;
+        result->loc = assignLoc;
+
+        // The result covers every bit of the target, so it is a whole-target
+        // write: writeTarget keeps multi-driver conflict detection and any
+        // live partial-slice state centralized, and branch merging sees an
+        // ordinary whole driver.
+        writeTarget(outputName, result);
+
+        if (ctx.is_sequential) {
             recordFlopTriggerFact(ctx, flopTriggersKey(baseName), assignLoc);
         }
         return;
@@ -2722,6 +2965,7 @@ void resolveForLoopStatementInPlace(
             ctx.currently_inlining, ctx.is_subroutine_scope
         };
         iterBodyCtx.inheritInterfaceViews(ctx);
+        iterBodyCtx.allow_flop_initial_values = ctx.allow_flop_initial_values;
         iterBodyCtx.in_procedural_block = ctx.in_procedural_block;
         iterBodyCtx.block_drivers = ctx.block_drivers;
         resolveStatementInPlace(forLoop->statement.get(), iterBodyCtx);
@@ -2954,7 +3198,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                              const std::vector<ImportSpec>& globalImports,
                              const InstancePath& occurrencePath,
                              FrontendDomainFacts* domainFacts,
-                             LangMetadata* langMeta) {
+                             LangMetadata* langMeta,
+                             bool allowFlopInitialValues) {
     const std::string langMetaModulePath = [&] {
         std::string path;
         for (const auto& elem : occurrencePath.elems) {
@@ -2977,6 +3222,45 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Seed the header namespace from package imports.
     applyImports(globalImports,      pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
     applyImports(unresolved.headerImports, pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
+
+    // Compilation-unit scope typedefs are visible to header parameters and
+    // ports; register them before either resolves. They can only reference
+    // package imports and earlier file-scope typedefs, never module state.
+    for (const auto& td : unresolved.fileScopeEnumTypedefs) {
+        if (namedTypeRegistry.contains(td.name)) {
+            throw CompilerError(
+                "Duplicate compilation-unit typedef: " + td.name);
+        }
+        auto* enumSyntax = &td.syntax->as<EnumTypeSyntax>();
+        int width = 32;
+        if (enumSyntax->baseType) {
+            width = resolveType(*enumSyntax->baseType, *localCtx,
+                                namedTypeRegistry, &pkgRegistry).width;
+        }
+        std::vector<EnumMember> members;
+        int64_t nextValue = 0;
+        for (const auto* decl : enumSyntax->members) {
+            int64_t val = nextValue;
+            if (decl->initializer)
+                val = evaluateConstantExpr(decl->initializer->expr, *localCtx, &pkgRegistry);
+            members.push_back({std::string(decl->name.valueText()), val});
+            nextValue = val + 1;
+        }
+        Type enumType = Type::makeEnum(td.name, width, members);
+        namedTypeRegistry[td.name] = enumType;
+        for (const auto& member : members) {
+            localCtx->values[member.name] = ConstantValue::bits(enumType, member.value);
+            enumMemberValues[member.name] = {member.value, enumType};
+        }
+    }
+    for (const auto& td : unresolved.fileScopeStructTypedefs) {
+        if (namedTypeRegistry.contains(td.name)) {
+            throw CompilerError(
+                "Duplicate compilation-unit typedef: " + td.name);
+        }
+        namedTypeRegistry[td.name] = resolveStructTypedef(
+            td, *localCtx, namedTypeRegistry, "$unit::" + td.name, &pkgRegistry);
+    }
 
     // Resolve header parameters before body imports and body-local typedefs.
     for (const auto& param : unresolved.parameters) {
@@ -3068,6 +3352,11 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         IfacePortView view;
         view.interface_name = ip.interface_name;
         view.modport_name = ip.modport_name;
+        if (ip.dimensions.syntax && !ip.dimensions.syntax->empty()) {
+            view.dimensions = ResolveDimensions(*ip.dimensions.syntax, *mergedCtx,
+                                                &pkgRegistry, &sourceManager,
+                                                &namedTypeRegistry);
+        }
 
         for (const auto& p : idef.parameters) {
             const std::string qname = ip.port_name + "." + p.name;
@@ -3081,13 +3370,9 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
         }
 
         auto addMember = [&](const UnresolvedSignal& sig, bool isOutput) {
-            UnresolvedSignal qualified{
-                .name = ip.port_name + "." + sig.name,
-                .type = sig.type,
-                .dimensions = sig.dimensions,
-            };
-            ModuleNode node = resolveModuleNode(
-                qualified, ifaceCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
+            ModuleNode node = resolveInterfaceMemberNode(
+                ip.port_name + "." + sig.name, sig, view.dimensions, ifaceCtx,
+                namedTypeRegistry, &pkgRegistry, &sourceManager);
             if (isOutput) addOutputNode(resolved, node);
             else addInputNode(resolved, node);
             view.member_is_output[sig.name] = isOutput;
@@ -3203,6 +3488,13 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
         if (isGenerateParentFlop(signal)) continue;
+        if (signal.initializer) {
+            throw CompilerError(
+                "Initializer on variable declaration '" + signal.name +
+                "' is not supported: only flops (non-blocking assignment "
+                "targets) may have declaration initializers",
+                resolveSourceLoc(*signal.initializer, sourceManager));
+        }
         auto sig = resolveModuleNode(signal, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
         addInternalNode(resolved, sig);
     }
@@ -3211,11 +3503,28 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     std::set<std::string> flopNames;
     auto addResolvedFlop = [&](const UnresolvedSignal& flop) {
         const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+        std::vector<int64_t> initialValues;
+        if (flop.initializer) {
+            const auto initLoc = resolveSourceLoc(*flop.initializer, sourceManager);
+            if (!allowFlopInitialValues) {
+                throw CompilerError(
+                    "Initializers on variable declarations are not supported "
+                    "in ASIC-strict mode (flop '" + flop.name + "'). "
+                    "Use an explicit reset instead.",
+                    initLoc);
+            }
+            const ConstantValue initValue = evaluateConstantValue(
+                flop.initializer, resolvedModuleNode.type, *mergedCtx,
+                pkgRegistry, &namedTypeRegistry, sourceManager);
+            initialValues = flattenConstantToLeaves(
+                initValue, resolvedModuleNode.type, initLoc);
+        }
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedModuleNode.name,
                 .type = resolvedModuleNode.type,
                 .flop_type = FLOP_D,
                 .reset_value = std::nullopt,
+                .initial_values = std::move(initialValues),
                 .clock_domain = InvalidClockId,
                 .reset_domains = {},
                 .binding = {},
@@ -3233,6 +3542,18 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     for (const auto& output : unresolved.outputs) {
         if (isGenerateParentFlop(output)) {
             addResolvedFlop(output);
+        }
+    }
+    // Output ports may only carry declaration initializers when the port is
+    // a flop (registered output); combinational outputs have no storage to
+    // initialize.
+    for (const auto& output : unresolved.outputs) {
+        if (output.initializer && !flopNames.contains(output.name)) {
+            throw CompilerError(
+                "Initializer on output port '" + output.name +
+                "' is not supported: only registered outputs (non-blocking "
+                "assignment targets) may have declaration initializers",
+                resolveSourceLoc(*output.initializer, sourceManager));
         }
     }
 
@@ -3263,11 +3584,6 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                     resolveSourceLoc(*inst, sourceManager));
             }
             std::string instName(inst->decl->name.valueText());
-            if (inst->decl->dimensions.size() != 0) {
-                throw CompilerError(
-                    "Arrays of interface instances are not supported: " + instName,
-                    resolveSourceLoc(*inst, sourceManager));
-            }
             if (ifaceInstanceViews.contains(instName)) {
                 throw CompilerError(
                     "Duplicate interface instance name: " + instName,
@@ -3278,6 +3594,11 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
 
             IfaceInstanceView view;
             view.interface_name = typeName;
+            if (!inst->decl->dimensions.empty()) {
+                view.dimensions = ResolveDimensions(inst->decl->dimensions, *mergedCtx,
+                                                    &pkgRegistry, &sourceManager,
+                                                    &namedTypeRegistry);
+            }
             for (const auto& [pname, value] : ifaceCtx.values) {
                 view.param_values.emplace(pname, value);
             }
@@ -3293,13 +3614,9 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
             }
 
             auto addMember = [&](const UnresolvedSignal& sig) {
-                UnresolvedSignal qualified{
-                    .name = instName + "." + sig.name,
-                    .type = sig.type,
-                    .dimensions = sig.dimensions,
-                };
-                addInternalNode(resolved, resolveModuleNode(
-                    qualified, ifaceCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+                addInternalNode(resolved, resolveInterfaceMemberNode(
+                    instName + "." + sig.name, sig, view.dimensions, ifaceCtx,
+                    namedTypeRegistry, &pkgRegistry, &sourceManager));
                 view.member_names.insert(sig.name);
             };
             for (const auto& sig : idef.input_ports)  addMember(sig);
@@ -3418,6 +3735,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     resCtx.interface_ports = std::move(ifacePortViews);
     resCtx.interface_instances = std::move(ifaceInstanceViews);
     resCtx.lang_meta = langMeta;
+    resCtx.allow_flop_initial_values = allowFlopInitialValues;
 
     // Connect the interface's own input ports (e.g. clk) for each interface
     // instance, now that expressions can be built.
@@ -3545,7 +3863,8 @@ Module resolveModules(
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     FrontendDomainFacts* domainFacts,
-    LangMetadata* langMeta) {
+    LangMetadata* langMeta,
+    bool allowFlopInitialValues) {
 
     // Filter out package declarations from module count
     if (modules.size() != 1) {
@@ -3565,7 +3884,8 @@ Module resolveModules(
     ParameterContext emptyCtx;
     return resolveModule(*modules[0], emptyCtx, moduleLookup, interfaceLookup,
                          sourceManager, pkgRegistry,
-                         globalImports, {}, domainFacts, langMeta);
+                         globalImports, {}, domainFacts, langMeta,
+                         allowFlopInitialValues);
 }
 
 Module resolveModules(
@@ -3577,7 +3897,8 @@ Module resolveModules(
     const std::string& topModuleName,
     const ParameterContext& topParams,
     FrontendDomainFacts* domainFacts,
-    LangMetadata* langMeta) {
+    LangMetadata* langMeta,
+    bool allowFlopInitialValues) {
 
     PackageRegistry pkgRegistry = resolvePackages(packages, sourceManager);
 
@@ -3595,7 +3916,8 @@ Module resolveModules(
 
     return resolveModule(*it->second, topParams, moduleLookup, interfaceLookup,
                          sourceManager, pkgRegistry,
-                         globalImports, {}, domainFacts, langMeta);
+                         globalImports, {}, domainFacts, langMeta,
+                         allowFlopInitialValues);
 }
 
 } // namespace mate

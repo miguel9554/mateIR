@@ -1,0 +1,12 @@
+module_name: taxi_arrayed_interface_port_fail
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - ready0
+      - ready1

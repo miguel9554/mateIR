@@ -444,7 +444,7 @@ void Simulator::run() {
             rng_seed = config_.flops_initial_seed.value_or(std::random_device{}());
         }
         std::mt19937_64 rng(rng_seed);
-        runtime_->initialize(config_.flops_initial, rng);
+        runtime_->initialize(config_.flops_initial, config_.flops_use_initial_values, rng);
     }
 
     // 2. Gather initial async input values from the first event in their

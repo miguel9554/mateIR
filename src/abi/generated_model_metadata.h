@@ -80,10 +80,12 @@ using GeneratedClockCommitFn = void (*)(
     std::span<NativeWordSlot> storage);
 
 // Applies FlopsInitial to every flop Q leaf in the design, in generated
-// (flop-declaration) order.
+// (flop-declaration) order. When use_initial_values is true, flops with a
+// declaration initializer take that value instead of the mode.
 using GeneratedFlopsInitFn = void (*)(
     std::span<NativeWordSlot> storage,
     MateFlopsInitial mode,
+    bool use_initial_values,
     std::mt19937_64& rng);
 
 struct GeneratedModelMetadata {

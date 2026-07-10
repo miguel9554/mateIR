@@ -1,0 +1,11 @@
+module_name: taxi_module_scope_initializer_fail
+
+resets:
+  rst_n:
+    polarity: negative
+
+clock_domains:
+  clk:
+    polarity: posedge
+    inputs_outputs:
+      - d

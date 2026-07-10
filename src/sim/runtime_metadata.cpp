@@ -222,6 +222,12 @@ void collectModuleMetadata(const MateIR& ir,
             .leaves = {},
         };
 
+        if (!flop.initial_values.empty() &&
+            flop.initial_values.size() != d_refs.size()) {
+            throw CompilerError(std::format(
+                "Simulator metadata: flop '{}' has {} initial values for {} leaves",
+                runtime_flop.name, flop.initial_values.size(), d_refs.size()));
+        }
         for (size_t i = 0; i < d_refs.size(); ++i) {
             const auto& d = d_refs[i];
             const auto& q = q_refs[i];
@@ -246,6 +252,9 @@ void collectModuleMetadata(const MateIR& ir,
                 .type = q_type,
                 .d_node = d.node,
                 .q_node = q.node,
+                .initial_value = flop.initial_values.empty()
+                    ? std::nullopt
+                    : std::optional<int64_t>(flop.initial_values.at(i)),
             });
         }
 

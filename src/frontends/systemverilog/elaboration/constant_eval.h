@@ -26,6 +26,17 @@ struct InvocationExpressionSyntax;
 
 namespace mate {
 
+struct CastTargetResolution {
+    enum class Kind {
+        NamedType,
+        Width,
+    };
+
+    Kind kind;
+    Type type;
+    int width = 0;
+};
+
 ConstantValue integerConstant(int64_t value);
 
 // TODO should be double? or parametrized by type.
@@ -67,6 +78,13 @@ std::optional<int64_t> staticBitsWidth(
     const PackageRegistry* pkgRegistry,
     const NamedTypeRegistry* namedTypeRegistry);
 
+CastTargetResolution resolveCastTarget(
+    const slang::syntax::SyntaxNode& castTargetSyntax,
+    const ParameterContext& ctx,
+    const PackageRegistry* pkgRegistry = nullptr,
+    const NamedTypeRegistry* namedTypeRegistry = nullptr,
+    const slang::SourceManager* sm = nullptr);
+
 // Evaluate a constant expression given a parameter context
 // Throws if a referenced parameter is not in the context
 int64_t evaluateConstantExpr(const slang::syntax::ExpressionSyntax* expr,
@@ -90,6 +108,13 @@ ConstantValue evaluateConstantValue(const slang::syntax::ExpressionSyntax* expr,
                                     const PackageRegistry& pkgRegistry,
                                     const NamedTypeRegistry* namedTypeRegistry,
                                     const slang::SourceManager& sm);
+
+// Flatten a constant of the given (possibly aggregate) declared type into one
+// int64 per scalar leaf, in collectAggregateLeafPlan order (unpacked dims
+// outermost-first in declared direction, struct fields in declaration order).
+std::vector<int64_t> flattenConstantToLeaves(const ConstantValue& value,
+                                             const Type& type,
+                                             const std::optional<SourceLoc>& loc);
 
 
 // Evaluate the next genvar value from a for-loop iteration expression.

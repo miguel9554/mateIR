@@ -27,8 +27,8 @@ ExtractedIR buildIR(const slang::syntax::SyntaxTree& tree);
 // nullopt for anonymous, built-in, or module-local types.
 std::optional<std::string> externalPortTypeName(
     const UnresolvedSignal& signal,
+    const UnresolvedModule& module,
     const std::vector<ImportSpec>& global_imports,
-    const std::vector<ImportSpec>& header_imports,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages);
 
 } // namespace mate

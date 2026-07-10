@@ -247,6 +247,10 @@ public:
     std::vector<std::unique_ptr<UnresolvedPackage>> packages;
     std::vector<std::unique_ptr<UnresolvedInterface>> interfaces;
     std::vector<ImportSpec> globalImports;
+    // Compilation-unit scope typedefs, visible in every module declared after
+    // them.
+    std::vector<UnresolvedTypedef> fileScopeEnumTypedefs;
+    std::vector<UnresolvedTypedef> fileScopeStructTypedefs;
     UnresolvedModule* currentModule = nullptr;
     UnresolvedPackage* currentPackage = nullptr;
 
@@ -320,6 +324,8 @@ public:
 
         auto module = std::make_unique<UnresolvedModule>();
         module->name = std::move(headerInfo.name);
+        module->fileScopeEnumTypedefs = fileScopeEnumTypedefs;
+        module->fileScopeStructTypedefs = fileScopeStructTypedefs;
         module->parameters = std::move(headerInfo.parameters);
         module->inputs = std::move(headerInfo.inputs);
         module->outputs = std::move(headerInfo.outputs);
@@ -435,15 +441,17 @@ public:
         const auto type = extractDataType(*node.type);
         std::vector<UnresolvedSignal> signals;
         for (auto declarator : node.declarators){
-                if (declarator->initializer) throw CompilerError(
-                    "Initializers on variable declarations are not supported. "
-                    "Use an explicit always block assignment instead.",
-                    resolveSourceLoc(*declarator, sm));
+                // Initializers are recorded here and validated during
+                // elaboration, where flop-ness and the initial-value mode
+                // are known.
                 signals.push_back(
                     UnresolvedSignal{
                     .name = std::string(declarator->name.valueText()),
                     .type = type,
                     .dimensions = {&(declarator->dimensions)},
+                    .initializer = declarator->initializer
+                        ? declarator->initializer->expr.get()
+                        : nullptr,
                 });
         }
         std::move(signals.begin(), signals.end(),
@@ -484,15 +492,19 @@ public:
     }
 
     void handle(const TypedefDeclarationSyntax& node) {
-        if (!currentModule && !currentPackage) throw CompilerError(
-            "Typedef declaration must be inside a module or package.", resolveSourceLoc(node, sm));
+        // Typedefs outside any module or package have compilation-unit scope:
+        // they are collected here and seeded into every subsequently declared
+        // module (see module creation in handle(ModuleDeclarationSyntax)).
+        const bool fileScope = !currentModule && !currentPackage;
         const std::string typeName(node.name.valueText());
         if (node.type->kind == SyntaxKind::EnumType) {
             UnresolvedTypedef td{.name = typeName, .syntax = node.type};
             if (currentPackage) {
                 currentPackage->enumTypedefs.push_back(td);
-            } else {
+            } else if (currentModule) {
                 currentModule->enumTypedefs.push_back(td);
+            } else {
+                fileScopeEnumTypedefs.push_back(td);
             }
             return;
         }
@@ -500,11 +512,16 @@ public:
             UnresolvedTypedef td{.name = typeName, .syntax = node.type};
             if (currentPackage) {
                 currentPackage->structTypedefs.push_back(td);
-            } else {
+            } else if (currentModule) {
                 currentModule->structTypedefs.push_back(td);
+            } else {
+                fileScopeStructTypedefs.push_back(td);
             }
             return;
         }
+        if (fileScope) throw CompilerError(
+            "Only enum and struct typedefs are supported at compilation-unit scope.",
+            resolveSourceLoc(node, sm));
         if (node.type->kind == SyntaxKind::UnionType) {
             throw CompilerError(
                 "union types are not supported",
@@ -651,9 +668,10 @@ namespace mate {
 
 std::optional<std::string> externalPortTypeName(
     const UnresolvedSignal& signal,
+    const UnresolvedModule& module,
     const std::vector<ImportSpec>& global_imports,
-    const std::vector<ImportSpec>& header_imports,
     const std::vector<std::unique_ptr<UnresolvedPackage>>& packages) {
+    const std::vector<ImportSpec>& header_imports = module.headerImports;
 
     if (!signal.type.syntax || signal.type.syntax->kind != SyntaxKind::NamedType) {
         return std::nullopt;
@@ -678,7 +696,18 @@ std::optional<std::string> externalPortTypeName(
     }
     const std::string type_name(
         named.name->as<IdentifierNameSyntax>().identifier.valueText());
-    return resolveImportedTypeName(type_name, global_imports, header_imports, packages);
+    auto imported = resolveImportedTypeName(type_name, global_imports, header_imports, packages);
+    if (imported) return imported;
+    // Compilation-unit ($unit) scope typedefs are referenceable by their bare
+    // name from any file compiled in the same compilation unit.
+    auto inList = [&](const std::vector<UnresolvedTypedef>& tds) {
+        return std::any_of(tds.begin(), tds.end(),
+                           [&](const auto& td) { return td.name == type_name; });
+    };
+    if (inList(module.fileScopeEnumTypedefs) || inList(module.fileScopeStructTypedefs)) {
+        return type_name;
+    }
+    return std::nullopt;
 }
 
 ExtractedIR buildIR(const SyntaxTree& tree) {

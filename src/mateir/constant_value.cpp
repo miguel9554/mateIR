@@ -329,6 +329,26 @@ int64_t ConstantValue::requireInt64(std::string_view context,
     return *value;
 }
 
+int64_t ConstantValue::requireBitPatternInt64(std::string_view context,
+                                              std::optional<SourceLoc> loc) const {
+    const ConstantValue flat =
+        (isAggregate() && type_.isPackedStruct()) ? flattenToBits() : *this;
+    if (!flat.isBits()) {
+        throw CompilerError(std::string(context) + " is not a bit-vector constant", loc);
+    }
+    const auto& value = std::get<ConstantBitVector>(flat.payload_);
+    for (int index = 64; index < value.width; ++index) {
+        if ((value.words[index / 64] >> (index % 64)) & 1) {
+            throw CompilerError(
+                std::string(context) + " does not fit in 64 bits", loc);
+        }
+    }
+    const uint64_t mask = value.width >= 64
+        ? ~uint64_t{0}
+        : ((uint64_t{1} << value.width) - 1);
+    return static_cast<int64_t>(value.words[0] & mask);
+}
+
 std::string ConstantValue::debugString() const {
     if (auto value = asInt64()) return std::to_string(*value);
     if (isReal()) return std::to_string(asReal().value);

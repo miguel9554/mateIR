@@ -278,8 +278,10 @@ NativeSimEngine::PreparedUpdates NativeSimEngine::prepareUpdates(
     return prepared;
 }
 
-void NativeSimEngine::initialize(FlopsInitial mode, std::mt19937_64& rng) {
+void NativeSimEngine::initialize(FlopsInitial mode, bool use_initial_values,
+                                 std::mt19937_64& rng) {
     pending_flops_initial_ = toAbiFlopsInitial(mode);
+    pending_use_initial_values_ = use_initial_values;
     pending_flops_seed_ = rng();
     // Native flops are initialized together with initial inputs, matching the
     // existing simulator's externally-visible initialization point.
@@ -293,6 +295,7 @@ void NativeSimEngine::initializeInputsAndEvaluate(
     MateStatus status{};
     checkStatus(mate_instance_init_(abi_instance_,
                                     pending_flops_initial_,
+                                    pending_use_initial_values_ ? 1 : 0,
                                     pending_flops_seed_,
                                     async.updates.data(),
                                     static_cast<int32_t>(async.updates.size()),

@@ -97,7 +97,7 @@ bool extract_reset_from_concat(
     const Module& resolved,
     EventTriggerFact& reset,
     EventTriggerFact& clock,
-    int& reset_value,
+    int64_t& reset_value,
     DFGNode*& functionalLogic)
 {
     if (dNodeDriver->concatParts().empty()) {
@@ -190,7 +190,7 @@ bool extract_reset_from_concat(
     }
 
     if (resetIsConst) {
-        reset_value = static_cast<int>(assembledReset);
+        reset_value = assembledReset;
     } else if (!resetIsQ) {
         throw CompilerError(
             std::format("flop '{}' reset CONCAT is not a pure reset constant nor retained .q", flop_name),
@@ -211,7 +211,7 @@ bool extract_reset(
     const Module& resolved,
     EventTriggerFact& reset,
     EventTriggerFact& clock,
-    int& reset_value,
+    int64_t& reset_value,
     DFGNode*& functionalLogic)
 {
     if (dNodeDriver->kind() == DFGOp::CONCAT) {
@@ -261,7 +261,7 @@ bool extract_reset(
     // Check the reset assignment is either a CONSTANT (has reset) or its .q value (NO reset)
     bool has_reset;
     if (auto constValue = constantValueOfNode(expectedResetAssign)) {
-        reset_value = static_cast<int>(*constValue);
+        reset_value = *constValue;
         has_reset = true;
     } else if (isFlopQValue(expectedResetAssign, flop_name)) {
         has_reset = false;
@@ -311,7 +311,7 @@ FlopInfo extractFlopClockAndReset(
     EventTriggerFact clock;
     EventTriggerFact reset;
     bool has_reset;
-    int reset_value;
+    int64_t reset_value;
 
     if (triggers.size() == 1) {
         clock = triggers[0];
@@ -338,10 +338,21 @@ FlopInfo extractFlopClockAndReset(
         .reset_value = flop.reset_value,
     };
     flop.name = flop_name;
-    for (const auto& leaf : flopIn.binding.aggregate_leaves) {
+    if (!flopIn.initial_values.empty() &&
+        flopIn.initial_values.size() != flopIn.binding.aggregate_leaves.size()) {
+        throw CompilerError(std::format(
+            "flop '{}' has {} initial values for {} leaves",
+            flopIn.name, flopIn.initial_values.size(),
+            flopIn.binding.aggregate_leaves.size()));
+    }
+    for (size_t i = 0; i < flopIn.binding.aggregate_leaves.size(); ++i) {
+        const auto& leaf = flopIn.binding.aggregate_leaves[i];
         if (leaf.name == flop_name) {
             flop.type = leaf.leaf_type;
             flop.binding.aggregate_leaves = {leaf};
+            if (!flopIn.initial_values.empty()) {
+                flop.initial_values = {flopIn.initial_values[i]};
+            }
             break;
         }
     }
@@ -473,16 +484,27 @@ static void resolveFlopsForModule(Module& resolved,
                 }
             }
         } else {
-            auto suffixes = unpackedIndexSuffixes(output.type);
-            const auto& leaves = moduleNodeLeaves(output);
-            for (size_t i = 0; i < suffixes.size(); ++i) {
-                const auto& suffix = suffixes[i];
-                DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + suffix + ".q");
-                DFGNode* outNode = i < leaves.size()
-                    ? leaves[i]
-                    : graph.getGraphOutput(dfgInstancePath, outName + suffix);
-                if (qNode && outNode) {
-                    graph.connectDriver(outNode, {qNode, 0});
+            // Walk the aggregate leaf plan (not just element suffixes) so
+            // arrays of structs connect their per-field leaves.
+            const auto& aggLeaves = output.binding.aggregate_leaves;
+            if (!aggLeaves.empty()) {
+                for (const auto& leaf : aggLeaves) {
+                    DFGNode* qNode = graph.getGraphInput(dfgInstancePath, leaf.name + ".q");
+                    DFGNode* outNode = leaf.leaf
+                        ? leaf.leaf
+                        : graph.getGraphOutput(dfgInstancePath, leaf.name);
+                    if (qNode && outNode) {
+                        graph.connectDriver(outNode, {qNode, 0});
+                    }
+                }
+            } else {
+                auto suffixes = unpackedIndexSuffixes(output.type);
+                for (const auto& suffix : suffixes) {
+                    DFGNode* qNode = graph.getGraphInput(dfgInstancePath, outName + suffix + ".q");
+                    DFGNode* outNode = graph.getGraphOutput(dfgInstancePath, outName + suffix);
+                    if (qNode && outNode) {
+                        graph.connectDriver(outNode, {qNode, 0});
+                    }
                 }
             }
         }

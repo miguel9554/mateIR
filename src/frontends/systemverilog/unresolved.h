@@ -58,6 +58,10 @@ struct UnresolvedSignal {
     std::string name;
     UnresolvedType type;
     UnresolvedDimension dimensions;  // array dimensions (if any)
+    // Declaration initializer expression (e.g. `logic q = 1'b0;`).
+    // Only supported on signals that resolve to flops; validated during
+    // elaboration once flop-ness is known.
+    const slang::syntax::ExpressionSyntax* initializer = nullptr;
 
     void print(std::ostream& os) const;
 };
@@ -117,6 +121,7 @@ struct UnresolvedInterfacePort {
     std::string port_name;
     std::string interface_name;
     std::string modport_name;
+    UnresolvedDimension dimensions;
 };
 
 // ============================================================================
@@ -158,6 +163,11 @@ struct UnresolvedModule {
     // Enum typedef declarations (typedef_name → EnumType syntax pointer)
     std::vector<UnresolvedTypedef> enumTypedefs;
     std::vector<UnresolvedTypedef> structTypedefs;
+
+    // Compilation-unit scope typedefs declared before this module. Registered
+    // ahead of header parameters and ports, which may use them as types.
+    std::vector<UnresolvedTypedef> fileScopeEnumTypedefs;
+    std::vector<UnresolvedTypedef> fileScopeStructTypedefs;
 
     // Package imports are separated because body imports must not affect the
     // module header namespace (parameters and ports).

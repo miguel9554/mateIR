@@ -388,6 +388,7 @@ struct SubIfacePortInfo {
     const UnresolvedInterface* idef = nullptr;
     std::string interface_name;
     std::string modport_name;
+    std::vector<Dimension> dimensions;
 };
 using SubIfacePortMap = std::map<std::string, SubIfacePortInfo>;
 
@@ -466,6 +467,14 @@ static void resolveInterfacePortConnection(
     }
 
     const auto* parentPort = lookupIfacePortView(ctx, parentBase);
+    const auto* parentInst = lookupIfaceInstanceView(ctx, parentBase);
+    const std::vector<Dimension>& parentDims =
+        parentPort ? parentPort->dimensions : parentInst->dimensions;
+    if (parentDims != info.dimensions) {
+        throw CompilerError(
+            "Interface port '" + portName + "' array dimensions do not match "
+            "connection '" + parentBase + "'", loc);
+    }
 
     auto wireMember = [&](const std::string& memberName, bool driven_by_child) {
         const std::string childNodeName = portName + "." + memberName;
@@ -871,6 +880,10 @@ void instantiateSubmoduleInstance(
             .idef = it->second,
             .interface_name = ip.interface_name,
             .modport_name = ip.modport_name,
+            .dimensions = ip.dimensions.syntax && !ip.dimensions.syntax->empty()
+                ? ResolveDimensions(*ip.dimensions.syntax, instCtx, &ctx.pkgRegistry,
+                                    &ctx.sm, &ctx.namedTypeRegistry)
+                : std::vector<Dimension>{},
         });
     }
 
@@ -917,7 +930,8 @@ void instantiateSubmoduleInstance(
                                      ctx.moduleLookup, *ctx.interfaceLookup, ctx.sm,
                                      ctx.pkgRegistry, ctx.globalImports,
                                      childOccurrencePath,
-                                     ctx.domain_facts, ctx.lang_meta);
+                                     ctx.domain_facts, ctx.lang_meta,
+                                     ctx.allow_flop_initial_values);
 
     std::set<std::string> subInputNames, subOutputNames;
     forEachInputNode(resolvedSub, [&](const ModuleNode& inp) { subInputNames.insert(inp.name); });

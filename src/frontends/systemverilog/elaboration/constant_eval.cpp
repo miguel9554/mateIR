@@ -174,6 +174,85 @@ ConstantValue lowerStringLiteralConstant(std::string_view text, const Type& expe
         expectedType, lowerFrontendStringLiteralToWords(text, expectedType.width));
 }
 
+std::optional<SourceLoc> constantExprLoc(const ExpressionSyntax* expr,
+                                         const slang::SourceManager* sm) {
+    if (!expr || !sm) return std::nullopt;
+    return resolveSourceLoc(*expr, *sm);
+}
+
+uint64_t maskToWidth(uint64_t value, int width) {
+    if (width <= 0 || width > 64) {
+        throw CompilerError("Constant concatenation item width is out of range");
+    }
+    if (width == 64) return value;
+    return value & ((uint64_t(1) << width) - 1);
+}
+
+template <typename ExpressionListT>
+int concatenationItemListWidth(const ExpressionListT& expressions,
+                               const slang::SourceManager* sm,
+                               const ParameterContext* paramCtx,
+                               const NamedTypeRegistry* namedTypeRegistry,
+                               const PackageRegistry* pkgRegistry) {
+    int width = 0;
+    for (const auto* item : expressions) {
+        const int itemWidth = constantExprWidth(
+            item, sm, paramCtx, namedTypeRegistry, pkgRegistry);
+        if (itemWidth <= 0) {
+            throw CompilerError("Constant concatenation item must have a positive width");
+        }
+        if (itemWidth > std::numeric_limits<int>::max() - width) {
+            throw CompilerError("Constant concatenation width exceeds supported range");
+        }
+        width += itemWidth;
+    }
+    return width;
+}
+
+int64_t multipleConcatenationRepeatCount(const MultipleConcatenationExpressionSyntax& multiConcat,
+                                         const ParameterContext& ctx,
+                                         const PackageRegistry* pkgRegistry,
+                                         const NamedTypeRegistry* namedTypeRegistry,
+                                         const slang::SourceManager* sm) {
+    const int64_t repeatCount = evaluateConstantExpr(
+        multiConcat.expression, ctx, pkgRegistry, namedTypeRegistry, sm);
+    if (repeatCount < 0) {
+        throw CompilerError(
+            "Constant multiple concatenation repeat count cannot be negative",
+            constantExprLoc(&multiConcat, sm));
+    }
+    if (repeatCount == 0) {
+        throw CompilerError(
+            "Constant multiple concatenation repeat count must be positive",
+            constantExprLoc(&multiConcat, sm));
+    }
+    return repeatCount;
+}
+
+template <typename ExpressionListT>
+uint64_t evaluateConcatenationToUint64(const ExpressionListT& expressions,
+                                       const ParameterContext& ctx,
+                                       const PackageRegistry* pkgRegistry,
+                                       const NamedTypeRegistry* namedTypeRegistry,
+                                       const slang::SourceManager* sm) {
+    uint64_t result = 0;
+    int resultWidth = 0;
+    for (const auto* item : expressions) {
+        const int itemWidth = constantExprWidth(item, sm, &ctx, namedTypeRegistry, pkgRegistry);
+        if (itemWidth > 64 || resultWidth > 64 - itemWidth) {
+            throw CompilerError("Constant concatenation does not fit in int64_t",
+                                constantExprLoc(item, sm));
+        }
+        const uint64_t itemValue = static_cast<uint64_t>(
+            evaluateConstantExpr(item, ctx, pkgRegistry, namedTypeRegistry, sm));
+        result = itemWidth == 64
+            ? itemValue
+            : (result << itemWidth) | maskToWidth(itemValue, itemWidth);
+        resultWidth += itemWidth;
+    }
+    return result;
+}
+
 }  // namespace
 
 IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionSyntax& vecExpr){
@@ -196,7 +275,10 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
         base = 10;
     }
 
-    int64_t value = std::stoll(valueText, nullptr, base);
+    // Parse as unsigned and reinterpret: sized literals like
+    // 64'hFFFF_FFFF_0000_0000 are bit patterns that exceed int64 range but
+    // fit in 64 bits.
+    int64_t value = static_cast<int64_t>(std::stoull(valueText, nullptr, base));
 
     int width;
     if (!sizeText.empty()) {
@@ -325,16 +407,25 @@ int constantExprWidth(const ExpressionSyntax* expr,
             return constantExprWidth(expr->as<ParenthesizedExpressionSyntax>().expression,
                                      sm, paramCtx, namedTypeRegistry, pkgRegistry);
         case SyntaxKind::ConcatenationExpression: {
-            int width = 0;
-            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
-                const int itemWidth = constantExprWidth(item, sm, paramCtx,
-                                                        namedTypeRegistry, pkgRegistry);
-                if (itemWidth > std::numeric_limits<int>::max() - width) {
-                    throw CompilerError("Constant concatenation width exceeds supported range");
-                }
-                width += itemWidth;
+            return concatenationItemListWidth(
+                expr->as<ConcatenationExpressionSyntax>().expressions,
+                sm, paramCtx, namedTypeRegistry, pkgRegistry);
+        }
+        case SyntaxKind::MultipleConcatenationExpression: {
+            if (!paramCtx) {
+                throw CompilerError("Cannot evaluate constant multiple concatenation width without parameter context",
+                                    loc);
             }
-            return width;
+            const auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
+            const int64_t repeatCount = multipleConcatenationRepeatCount(
+                multiConcat, *paramCtx, pkgRegistry, namedTypeRegistry, sm);
+            const int itemWidth = concatenationItemListWidth(
+                multiConcat.concatenation->expressions,
+                sm, paramCtx, namedTypeRegistry, pkgRegistry);
+            if (repeatCount > std::numeric_limits<int>::max() / itemWidth) {
+                throw CompilerError("Constant multiple concatenation width exceeds supported range", loc);
+            }
+            return static_cast<int>(repeatCount) * itemWidth;
         }
         case SyntaxKind::IdentifierName: {
             std::string name(expr->as<IdentifierNameSyntax>().identifier.valueText());
@@ -349,6 +440,22 @@ int constantExprWidth(const ExpressionSyntax* expr,
             throw CompilerError(
                 "Cannot determine width of constant expression: " + name, loc);
         }
+        case SyntaxKind::IdentifierSelectName: {
+            // Width of a bit- or range-select on a constant identifier.
+            const auto& sel = expr->as<IdentifierSelectNameSyntax>();
+            if (sel.selectors.size() != 1 || !sel.selectors[0]->selector) break;
+            const auto* selector = sel.selectors[0]->selector;
+            if (selector->kind == SyntaxKind::BitSelect) return 1;
+            if (selector->kind == SyntaxKind::SimpleRangeSelect && paramCtx) {
+                const auto& range = selector->as<RangeSelectSyntax>();
+                const int64_t left =
+                    evaluateConstantExpr(range.left, *paramCtx, pkgRegistry, namedTypeRegistry, sm);
+                const int64_t right =
+                    evaluateConstantExpr(range.right, *paramCtx, pkgRegistry, namedTypeRegistry, sm);
+                return static_cast<int>(std::abs(left - right)) + 1;
+            }
+            break;
+        }
         case SyntaxKind::ScopedName: {
             if (!pkgRegistry) break;
             const auto& scoped = expr->as<ScopedNameSyntax>();
@@ -362,6 +469,17 @@ int constantExprWidth(const ExpressionSyntax* expr,
             auto constIt = pkgIt->second.constants.find(itemName);
             if (constIt != pkgIt->second.constants.end()) return bitstreamWidth(constIt->second.type());
             break;
+        }
+        case SyntaxKind::CastExpression: {
+            if (!paramCtx) {
+                throw CompilerError("Cannot determine width of constant cast without parameter context", loc);
+            }
+            const auto& castExpr = expr->as<CastExpressionSyntax>();
+            const auto target = resolveCastTarget(
+                *castExpr.left, *paramCtx, pkgRegistry, namedTypeRegistry, sm);
+            return target.kind == CastTargetResolution::Kind::NamedType
+                ? bitstreamWidth(target.type)
+                : target.width;
         }
         default:
             break;
@@ -434,6 +552,146 @@ std::optional<int64_t> staticBitsWidth(
     return std::nullopt;
 }
 
+CastTargetResolution resolveCastTarget(const SyntaxNode& castTargetSyntax,
+                                       const ParameterContext& ctx,
+                                       const PackageRegistry* pkgRegistry,
+                                       const NamedTypeRegistry* namedTypeRegistry,
+                                       const slang::SourceManager* sm) {
+    auto loc = sm ? std::optional<SourceLoc>(resolveSourceLoc(castTargetSyntax, *sm)) : std::nullopt;
+
+    const auto resolveWidth = [&](const ExpressionSyntax& widthExpr,
+                                  const std::string& debugName) -> CastTargetResolution {
+        int64_t widthValue = evaluateConstantExpr(&widthExpr, ctx, pkgRegistry, namedTypeRegistry, sm);
+        if (widthValue <= 0) {
+            throw CompilerError(
+                std::format("Width cast '{}' must have positive width, got {}", debugName, widthValue),
+                loc);
+        }
+        if (widthValue > std::numeric_limits<int>::max()) {
+            throw CompilerError(
+                std::format("Width cast '{}' exceeds supported width {}", debugName, widthValue),
+                loc);
+        }
+        return CastTargetResolution{
+            .kind = CastTargetResolution::Kind::Width,
+            .type = Type::makeInteger(static_cast<int>(widthValue), false),
+            .width = static_cast<int>(widthValue),
+        };
+    };
+
+    const auto tryResolvePackageNamedType = [&](const ScopedNameSyntax& scoped)
+        -> std::optional<CastTargetResolution> {
+        if (!pkgRegistry || scoped.separator.rawText() != "::") return std::nullopt;
+        std::string pkgName(scoped.left->as<IdentifierNameSyntax>().identifier.valueText());
+        std::string typeName(scoped.right->as<IdentifierNameSyntax>().identifier.valueText());
+        auto pkgIt = pkgRegistry->find(pkgName);
+        if (pkgIt == pkgRegistry->end()) {
+            throw CompilerError("Unknown package in cast: " + pkgName, loc);
+        }
+        auto it = pkgIt->second.namedTypes.find(typeName);
+        if (it == pkgIt->second.namedTypes.end()) return std::nullopt;
+        return CastTargetResolution{
+            .kind = CastTargetResolution::Kind::NamedType,
+            .type = it->second,
+            .width = it->second.width,
+        };
+    };
+
+    switch (castTargetSyntax.kind) {
+        case SyntaxKind::NamedType: {
+            const auto& namedType = castTargetSyntax.as<NamedTypeSyntax>();
+            if (namedType.name->kind == SyntaxKind::ScopedName) {
+                const auto& scoped = namedType.name->as<ScopedNameSyntax>();
+                if (auto resolved = tryResolvePackageNamedType(scoped)) {
+                    return *resolved;
+                }
+                throw CompilerError(
+                    "Unknown type in cast: " +
+                        std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText()) +
+                        "::" +
+                        std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText()),
+                    loc);
+            }
+
+            std::string name(namedType.name->as<IdentifierNameSyntax>().identifier.valueText());
+            if (namedTypeRegistry) {
+                auto it = namedTypeRegistry->find(name);
+                if (it != namedTypeRegistry->end()) {
+                    return CastTargetResolution{
+                        .kind = CastTargetResolution::Kind::NamedType,
+                        .type = it->second,
+                        .width = it->second.width,
+                    };
+                }
+            }
+            return resolveWidth(namedType.name->as<IdentifierNameSyntax>(), name);
+        }
+
+        case SyntaxKind::IdentifierName: {
+            const auto& ident = castTargetSyntax.as<IdentifierNameSyntax>();
+            std::string name(ident.identifier.valueText());
+            if (namedTypeRegistry) {
+                auto it = namedTypeRegistry->find(name);
+                if (it != namedTypeRegistry->end()) {
+                    return CastTargetResolution{
+                        .kind = CastTargetResolution::Kind::NamedType,
+                        .type = it->second,
+                        .width = it->second.width,
+                    };
+                }
+            }
+            return resolveWidth(ident, name);
+        }
+
+        case SyntaxKind::ScopedName: {
+            const auto& scoped = castTargetSyntax.as<ScopedNameSyntax>();
+            if (auto resolved = tryResolvePackageNamedType(scoped)) {
+                return *resolved;
+            }
+            throw CompilerError(
+                "Unknown type in cast: " +
+                    std::string(scoped.left->as<IdentifierNameSyntax>().identifier.valueText()) +
+                    "::" +
+                    std::string(scoped.right->as<IdentifierNameSyntax>().identifier.valueText()),
+                loc);
+        }
+
+        case SyntaxKind::MemberAccessExpression: {
+            const auto& member = castTargetSyntax.as<MemberAccessExpressionSyntax>();
+            if (member.left->kind != SyntaxKind::IdentifierName) {
+                throw CompilerError("Unsupported width-cast target expression", loc);
+            }
+            const std::string qualified =
+                std::string(member.left->as<IdentifierNameSyntax>().identifier.valueText()) +
+                "." + std::string(member.name.valueText());
+            return resolveWidth(member, qualified);
+        }
+
+        case SyntaxKind::IntegerLiteralExpression: {
+            const auto& literal = castTargetSyntax.as<LiteralExpressionSyntax>();
+            int64_t widthValue = std::stoll(std::string(literal.literal.rawText()));
+            if (widthValue <= 0) {
+                throw CompilerError(
+                    std::format("Width cast '{}' must have positive width, got {}", literal.literal.rawText(), widthValue),
+                    loc);
+            }
+            if (widthValue > std::numeric_limits<int>::max()) {
+                throw CompilerError(
+                    std::format("Width cast '{}' exceeds supported width {}", literal.literal.rawText(), widthValue),
+                    loc);
+            }
+            return CastTargetResolution{
+                .kind = CastTargetResolution::Kind::Width,
+                .type = Type::makeInteger(static_cast<int>(widthValue), false),
+                .width = static_cast<int>(widthValue),
+            };
+        }
+
+        default:
+            throw CompilerError("Only named-type and width casts are supported", loc);
+    }
+}
+
 // Evaluate a constant expression given a parameter context
 // Throws if a referenced parameter is not in the context
 int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContext& ctx,
@@ -484,6 +742,65 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                     "Parameter '" + paramName + "' not found in context");
             }
             return it->second.requireInt64("Parameter '" + paramName + "'");
+        }
+
+        case SyntaxKind::IdentifierSelectName: {
+            // Bit- or range-select on a constant identifier, e.g. gi[7:0] or
+            // BYTE_INIT_LP[3:0].
+            auto& sel = expr->as<IdentifierSelectNameSyntax>();
+            std::string paramName(sel.identifier.valueText());
+            auto it = ctx.values.find(paramName);
+            if (it == ctx.values.end()) {
+                throw CompilerError(
+                    "Parameter '" + paramName + "' not found in context",
+                    sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+            }
+            int64_t value = it->second.requireInt64("Parameter '" + paramName + "'");
+            for (const auto* elementSelect : sel.selectors) {
+                if (!elementSelect->selector) {
+                    throw CompilerError(
+                        "Empty selector in constant expression",
+                        sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+                }
+                if (elementSelect->selector->kind == SyntaxKind::BitSelect) {
+                    const auto& bit = elementSelect->selector->as<BitSelectSyntax>();
+                    const int64_t index =
+                        evaluateConstantExpr(bit.expr, ctx, pkgRegistry, namedTypeRegistry, sm);
+                    if (index < 0 || index > 63) {
+                        throw CompilerError(
+                            "Constant bit-select index out of supported range",
+                            sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+                    }
+                    value = (static_cast<uint64_t>(value) >> index) & 1;
+                    continue;
+                }
+                if (elementSelect->selector->kind == SyntaxKind::SimpleRangeSelect) {
+                    const auto& range = elementSelect->selector->as<RangeSelectSyntax>();
+                    const int64_t left =
+                        evaluateConstantExpr(range.left, ctx, pkgRegistry, namedTypeRegistry, sm);
+                    const int64_t right =
+                        evaluateConstantExpr(range.right, ctx, pkgRegistry, namedTypeRegistry, sm);
+                    const int64_t hi = std::max(left, right);
+                    const int64_t lo = std::min(left, right);
+                    const int64_t width = hi - lo + 1;
+                    if (lo < 0 || hi > 63) {
+                        throw CompilerError(
+                            "Constant range-select out of supported range",
+                            sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+                    }
+                    const uint64_t mask = width >= 64
+                        ? ~uint64_t{0}
+                        : ((uint64_t{1} << width) - 1);
+                    value = static_cast<int64_t>(
+                        (static_cast<uint64_t>(value) >> lo) & mask);
+                    continue;
+                }
+                throw CompilerError(
+                    "Unsupported selector kind in constant expression: " +
+                    std::string(toString(elementSelect->selector->kind)),
+                    sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+            }
+            return value;
         }
 
         case SyntaxKind::MemberAccessExpression: {
@@ -567,22 +884,32 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
         }
 
         case SyntaxKind::ConcatenationExpression: {
+            return static_cast<int64_t>(evaluateConcatenationToUint64(
+                expr->as<ConcatenationExpressionSyntax>().expressions,
+                ctx, pkgRegistry, namedTypeRegistry, sm));
+        }
+
+        case SyntaxKind::MultipleConcatenationExpression: {
+            const auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
+            const int64_t repeatCount = multipleConcatenationRepeatCount(
+                multiConcat, ctx, pkgRegistry, namedTypeRegistry, sm);
             uint64_t result = 0;
             int resultWidth = 0;
-            for (const auto* item : expr->as<ConcatenationExpressionSyntax>().expressions) {
-                const int itemWidth = constantExprWidth(item, sm, &ctx, namedTypeRegistry, pkgRegistry);
-                if (itemWidth > 64 || resultWidth > 64 - itemWidth) {
-                    throw CompilerError("Constant concatenation does not fit in int64_t");
+            for (int64_t i = 0; i < repeatCount; ++i) {
+                for (const auto* item : multiConcat.concatenation->expressions) {
+                    const int itemWidth = constantExprWidth(
+                        item, sm, &ctx, namedTypeRegistry, pkgRegistry);
+                    if (itemWidth > 64 || resultWidth > 64 - itemWidth) {
+                        throw CompilerError("Constant multiple concatenation does not fit in int64_t",
+                                            constantExprLoc(expr, sm));
+                    }
+                    const uint64_t itemValue = static_cast<uint64_t>(
+                        evaluateConstantExpr(item, ctx, pkgRegistry, namedTypeRegistry, sm));
+                    result = itemWidth == 64
+                        ? itemValue
+                        : (result << itemWidth) | maskToWidth(itemValue, itemWidth);
+                    resultWidth += itemWidth;
                 }
-                const uint64_t itemValue = static_cast<uint64_t>(
-                    evaluateConstantExpr(item, ctx, pkgRegistry, namedTypeRegistry, sm));
-                const uint64_t mask = itemWidth == 64
-                    ? UINT64_MAX
-                    : (uint64_t(1) << itemWidth) - 1;
-                result = itemWidth == 64
-                    ? itemValue
-                    : (result << itemWidth) | (itemValue & mask);
-                resultWidth += itemWidth;
             }
             return static_cast<int64_t>(result);
         }
@@ -735,13 +1062,15 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
         case SyntaxKind::CastExpression: {
             auto& castExpr = expr->as<CastExpressionSyntax>();
             int64_t val = evaluateConstantExpr(castExpr.right->expression, ctx, pkgRegistry, namedTypeRegistry, sm);
-            // Width cast: mask to the specified number of bits
-            if (castExpr.left->kind == SyntaxKind::IntegerLiteralExpression) {
-                int64_t width = std::stoll(std::string(
-                    castExpr.left->as<LiteralExpressionSyntax>().literal.rawText()));
-                if (width > 0 && width < 64) {
-                    val = static_cast<int64_t>(static_cast<uint64_t>(val) & ((uint64_t(1) << width) - 1));
+            const auto target = resolveCastTarget(
+                *castExpr.left, ctx, pkgRegistry, namedTypeRegistry, sm);
+            if (target.kind == CastTargetResolution::Kind::Width) {
+                if (target.width > 64) {
+                    throw CompilerError(
+                        std::format("Constant width cast '{}' does not fit in int64_t", target.width),
+                        constantExprLoc(expr, sm));
                 }
+                val = static_cast<int64_t>(maskToWidth(static_cast<uint64_t>(val), target.width));
             }
             return val;
         }
@@ -890,17 +1219,70 @@ ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
             }
             return ConstantValue::concatenate(expectedType, values);
         }
+        case SyntaxKind::MultipleConcatenationExpression: {
+            const auto& multiConcat = expr->as<MultipleConcatenationExpressionSyntax>();
+            const int64_t repeatCount = multipleConcatenationRepeatCount(
+                multiConcat, ctx, &pkgRegistry, namedTypeRegistry, &sm);
+            std::vector<ConstantValue> values;
+            const size_t concatItemCount = multiConcat.concatenation->expressions.size();
+            if (concatItemCount == 0) {
+                throw CompilerError("Empty constant multiple concatenation",
+                                    resolveSourceLoc(*expr, sm));
+            }
+            const size_t repeatCountSize = static_cast<size_t>(repeatCount);
+            if (repeatCountSize > std::numeric_limits<size_t>::max() / concatItemCount) {
+                throw CompilerError("Constant multiple concatenation element count exceeds supported range",
+                                    resolveSourceLoc(*expr, sm));
+            }
+            values.reserve(repeatCountSize * concatItemCount);
+            for (int64_t i = 0; i < repeatCount; ++i) {
+                for (const auto* item : multiConcat.concatenation->expressions) {
+                    values.push_back(evaluateConstantValue(
+                        item,
+                        Type::makeInteger(
+                            constantExprWidth(item, &sm, &ctx, namedTypeRegistry, &pkgRegistry), false),
+                        ctx, pkgRegistry, namedTypeRegistry, sm));
+                }
+            }
+            return ConstantValue::concatenate(expectedType, values);
+        }
         case SyntaxKind::AssignmentPatternExpression: {
             const auto& assignment = expr->as<AssignmentPatternExpressionSyntax>();
             if (!expectedType.unpacked_dims.empty()) {
+                Type elementType = expectedType;
+                const auto dim = elementType.unpacked_dims.front();
+                elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+                if (assignment.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+                    // '{default: <expr>}: replicate the default value across
+                    // every element of this dimension.
+                    const auto& pattern =
+                        assignment.pattern->as<StructuredAssignmentPatternSyntax>();
+                    if (pattern.items.size() != 1 ||
+                        pattern.items[0]->key->kind != SyntaxKind::DefaultPatternKeyExpression) {
+                        throw CompilerError(
+                            "Only a single default key is supported in array "
+                            "assignment patterns for constants",
+                            resolveSourceLoc(*expr, sm));
+                    }
+                    // The default applies recursively: for aggregate element
+                    // types, re-apply the whole pattern one dimension down.
+                    ConstantValue element = elementType.isAggregate()
+                        ? evaluateConstantValue(expr, elementType, ctx,
+                                                pkgRegistry, namedTypeRegistry, sm)
+                        : evaluateConstantValue(pattern.items[0]->expr,
+                                                elementType, ctx, pkgRegistry,
+                                                namedTypeRegistry, sm);
+                    const size_t count =
+                        static_cast<size_t>(std::abs(dim.right - dim.left)) + 1;
+                    std::vector<ConstantValue> values(count, element);
+                    return ConstantValue::array(expectedType, std::move(values));
+                }
                 if (assignment.pattern->kind != SyntaxKind::SimpleAssignmentPattern) {
                     throw CompilerError(
                         "Only ordered array assignment patterns are supported for package constants",
                         resolveSourceLoc(*expr, sm));
                 }
                 const auto& pattern = assignment.pattern->as<SimpleAssignmentPatternSyntax>();
-                Type elementType = expectedType;
-                elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
                 std::vector<ConstantValue> values;
                 values.reserve(pattern.items.size());
                 for (const auto* item : pattern.items) {
@@ -1029,6 +1411,78 @@ int64_t evaluateStepExpr(
             throw CompilerError(
                 "Unsupported loop step expression: " + std::string(toString(iterExpr->kind)));
     }
+}
+
+namespace {
+
+void flattenConstantLeavesImpl(const ConstantValue& value,
+                               const Type& type,
+                               const std::optional<SourceLoc>& loc,
+                               std::vector<int64_t>& out) {
+    if (!type.unpacked_dims.empty()) {
+        Type elem = type;
+        const auto dim = elem.unpacked_dims.front();
+        elem.unpacked_dims.erase(elem.unpacked_dims.begin());
+        const size_t count =
+            static_cast<size_t>(std::abs(dim.right - dim.left)) + 1;
+        if (!value.isAggregate() || value.asAggregate().elements.size() != count) {
+            throw CompilerError(std::format(
+                "Constant element count does not match unpacked dimension "
+                "(expected {}, got {})",
+                count,
+                value.isAggregate() ? value.asAggregate().elements.size() : 1),
+                loc);
+        }
+        for (size_t i = 0; i < count; ++i) {
+            flattenConstantLeavesImpl(value.element(i), elem, loc, out);
+        }
+        return;
+    }
+    if (type.isStruct()) {
+        const auto& fields = type.structInfo().fields;
+        if (value.isAggregate()) {
+            const auto& elements = value.asAggregate().elements;
+            if (elements.size() != fields.size()) {
+                throw CompilerError(
+                    "Constant struct field count does not match its type", loc);
+            }
+            for (size_t i = 0; i < fields.size(); ++i) {
+                flattenConstantLeavesImpl(elements[i], *fields[i].type, loc, out);
+            }
+            return;
+        }
+        // Packed struct value stored as flat bits: slice per field, first
+        // field at the MSB (packed struct layout).
+        const int64_t all = value.requireBitPatternInt64("packed struct constant", loc);
+        int offset = type.width;
+        for (const auto& field : fields) {
+            const int fieldWidth = field.type->width;
+            offset -= fieldWidth;
+            if (offset < 0 || fieldWidth <= 0 || fieldWidth > 64) {
+                throw CompilerError(
+                    "Unsupported packed struct constant layout", loc);
+            }
+            const uint64_t mask = fieldWidth >= 64
+                ? ~uint64_t{0}
+                : ((uint64_t{1} << fieldWidth) - 1);
+            const int64_t fieldValue = static_cast<int64_t>(
+                (static_cast<uint64_t>(all) >> offset) & mask);
+            flattenConstantLeavesImpl(
+                ConstantValue::bits(*field.type, fieldValue), *field.type, loc, out);
+        }
+        return;
+    }
+    out.push_back(value.requireBitPatternInt64("constant leaf value", loc));
+}
+
+} // namespace
+
+std::vector<int64_t> flattenConstantToLeaves(const ConstantValue& value,
+                                             const Type& type,
+                                             const std::optional<SourceLoc>& loc) {
+    std::vector<int64_t> out;
+    flattenConstantLeavesImpl(value, type, loc, out);
+    return out;
 }
 
 } // namespace mate

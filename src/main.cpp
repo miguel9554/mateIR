@@ -45,6 +45,8 @@ void printUsage(const char* progName) {
               << "  --dpi-link-libs <lib1.a,lib2.a,...>\n"
               << "                            Static libraries whose objects are folded into the\n"
               << "                            --dpi-lib output archive\n"
+              << "  --dpi-cxx-flags <flags>   Extra whitespace-separated compile flags for the\n"
+              << "                            --dpi-lib output (e.g. sanitizer flags)\n"
               << "  --cxx <path>              C++ compiler for --dpi-lib (default: c++)\n"
               << "  --ar <path>               Archiver for --dpi-lib (default: ar)\n"
               << "  --flops-initial <mode>    Flop init: random (default), zeros, ones\n"
@@ -151,6 +153,7 @@ int main(int argc, char** argv) {
     std::string dpiOutLibStr;
     std::string dpiIncludeDirsStr;
     std::string dpiLinkLibsStr;
+    std::string dpiCxxFlagsStr;
     std::string cxxPath = "c++";
     std::string arPath = "ar";
     std::vector<std::string> domainFiles;
@@ -194,6 +197,7 @@ int main(int argc, char** argv) {
                    std::strcmp(argv[i], "--dpi-out-lib") == 0 ||
                    std::strcmp(argv[i], "--dpi-include-dirs") == 0 ||
                    std::strcmp(argv[i], "--dpi-link-libs") == 0 ||
+                   std::strcmp(argv[i], "--dpi-cxx-flags") == 0 ||
                    std::strcmp(argv[i], "--cxx") == 0 ||
                    std::strcmp(argv[i], "--ar") == 0) {
             if (i + 1 >= argc) {
@@ -220,6 +224,7 @@ int main(int argc, char** argv) {
             else if (opt == "--dpi-out-lib") dpiOutLibStr = value;
             else if (opt == "--dpi-include-dirs") dpiIncludeDirsStr = value;
             else if (opt == "--dpi-link-libs") dpiLinkLibsStr = value;
+            else if (opt == "--dpi-cxx-flags") dpiCxxFlagsStr = value;
             else if (opt == "--cxx") cxxPath = value;
             else if (opt == "--ar") arPath = value;
         } else if (std::strcmp(argv[i], "--domains") == 0) {
@@ -379,6 +384,11 @@ int main(int argc, char** argv) {
             }
             for (const auto& lib : splitComma(dpiLinkLibsStr)) {
                 linkConfig.link_libs.emplace_back(lib);
+            }
+            {
+                std::istringstream flagStream(dpiCxxFlagsStr);
+                std::string flag;
+                while (flagStream >> flag) linkConfig.extra_cxx_flags.push_back(flag);
             }
             linkDpiLib(linkConfig);
         }

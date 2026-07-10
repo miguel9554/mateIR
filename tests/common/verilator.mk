@@ -53,8 +53,11 @@ endif
 
 ifeq ($(DPI),1)
 
-BUILD_DIR   = $(PROJECT_ROOT)/build/dev
 DPI_BUILD_TARGET ?= dev
+# When DPI_BUILD_TARGET=noop (regression pre-builds the tree once upfront),
+# DPI_BUILD_PRESET still selects which prebuilt build dir to use.
+DPI_BUILD_PRESET ?= $(if $(filter noop,$(DPI_BUILD_TARGET)),dev,$(DPI_BUILD_TARGET))
+BUILD_DIR   = $(PROJECT_ROOT)/build/$(DPI_BUILD_PRESET)
 DPI_GEN_DIR = $(RTL_GEN_DIR)
 GEN_SV_PKG  = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi_pkg.sv
 GEN_SV      = $(DPI_GEN_DIR)/$(MODULE_NAME)_dpi.sv
@@ -68,6 +71,19 @@ GEN_STAMP   = $(DPI_GEN_DIR)/.stamp
 # to fold into the output archive.
 DPI_INCLUDE_DIRS = $(abspath $(PROJECT_ROOT)/src),$(abspath $(PROJECT_ROOT)/external/slang/external/ieee1800)
 DPI_LINK_LIBS = $(abspath $(BUILD_DIR)/libmate-abi-native.a)
+
+# Sanitized preset: compile the generated DPI model with the same sanitizer
+# flags as libmate-abi-native (see CMakeLists ENABLE_SANITIZERS), pull the
+# sanitizer runtimes into the final Verilator link, and run both mate and the
+# simulation binary with the repo's standard ASan/UBSan options.
+DPI_CXX_FLAGS_ARG =
+DPI_SANITIZE_LDFLAGS =
+ifeq ($(DPI_BUILD_PRESET),sanitized)
+DPI_SANITIZE_FLAGS = -fno-omit-frame-pointer -fsanitize=address,undefined
+DPI_CXX_FLAGS_ARG = --dpi-cxx-flags '$(DPI_SANITIZE_FLAGS)'
+DPI_SANITIZE_LDFLAGS = -fsanitize=address,undefined
+SANITIZER_ENV = ASAN_OPTIONS=symbolize=1,detect_leaks=0,abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1,halt_on_error=1
+endif
 
 SRCS = $(RTL_SRCS) $(TB_SRCS) $(GEN_SRCS) $(GEN_SV_PKG) $(GEN_SV)
 
@@ -87,7 +103,7 @@ endif
 
 $(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate | prep
 	mkdir -p $(DPI_GEN_DIR)
-	$(BUILD_DIR)/mate \
+	$(SANITIZER_ENV) $(BUILD_DIR)/mate \
 		--dpi-lib \
 		--top $(MODULE_NAME) \
 		--domains $(DOMAINS_YAML) \
@@ -97,6 +113,7 @@ $(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate | prep
 		--dpi-out-lib $(DPI_LIB) \
 		--dpi-include-dirs $(DPI_INCLUDE_DIRS) \
 		--dpi-link-libs $(DPI_LINK_LIBS) \
+		$(DPI_CXX_FLAGS_ARG) \
 		$(RTL_SRCS)
 	touch $(GEN_STAMP)
 
@@ -108,7 +125,7 @@ $(OUT): $(GEN_DIR)/tb.sv $(DPI_LIB) | prep
 		$(VERILATOR_WARNS) \
 		--top-module $(TOP_MODULE) \
 		-I$(RTL_DIR) \
-		-LDFLAGS '$(abspath $(DPI_LIB))' \
+		-LDFLAGS '$(abspath $(DPI_LIB)) $(DPI_SANITIZE_LDFLAGS)' \
 		$(SRCS) \
 		$(DPI_TIME_C)
 
@@ -143,7 +160,7 @@ PLUSARGS ?=
 
 $(WAVES): $(OUT) force
 	mkdir -p $(CUSTOM_SIM_DIR)/stimuli
-	./obj_dir/V$(TOP_MODULE) +WAVES=$(WAVES) $(SEED_ARG) $(PLUSARGS)
+	$(SANITIZER_ENV) ./obj_dir/V$(TOP_MODULE) +WAVES=$(WAVES) $(SEED_ARG) $(PLUSARGS)
 
 simulate:
 	$(MAKE) $(WAVES)

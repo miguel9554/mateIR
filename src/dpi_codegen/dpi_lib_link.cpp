@@ -44,11 +44,14 @@ std::filesystem::path compileToObject(const mate::DpiLibLinkConfig& config,
         "-std=c++20",
         "-O1",
         "-fPIC",
-        "-c",
-        quoteShellArg(source),
-        "-o",
-        quoteShellArg(object),
     };
+    for (const auto& flag : config.extra_cxx_flags) {
+        args.push_back(quoteShellArg(flag));
+    }
+    args.push_back("-c");
+    args.push_back(quoteShellArg(source));
+    args.push_back("-o");
+    args.push_back(quoteShellArg(object));
     for (const auto& dir : config.include_dirs) {
         args.push_back("-I" + quoteShellArg(dir));
     }

@@ -2,12 +2,11 @@
 """Assert the language-metadata sidecar artifact for interface and
 port-type testcases.
 
-Compiles two interface tests with the vector simulator (the sidecar artifact
-is written by the frontend pipeline before simulation starts, so the run's
-exit status is ignored) and asserts lang_metadata.json content:
-record kinds, attrs, and role->anchor bindings.
+Compiles two interface tests with mate (a plain compile; the sidecar
+artifact is written unconditionally by the frontend pipeline) and asserts
+lang_metadata.json content: record kinds, attrs, and role->anchor bindings.
 
-Usage: check_lang_metadata.py <simulator-binary>
+Usage: check_lang_metadata.py <mate-binary>
 """
 
 import json
@@ -19,7 +18,7 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).resolve().parent
 
 
-def compile_and_load(simulator, test_name):
+def compile_and_load(mate_binary, test_name):
     rtl_dir = TESTS_DIR / test_name / "rtl"
     sources = sorted(str(p) for p in rtl_dir.glob("*.v"))
     sources += sorted(str(p) for p in rtl_dir.glob("*.sv"))
@@ -27,19 +26,17 @@ def compile_and_load(simulator, test_name):
 
     with tempfile.TemporaryDirectory(prefix=f"{test_name}_langmeta_") as tmp:
         tmp_path = Path(tmp)
-        (tmp_path / "stimuli").mkdir()
         cmd = [
-            str(simulator),
-            "--simulate",
+            str(mate_binary),
             "--top", test_name,
-            "--inputs-dir", str(tmp_path / "stimuli"),
-            "--output-dir", str(tmp_path / "out"),
-            "--flops-initial", "zeros",
             "--domains", str(domains),
         ] + sources
-        # The run fails on missing stimuli; the sidecar artifact is written
-        # by the frontend pipeline before that.
         result = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise AssertionError(
+                f"{test_name}: mate compile failed\n"
+                f"stdout/stderr:\n{result.stdout}{result.stderr}"
+            )
         artifact = tmp_path / "debug_output" / test_name / "lang_metadata.json"
         if not artifact.exists():
             raise AssertionError(
@@ -119,13 +116,13 @@ def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
         return 1
-    simulator = Path(sys.argv[1]).resolve()
+    mate_binary = Path(sys.argv[1]).resolve()
 
     for test_name, check in (
         ("iface_params", check_iface_params),
         ("struct_top_ports", check_struct_top_ports),
     ):
-        records = compile_and_load(simulator, test_name)
+        records = compile_and_load(mate_binary, test_name)
         check(records)
         print(f"lang_metadata check passed: {test_name}")
 

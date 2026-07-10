@@ -67,8 +67,14 @@ MateStatusCode mate_instance_create(const MateModel* model,
                                     MateStatus* status);
 MateStatusCode mate_instance_destroy(MateInstance* instance, MateStatus* status);
 
+/*
+ * use_initial_values: nonzero honors flop declaration initializers (e.g.
+ * `logic q = 1'b0;`) baked into the model; flops without one — or all flops
+ * when zero — follow the flops_initial policy.
+ */
 MateStatusCode mate_instance_init(MateInstance* instance,
                                   MateFlopsInitial flops_initial,
+                                  int32_t use_initial_values,
                                   uint64_t seed,
                                   const MateInputUpdate* async_inputs,
                                   int32_t async_count,

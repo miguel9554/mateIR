@@ -571,6 +571,9 @@ void FlopInfo::print(std::ostream& os, int indent) const {
     if (reset_value) {
         os << indent_str(indent + 1) << "reset_value: " << *reset_value << std::endl;
     }
+    if (initial_value) {
+        os << indent_str(indent + 1) << "initial_value: " << *initial_value << std::endl;
+    }
 }
 
 void NamedValueBase::print(std::ostream& os) const {
@@ -891,6 +894,9 @@ static std::string flopToJson(const FlopInfo& f) {
     ss << "\"reset_domains\": " << resetDomainsToJson(f.reset_domains);
     if (f.reset_value) {
         ss << ", \"reset_value\": " << *f.reset_value;
+    }
+    if (f.initial_value) {
+        ss << ", \"initial_value\": " << *f.initial_value;
     }
     ss << ", \"binding_leaves\": [";
     for (size_t i = 0; i < f.binding.aggregate_leaves.size(); ++i) {

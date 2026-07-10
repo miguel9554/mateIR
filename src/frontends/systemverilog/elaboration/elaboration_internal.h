@@ -176,6 +176,11 @@ struct ResolutionContext {
     bool in_procedural_block = false;
     std::map<std::string, DFGNode*> block_drivers = {};
 
+    // FPGA-style declaration initializers on flops. False = ASIC-strict mode.
+    // Set after construction in resolveModule; child contexts built with
+    // fresh aggregate initialization must copy it from their parent.
+    bool allow_flop_initial_values = true;
+
     // Child contexts (generate scopes, loop bodies) must inherit the parent's
     // interface views so interface member references keep resolving.
     void inheritInterfaceViews(const ResolutionContext& parent) {
@@ -291,6 +296,7 @@ Module resolveModule(const UnresolvedModule& unresolved,
                      const std::vector<ImportSpec>& globalImports,
                      const InstancePath& occurrencePath,
                      FrontendDomainFacts* domainFacts,
-                     LangMetadata* langMeta);
+                     LangMetadata* langMeta,
+                     bool allowFlopInitialValues);
 
 } // namespace mate

@@ -186,6 +186,10 @@ struct FlopInfo {
     Type type;
     flopType_t flop_type;
     std::optional<int> reset_value;
+    // FPGA-style declaration initializer (e.g. `logic q = 1'b0;`). Distinct
+    // from reset_value: applied once at time 0 when the runtime enables
+    // initial values, never on reset.
+    std::optional<int64_t> initial_value;
     ClockId clock_domain = InvalidClockId;
     ResetDomains reset_domains;
     // Leaf bindings in declaration order.

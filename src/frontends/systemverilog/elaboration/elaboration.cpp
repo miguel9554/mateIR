@@ -60,7 +60,8 @@ Module resolveModule(const UnresolvedModule& unresolved,
                                     const std::vector<ImportSpec>& globalImports,
                                     const InstancePath& occurrencePath,
                                     FrontendDomainFacts* domainFacts,
-                                    LangMetadata* langMeta);
+                                    LangMetadata* langMeta,
+                                    bool allowFlopInitialValues);
 
 // (anonymous namespace removed: split across elaboration TUs)
 
@@ -2904,6 +2905,7 @@ void resolveForLoopStatementInPlace(
             ctx.currently_inlining, ctx.is_subroutine_scope
         };
         iterBodyCtx.inheritInterfaceViews(ctx);
+        iterBodyCtx.allow_flop_initial_values = ctx.allow_flop_initial_values;
         iterBodyCtx.in_procedural_block = ctx.in_procedural_block;
         iterBodyCtx.block_drivers = ctx.block_drivers;
         resolveStatementInPlace(forLoop->statement.get(), iterBodyCtx);
@@ -3136,7 +3138,8 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
                              const std::vector<ImportSpec>& globalImports,
                              const InstancePath& occurrencePath,
                              FrontendDomainFacts* domainFacts,
-                             LangMetadata* langMeta) {
+                             LangMetadata* langMeta,
+                             bool allowFlopInitialValues) {
     const std::string langMetaModulePath = [&] {
         std::string path;
         for (const auto& elem : occurrencePath.elems) {
@@ -3385,6 +3388,13 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     // Resolve signals
     for (const auto& signal : unresolved.signals) {
         if (isGenerateParentFlop(signal)) continue;
+        if (signal.initializer) {
+            throw CompilerError(
+                "Initializer on variable declaration '" + signal.name +
+                "' is not supported: only flops (non-blocking assignment "
+                "targets) may have declaration initializers",
+                resolveSourceLoc(*signal.initializer, sourceManager));
+        }
         auto sig = resolveModuleNode(signal, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager);
         addInternalNode(resolved, sig);
     }
@@ -3393,11 +3403,52 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     std::set<std::string> flopNames;
     auto addResolvedFlop = [&](const UnresolvedSignal& flop) {
         const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
+        std::optional<int64_t> initialValue;
+        if (flop.initializer) {
+            if (!allowFlopInitialValues) {
+                throw CompilerError(
+                    "Initializers on variable declarations are not supported "
+                    "in ASIC-strict mode (flop '" + flop.name + "'). "
+                    "Use an explicit reset instead.",
+                    resolveSourceLoc(*flop.initializer, sourceManager));
+            }
+            // `'{default: <const>}` initializes every element of an unpacked
+            // array flop; initial_value already broadcasts to all leaves
+            // (mirroring reset_value semantics), so unwrap to the default's
+            // value expression.
+            const auto* initExpr = flop.initializer;
+            if (initExpr->kind == SyntaxKind::AssignmentPatternExpression) {
+                const auto& assignment =
+                    initExpr->as<AssignmentPatternExpressionSyntax>();
+                if (assignment.pattern->kind != SyntaxKind::StructuredAssignmentPattern) {
+                    throw CompilerError(
+                        "Only '{default: <constant>} assignment patterns are "
+                        "supported as flop declaration initializers (flop '" +
+                        flop.name + "')",
+                        resolveSourceLoc(*initExpr, sourceManager));
+                }
+                const auto& pattern =
+                    assignment.pattern->as<StructuredAssignmentPatternSyntax>();
+                if (pattern.items.size() != 1 ||
+                    pattern.items[0]->key->kind != SyntaxKind::DefaultPatternKeyExpression) {
+                    throw CompilerError(
+                        "Only a single default key is supported in flop "
+                        "declaration initializer assignment patterns (flop '" +
+                        flop.name + "')",
+                        resolveSourceLoc(*initExpr, sourceManager));
+                }
+                initExpr = pattern.items[0]->expr;
+            }
+            initialValue = evaluateConstantExpr(
+                initExpr, *mergedCtx, &pkgRegistry, &namedTypeRegistry,
+                &sourceManager);
+        }
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedModuleNode.name,
                 .type = resolvedModuleNode.type,
                 .flop_type = FLOP_D,
                 .reset_value = std::nullopt,
+                .initial_value = initialValue,
                 .clock_domain = InvalidClockId,
                 .reset_domains = {},
                 .binding = {},
@@ -3600,6 +3651,7 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     resCtx.interface_ports = std::move(ifacePortViews);
     resCtx.interface_instances = std::move(ifaceInstanceViews);
     resCtx.lang_meta = langMeta;
+    resCtx.allow_flop_initial_values = allowFlopInitialValues;
 
     // Connect the interface's own input ports (e.g. clk) for each interface
     // instance, now that expressions can be built.
@@ -3727,7 +3779,8 @@ Module resolveModules(
     const std::vector<ImportSpec>& globalImports,
     const slang::SourceManager& sourceManager,
     FrontendDomainFacts* domainFacts,
-    LangMetadata* langMeta) {
+    LangMetadata* langMeta,
+    bool allowFlopInitialValues) {
 
     // Filter out package declarations from module count
     if (modules.size() != 1) {
@@ -3747,7 +3800,8 @@ Module resolveModules(
     ParameterContext emptyCtx;
     return resolveModule(*modules[0], emptyCtx, moduleLookup, interfaceLookup,
                          sourceManager, pkgRegistry,
-                         globalImports, {}, domainFacts, langMeta);
+                         globalImports, {}, domainFacts, langMeta,
+                         allowFlopInitialValues);
 }
 
 Module resolveModules(
@@ -3759,7 +3813,8 @@ Module resolveModules(
     const std::string& topModuleName,
     const ParameterContext& topParams,
     FrontendDomainFacts* domainFacts,
-    LangMetadata* langMeta) {
+    LangMetadata* langMeta,
+    bool allowFlopInitialValues) {
 
     PackageRegistry pkgRegistry = resolvePackages(packages, sourceManager);
 
@@ -3777,7 +3832,8 @@ Module resolveModules(
 
     return resolveModule(*it->second, topParams, moduleLookup, interfaceLookup,
                          sourceManager, pkgRegistry,
-                         globalImports, {}, domainFacts, langMeta);
+                         globalImports, {}, domainFacts, langMeta,
+                         allowFlopInitialValues);
 }
 
 } // namespace mate

@@ -26,6 +26,9 @@ struct FrontendOptions {
     std::optional<std::string> emit_inferred_synchronizers_dir;
     std::vector<DebugNodeSpec> debug_dfg_nodes;
     bool dump_passes = false;
+    // FPGA-style declaration initializers on flops (e.g. `logic q = 1'b0;`).
+    // When false (ASIC-strict mode), such initializers are a compile error.
+    bool allow_flop_initial_values = true;
 };
 
 class Frontend {

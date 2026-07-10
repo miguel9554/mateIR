@@ -917,7 +917,8 @@ void instantiateSubmoduleInstance(
                                      ctx.moduleLookup, *ctx.interfaceLookup, ctx.sm,
                                      ctx.pkgRegistry, ctx.globalImports,
                                      childOccurrencePath,
-                                     ctx.domain_facts, ctx.lang_meta);
+                                     ctx.domain_facts, ctx.lang_meta,
+                                     ctx.allow_flop_initial_values);
 
     std::set<std::string> subInputNames, subOutputNames;
     forEachInputNode(resolvedSub, [&](const ModuleNode& inp) { subInputNames.insert(inp.name); });

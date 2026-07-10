@@ -404,11 +404,12 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
             return resolveModules(extracted.modules, extracted.packages, extracted.interfaces,
                                   extracted.globalImports,
                                   sourceManager, *options.top_module, topParams, &domainFacts,
-                                  &langMeta);
+                                  &langMeta, options.allow_flop_initial_values);
         }
         return resolveModules(extracted.modules, extracted.packages, extracted.interfaces,
                               extracted.globalImports,
-                              sourceManager, &domainFacts, &langMeta);
+                              sourceManager, &domainFacts, &langMeta,
+                              options.allow_flop_initial_values);
     }();
     ir.source_files = options.source_files;
     ir.frontend_module_count = extracted.modules.size();

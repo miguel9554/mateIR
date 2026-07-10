@@ -802,7 +802,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     }
     emitUpdateArrayWithCount("async_updates", init_async_inputs);
     emitUpdateArrayWithCount("sync_updates", ports.sync_inputs);
-    out << "        check(mate_instance_init(context.instance, MATE_FLOPS_INITIAL_ZERO, 0, async_updates, async_updates_count, sync_updates, sync_updates_count, &status), status, \"" << config.function_prefix << "_init_values\");\n";
+    out << "        check(mate_instance_init(context.instance, MATE_FLOPS_INITIAL_ZERO, 1, 0, async_updates, async_updates_count, sync_updates, sync_updates_count, &status), status, \"" << config.function_prefix << "_init_values\");\n";
     out << "        writeOutputs(context";
     for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";
@@ -1892,10 +1892,12 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
         out << "}\n\n";
     }
 
-    // Applies FlopsInitial to every flop Q leaf in declaration order.
+    // Applies FlopsInitial to every flop Q leaf in declaration order. Flops
+    // with a declaration initializer are then overwritten with it when
+    // use_initial_values is set.
     result.flops_init_fn_name = "initFlops";
     out << "void " << result.flops_init_fn_name
-        << "(std::span<mate::abi::NativeWordSlot> storage, MateFlopsInitial mode, std::mt19937_64& rng) {\n";
+        << "(std::span<mate::abi::NativeWordSlot> storage, MateFlopsInitial mode, bool use_initial_values, std::mt19937_64& rng) {\n";
     out << "    switch (mode) {\n";
     out << "        case MATE_FLOPS_INITIAL_RANDOM:\n";
     for (const auto& flop : rt.flops) {
@@ -1928,6 +1930,24 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
     }
     out << "            break;\n";
     out << "    }\n";
+    bool any_initial_value = false;
+    for (const auto& flop : rt.flops) {
+        if (flop.initial_value.has_value()) { any_initial_value = true; break; }
+    }
+    if (any_initial_value) {
+        out << "    if (use_initial_values) {\n";
+        for (const auto& flop : rt.flops) {
+            if (!flop.initial_value.has_value()) continue;
+            for (const auto& leaf : flop.leaves) {
+                out << "        " << fixedValueFromTypeExpr(flop.initial_value.value(), leaf.type)
+                    << ".copyToWords(storage[" << flopQStorageIndex(leaf.q_node)
+                    << "].words, storage[" << flopQStorageIndex(leaf.q_node) << "].nwords);\n";
+            }
+        }
+        out << "    }\n";
+    } else {
+        out << "    (void)use_initial_values;\n";
+    }
     out << "}\n\n";
 
     out << "} // namespace\n\n";

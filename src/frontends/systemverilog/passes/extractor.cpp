@@ -435,15 +435,17 @@ public:
         const auto type = extractDataType(*node.type);
         std::vector<UnresolvedSignal> signals;
         for (auto declarator : node.declarators){
-                if (declarator->initializer) throw CompilerError(
-                    "Initializers on variable declarations are not supported. "
-                    "Use an explicit always block assignment instead.",
-                    resolveSourceLoc(*declarator, sm));
+                // Initializers are recorded here and validated during
+                // elaboration, where flop-ness and the initial-value mode
+                // are known.
                 signals.push_back(
                     UnresolvedSignal{
                     .name = std::string(declarator->name.valueText()),
                     .type = type,
                     .dimensions = {&(declarator->dimensions)},
+                    .initializer = declarator->initializer
+                        ? declarator->initializer->expr.get()
+                        : nullptr,
                 });
         }
         std::move(signals.begin(), signals.end(),

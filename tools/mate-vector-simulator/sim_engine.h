@@ -26,7 +26,8 @@ class SimEngine {
 public:
     virtual ~SimEngine() = default;
 
-    virtual void initialize(FlopsInitial mode, std::mt19937_64& rng) = 0;
+    virtual void initialize(FlopsInitial mode, bool use_initial_values,
+                            std::mt19937_64& rng) = 0;
     virtual void initializeInputsAndEvaluate(std::span<const RuntimeInputUpdate> async_inputs,
                                              std::span<const RuntimeInputUpdate> sync_inputs) = 0;
     virtual void setInputValues(std::span<const RuntimeInputUpdate> inputs) = 0;
@@ -47,7 +48,8 @@ public:
     NativeSimEngine(const NativeSimEngine&) = delete;
     NativeSimEngine& operator=(const NativeSimEngine&) = delete;
 
-    void initialize(FlopsInitial mode, std::mt19937_64& rng) override;
+    void initialize(FlopsInitial mode, bool use_initial_values,
+                    std::mt19937_64& rng) override;
     void initializeInputsAndEvaluate(std::span<const RuntimeInputUpdate> async_inputs,
                                      std::span<const RuntimeInputUpdate> sync_inputs) override;
     void setInputValues(std::span<const RuntimeInputUpdate> inputs) override;
@@ -70,13 +72,14 @@ private:
     const MateModel* abi_model_ = nullptr;
     MateInstance* abi_instance_ = nullptr;
     MateFlopsInitial pending_flops_initial_ = MATE_FLOPS_INITIAL_RANDOM;
+    bool pending_use_initial_values_ = true;
     uint64_t pending_flops_seed_ = 0;
 
     using MateModelCreateFn = int (*)(const MateModel**, MateStatus*);
     using MateModelDestroyFn = int (*)(const MateModel*, MateStatus*);
     using MateInstanceCreateFn = int (*)(const MateModel*, const char*, MateInstance**, MateStatus*);
     using MateInstanceDestroyFn = int (*)(MateInstance*, MateStatus*);
-    using MateInstanceInitFn = int (*)(MateInstance*, int, uint64_t,
+    using MateInstanceInitFn = int (*)(MateInstance*, int, int32_t, uint64_t,
                                       const MateInputUpdate*, int32_t,
                                       const MateInputUpdate*, int32_t,
                                       MateStatus*);

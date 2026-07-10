@@ -125,6 +125,9 @@ struct RuntimeFlopMetadata {
     ClockId clock_domain = InvalidClockId;
     ResetDomains reset_domains;
     std::optional<int> reset_value;
+    // Declaration initializer value, applied at time 0 when the runtime
+    // enables initial values (instead of the FlopsInitial policy).
+    std::optional<int64_t> initial_value;
     std::vector<RuntimeFlopLeafMetadata> leaves;
 };
 

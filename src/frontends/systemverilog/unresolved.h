@@ -58,6 +58,10 @@ struct UnresolvedSignal {
     std::string name;
     UnresolvedType type;
     UnresolvedDimension dimensions;  // array dimensions (if any)
+    // Declaration initializer expression (e.g. `logic q = 1'b0;`).
+    // Only supported on signals that resolve to flops; validated during
+    // elaboration once flop-ness is known.
+    const slang::syntax::ExpressionSyntax* initializer = nullptr;
 
     void print(std::ostream& os) const;
 };

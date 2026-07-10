@@ -49,6 +49,11 @@ void printUsage(const char* progName) {
               << "  --ar <path>               Archiver for --dpi-lib (default: ar)\n"
               << "  --flops-initial <mode>    Flop init: random (default), zeros, ones\n"
               << "  --flops-seed <n>          Seed for random flop initialization\n"
+              << "  --strict-flop-init        ASIC-strict mode: reject declaration initializers\n"
+              << "                            on flops (e.g. `logic q = 1'b0;`)\n"
+              << "  --flops-ignore-initial-values\n"
+              << "                            Ignore stored flop declaration initial values in\n"
+              << "                            simulation; use the --flops-initial policy instead\n"
               << "  --debug-nodes <n1,n2,...> Comma-separated node names for debug DOTs\n"
               << "  --debug-node-deps <...>   Comma-separated node names to dump direct DFG inputs\n"
               << "  --debug-node-paths <...>  Comma-separated SOURCE=TARGET queries to dump one dependency chain\n"
@@ -152,6 +157,8 @@ int main(int argc, char** argv) {
     std::vector<std::string> sourceFiles;
     TopDomainMode topDomainMode = TopDomainMode::Yaml;
     bool inferSynchronizers = false;
+    bool strictFlopInit = false;
+    bool flopsIgnoreInitialValues = false;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--simulate") == 0) {
@@ -166,6 +173,10 @@ int main(int argc, char** argv) {
             inferSynchronizers = true;
         } else if (std::strcmp(argv[i], "--dump-passes") == 0) {
             dumpPasses = true;
+        } else if (std::strcmp(argv[i], "--strict-flop-init") == 0) {
+            strictFlopInit = true;
+        } else if (std::strcmp(argv[i], "--flops-ignore-initial-values") == 0) {
+            flopsIgnoreInitialValues = true;
         } else if (std::strcmp(argv[i], "--frontend") == 0 ||
                    std::strcmp(argv[i], "--top") == 0 ||
                    std::strcmp(argv[i], "--inputs-dir") == 0 ||
@@ -289,6 +300,7 @@ int main(int argc, char** argv) {
         }
         frontendOptions.debug_dfg_nodes = parseDebugNodes(debugNodesStr);
         frontendOptions.dump_passes = dumpPasses;
+        frontendOptions.allow_flop_initial_values = !strictFlopInit;
         parseParams(paramsStr, frontendOptions.parameters);
 
         auto frontend = makeFrontend(frontendName);
@@ -330,6 +342,7 @@ int main(int argc, char** argv) {
             if (!flopsSeedStr.empty()) {
                 simConfig.flops_initial_seed = std::stoull(flopsSeedStr);
             }
+            simConfig.flops_use_initial_values = !flopsIgnoreInitialValues;
 
             std::cout << "========================================\n";
             std::cout << "Running simulation...\n";

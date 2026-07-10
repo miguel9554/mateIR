@@ -219,6 +219,7 @@ void collectModuleMetadata(const MateIR& ir,
             .clock_domain = flop.clock_domain,
             .reset_domains = flop.reset_domains,
             .reset_value = flop.reset_value,
+            .initial_value = flop.initial_value,
             .leaves = {},
         };
 

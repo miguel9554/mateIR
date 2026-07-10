@@ -163,6 +163,11 @@ struct UnresolvedModule {
     std::vector<UnresolvedTypedef> enumTypedefs;
     std::vector<UnresolvedTypedef> structTypedefs;
 
+    // Compilation-unit scope typedefs declared before this module. Registered
+    // ahead of header parameters and ports, which may use them as types.
+    std::vector<UnresolvedTypedef> fileScopeEnumTypedefs;
+    std::vector<UnresolvedTypedef> fileScopeStructTypedefs;
+
     // Package imports are separated because body imports must not affect the
     // module header namespace (parameters and ports).
     std::vector<ImportSpec> headerImports;

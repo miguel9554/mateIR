@@ -1932,14 +1932,17 @@ NativeFlopCommitCode makeNativeFlopCommitCpp(const RtlRuntimeModel& model) {
     out << "    }\n";
     bool any_initial_value = false;
     for (const auto& flop : rt.flops) {
-        if (flop.initial_value.has_value()) { any_initial_value = true; break; }
+        for (const auto& leaf : flop.leaves) {
+            if (leaf.initial_value.has_value()) { any_initial_value = true; break; }
+        }
+        if (any_initial_value) break;
     }
     if (any_initial_value) {
         out << "    if (use_initial_values) {\n";
         for (const auto& flop : rt.flops) {
-            if (!flop.initial_value.has_value()) continue;
             for (const auto& leaf : flop.leaves) {
-                out << "        " << fixedValueFromTypeExpr(flop.initial_value.value(), leaf.type)
+                if (!leaf.initial_value.has_value()) continue;
+                out << "        " << fixedValueFromTypeExpr(leaf.initial_value.value(), leaf.type)
                     << ".copyToWords(storage[" << flopQStorageIndex(leaf.q_node)
                     << "].words, storage[" << flopQStorageIndex(leaf.q_node) << "].nwords);\n";
             }

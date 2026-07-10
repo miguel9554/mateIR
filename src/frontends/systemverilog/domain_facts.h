@@ -114,7 +114,7 @@ struct FlopDomainFact {
     std::string flop_name;
     EventTriggerFact clock;
     std::optional<EventTriggerFact> reset;
-    std::optional<int> reset_value;
+    std::optional<int64_t> reset_value;
 };
 
 enum class ConnectionExprKind { SimpleIdentifier, UnsupportedExpression };

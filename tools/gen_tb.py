@@ -28,6 +28,7 @@ class Port:
     named_struct_type: str  # preserved named type text for struct ports
     struct_leaves: list[tuple[str, str]]  # [("field.sub", "logic [N:0]"), ...]
     unpacked_dims: str = ""  # unpacked dimensions on the declarator, e.g. "[IC_NUM_WAYS]"
+    resolved_unpacked_dims: str = ""  # unpacked dims with params substituted
     interface_type: str = ""  # interface type for interface ports, e.g. "my_if"
     interface_modport: str = ""  # optional modport on interface ports, e.g. "master"
     # True for pseudo-ports representing interface-port members ("bus.data"),
@@ -82,6 +83,13 @@ def parse_module(filepath: Path) -> ModuleInfo:
         for decl in header.parameters.declarations:
             if not hasattr(decl, 'declarators'):
                 continue  # skip comma tokens
+            # Header localparams are not overridable and must not appear in
+            # the instantiation's parameter list.
+            try:
+                if decl.keyword.valueText == 'localparam':
+                    continue
+            except AttributeError:
+                pass
             type_str = ""
             try:
                 if 'Implicit' not in str(decl.type.kind):
@@ -284,6 +292,7 @@ def parse_module(filepath: Path) -> ModuleInfo:
                 named_struct_type=named_struct_type,
                 struct_leaves=struct_leaves,
                 unpacked_dims=port_unpacked_dims,
+                resolved_unpacked_dims=resolve_dims(port_unpacked_dims),
                 interface_type=interface_type,
                 interface_modport=interface_modport,
             ))
@@ -391,6 +400,48 @@ def port_type_str(port: Port, use_resolved: bool = False) -> str:
     if dims:
         parts.append(dims)
     return ' '.join(parts)
+
+
+def _eval_dim_expr(text: str) -> int | None:
+    """Evaluate a dimension bound: an integer expression over + - * / ( )."""
+    text = text.strip()
+    if not re.fullmatch(r"[\d\s()+\-*/]+", text):
+        return None
+    try:
+        return int(eval(compile(text, "<dim>", "eval"), {"__builtins__": {}}, {}))
+    except Exception:
+        return None
+
+
+def unpacked_index_suffixes(unpacked_dims: str) -> list[str]:
+    """Declaration-order index suffixes for (possibly multi-dim) unpacked
+    ranges, e.g. "[0:1][0:1]" -> ["[0][0]", "[0][1]", "[1][0]", "[1][1]"].
+    Bounds may be integer arithmetic (params already substituted). Empty list
+    when any dimension cannot be evaluated."""
+    if not unpacked_dims:
+        return []
+    bodies = re.findall(r"\[([^\]]*)\]", unpacked_dims)
+    if not bodies:
+        return []
+    per_dim: list[list[int]] = []
+    for body in bodies:
+        if ':' in body:
+            left_text, right_text = body.split(':', 1)
+            left = _eval_dim_expr(left_text)
+            right = _eval_dim_expr(right_text)
+            if left is None or right is None:
+                return []
+            step = 1 if left <= right else -1
+            per_dim.append(list(range(left, right + step, step)))
+        else:
+            count = _eval_dim_expr(body)
+            if count is None:
+                return []
+            per_dim.append(list(range(count)))
+    suffixes = ['']
+    for indices in per_dim:
+        suffixes = [s + f'[{i}]' for s in suffixes for i in indices]
+    return suffixes
 
 
 def single_unpacked_indices(unpacked_dims: str) -> list[int]:
@@ -732,12 +783,20 @@ def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
         if port.direction != 'output':
             continue
         if port.unpacked_dims:
-            indices = single_unpacked_indices(port.unpacked_dims)
-            if not indices or port.struct_leaves:
-                continue
-            type_str = port_type_str(port, use_resolved=True)
-            for index in indices:
-                entries.append((port, f'[{index}]', type_str))
+            suffixes = unpacked_index_suffixes(
+                port.resolved_unpacked_dims or port.unpacked_dims)
+            if not suffixes:
+                raise ValueError(
+                    f"checker_dpi: cannot enumerate unpacked dims "
+                    f"'{port.unpacked_dims}' of output port '{port.name}'")
+            if port.struct_leaves:
+                for suffix in suffixes:
+                    for leaf_name, leaf_type in port.struct_leaves:
+                        entries.append((port, f'{suffix}.{leaf_name}', leaf_type))
+            else:
+                type_str = port_type_str(port, use_resolved=True)
+                for suffix in suffixes:
+                    entries.append((port, suffix, type_str))
             continue
         if port.struct_leaves:
             for leaf_name, leaf_type in port.struct_leaves:

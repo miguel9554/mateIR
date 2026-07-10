@@ -275,7 +275,10 @@ IntegerVectorLiteral parseIntegerVectorExpression(const IntegerVectorExpressionS
         base = 10;
     }
 
-    int64_t value = std::stoll(valueText, nullptr, base);
+    // Parse as unsigned and reinterpret: sized literals like
+    // 64'hFFFF_FFFF_0000_0000 are bit patterns that exceed int64 range but
+    // fit in 64 bits.
+    int64_t value = static_cast<int64_t>(std::stoull(valueText, nullptr, base));
 
     int width;
     if (!sizeText.empty()) {
@@ -436,6 +439,22 @@ int constantExprWidth(const ExpressionSyntax* expr,
             }
             throw CompilerError(
                 "Cannot determine width of constant expression: " + name, loc);
+        }
+        case SyntaxKind::IdentifierSelectName: {
+            // Width of a bit- or range-select on a constant identifier.
+            const auto& sel = expr->as<IdentifierSelectNameSyntax>();
+            if (sel.selectors.size() != 1 || !sel.selectors[0]->selector) break;
+            const auto* selector = sel.selectors[0]->selector;
+            if (selector->kind == SyntaxKind::BitSelect) return 1;
+            if (selector->kind == SyntaxKind::SimpleRangeSelect && paramCtx) {
+                const auto& range = selector->as<RangeSelectSyntax>();
+                const int64_t left =
+                    evaluateConstantExpr(range.left, *paramCtx, pkgRegistry, namedTypeRegistry, sm);
+                const int64_t right =
+                    evaluateConstantExpr(range.right, *paramCtx, pkgRegistry, namedTypeRegistry, sm);
+                return static_cast<int>(std::abs(left - right)) + 1;
+            }
+            break;
         }
         case SyntaxKind::ScopedName: {
             if (!pkgRegistry) break;
@@ -723,6 +742,65 @@ int64_t evaluateConstantExpr(const ExpressionSyntax* expr, const ParameterContex
                     "Parameter '" + paramName + "' not found in context");
             }
             return it->second.requireInt64("Parameter '" + paramName + "'");
+        }
+
+        case SyntaxKind::IdentifierSelectName: {
+            // Bit- or range-select on a constant identifier, e.g. gi[7:0] or
+            // BYTE_INIT_LP[3:0].
+            auto& sel = expr->as<IdentifierSelectNameSyntax>();
+            std::string paramName(sel.identifier.valueText());
+            auto it = ctx.values.find(paramName);
+            if (it == ctx.values.end()) {
+                throw CompilerError(
+                    "Parameter '" + paramName + "' not found in context",
+                    sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+            }
+            int64_t value = it->second.requireInt64("Parameter '" + paramName + "'");
+            for (const auto* elementSelect : sel.selectors) {
+                if (!elementSelect->selector) {
+                    throw CompilerError(
+                        "Empty selector in constant expression",
+                        sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+                }
+                if (elementSelect->selector->kind == SyntaxKind::BitSelect) {
+                    const auto& bit = elementSelect->selector->as<BitSelectSyntax>();
+                    const int64_t index =
+                        evaluateConstantExpr(bit.expr, ctx, pkgRegistry, namedTypeRegistry, sm);
+                    if (index < 0 || index > 63) {
+                        throw CompilerError(
+                            "Constant bit-select index out of supported range",
+                            sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+                    }
+                    value = (static_cast<uint64_t>(value) >> index) & 1;
+                    continue;
+                }
+                if (elementSelect->selector->kind == SyntaxKind::SimpleRangeSelect) {
+                    const auto& range = elementSelect->selector->as<RangeSelectSyntax>();
+                    const int64_t left =
+                        evaluateConstantExpr(range.left, ctx, pkgRegistry, namedTypeRegistry, sm);
+                    const int64_t right =
+                        evaluateConstantExpr(range.right, ctx, pkgRegistry, namedTypeRegistry, sm);
+                    const int64_t hi = std::max(left, right);
+                    const int64_t lo = std::min(left, right);
+                    const int64_t width = hi - lo + 1;
+                    if (lo < 0 || hi > 63) {
+                        throw CompilerError(
+                            "Constant range-select out of supported range",
+                            sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+                    }
+                    const uint64_t mask = width >= 64
+                        ? ~uint64_t{0}
+                        : ((uint64_t{1} << width) - 1);
+                    value = static_cast<int64_t>(
+                        (static_cast<uint64_t>(value) >> lo) & mask);
+                    continue;
+                }
+                throw CompilerError(
+                    "Unsupported selector kind in constant expression: " +
+                    std::string(toString(elementSelect->selector->kind)),
+                    sm ? std::optional<SourceLoc>(resolveSourceLoc(*expr, *sm)) : std::nullopt);
+            }
+            return value;
         }
 
         case SyntaxKind::MemberAccessExpression: {
@@ -1171,14 +1249,40 @@ ConstantValue evaluateConstantValue(const ExpressionSyntax* expr,
         case SyntaxKind::AssignmentPatternExpression: {
             const auto& assignment = expr->as<AssignmentPatternExpressionSyntax>();
             if (!expectedType.unpacked_dims.empty()) {
+                Type elementType = expectedType;
+                const auto dim = elementType.unpacked_dims.front();
+                elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+                if (assignment.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+                    // '{default: <expr>}: replicate the default value across
+                    // every element of this dimension.
+                    const auto& pattern =
+                        assignment.pattern->as<StructuredAssignmentPatternSyntax>();
+                    if (pattern.items.size() != 1 ||
+                        pattern.items[0]->key->kind != SyntaxKind::DefaultPatternKeyExpression) {
+                        throw CompilerError(
+                            "Only a single default key is supported in array "
+                            "assignment patterns for constants",
+                            resolveSourceLoc(*expr, sm));
+                    }
+                    // The default applies recursively: for aggregate element
+                    // types, re-apply the whole pattern one dimension down.
+                    ConstantValue element = elementType.isAggregate()
+                        ? evaluateConstantValue(expr, elementType, ctx,
+                                                pkgRegistry, namedTypeRegistry, sm)
+                        : evaluateConstantValue(pattern.items[0]->expr,
+                                                elementType, ctx, pkgRegistry,
+                                                namedTypeRegistry, sm);
+                    const size_t count =
+                        static_cast<size_t>(std::abs(dim.right - dim.left)) + 1;
+                    std::vector<ConstantValue> values(count, element);
+                    return ConstantValue::array(expectedType, std::move(values));
+                }
                 if (assignment.pattern->kind != SyntaxKind::SimpleAssignmentPattern) {
                     throw CompilerError(
                         "Only ordered array assignment patterns are supported for package constants",
                         resolveSourceLoc(*expr, sm));
                 }
                 const auto& pattern = assignment.pattern->as<SimpleAssignmentPatternSyntax>();
-                Type elementType = expectedType;
-                elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
                 std::vector<ConstantValue> values;
                 values.reserve(pattern.items.size());
                 for (const auto* item : pattern.items) {
@@ -1307,6 +1411,78 @@ int64_t evaluateStepExpr(
             throw CompilerError(
                 "Unsupported loop step expression: " + std::string(toString(iterExpr->kind)));
     }
+}
+
+namespace {
+
+void flattenConstantLeavesImpl(const ConstantValue& value,
+                               const Type& type,
+                               const std::optional<SourceLoc>& loc,
+                               std::vector<int64_t>& out) {
+    if (!type.unpacked_dims.empty()) {
+        Type elem = type;
+        const auto dim = elem.unpacked_dims.front();
+        elem.unpacked_dims.erase(elem.unpacked_dims.begin());
+        const size_t count =
+            static_cast<size_t>(std::abs(dim.right - dim.left)) + 1;
+        if (!value.isAggregate() || value.asAggregate().elements.size() != count) {
+            throw CompilerError(std::format(
+                "Constant element count does not match unpacked dimension "
+                "(expected {}, got {})",
+                count,
+                value.isAggregate() ? value.asAggregate().elements.size() : 1),
+                loc);
+        }
+        for (size_t i = 0; i < count; ++i) {
+            flattenConstantLeavesImpl(value.element(i), elem, loc, out);
+        }
+        return;
+    }
+    if (type.isStruct()) {
+        const auto& fields = type.structInfo().fields;
+        if (value.isAggregate()) {
+            const auto& elements = value.asAggregate().elements;
+            if (elements.size() != fields.size()) {
+                throw CompilerError(
+                    "Constant struct field count does not match its type", loc);
+            }
+            for (size_t i = 0; i < fields.size(); ++i) {
+                flattenConstantLeavesImpl(elements[i], *fields[i].type, loc, out);
+            }
+            return;
+        }
+        // Packed struct value stored as flat bits: slice per field, first
+        // field at the MSB (packed struct layout).
+        const int64_t all = value.requireBitPatternInt64("packed struct constant", loc);
+        int offset = type.width;
+        for (const auto& field : fields) {
+            const int fieldWidth = field.type->width;
+            offset -= fieldWidth;
+            if (offset < 0 || fieldWidth <= 0 || fieldWidth > 64) {
+                throw CompilerError(
+                    "Unsupported packed struct constant layout", loc);
+            }
+            const uint64_t mask = fieldWidth >= 64
+                ? ~uint64_t{0}
+                : ((uint64_t{1} << fieldWidth) - 1);
+            const int64_t fieldValue = static_cast<int64_t>(
+                (static_cast<uint64_t>(all) >> offset) & mask);
+            flattenConstantLeavesImpl(
+                ConstantValue::bits(*field.type, fieldValue), *field.type, loc, out);
+        }
+        return;
+    }
+    out.push_back(value.requireBitPatternInt64("constant leaf value", loc));
+}
+
+} // namespace
+
+std::vector<int64_t> flattenConstantToLeaves(const ConstantValue& value,
+                                             const Type& type,
+                                             const std::optional<SourceLoc>& loc) {
+    std::vector<int64_t> out;
+    flattenConstantLeavesImpl(value, type, loc, out);
+    return out;
 }
 
 } // namespace mate

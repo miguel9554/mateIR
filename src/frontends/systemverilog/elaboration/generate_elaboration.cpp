@@ -233,7 +233,7 @@ static void resolveGenerateScopeDecls(
                 throw CompilerError(
                     "Generate-scope flop arrays not yet supported: " + name);
 
-            std::optional<int64_t> initialValue;
+            std::vector<int64_t> initialValues;
             if (decl.initializer) {
                 if (!ctx.allow_flop_initial_values) {
                     throw CompilerError(
@@ -242,9 +242,11 @@ static void resolveGenerateScopeDecls(
                         "Use an explicit reset instead.",
                         resolveSourceLoc(decl, ctx.sm));
                 }
-                initialValue = evaluateConstantExpr(
-                    decl.initializer->expr, ctx.params, &ctx.pkgRegistry,
-                    &ctx.namedTypeRegistry, &ctx.sm);
+                const ConstantValue initValue = evaluateConstantValue(
+                    decl.initializer->expr, type, ctx.params, ctx.pkgRegistry,
+                    &ctx.namedTypeRegistry, ctx.sm);
+                initialValues = flattenConstantToLeaves(
+                    initValue, type, resolveSourceLoc(decl, ctx.sm));
             }
 
             // Qualified name used for FlopInfo and frontend-private trigger facts
@@ -255,7 +257,7 @@ static void resolveGenerateScopeDecls(
                 .type       = type,
                 .flop_type  = FLOP_D,
                 .reset_value = std::nullopt,
-                .initial_value = initialValue,
+                .initial_values = std::move(initialValues),
                 .clock_domain = InvalidClockId,
                 .reset_domains = {},
                 .binding    = {},

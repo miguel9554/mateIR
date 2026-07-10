@@ -338,7 +338,7 @@ static ExprValue exprValueFromConstantParam(const std::string& baseName,
             .leaf_paths = leafPaths,
         };
     }
-    auto* n = graph.constant(cv.requireInt64("DFG parameter '" + baseName + "'", loc));
+    auto* n = graph.constant(cv.requireBitPatternInt64("DFG parameter '" + baseName + "'", loc));
     n->type = type;
     if (loc) n->loc = *loc;
     return ExprValue{.type = *n->type, .scalar = n, .leaves = {}, .leaf_paths = {}};
@@ -1921,6 +1921,65 @@ ExprValue buildAssignmentPatternExprValueForTarget(
 
     if (!targetType.isStruct() && targetType.unpacked_dims.empty() && !targetType.packed_dims.empty()) {
         return buildPackedArrayPatternExprValue(patternExpr, targetType, ctx, loc);
+    }
+
+    if (!targetType.unpacked_dims.empty()) {
+        // Unpacked array target: one pattern item per outer element (ordered),
+        // or a single '{default: <expr>} replicated across the dimension.
+        // Each element is built recursively so struct and nested-array
+        // elements work.
+        Type elementType = targetType;
+        const auto dim = elementType.unpacked_dims.front();
+        elementType.unpacked_dims.erase(elementType.unpacked_dims.begin());
+        const size_t count = static_cast<size_t>(std::abs(dim.right - dim.left)) + 1;
+
+        std::vector<ExprValue> elements;
+        if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
+            const auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
+            if (pattern.items.size() != count) {
+                throw CompilerError(
+                    std::format("Assignment pattern requires {} elements but {} were provided",
+                                count, pattern.items.size()),
+                    loc);
+            }
+            elements.reserve(count);
+            for (const auto* item : pattern.items) {
+                elements.push_back(
+                    buildValueForTargetType(item, elementType, ctx, loc, false));
+            }
+        } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
+            const auto& pattern = patternExpr.pattern->as<StructuredAssignmentPatternSyntax>();
+            if (pattern.items.size() != 1 ||
+                pattern.items[0]->key->kind != SyntaxKind::DefaultPatternKeyExpression) {
+                throw CompilerError(
+                    "Only a single default key is supported in unpacked-array "
+                    "assignment patterns with struct elements",
+                    loc);
+            }
+            ExprValue element = elementType.isAggregate()
+                ? buildValueForTargetType(&patternExpr, elementType, ctx, loc, false)
+                : buildValueForTargetType(pattern.items[0]->expr, elementType, ctx, loc, false);
+            elements.assign(count, element);
+        } else {
+            throw CompilerError("Replicated assignment patterns are not yet supported", loc);
+        }
+
+        std::vector<DFGNode*> leaves;
+        for (const auto& element : elements) {
+            if (!element.leaves.empty()) {
+                leaves.insert(leaves.end(), element.leaves.begin(), element.leaves.end());
+            } else if (element.scalar) {
+                leaves.push_back(element.scalar);
+            } else {
+                throw CompilerError("Assignment pattern element has no value", loc);
+            }
+        }
+        return ExprValue{
+            .type = targetType,
+            .scalar = nullptr,
+            .leaves = std::move(leaves),
+            .leaf_paths = {},
+        };
     }
 
     throw CompilerError("Assignment patterns are only supported for whole unpacked arrays or struct literals", loc);

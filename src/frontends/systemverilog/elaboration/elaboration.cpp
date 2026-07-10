@@ -1331,16 +1331,51 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             auto& patternExpr = right->as<AssignmentPatternExpressionSyntax>();
 
             if (patternExpr.pattern->kind == SyntaxKind::SimpleAssignmentPattern) {
-                auto& pattern = patternExpr.pattern->as<SimpleAssignmentPatternSyntax>();
-                if (pattern.items.size() != suffixes.size()) {
+                // Multi-dimensional arrays use nested ordered patterns
+                // ('{'{...}, '{...}}); recurse one dimension at a time and
+                // flatten into leaf order.
+                std::vector<DFGNode*> collected;
+                std::function<void(const ExpressionSyntax*, const Type&)> collectLeafDrivers =
+                    [&](const ExpressionSyntax* elemExpr, const Type& elemType) {
+                        if (elemType.unpacked_dims.empty()) {
+                            collected.push_back(buildExprDFG(elemExpr, ctx));
+                            return;
+                        }
+                        if (elemExpr->kind != SyntaxKind::AssignmentPatternExpression) {
+                            throw CompilerError(
+                                "Nested assignment pattern expected for unpacked array dimension",
+                                assignLoc);
+                        }
+                        const auto& nestedExpr = elemExpr->as<AssignmentPatternExpressionSyntax>();
+                        if (nestedExpr.pattern->kind != SyntaxKind::SimpleAssignmentPattern) {
+                            throw CompilerError(
+                                "Only ordered patterns are supported in nested array assignment patterns",
+                                assignLoc);
+                        }
+                        const auto& nested = nestedExpr.pattern->as<SimpleAssignmentPatternSyntax>();
+                        Type innerType = elemType;
+                        const auto dim = innerType.unpacked_dims.front();
+                        innerType.unpacked_dims.erase(innerType.unpacked_dims.begin());
+                        const size_t count =
+                            static_cast<size_t>(std::abs(dim.right - dim.left)) + 1;
+                        if (nested.items.size() != count) {
+                            throw CompilerError(
+                                std::format("Assignment pattern for '{}' requires {} elements but {} were provided",
+                                            baseName, count, nested.items.size()),
+                                assignLoc);
+                        }
+                        for (const auto* item : nested.items) {
+                            collectLeafDrivers(item, innerType);
+                        }
+                    };
+                collectLeafDrivers(right, *declaredType);
+                if (collected.size() != suffixes.size()) {
                     throw CompilerError(
                         std::format("Assignment pattern for '{}' requires {} elements but {} were provided",
-                                    baseName, suffixes.size(), pattern.items.size()),
+                                    baseName, suffixes.size(), collected.size()),
                         assignLoc);
                 }
-                for (size_t i = 0; i < suffixes.size(); ++i) {
-                    elementDrivers[i] = buildExprDFG(pattern.items[i], ctx);
-                }
+                elementDrivers = std::move(collected);
             } else if (patternExpr.pattern->kind == SyntaxKind::StructuredAssignmentPattern) {
                 if (declaredType->unpacked_dims.size() != 1) {
                     throw CompilerError(
@@ -1577,9 +1612,17 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
     if (selectors.empty()) {
         if (const auto* declaredType = lookupDeclaredType(baseName, ctx);
             declaredType && !declaredType->unpacked_dims.empty()) {
+            // Deferred assignment patterns are normally built after full LHS
+            // normalization, but this whole-array path returns early — build
+            // the RHS against the declared array type here.
+            if (rhsNeedsAssignmentPatternContext) {
+                RHSvalue = buildValueForTargetType(
+                    right, *declaredType, ctx, assignLoc, false);
+                RHSexprNode = RHSvalue.scalar;
+            }
             if (RHSvalue.type.unpacked_dims != declaredType->unpacked_dims ||
                     RHSvalue.leaves.size() != aggregateValueLeafCount(*declaredType)) {
-                throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+                throw CompilerError("Whole-array assignment shape mismatch (dims/leaf count)", assignLoc);
             }
 
             if (!typeContainsStructValue(*declaredType)) {
@@ -1595,7 +1638,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
             const size_t leavesPerElement = elementPlan.size();
             if (leavesPerElement == 0 ||
                 RHSvalue.leaves.size() != suffixes.size() * leavesPerElement) {
-                throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+                throw CompilerError("Whole-array assignment shape mismatch (element plan)", assignLoc);
             }
 
             for (size_t i = 0; i < suffixes.size(); ++i) {
@@ -1603,7 +1646,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
                 std::vector<AggregateLeafBinding> lhsPlan;
                 collectAggregateLeafPlan(elementType, lhsBase, {}, lhsPlan);
                 if (lhsPlan.size() != leavesPerElement) {
-                    throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+                    throw CompilerError("Whole-array assignment shape mismatch (lhs plan)", assignLoc);
                 }
 
                 for (size_t j = 0; j < leavesPerElement; ++j) {
@@ -1924,7 +1967,7 @@ void resolveAssignExpression(const BinaryExpressionSyntax& assignExpr,
         }
 
         if (RHSvalue.leaves.size() != lhsPlan.size()) {
-            throw CompilerError("Whole-array assignment shape mismatch", assignLoc);
+            throw CompilerError("Whole-array assignment shape mismatch (struct leaves)", assignLoc);
         }
 
         for (size_t i = 0; i < lhsPlan.size(); ++i) {
@@ -3163,6 +3206,45 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     applyImports(globalImports,      pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
     applyImports(unresolved.headerImports, pkgRegistry, namedTypeRegistry, enumMemberValues, *localCtx);
 
+    // Compilation-unit scope typedefs are visible to header parameters and
+    // ports; register them before either resolves. They can only reference
+    // package imports and earlier file-scope typedefs, never module state.
+    for (const auto& td : unresolved.fileScopeEnumTypedefs) {
+        if (namedTypeRegistry.contains(td.name)) {
+            throw CompilerError(
+                "Duplicate compilation-unit typedef: " + td.name);
+        }
+        auto* enumSyntax = &td.syntax->as<EnumTypeSyntax>();
+        int width = 32;
+        if (enumSyntax->baseType) {
+            width = resolveType(*enumSyntax->baseType, *localCtx,
+                                namedTypeRegistry, &pkgRegistry).width;
+        }
+        std::vector<EnumMember> members;
+        int64_t nextValue = 0;
+        for (const auto* decl : enumSyntax->members) {
+            int64_t val = nextValue;
+            if (decl->initializer)
+                val = evaluateConstantExpr(decl->initializer->expr, *localCtx, &pkgRegistry);
+            members.push_back({std::string(decl->name.valueText()), val});
+            nextValue = val + 1;
+        }
+        Type enumType = Type::makeEnum(td.name, width, members);
+        namedTypeRegistry[td.name] = enumType;
+        for (const auto& member : members) {
+            localCtx->values[member.name] = ConstantValue::bits(enumType, member.value);
+            enumMemberValues[member.name] = {member.value, enumType};
+        }
+    }
+    for (const auto& td : unresolved.fileScopeStructTypedefs) {
+        if (namedTypeRegistry.contains(td.name)) {
+            throw CompilerError(
+                "Duplicate compilation-unit typedef: " + td.name);
+        }
+        namedTypeRegistry[td.name] = resolveStructTypedef(
+            td, *localCtx, namedTypeRegistry, "$unit::" + td.name, &pkgRegistry);
+    }
+
     // Resolve header parameters before body imports and body-local typedefs.
     for (const auto& param : unresolved.parameters) {
         resolved.parameters.push_back(resolveParameter(
@@ -3403,52 +3485,28 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     std::set<std::string> flopNames;
     auto addResolvedFlop = [&](const UnresolvedSignal& flop) {
         const auto& resolvedModuleNode = (resolveModuleNode(flop, *mergedCtx, namedTypeRegistry, &pkgRegistry, &sourceManager));
-        std::optional<int64_t> initialValue;
+        std::vector<int64_t> initialValues;
         if (flop.initializer) {
+            const auto initLoc = resolveSourceLoc(*flop.initializer, sourceManager);
             if (!allowFlopInitialValues) {
                 throw CompilerError(
                     "Initializers on variable declarations are not supported "
                     "in ASIC-strict mode (flop '" + flop.name + "'). "
                     "Use an explicit reset instead.",
-                    resolveSourceLoc(*flop.initializer, sourceManager));
+                    initLoc);
             }
-            // `'{default: <const>}` initializes every element of an unpacked
-            // array flop; initial_value already broadcasts to all leaves
-            // (mirroring reset_value semantics), so unwrap to the default's
-            // value expression.
-            const auto* initExpr = flop.initializer;
-            if (initExpr->kind == SyntaxKind::AssignmentPatternExpression) {
-                const auto& assignment =
-                    initExpr->as<AssignmentPatternExpressionSyntax>();
-                if (assignment.pattern->kind != SyntaxKind::StructuredAssignmentPattern) {
-                    throw CompilerError(
-                        "Only '{default: <constant>} assignment patterns are "
-                        "supported as flop declaration initializers (flop '" +
-                        flop.name + "')",
-                        resolveSourceLoc(*initExpr, sourceManager));
-                }
-                const auto& pattern =
-                    assignment.pattern->as<StructuredAssignmentPatternSyntax>();
-                if (pattern.items.size() != 1 ||
-                    pattern.items[0]->key->kind != SyntaxKind::DefaultPatternKeyExpression) {
-                    throw CompilerError(
-                        "Only a single default key is supported in flop "
-                        "declaration initializer assignment patterns (flop '" +
-                        flop.name + "')",
-                        resolveSourceLoc(*initExpr, sourceManager));
-                }
-                initExpr = pattern.items[0]->expr;
-            }
-            initialValue = evaluateConstantExpr(
-                initExpr, *mergedCtx, &pkgRegistry, &namedTypeRegistry,
-                &sourceManager);
+            const ConstantValue initValue = evaluateConstantValue(
+                flop.initializer, resolvedModuleNode.type, *mergedCtx,
+                pkgRegistry, &namedTypeRegistry, sourceManager);
+            initialValues = flattenConstantToLeaves(
+                initValue, resolvedModuleNode.type, initLoc);
         }
         resolved.flops.push_back(FlopInfo{
                 .name = resolvedModuleNode.name,
                 .type = resolvedModuleNode.type,
                 .flop_type = FLOP_D,
                 .reset_value = std::nullopt,
-                .initial_value = initialValue,
+                .initial_values = std::move(initialValues),
                 .clock_domain = InvalidClockId,
                 .reset_domains = {},
                 .binding = {},
@@ -3466,6 +3524,18 @@ Module resolveModule(const UnresolvedModule& unresolved, const ParameterContext&
     for (const auto& output : unresolved.outputs) {
         if (isGenerateParentFlop(output)) {
             addResolvedFlop(output);
+        }
+    }
+    // Output ports may only carry declaration initializers when the port is
+    // a flop (registered output); combinational outputs have no storage to
+    // initialize.
+    for (const auto& output : unresolved.outputs) {
+        if (output.initializer && !flopNames.contains(output.name)) {
+            throw CompilerError(
+                "Initializer on output port '" + output.name +
+                "' is not supported: only registered outputs (non-blocking "
+                "assignment targets) may have declaration initializers",
+                resolveSourceLoc(*output.initializer, sourceManager));
         }
     }
 

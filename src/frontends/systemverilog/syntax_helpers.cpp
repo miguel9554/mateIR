@@ -114,10 +114,17 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
                 UnresolvedSignal portInfo{
                     .name = portName,
                     .type = typeInfo,
-                    .dimensions = {&(port.declarator->dimensions)}
+                    .dimensions = {&(port.declarator->dimensions)},
+                    .initializer = port.declarator->initializer
+                        ? port.declarator->initializer->expr.get()
+                        : nullptr,
                 };
 
                 if (dir == TokenKind::InputKeyword) {
+                    if (portInfo.initializer) {
+                        throw CompilerError(
+                            "Default values on input ports are not supported: " + portName);
+                    }
                     info.inputs.push_back(portInfo);
                 } else if (dir == TokenKind::OutputKeyword) {
                     info.outputs.push_back(portInfo);
@@ -135,6 +142,10 @@ UnresolvedModule extractModuleHeader(const ModuleHeaderSyntax& header) {
                 auto dir = netHeader.direction.kind;
                 UnresolvedType typeInfo = extractDataType(*netHeader.dataType);
 
+                if (port.declarator->initializer) {
+                    throw CompilerError(
+                        "Initializers on net ports are not supported: " + portName);
+                }
                 UnresolvedSignal portInfo{
                     .name = portName,
                     .type = typeInfo,

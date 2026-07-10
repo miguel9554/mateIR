@@ -70,6 +70,12 @@ public:
     std::optional<int64_t> asInt64() const;
     int64_t requireInt64(std::string_view context,
                          std::optional<SourceLoc> loc = std::nullopt) const;
+    // Raw two's-complement bit pattern (low word, masked to the value's
+    // width) for values whose significant bits fit in 64. Unlike
+    // requireInt64, accepts unsigned 64-bit patterns with the MSB set
+    // (e.g. 64'hFFFF_FFFF_0000_0000).
+    int64_t requireBitPatternInt64(std::string_view context,
+                                   std::optional<SourceLoc> loc = std::nullopt) const;
     std::string debugString() const;
 
 private:

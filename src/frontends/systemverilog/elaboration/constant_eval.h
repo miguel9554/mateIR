@@ -109,6 +109,13 @@ ConstantValue evaluateConstantValue(const slang::syntax::ExpressionSyntax* expr,
                                     const NamedTypeRegistry* namedTypeRegistry,
                                     const slang::SourceManager& sm);
 
+// Flatten a constant of the given (possibly aggregate) declared type into one
+// int64 per scalar leaf, in collectAggregateLeafPlan order (unpacked dims
+// outermost-first in declared direction, struct fields in declaration order).
+std::vector<int64_t> flattenConstantToLeaves(const ConstantValue& value,
+                                             const Type& type,
+                                             const std::optional<SourceLoc>& loc);
+
 
 // Evaluate the next genvar value from a for-loop iteration expression.
 // Supports: i = expr, i++, i--, ++i, --i

@@ -432,7 +432,7 @@ MateIR lowerSystemVerilogToMateIR(ExtractedIR& extracted,
         auto emitPortTypes = [&](const std::vector<UnresolvedSignal>& signals) {
             for (const auto& signal : signals) {
                 auto qualified = externalPortTypeName(
-                    signal, extracted.globalImports, topUnresolved->headerImports,
+                    signal, *topUnresolved, extracted.globalImports,
                     extracted.packages);
                 if (!qualified) continue;
                 LangMetaRecord record;

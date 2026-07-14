@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <span>
 #include <thread>
 #include <utility>
@@ -1297,9 +1298,9 @@ struct NativeCombinationalCode {
 //
 // Chunk boundaries are chosen by accumulated *cost*, not raw node count: an
 // ordinary node costs 1 (one generated statement), but a MUX node's own
-// codegen emits one `case: return ...;` line per arm (see combinationalNodeCost
-// below), so a single MUX can be worth thousands of "cost-1" nodes despite
-// being one DFG node. Node-count-only chunking let a run of topologically
+// codegen emits one `case` body per distinct arm value plus the non-default
+// labels (see muxEmissionPlan / combinationalNodeCost below), so a single MUX
+// can still be worth many "cost-1" nodes despite being one DFG node. Node-count-only chunking let a run of topologically
 // adjacent giant MUXes (e.g. several sibling decoder outputs computed from
 // the same selector) land in the same function purely by coincidence of
 // order, producing one 90k+ line outlier function no per-file parallelism
@@ -1319,9 +1320,69 @@ struct NativeCombinationalCode {
 // so bigger chunks only buy superlinear per-function compile cost.
 constexpr size_t kCombinationalChunkCostBudget = 4000;
 
+// MUX arms sharing a data value share one generated `case` body, and when the
+// arms cover the selector's full value range the largest group becomes the
+// switch `default:` (its labels are provably exhaustive, so dropping them
+// cannot silently mask a missing arm — the throwing default stays whenever
+// coverage is partial). Wide decode muxes (e.g. a 4096-arm CSR read mux with
+// ~130 distinct values) therefore emit — and cost — per distinct value, not
+// per arm. Arms group by value identity: CONSTs by (value, width, sign),
+// anything else by data node.
+struct MuxEmissionGroup {
+    size_t representative_arm = 0;
+    std::vector<int64_t> selector_codes;
+};
+
+struct MuxEmissionPlan {
+    std::vector<MuxEmissionGroup> groups;
+    // Index into groups emitted as `default:`; nullopt keeps the throwing
+    // default and emits every group's labels explicitly.
+    std::optional<size_t> default_group;
+
+    size_t generatedLineCount() const {
+        size_t labels = 0;
+        for (size_t i = 0; i < groups.size(); ++i) {
+            if (default_group && *default_group == i) continue;
+            labels += groups[i].selector_codes.size();
+        }
+        return labels + groups.size();
+    }
+};
+
+MuxEmissionPlan muxEmissionPlan(const DFGNode* node) {
+    using ArmKey = std::tuple<const DFGNode*, int64_t, int, bool>;
+    MuxEmissionPlan plan;
+    std::map<ArmKey, size_t> group_for_key;
+    for (size_t i = 0; i < node->muxArmCount(); ++i) {
+        const DFGNode* data = node->muxArmData(i).node;
+        ArmKey key = data->kind() == DFGOp::CONST
+            ? ArmKey{nullptr, data->constValue(),
+                     data->type ? data->type->width : -1,
+                     data->type && data->type->isSigned()}
+            : ArmKey{data, 0, 0, false};
+        auto [it, inserted] = group_for_key.try_emplace(key, plan.groups.size());
+        if (inserted) plan.groups.push_back({i, {}});
+        plan.groups[it->second].selector_codes.push_back(node->muxArmValue(i));
+    }
+
+    const DFGNode* selector = node->muxSelector().node;
+    const bool full_coverage =
+        selector->type && selector->type->width > 0 && selector->type->width < 63 &&
+        node->muxArmCount() == (uint64_t{1} << selector->type->width);
+    if (full_coverage) {
+        size_t largest = 0;
+        for (size_t i = 1; i < plan.groups.size(); ++i) {
+            if (plan.groups[i].selector_codes.size() >
+                plan.groups[largest].selector_codes.size()) largest = i;
+        }
+        plan.default_group = largest;
+    }
+    return plan;
+}
+
 size_t combinationalNodeCost(const DFGNode* node) {
     if (node->kind() == DFGOp::MUX) {
-        return std::max<size_t>(1, node->muxArmCount());
+        return std::max<size_t>(1, muxEmissionPlan(node).generatedLineCount());
     }
     return 1;
 }
@@ -1620,16 +1681,28 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
                     break;
 
                 case DFGOp::MUX: {
+                    const auto plan = muxEmissionPlan(node);
                     expr = std::format("[&]() -> {} {{\n", fixedValueType(type));
                     expr += std::format("        const int64_t selector = static_cast<int64_t>({}.lowU64());\n",
                                         nodeValue(node->muxSelector().node));
                     expr += "        switch (selector) {\n";
-                    for (size_t i = 0; i < node->muxArmCount(); ++i) {
-                        expr += std::format("            case {}: return {};\n",
-                                            node->muxArmValue(i),
-                                            resizeExpr(nodeValue(node->muxArmData(i).node), type));
+                    for (size_t g = 0; g < plan.groups.size(); ++g) {
+                        if (plan.default_group && *plan.default_group == g) continue;
+                        const auto& group = plan.groups[g];
+                        expr += "           ";
+                        for (int64_t code : group.selector_codes) {
+                            expr += std::format(" case {}:", code);
+                        }
+                        expr += std::format(" return {};\n",
+                                            resizeExpr(nodeValue(node->muxArmData(group.representative_arm).node), type));
                     }
-                    expr += "            default: throw std::runtime_error(\"Mate native model: MUX selector has no matching arm\");\n";
+                    if (plan.default_group) {
+                        const auto& group = plan.groups[*plan.default_group];
+                        expr += std::format("            default: return {};\n",
+                                            resizeExpr(nodeValue(node->muxArmData(group.representative_arm).node), type));
+                    } else {
+                        expr += "            default: throw std::runtime_error(\"Mate native model: MUX selector has no matching arm\");\n";
+                    }
                     expr += "        }\n";
                     expr += "    }()";
                     break;

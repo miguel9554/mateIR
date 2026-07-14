@@ -3,7 +3,9 @@
 
 #include "util/source_loc.h"
 
+#include <map>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -489,6 +491,66 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
                 if (tval && fval && tval == fval) {
                     graph.redirectConsumers(node, tval);
                     return true;
+                }
+            }
+
+            // A wide decode mux whose arms take exactly two distinct values,
+            // one of them on a single selector code, is an equality compare
+            // in disguise (e.g. a CSR write-enable decode: 4095 arms of 0 and
+            // one arm of 1). Rewrite to MUX(EQ(sel, code), majority, minority).
+            //
+            // Strictness guards:
+            // - arms must cover the selector's full value range: an uncovered
+            //   selector value traps at runtime today, and the rewrite would
+            //   silently route it to the majority arm instead;
+            // - the minority value must sit on exactly one selector code, so
+            //   the replacement is a single EQ with no set-membership logic.
+            // Arms group by value identity: CONSTs by (value, width, sign),
+            // anything else by node.
+            if (node->muxArmCount() > 2 && sel->hasType()) {
+                const int selWidth = sel->type->width;
+                if (selWidth > 0 && selWidth < 63 &&
+                    node->muxArmCount() == (uint64_t{1} << selWidth)) {
+                    using ArmKey = std::tuple<const DFGNode*, int64_t, int, bool>;
+                    std::map<ArmKey, size_t> arm_count_for_key;
+                    std::map<ArmKey, size_t> first_arm_for_key;
+                    for (size_t i = 0; i < node->muxArmCount(); ++i) {
+                        const DFGNode* data = node->muxArmData(i).node;
+                        ArmKey key = isConst(data)
+                            ? ArmKey{nullptr, data->constValue(),
+                                     data->hasType() ? data->type->width : -1,
+                                     data->hasType() && data->type->isSigned()}
+                            : ArmKey{data, 0, 0, false};
+                        if (arm_count_for_key[key]++ == 0) first_arm_for_key[key] = i;
+                    }
+                    if (arm_count_for_key.size() == 2) {
+                        auto it = arm_count_for_key.begin();
+                        auto [key_a, count_a] = *it;
+                        auto [key_b, count_b] = *std::next(it);
+                        if ((count_a == 1) != (count_b == 1)) {
+                            const ArmKey& minority_key = count_a == 1 ? key_a : key_b;
+                            const ArmKey& majority_key = count_a == 1 ? key_b : key_a;
+                            const size_t minority_arm = first_arm_for_key.at(minority_key);
+                            const size_t majority_arm = first_arm_for_key.at(majority_key);
+                            const int64_t code = normalizeToTypeWidth(
+                                node->muxArmValue(minority_arm), *sel->type);
+                            DFGNode* code_const = graph.constant(code);
+                            code_const->type = sel->type;
+                            code_const->loc = node->loc;
+                            DFGNode* is_code = graph.eq(sel, code_const);
+                            is_code->type = Type::makeInteger(1, false);
+                            is_code->loc = node->loc;
+                            DFGNode* narrow = graph.mux(
+                                is_code, {0, 1},
+                                {node->muxArmData(majority_arm).node,
+                                 node->muxArmData(minority_arm).node});
+                            narrow->type = node->type;
+                            narrow->loc = node->loc;
+                            narrow->instance_path = node->instance_path;
+                            graph.redirectConsumers(node, narrow);
+                            return true;
+                        }
+                    }
                 }
             }
             break;

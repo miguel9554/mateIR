@@ -102,8 +102,7 @@ static std::vector<DFGNode*> buildPostOrder(
 
 static bool tryConstantFold(DFGNode* node) {
     // Skip nodes that are already constants or have no inputs
-    if (node->kind() == DFGOp::CONST || node->kind() == DFGOp::INPUT ||
-        node->kind() == DFGOp::SLICE)
+    if (node->kind() == DFGOp::CONST || node->kind() == DFGOp::INPUT)
         return false;
 
     // CONCAT with all-constant inputs: fold by bit-concatenation (MSB-first)
@@ -252,6 +251,25 @@ static bool tryConstantFold(DFGNode* node) {
             int bits = 0;
             while (v) { bits ^= 1; v &= v - 1; }
             result = bits;
+            break;
+        }
+        case DFGOp::SLICE: {
+            // SLICE indices are internal-space bit positions (0-based from
+            // LSB, see resolveSliceRange). Only fold when that plain
+            // bit-slice reading is unambiguous: a source with more than one
+            // packed dim makes a high==low select an *element* select whose
+            // width exceeds one bit (type_propagation peels a dim), so leave
+            // those alone. int64 storage also caps what we can fold.
+            auto slice = node->sliceInputs();
+            const DFGNode* source = slice.source.node;
+            if (!source->hasType() || source->type->packed_dims.size() > 1)
+                return false;
+            const int64_t high = getConst(slice.high.node);
+            const int64_t low = getConst(slice.low.node);
+            if (low < 0 || high < low || high > 62) return false;
+            const uint64_t mask = (uint64_t{1} << (high - low + 1)) - 1;
+            result = static_cast<int64_t>(
+                (static_cast<uint64_t>(getConst(source)) >> low) & mask);
             break;
         }
         case DFGOp::REDUCTION_XNOR: {

@@ -4,6 +4,8 @@
 #include "frontends/systemverilog/passes/cdc_emit.h"
 #include "frontends/systemverilog/passes/condition_normalization.h"
 #include "frontends/systemverilog/passes/constant_fold.h"
+#include "frontends/systemverilog/passes/cse.h"
+#include "frontends/systemverilog/passes/vectorize.h"
 #include "frontends/systemverilog/passes/dce.h"
 #include "frontends/systemverilog/passes/dfg_inline.h"
 #include "frontends/systemverilog/passes/domains_propagate_and_check.h"
@@ -280,37 +282,41 @@ void runMateIRPipeline(MateIR& ir,
         runPass(3, "type_propagation", [&]{ propagateTypes(*module.dfg); });
         runPass(4, "condition_normalization", [&]{ normalizeConditions(*module.dfg, preOptRoots); });
         runPass(5, "constant_fold", [&]{ constantFold(*module.dfg, preOptRoots); });
-        runPass(6, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
+        runPass(6, "cse", [&]{ eliminateCommonSubexpressions(*module.dfg, preOptRoots); });
+        runPass(7, "flop_resolve", [&]{ resolveFlops(module, domainFacts); });
         if (dumpPasses) {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
-            std::ofstream f(std::format("{}/06_flop_resolve_flops.txt", dir));
+            std::ofstream f(std::format("{}/07_flop_resolve_flops.txt", dir));
             dumpFlopsRecursive(module, f);
         }
+        // After flop_resolve so lane merging sees the same graph the backends
+        // see and cannot disturb flop pattern matching.
+        runPass(8, "vectorize", [&]{ vectorizeDFG(*module.dfg, preOptRoots); });
         if (topDomainMode == TopDomainMode::Yaml) {
-            runPass(7, "load_top_io_domains", [&]{
+            runPass(9, "load_top_io_domains", [&]{
                 loadTopIODomains(module, *topDomainPath, domainFacts);
             });
         } else {
-            runPass(7, "infer_top_clock_reset_domains", [&]{
+            runPass(9, "infer_top_clock_reset_domains", [&]{
                 inferTopClockResetDomains(module, domainFacts);
             });
         }
-        runPass(8, "cdc_annotations", [&]{
+        runPass(10, "cdc_annotations", [&]{
             if (inferSynchronizers) {
                 loadCdcAnnotations(module, {}, domainFacts);
             } else {
                 loadCdcAnnotations(module, cdcPathsByModule, domainFacts);
             }
         });
-        runPass(9, "global_domain_resolve", [&]{
+        runPass(11, "global_domain_resolve", [&]{
             resolveGlobalDomains(ir, domainFacts);
         });
         if (topDomainMode == TopDomainMode::Infer) {
-            runPass(10, "infer_top_data_input_domains", [&]{
+            runPass(12, "infer_top_data_input_domains", [&]{
                 inferTopDataInputDomains(ir, domainFacts);
             });
         }
-        runPass(topDomainMode == TopDomainMode::Infer ? 11 : 10, "dce", [&]{
+        runPass(topDomainMode == TopDomainMode::Infer ? 13 : 12, "dce", [&]{
             auto keepAlive = collectRoots(ModuleRootSelection{
                 .parameters = true,
                 .localparams = true,
@@ -326,14 +332,14 @@ void runMateIRPipeline(MateIR& ir,
         module.dfg->validateNoOrphans();
         module.dfg->validateStrictLiveDFG();
         validateFrontendDomainFacts(module, domainFacts);
-        runPass(topDomainMode == TopDomainMode::Infer ? 12 : 11,
+        runPass(topDomainMode == TopDomainMode::Infer ? 14 : 13,
                 "domains_propagate_and_check",
                 [&]{ domainsPropagateAndCheck(ir, domainFacts, inferSynchronizers); });
         if (dumpPasses) {
             std::string dir = DEBUG_OUTPUT_DIR + "/" + module.name;
             std::ofstream f(std::format("{}/{}_domains_propagate_flops.txt",
                                         dir,
-                                        topDomainMode == TopDomainMode::Infer ? "12" : "11"));
+                                        topDomainMode == TopDomainMode::Infer ? "14" : "13"));
             dumpFlopsRecursive(module, f);
         }
         validateNoCombLoops(module);

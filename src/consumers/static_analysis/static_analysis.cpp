@@ -108,8 +108,6 @@ std::string debugInputLabel(const DFGNode* node, size_t index) {
             break;
         case DFGOp::SLICE:
             if (index == 0) return "src";
-            if (index == 1) return "hi";
-            if (index == 2) return "lo";
             break;
         default:
             break;

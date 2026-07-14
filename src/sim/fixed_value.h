@@ -7,6 +7,8 @@
 #endif
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -21,6 +23,20 @@ namespace mate {
 // forcing them inline via always_inline instead cost 1.5-4.7x generated
 // compile time. Keep these bodies branch-free; validate buffers at the ABI
 // boundary, not here.
+//
+// The same -O1 inliner constraint motivates the `if constexpr` single-word
+// fast paths below: the generic wordops:: helpers take runtime word counts
+// and loop, so they stay out-of-line and every 1-bit AND became a function
+// call. For kWords == 1 instantiations (the overwhelming majority of
+// generated ops) each fast-path body is one or two branch-free expressions,
+// which -O1 inlines on its own. Values keep the invariant that bits above
+// Width in the top word are zero; fast paths preserve it.
+
+constexpr uint64_t constLowMask(int bits) {
+    if (bits <= 0) return 0;
+    if (bits >= 64) return ~uint64_t{0};
+    return (uint64_t{1} << bits) - 1;
+}
 
 template <int Width, bool Signed = false>
 struct FixedValue {
@@ -29,6 +45,9 @@ struct FixedValue {
     static constexpr int width = Width;
     static constexpr bool is_signed = Signed;
     static constexpr size_t kWords = wordops::wordCount(Width);
+    // Mask of the valid bits in the top (or only) word.
+    static constexpr uint64_t kTopWordMask =
+        constLowMask(Width - 64 * (static_cast<int>(kWords) - 1));
 
     uint64_t w[kWords] = {};
 
@@ -114,40 +133,133 @@ struct FixedValue {
 
     template <int NewWidth, bool NewSigned = Signed>
     FixedValue<NewWidth, NewSigned> resized() const {
-        FixedValue<NewWidth, NewSigned> result;
-        wordops::resize(result.w, result.kWords, NewWidth, w, kWords, Width, NewSigned);
+        using Result = FixedValue<NewWidth, NewSigned>;
+        Result result;
+        if constexpr (NewWidth == Width) {
+            for (size_t i = 0; i < kWords; ++i) result.w[i] = w[i];
+        } else if constexpr (kWords == 1 && Result::kWords == 1) {
+            uint64_t v = w[0];
+            // Mirror wordops::resize: extend with the source's top bit only
+            // when widening into a signed destination.
+            if constexpr (NewSigned && NewWidth > Width) {
+                constexpr uint64_t sign_bit = uint64_t{1} << (Width - 1);
+                v = (v ^ sign_bit) - sign_bit;
+            }
+            result.w[0] = v & Result::kTopWordMask;
+        } else {
+            wordops::resize(result.w, Result::kWords, NewWidth, w, kWords, Width, NewSigned);
+        }
+        return result;
+    }
+
+    // Strided lane gather: lane i, bit j reads source bit Offset+Stride*i+j.
+    // All parameters are compile-time constants so the loop unrolls/optimizes.
+    template <int64_t Offset, int64_t Stride, int64_t LaneWidth, int64_t LaneCount>
+    FixedValue<static_cast<int>(LaneWidth * LaneCount), false> gatherAffine() const {
+        using Result = FixedValue<static_cast<int>(LaneWidth * LaneCount), false>;
+        Result result;
+        if constexpr (kWords == 1 && Result::kWords == 1) {
+            constexpr uint64_t lane_mask = constLowMask(static_cast<int>(LaneWidth));
+            uint64_t out = 0;
+            for (int64_t i = 0; i < LaneCount; ++i) {
+                out |= ((w[0] >> (Offset + Stride * i)) & lane_mask) << (LaneWidth * i);
+            }
+            result.w[0] = out;
+        } else {
+            for (int64_t i = 0; i < LaneCount; ++i) {
+                wordops::copyBits(result.w, Result::kWords, Result::width,
+                                  static_cast<int>(LaneWidth * i),
+                                  w, kWords, Width,
+                                  static_cast<int>(Offset + Stride * i),
+                                  static_cast<int>(LaneWidth));
+            }
+        }
+        return result;
+    }
+
+    // Arbitrary bit gather: result bit j = source bit indices[j].
+    template <int OutWidth, size_t N>
+    FixedValue<OutWidth, false> gatherBits(const std::array<int32_t, N>& indices) const {
+        static_assert(static_cast<size_t>(OutWidth) == N,
+                      "gatherBits: output width must equal index count");
+        FixedValue<OutWidth, false> result;
+        for (size_t j = 0; j < N; ++j) {
+            const size_t bit = static_cast<size_t>(indices[j]);
+            const uint64_t value = (w[bit / 64] >> (bit % 64)) & 1;
+            result.w[j / 64] |= value << (j % 64);
+        }
         return result;
     }
 
     template <int High, int Low>
     FixedValue<High - Low + 1, false> slice() const {
         static_assert(High >= Low, "FixedValue slice high must be >= low");
-        FixedValue<High - Low + 1, false> result;
-        wordops::slice(result.w, result.kWords, result.width, w, kWords, Width, Low);
+        using Result = FixedValue<High - Low + 1, false>;
+        Result result;
+        if constexpr (Result::kWords == 1 && High < 64 * static_cast<int>(kWords)) {
+            constexpr int low_word = Low / 64;
+            constexpr int high_word = High / 64;
+            constexpr int shift = Low % 64;
+            if constexpr (low_word == high_word) {
+                result.w[0] = (w[low_word] >> shift) & Result::kTopWordMask;
+            } else {
+                result.w[0] = ((w[low_word] >> shift) | (w[high_word] << (64 - shift))) &
+                              Result::kTopWordMask;
+            }
+        } else {
+            wordops::slice(result.w, Result::kWords, Result::width, w, kWords, Width, Low);
+        }
         return result;
     }
 
     FixedValue shl(uint64_t amount) const {
         FixedValue result;
-        wordops::shiftLeft(result.w, w, kWords, Width, amount);
+        if constexpr (kWords == 1) {
+            result.w[0] = amount >= 64 ? 0 : (w[0] << amount) & kTopWordMask;
+        } else {
+            wordops::shiftLeft(result.w, w, kWords, Width, amount);
+        }
         return result;
     }
 
     FixedValue shr(uint64_t amount, bool arithmetic) const {
         FixedValue result;
-        wordops::shiftRight(result.w, w, kWords, Width, amount, arithmetic, Signed);
+        if constexpr (kWords == 1) {
+            if (arithmetic && Signed) {
+                // Sign-extend to 64 bits, arithmetic-shift, re-mask. Clamp the
+                // amount to 63: the sign already fills every bit by then, and
+                // shifting an int64 by >= 64 is undefined.
+                constexpr uint64_t sign_bit = uint64_t{1} << (Width - 1);
+                const int64_t extended = static_cast<int64_t>((w[0] ^ sign_bit) - sign_bit);
+                result.w[0] =
+                    static_cast<uint64_t>(extended >> (amount >= 63 ? 63 : amount)) &
+                    kTopWordMask;
+            } else {
+                result.w[0] = amount >= 64 ? 0 : w[0] >> amount;
+            }
+        } else {
+            wordops::shiftRight(result.w, w, kWords, Width, amount, arithmetic, Signed);
+        }
         return result;
     }
 
     FixedValue negated() const {
         FixedValue result;
-        wordops::negate(result.w, w, kWords, Width);
+        if constexpr (kWords == 1) {
+            result.w[0] = (0 - w[0]) & kTopWordMask;
+        } else {
+            wordops::negate(result.w, w, kWords, Width);
+        }
         return result;
     }
 
     FixedValue bitwiseNot() const {
         FixedValue result;
-        wordops::bitwiseNot(result.w, w, kWords, Width);
+        if constexpr (kWords == 1) {
+            result.w[0] = ~w[0] & kTopWordMask;
+        } else {
+            wordops::bitwiseNot(result.w, w, kWords, Width);
+        }
         return result;
     }
 
@@ -158,7 +270,11 @@ struct FixedValue {
         auto lhs_wide = resized<OutWidth, Signed>();
         auto rhs_wide = rhs.template resized<OutWidth, RSigned>();
         FixedValue<OutWidth, Signed && RSigned> result;
-        wordops::bitwiseAnd(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        if constexpr (result.kWords == 1) {
+            result.w[0] = lhs_wide.w[0] & rhs_wide.w[0];
+        } else {
+            wordops::bitwiseAnd(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        }
         return result;
     }
 
@@ -169,7 +285,11 @@ struct FixedValue {
         auto lhs_wide = resized<OutWidth, Signed>();
         auto rhs_wide = rhs.template resized<OutWidth, RSigned>();
         FixedValue<OutWidth, Signed && RSigned> result;
-        wordops::bitwiseOr(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        if constexpr (result.kWords == 1) {
+            result.w[0] = lhs_wide.w[0] | rhs_wide.w[0];
+        } else {
+            wordops::bitwiseOr(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        }
         return result;
     }
 
@@ -180,7 +300,11 @@ struct FixedValue {
         auto lhs_wide = resized<OutWidth, Signed>();
         auto rhs_wide = rhs.template resized<OutWidth, RSigned>();
         FixedValue<OutWidth, Signed && RSigned> result;
-        wordops::bitwiseXor(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        if constexpr (result.kWords == 1) {
+            result.w[0] = lhs_wide.w[0] ^ rhs_wide.w[0];
+        } else {
+            wordops::bitwiseXor(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        }
         return result;
     }
 
@@ -191,7 +315,11 @@ struct FixedValue {
         auto lhs_wide = resized<OutWidth, Signed>();
         auto rhs_wide = rhs.template resized<OutWidth, RSigned>();
         FixedValue<OutWidth, Signed && RSigned> result;
-        wordops::bitwiseXnor(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        if constexpr (result.kWords == 1) {
+            result.w[0] = ~(lhs_wide.w[0] ^ rhs_wide.w[0]) & result.kTopWordMask;
+        } else {
+            wordops::bitwiseXnor(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        }
         return result;
     }
 
@@ -202,7 +330,11 @@ struct FixedValue {
         auto lhs_wide = resized<OutWidth, Signed>();
         auto rhs_wide = rhs.template resized<OutWidth, RSigned>();
         FixedValue<OutWidth, Signed && RSigned> result;
-        wordops::add(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        if constexpr (result.kWords == 1) {
+            result.w[0] = (lhs_wide.w[0] + rhs_wide.w[0]) & result.kTopWordMask;
+        } else {
+            wordops::add(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        }
         return result;
     }
 
@@ -213,7 +345,11 @@ struct FixedValue {
         auto lhs_wide = resized<OutWidth, Signed>();
         auto rhs_wide = rhs.template resized<OutWidth, RSigned>();
         FixedValue<OutWidth, Signed && RSigned> result;
-        wordops::sub(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        if constexpr (result.kWords == 1) {
+            result.w[0] = (lhs_wide.w[0] - rhs_wide.w[0]) & result.kTopWordMask;
+        } else {
+            wordops::sub(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        }
         return result;
     }
 
@@ -224,7 +360,11 @@ struct FixedValue {
         auto lhs_wide = resized<OutWidth, false>();
         auto rhs_wide = rhs.template resized<OutWidth, false>();
         FixedValue<OutWidth, Signed && RSigned> result;
-        wordops::mul(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        if constexpr (result.kWords == 1) {
+            result.w[0] = (lhs_wide.w[0] * rhs_wide.w[0]) & result.kTopWordMask;
+        } else {
+            wordops::mul(result.w, lhs_wide.w, rhs_wide.w, result.kWords, OutWidth);
+        }
         return result;
     }
 
@@ -233,7 +373,11 @@ struct FixedValue {
         constexpr int CompareWidth = Width > RWidth ? Width : RWidth;
         auto lhs_wide = resized<CompareWidth, Signed>();
         auto rhs_wide = rhs.template resized<CompareWidth, RSigned>();
-        return wordops::eq(lhs_wide.w, rhs_wide.w, lhs_wide.kWords, CompareWidth);
+        if constexpr (lhs_wide.kWords == 1) {
+            return lhs_wide.w[0] == rhs_wide.w[0];
+        } else {
+            return wordops::eq(lhs_wide.w, rhs_wide.w, lhs_wide.kWords, CompareWidth);
+        }
     }
 
     template <int RWidth, bool RSigned>
@@ -241,7 +385,11 @@ struct FixedValue {
         constexpr int CompareWidth = Width > RWidth ? Width : RWidth;
         auto lhs_wide = resized<CompareWidth, false>();
         auto rhs_wide = rhs.template resized<CompareWidth, false>();
-        return wordops::unsignedLt(lhs_wide.w, rhs_wide.w, lhs_wide.kWords, CompareWidth);
+        if constexpr (lhs_wide.kWords == 1) {
+            return lhs_wide.w[0] < rhs_wide.w[0];
+        } else {
+            return wordops::unsignedLt(lhs_wide.w, rhs_wide.w, lhs_wide.kWords, CompareWidth);
+        }
     }
 
     template <int RWidth, bool RSigned>
@@ -249,19 +397,37 @@ struct FixedValue {
         constexpr int CompareWidth = Width > RWidth ? Width : RWidth;
         auto lhs_wide = resized<CompareWidth, true>();
         auto rhs_wide = rhs.template resized<CompareWidth, true>();
-        return wordops::signedLt(lhs_wide.w, rhs_wide.w, lhs_wide.kWords, CompareWidth);
+        if constexpr (lhs_wide.kWords == 1) {
+            constexpr uint64_t sign_bit = uint64_t{1} << (CompareWidth - 1);
+            return static_cast<int64_t>((lhs_wide.w[0] ^ sign_bit) - sign_bit) <
+                   static_cast<int64_t>((rhs_wide.w[0] ^ sign_bit) - sign_bit);
+        } else {
+            return wordops::signedLt(lhs_wide.w, rhs_wide.w, lhs_wide.kWords, CompareWidth);
+        }
     }
 
     bool reductionAnd() const {
-        return wordops::reductionAnd(w, kWords, Width);
+        if constexpr (kWords == 1) {
+            return w[0] == kTopWordMask;
+        } else {
+            return wordops::reductionAnd(w, kWords, Width);
+        }
     }
 
     bool reductionOr() const {
-        return wordops::reductionOr(w, kWords, Width);
+        if constexpr (kWords == 1) {
+            return w[0] != 0;
+        } else {
+            return wordops::reductionOr(w, kWords, Width);
+        }
     }
 
     bool reductionXor() const {
-        return wordops::reductionXor(w, kWords, Width);
+        if constexpr (kWords == 1) {
+            return (std::popcount(w[0]) & 1) != 0;
+        } else {
+            return wordops::reductionXor(w, kWords, Width);
+        }
     }
 
     template <int TotalWidth, typename Part>
@@ -269,8 +435,13 @@ struct FixedValue {
                                  int& dst,
                                  const Part& part) {
         dst -= Part::width;
-        wordops::copyBits(result.w, result.kWords, TotalWidth, dst,
-                          part.w, Part::kWords, Part::width, 0, Part::width);
+        if constexpr (FixedValue<TotalWidth, false>::kWords == 1) {
+            // dst < 64 here, and the part's bits above its width are zero.
+            result.w[0] |= part.w[0] << dst;
+        } else {
+            wordops::copyBits(result.w, result.kWords, TotalWidth, dst,
+                              part.w, Part::kWords, Part::width, 0, Part::width);
+        }
     }
 
     template <typename... Parts>

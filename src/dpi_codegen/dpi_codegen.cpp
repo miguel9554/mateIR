@@ -1752,20 +1752,33 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
                     break;
 
                 case DFGOp::SLICE: {
-                    auto slice = node->sliceInputs();
-                    if (slice.high.node->kind() != DFGOp::CONST ||
-                        slice.low.node->kind() != DFGOp::CONST) {
-                        throw CompilerError(std::format(
-                            "mate-dpi-codegen: SLICE node '{}' has non-constant bounds",
-                            node->str()));
+                    const auto& indices = node->sliceIndices();
+                    const auto pattern = sliceAffinePattern(indices);
+                    if (pattern && pattern->lane_count == 1) {
+                        expr = std::format("{}.slice<{}, {}>()",
+                                           nodeValue(node->sliceSource().node),
+                                           pattern->offset + pattern->lane_width - 1,
+                                           pattern->offset);
+                    } else if (pattern) {
+                        expr = std::format("{}.gatherAffine<{}, {}, {}, {}>()",
+                                           nodeValue(node->sliceSource().node),
+                                           pattern->offset,
+                                           pattern->stride,
+                                           pattern->lane_width,
+                                           pattern->lane_count);
+                    } else {
+                        std::string index_list;
+                        for (size_t j = 0; j < indices.size(); ++j) {
+                            if (j) index_list += ", ";
+                            index_list += std::to_string(indices[j]);
+                        }
+                        expr = std::format(
+                            "{}.gatherBits<{}>(std::array<int32_t, {}>{{{{{}}}}})",
+                            nodeValue(node->sliceSource().node),
+                            indices.size(),
+                            indices.size(),
+                            index_list);
                     }
-                    auto resolved = resolveSliceRange(*slice.source.node,
-                                                      slice.high.node->constValue(),
-                                                      slice.low.node->constValue());
-                    expr = std::format("{}.slice<{}, {}>()",
-                                       nodeValue(slice.source.node),
-                                       resolved.internal_high,
-                                       resolved.internal_low);
                     break;
                 }
 

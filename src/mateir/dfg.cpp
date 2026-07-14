@@ -178,8 +178,6 @@ std::string DFG::renderDot(const std::string& graphName,
                 break;
             case DFGOp::SLICE:
                 if (j == 0) return "src";
-                if (j == 1) return "hi";
-                if (j == 2) return "lo";
                 break;
             default:
                 break;
@@ -296,6 +294,23 @@ std::string DFG::renderJson(int indent, const std::set<const DFGNode*>* filter) 
                 ss << muxValues[j];
             }
             ss << "],\n";
+        }
+
+        if (node->kind() == DFGOp::SLICE) {
+            // Contiguous ranges (the overwhelmingly common case) serialize
+            // compactly; anything else dumps the full index list.
+            const auto& indices = node->sliceIndices();
+            if (node->sliceIsContiguous()) {
+                ss << indentStr(indent + 3) << "\"slice_low\": " << indices.front()
+                   << ", \"slice_high\": " << indices.back() << ",\n";
+            } else {
+                ss << indentStr(indent + 3) << "\"slice_indices\": [";
+                for (size_t j = 0; j < indices.size(); ++j) {
+                    if (j > 0) ss << ", ";
+                    ss << indices[j];
+                }
+                ss << "],\n";
+            }
         }
 
         // Add inputs

@@ -7,6 +7,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -147,6 +148,45 @@ struct FixedValue {
             result.w[0] = v & Result::kTopWordMask;
         } else {
             wordops::resize(result.w, Result::kWords, NewWidth, w, kWords, Width, NewSigned);
+        }
+        return result;
+    }
+
+    // Strided lane gather: lane i, bit j reads source bit Offset+Stride*i+j.
+    // All parameters are compile-time constants so the loop unrolls/optimizes.
+    template <int64_t Offset, int64_t Stride, int64_t LaneWidth, int64_t LaneCount>
+    FixedValue<static_cast<int>(LaneWidth * LaneCount), false> gatherAffine() const {
+        using Result = FixedValue<static_cast<int>(LaneWidth * LaneCount), false>;
+        Result result;
+        if constexpr (kWords == 1 && Result::kWords == 1) {
+            constexpr uint64_t lane_mask = constLowMask(static_cast<int>(LaneWidth));
+            uint64_t out = 0;
+            for (int64_t i = 0; i < LaneCount; ++i) {
+                out |= ((w[0] >> (Offset + Stride * i)) & lane_mask) << (LaneWidth * i);
+            }
+            result.w[0] = out;
+        } else {
+            for (int64_t i = 0; i < LaneCount; ++i) {
+                wordops::copyBits(result.w, Result::kWords, Result::width,
+                                  static_cast<int>(LaneWidth * i),
+                                  w, kWords, Width,
+                                  static_cast<int>(Offset + Stride * i),
+                                  static_cast<int>(LaneWidth));
+            }
+        }
+        return result;
+    }
+
+    // Arbitrary bit gather: result bit j = source bit indices[j].
+    template <int OutWidth, size_t N>
+    FixedValue<OutWidth, false> gatherBits(const std::array<int32_t, N>& indices) const {
+        static_assert(static_cast<size_t>(OutWidth) == N,
+                      "gatherBits: output width must equal index count");
+        FixedValue<OutWidth, false> result;
+        for (size_t j = 0; j < N; ++j) {
+            const size_t bit = static_cast<size_t>(indices[j]);
+            const uint64_t value = (w[bit / 64] >> (bit % 64)) & 1;
+            result.w[j / 64] |= value << (j % 64);
         }
         return result;
     }

@@ -76,6 +76,12 @@ std::string nodeKey(const DFGNode* node,
                     key += std::format(",{}", value);
                 }
             }
+            if (kind == DFGOp::SLICE) {
+                key += "|s";
+                for (int64_t bit : node->sliceIndices()) {
+                    key += std::format(",{}", bit);
+                }
+            }
             appendTypeSignature(key, node);
             return key;
         }

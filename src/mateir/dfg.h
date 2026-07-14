@@ -29,7 +29,11 @@ enum class DFGOp {
     MUL,
     UNARY_NEGATE,
     // Bit extraction / concatenation ops
-    SLICE,      // Static bit-slice: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
+    SLICE,      // Bit gather: in[0]=source; payload stores bit_indices —
+                // result bit j = source bit bit_indices[j] (LSB-first,
+                // repetition allowed). Contiguous ranges are the common
+                // case; synthesis lowers any index pattern as wiring, and
+                // codegen decomposes it (shift / strided loop / per-bit).
     CONCAT,     // Concatenation: in[0..N-1] = parts, MSB-first
     // MUX
     MUX,        // Exhaustive value mux: in[0]=sel, in[1..]=data arms keyed by mux_values
@@ -108,7 +112,7 @@ inline int expectedInputs(DFGOp op) {
         // MUX: variable input count, validated separately
         case DFGOp::MUX:    return -1;
 
-        case DFGOp::SLICE:  return 3;
+        case DFGOp::SLICE:  return 1;
         case DFGOp::CONCAT: return -1; // variable
         case DFGOp::ADD:    return 2;
         case DFGOp::SUB:    return 2;
@@ -174,7 +178,11 @@ struct DFGConstPayload { int64_t value; };
 struct DFGXPayload {};
 struct DFGUnaryPayload { DFGOp op; DFGOutput operand; };
 struct DFGBinaryPayload { DFGOp op; DFGOutput lhs; DFGOutput rhs; };
-struct DFGSlicePayload { DFGOutput source; DFGOutput high; DFGOutput low; };
+// SLICE: result bit j = source bit bit_indices[j] (0-based from LSB,
+// repetition allowed). The frontend authors the node's result type; for
+// contiguous ranges type_propagation still computes the legacy type when the
+// creator left it unset.
+struct DFGSlicePayload { DFGOutput source; std::vector<int64_t> bit_indices; };
 struct DFGConcatPayload { std::vector<DFGOutput> parts; };
 struct DFGMuxPayload { DFGOutput selector; std::vector<DFGMuxArm> arms; };
 
@@ -185,12 +193,6 @@ struct DFGUnaryInputs {
 struct DFGBinaryInputs {
     DFGOutput lhs;
     DFGOutput rhs;
-};
-
-struct DFGSliceInputs {
-    DFGOutput source;
-    DFGOutput high;
-    DFGOutput low;
 };
 
 using DFGPayload = std::variant<
@@ -308,7 +310,7 @@ private:
             input_cache_.push_back(p->lhs);
             input_cache_.push_back(p->rhs);
         } else if (auto* p = std::get_if<DFGSlicePayload>(&payload_)) {
-            input_cache_ = {p->source, p->high, p->low};
+            input_cache_.push_back(p->source);
         } else if (auto* p = std::get_if<DFGConcatPayload>(&payload_)) {
             input_cache_ = p->parts;
         } else if (auto* p = std::get_if<DFGMuxPayload>(&payload_)) {
@@ -338,9 +340,22 @@ public:
         return {p.lhs, p.rhs};
     }
 
-    DFGSliceInputs sliceInputs() const {
-        const auto& p = std::get<DFGSlicePayload>(payload_);
-        return {p.source, p.high, p.low};
+    DFGOutput sliceSource() const {
+        return std::get<DFGSlicePayload>(payload_).source;
+    }
+
+    const std::vector<int64_t>& sliceIndices() const {
+        return std::get<DFGSlicePayload>(payload_).bit_indices;
+    }
+
+    // True when the slice reads a contiguous ascending bit range
+    // [indices.front() .. indices.back()].
+    bool sliceIsContiguous() const {
+        const auto& indices = sliceIndices();
+        for (size_t j = 1; j < indices.size(); ++j) {
+            if (indices[j] != indices[j - 1] + 1) return false;
+        }
+        return true;
     }
 
     const std::vector<DFGOutput>& concatParts() const {
@@ -461,10 +476,8 @@ public:
             return;
         }
         if (auto* p = std::get_if<DFGSlicePayload>(&payload_)) {
-            if (index == 0) p->source = replacement;
-            else if (index == 1) p->high = replacement;
-            else if (index == 2) p->low = replacement;
-            else throw CompilerError("replaceInputAt: SLICE index out of range", this);
+            if (index != 0) throw CompilerError("replaceInputAt: SLICE index out of range", this);
+            p->source = replacement;
             return;
         }
         if (auto* p = std::get_if<DFGConcatPayload>(&payload_)) {
@@ -513,8 +526,6 @@ inline std::string dfgInputRole(const DFGNode& node, size_t index) {
             break;
         case DFGOp::SLICE:
             if (index == 0) return "source";
-            if (index == 1) return "high";
-            if (index == 2) return "low";
             break;
         case DFGOp::CONCAT:
             return "part[" + std::to_string(index) + "]";
@@ -524,30 +535,45 @@ inline std::string dfgInputRole(const DFGNode& node, size_t index) {
     return std::to_string(index);
 }
 
-struct DFGSliceResolvedRange {
-    int64_t source_high = 0;
-    int64_t source_low = 0;
-    int64_t width = 0;
-    int64_t internal_low = 0;
-    int64_t internal_high = 0;
+// Affine view of a slice's index pattern: lane i, bit j reads source bit
+// offset + stride*i + j, for lane_count lanes of lane_width bits each.
+// A contiguous range is the lane_count == 1 case. Backends use this to pick
+// an efficient lowering (shift for contiguous, strided loop for lanes,
+// per-bit gather otherwise); synthesis treats any pattern as wiring.
+struct SliceAffinePattern {
+    int64_t offset = 0;
+    int64_t stride = 1;
+    int64_t lane_width = 1;
+    int64_t lane_count = 1;
 };
 
-// SLICE indices are always internal-space (0-based from LSB). Elaboration is
-// responsible for converting source-space indices before storing them.
-inline DFGSliceResolvedRange resolveSliceRange(const DFGNode& source_node,
-                                               int64_t high,
-                                               int64_t low) {
-    if (high < low) {
-        throw CompilerError(std::format(
-            "resolveSliceRange: invalid range high={} low={}", high, low), &source_node);
+inline std::optional<SliceAffinePattern> sliceAffinePattern(
+        const std::vector<int64_t>& indices) {
+    if (indices.empty()) return std::nullopt;
+    // Lane width: length of the first consecutive ascending run.
+    size_t lane_width = 1;
+    while (lane_width < indices.size() &&
+           indices[lane_width] == indices[lane_width - 1] + 1) {
+        ++lane_width;
     }
-
-    return DFGSliceResolvedRange{
-        .source_high = high,
-        .source_low = low,
-        .width = high - low + 1,
-        .internal_low = low,
-        .internal_high = high,
+    if (indices.size() % lane_width != 0) return std::nullopt;
+    const size_t lane_count = indices.size() / lane_width;
+    const int64_t stride =
+        lane_count > 1 ? indices[lane_width] - indices[0] : static_cast<int64_t>(lane_width);
+    if (stride < 1) return std::nullopt;
+    for (size_t i = 0; i < lane_count; ++i) {
+        for (size_t j = 0; j < lane_width; ++j) {
+            if (indices[i * lane_width + j] !=
+                indices[0] + stride * static_cast<int64_t>(i) + static_cast<int64_t>(j)) {
+                return std::nullopt;
+            }
+        }
+    }
+    return SliceAffinePattern{
+        .offset = indices[0],
+        .stride = stride,
+        .lane_width = static_cast<int64_t>(lane_width),
+        .lane_count = static_cast<int64_t>(lane_count),
     };
 }
 
@@ -739,14 +765,44 @@ public:
         return nodes.back().get();
     }
 
-    // Create a SLICE node: source[high:low]. high and low MUST be CONST nodes
-    // (static bit extraction only). Dynamic indexing must be lowered to MUX instead.
-    DFGNode* slice(DFGNode* source, DFGNode* high, DFGNode* low, const std::string& name = "") {
+    // Create a SLICE node reading the given source bits (LSB-first,
+    // repetition allowed). The caller owns the node's result type; contiguous
+    // ranges left untyped get the legacy type from type_propagation.
+    DFGNode* slice(DFGNode* source, std::vector<int64_t> bit_indices,
+                   const std::string& name = "") {
+        if (!source) throw CompilerError("slice: null source");
+        if (bit_indices.empty()) throw CompilerError("slice: empty bit_indices", source);
+        for (int64_t bit : bit_indices) {
+            if (bit < 0) throw CompilerError(std::format("slice: negative bit index {}", bit), source);
+        }
         auto n = name.empty()
-            ? makeNode(DFGSlicePayload{source, high, low})
-            : makeNode(DFGSlicePayload{source, high, low}, name);
+            ? makeNode(DFGSlicePayload{DFGOutput(source), std::move(bit_indices)})
+            : makeNode(DFGSlicePayload{DFGOutput(source), std::move(bit_indices)}, name);
         nodes.push_back(std::move(n));
         return nodes.back().get();
+    }
+
+    // Contiguous-range sugar: source[high:low], both bounds internal-space
+    // bit positions. Dynamic indexing must be lowered to MUX instead.
+    DFGNode* slice(DFGNode* source, int64_t high, int64_t low, const std::string& name = "") {
+        if (high < low) {
+            throw CompilerError(std::format("slice: invalid range high={} low={}", high, low),
+                                source);
+        }
+        std::vector<int64_t> bit_indices;
+        bit_indices.reserve(static_cast<size_t>(high - low + 1));
+        for (int64_t bit = low; bit <= high; ++bit) bit_indices.push_back(bit);
+        return slice(source, std::move(bit_indices), name);
+    }
+
+    // Transitional sugar for the CONST-index-node call sites: reads the
+    // constant range and stores it in the payload; the passed CONST nodes are
+    // no longer inputs of the slice (they orphan and DCE away).
+    DFGNode* slice(DFGNode* source, DFGNode* high, DFGNode* low, const std::string& name = "") {
+        if (!high || high->kind() != DFGOp::CONST || !low || low->kind() != DFGOp::CONST) {
+            throw CompilerError("slice: high/low must be CONST nodes", source);
+        }
+        return slice(source, high->constValue(), low->constValue(), name);
     }
 
     // Create a CONCAT node: concatenation of parts, MSB-first
@@ -1008,32 +1064,26 @@ public:
                     }
                 }
             } else if (node->kind() == DFGOp::SLICE) {
-                auto slice = node->sliceInputs();
-                if (slice.high.node->kind() != DFGOp::CONST ||
-                    slice.low.node->kind() != DFGOp::CONST) {
+                const auto& indices = node->sliceIndices();
+                if (indices.empty()) {
                     throw CompilerError(std::format(
-                        "DFG validate: SLICE {} requires CONST high/low inputs",
-                        node->str()), node.get());
+                        "DFG validate: SLICE {} has no bit indices", node->str()), node.get());
                 }
-                if (!slice.source.node->hasType()) {
+                DFGNode* source = node->sliceSource().node;
+                if (!source->hasType()) {
                     continue;  // type not yet propagated; bounds check deferred
                 }
-                if (slice.source.node->type->width <= 0) {
+                if (source->type->width <= 0) {
                     throw CompilerError(std::format(
                         "DFG validate: SLICE {} source has invalid width {}",
-                        node->str(), slice.source.node->type->width), node.get());
+                        node->str(), source->type->width), node.get());
                 }
-
-                int64_t high = slice.high.node->constValue();
-                int64_t low = slice.low.node->constValue();
-                auto resolved = resolveSliceRange(*slice.source.node, high, low);
-                if (resolved.internal_low < 0 ||
-                    resolved.internal_high >= slice.source.node->type->width) {
-                    throw CompilerError(std::format(
-                        "DFG validate: SLICE {} resolves to internal range [{}:{}] "
-                        "outside source width {}",
-                        node->str(), resolved.internal_high, resolved.internal_low,
-                        slice.source.node->type->width), node.get());
+                for (int64_t bit : indices) {
+                    if (bit < 0 || bit >= source->type->width) {
+                        throw CompilerError(std::format(
+                            "DFG validate: SLICE {} reads bit {} outside source width {}",
+                            node->str(), bit, source->type->width), node.get());
+                    }
                 }
             }
         }
@@ -1058,8 +1108,7 @@ public:
                     node->str()), node.get());
             }
             if (node->kind() == DFGOp::SLICE) {
-                auto slice = node->sliceInputs();
-                if (!slice.source.node->hasType()) {
+                if (!node->sliceSource().node->hasType()) {
                     throw CompilerError(std::format(
                         "DFG validateStrict: SLICE {} source has no type",
                         node->str()), node.get());

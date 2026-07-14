@@ -51,7 +51,7 @@ bool isFlopQValue(const DFGNode* node, const std::string& flop_name) {
     if (node->kind() != DFGOp::SLICE) {
         return false;
     }
-    auto* source = node->sliceInputs().source.node;
+    auto* source = node->sliceSource().node;
     return source->kind() == DFGOp::INPUT && source->name == flop_name + ".q";
 }
 
@@ -66,14 +66,16 @@ std::optional<int64_t> constantValueOfNode(const DFGNode* node) {
         return node->constValue();
     }
     if (node->kind() == DFGOp::SLICE) {
-        auto slice = node->sliceInputs();
-        auto src = constantValueOfNode(slice.source.node);
+        auto src = constantValueOfNode(node->sliceSource().node);
         if (!src) return std::nullopt;
-        auto hi = constantValueOfNode(slice.high.node);
-        auto lo = constantValueOfNode(slice.low.node);
-        if (!hi || !lo || *hi < *lo) return std::nullopt;
-        int width = static_cast<int>(*hi - *lo + 1);
-        return (*src >> *lo) & maskForWidth(width);
+        const auto& indices = node->sliceIndices();
+        if (indices.size() > 63) return std::nullopt;
+        int64_t value = 0;
+        for (size_t j = 0; j < indices.size(); ++j) {
+            if (indices[j] > 62) return std::nullopt;
+            value |= ((*src >> indices[j]) & 1) << j;
+        }
+        return value;
     }
     if (node->kind() == DFGOp::CONCAT) {
         int64_t value = 0;

@@ -256,22 +256,27 @@ static bool tryConstantFold(DFGNode* node) {
             break;
         }
         case DFGOp::SLICE: {
-            // SLICE indices are internal-space bit positions (0-based from
-            // LSB, see resolveSliceRange). Only fold when that plain
-            // bit-slice reading is unambiguous: a source with more than one
-            // packed dim makes a high==low select an *element* select whose
-            // width exceeds one bit (type_propagation peels a dim), so leave
-            // those alone. int64 storage also caps what we can fold.
-            auto slice = node->sliceInputs();
-            const DFGNode* source = slice.source.node;
-            if (!source->hasType() || source->type->packed_dims.size() > 1)
+            // Runtime semantics: result bit j = source bit indices[j]. Only
+            // fold when the folded value round-trips through int64 storage
+            // and the node's type (once known) agrees with the index count —
+            // element-peel-typed slices can be typed wider than their index
+            // count (the open NZB inconsistency) and must stay unfolded.
+            const DFGNode* source = node->sliceSource().node;
+            if (!source->hasType()) return false;
+            const auto& indices = node->sliceIndices();
+            if (indices.size() > 63) return false;
+            if (node->hasType()) {
+                if (node->type->width != static_cast<int>(indices.size())) return false;
+            } else if (source->type->packed_dims.size() > 1) {
                 return false;
-            const int64_t high = getConst(slice.high.node);
-            const int64_t low = getConst(slice.low.node);
-            if (low < 0 || high < low || high > 62) return false;
-            const uint64_t mask = (uint64_t{1} << (high - low + 1)) - 1;
-            result = static_cast<int64_t>(
-                (static_cast<uint64_t>(getConst(source)) >> low) & mask);
+            }
+            const uint64_t value = static_cast<uint64_t>(getConst(source));
+            uint64_t folded = 0;
+            for (size_t j = 0; j < indices.size(); ++j) {
+                if (indices[j] > 62) return false;
+                folded |= ((value >> indices[j]) & 1) << j;
+            }
+            result = static_cast<int64_t>(folded);
             break;
         }
         case DFGOp::REDUCTION_XNOR: {

@@ -296,29 +296,38 @@ bool inferNodeType(DFGNode* node) {
             node->type = Type::makeInteger(totalWidth, false);
             return true;
         }
-        // SLICE: in[0]=source, in[1]=high (CONST), in[2]=low (CONST)
-        // Dynamic indexing must be lowered to MUX during elaboration; a SLICE
-        // node with non-constant indices is a compiler bug.
+        // SLICE: in[0]=source; bit indices live in the payload.
+        // Contiguous slices get the legacy SystemVerilog-shaped type computed
+        // here (element-peel on packed dims for size-1 selects, inherited
+        // signedness on ranges) so behavior matches the pre-index-payload
+        // compiler. Non-contiguous slices are created only by IR passes,
+        // which must author the result type themselves (frontend-owned
+        // typing; type propagation just checks it).
         case DFGOp::SLICE: {
-            auto slice = node->sliceInputs();
-            auto* source = slice.source.node;
-            auto* highNode = slice.high.node;
-            auto* lowNode = slice.low.node;
+            auto* source = node->sliceSource().node;
             if (!source->hasType()) return false;
 
+            const auto& indices = node->sliceIndices();
+            if (!node->sliceIsContiguous()) {
+                if (!node->hasType()) {
+                    throw CompilerError(std::format(
+                        "[BUG] non-contiguous SLICE {} has no authored result type",
+                        node->str()), node->loc);
+                }
+                if (node->type->width != static_cast<int>(indices.size())) {
+                    throw CompilerError(std::format(
+                        "[BUG] non-contiguous SLICE {} typed width {} != {} indices",
+                        node->str(), node->type->width, indices.size()), node->loc);
+                }
+                return true;
+            }
+
             const auto& atype = *source->type;
+            const int64_t low_val = indices.front();
+            const int64_t high_val = indices.back();
 
             // Packed dimension indexing
             if (!atype.packed_dims.empty()) {
-                if (highNode->kind() != DFGOp::CONST || lowNode->kind() != DFGOp::CONST) {
-                    throw CompilerError(std::format(
-                        "[BUG] SLICE {} has non-constant packed indices — dynamic indexing "
-                        "should have been lowered to MUX during elaboration",
-                        node->str()), node->loc);
-                }
-                int64_t high_val = highNode->constValue();
-                int64_t low_val = lowNode->constValue();
-
                 if (high_val == low_val) {
                     // Single-element bit-select: peel one packed dim
                     std::vector<Dimension> remaining(
@@ -331,7 +340,7 @@ bool inferNodeType(DFGNode* node) {
                         new_width, atype.isSigned(), remaining);
                 } else {
                     // Range select: result width = |high - low| + 1, no packed dims
-                    int new_width = static_cast<int>(std::abs(high_val - low_val)) + 1;
+                    int new_width = static_cast<int>(high_val - low_val) + 1;
                     node->type = Type::makeInteger(
                         new_width, atype.isSigned());
                 }
@@ -339,16 +348,8 @@ bool inferNodeType(DFGNode* node) {
             }
 
             // No packed dims — flat bit-vector.
-            if (highNode->kind() != DFGOp::CONST || lowNode->kind() != DFGOp::CONST) {
-                throw CompilerError(std::format(
-                    "[BUG] SLICE {} on flat vector has non-constant indices — dynamic "
-                    "indexing should have been lowered to MUX during elaboration",
-                    node->str()), node->loc);
-            }
-            int64_t high_val = highNode->constValue();
-            int64_t low_val  = lowNode->constValue();
             node->type = Type::makeInteger(
-                static_cast<int>(std::abs(high_val - low_val)) + 1,
+                static_cast<int>(high_val - low_val) + 1,
                 high_val == low_val ? false : atype.isSigned());
             return true;
         }

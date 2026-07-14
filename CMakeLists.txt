@@ -103,6 +103,7 @@ set(SYSTEMVERILOG_FRONTEND_SOURCES
     src/frontends/systemverilog/passes/condition_normalization.cpp
     src/frontends/systemverilog/elaboration/constant_eval.cpp
     src/frontends/systemverilog/passes/constant_fold.cpp
+    src/frontends/systemverilog/passes/cse.cpp
     src/frontends/systemverilog/passes/dce.cpp
     src/frontends/systemverilog/passes/dfg_inline.cpp
     src/frontends/systemverilog/passes/domains_propagate_and_check.cpp

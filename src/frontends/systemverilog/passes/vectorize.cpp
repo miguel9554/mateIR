@@ -75,17 +75,21 @@ DFGNode* materializeVector(DFG& graph, const std::vector<DFGNode*>& lanes,
     return vec;
 }
 
+// The rule builders return the replacement node for a lane group (or nullptr
+// when the group doesn't fit the rule); the caller decides whether that node
+// replaces a whole CONCAT or becomes one segment of a rebuilt CONCAT.
+
 // R1: every lane is a SLICE of one common source -> merge the index lists.
-bool trySliceMerge(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& lanes) {
+// Lane widths may differ.
+DFGNode* buildSliceMerge(DFG& graph, const std::vector<DFGNode*>& lanes, const DFGNode* site) {
     DFGNode* source = nullptr;
     for (DFGNode* lane : lanes) {
-        if (lane->kind() != DFGOp::SLICE) return false;
         // Element-peel-typed slices (typed wider than their index count, the
         // open NZB inconsistency) don't merge cleanly; skip them.
-        if (typedWidth(lane) != static_cast<int>(lane->sliceIndices().size())) return false;
+        if (typedWidth(lane) != static_cast<int>(lane->sliceIndices().size())) return nullptr;
         DFGNode* lane_source = lane->sliceSource().node;
         if (!source) source = lane_source;
-        if (lane_source != source) return false;
+        if (lane_source != source) return nullptr;
     }
 
     std::vector<int64_t> merged;
@@ -99,17 +103,35 @@ bool trySliceMerge(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& lan
         !source->type->isSigned()) {
         bool identity = true;
         for (size_t j = 0; j < merged.size(); ++j) identity &= merged[j] == static_cast<int64_t>(j);
-        if (identity) {
-            graph.redirectConsumers(concat, source);
-            return true;
-        }
+        if (identity) return source;
     }
 
     DFGNode* fused = graph.slice(source, std::move(merged));
-    fused->type = concat->type;
-    adoptIdentity(fused, concat);
-    graph.redirectConsumers(concat, fused);
-    return true;
+    fused->type = Type::makeInteger(static_cast<int>(fused->sliceIndices().size()), false);
+    adoptIdentity(fused, site);
+    return fused;
+}
+
+// CONST run: pack the lane values into one constant (int64 storage limit).
+DFGNode* buildConstPack(DFG& graph, const std::vector<DFGNode*>& lanes, const DFGNode* site) {
+    int total = 0;
+    for (DFGNode* lane : lanes) {
+        const int w = typedWidth(lane);
+        if (w <= 0) return nullptr;
+        total += w;
+    }
+    if (total > 63) return nullptr;
+    int64_t value = 0;
+    for (size_t i = lanes.size(); i-- > 0;) {
+        const int w = typedWidth(lanes[i]);
+        const uint64_t lane_mask = (uint64_t{1} << w) - 1;
+        value = (value << w) |
+                static_cast<int64_t>(static_cast<uint64_t>(lanes[i]->constValue()) & lane_mask);
+    }
+    DFGNode* packed = graph.constant(value);
+    packed->type = Type::makeInteger(total, false);
+    adoptIdentity(packed, site);
+    return packed;
 }
 
 bool isVectorizableBitwise(DFGOp op) {
@@ -129,13 +151,13 @@ bool isVectorizableBitwise(DFGOp op) {
 
 // R2: every lane is the same bitwise op with the same lane width -> one wide
 // op over materialized operand vectors.
-bool tryBitwiseMerge(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& lanes) {
+DFGNode* buildBitwiseMerge(DFG& graph, const std::vector<DFGNode*>& lanes, const DFGNode* site) {
     const DFGOp op = lanes.front()->kind();
-    if (!isVectorizableBitwise(op)) return false;
+    if (!isVectorizableBitwise(op)) return nullptr;
     const int lane_width = typedWidth(lanes.front());
-    if (lane_width <= 0) return false;
+    if (lane_width <= 0) return nullptr;
     for (DFGNode* lane : lanes) {
-        if (lane->kind() != op || typedWidth(lane) != lane_width) return false;
+        if (typedWidth(lane) != lane_width) return nullptr;
     }
 
     const int total = lane_width * static_cast<int>(lanes.size());
@@ -144,7 +166,7 @@ bool tryBitwiseMerge(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& l
         std::vector<DFGNode*> operands;
         operands.reserve(lanes.size());
         for (DFGNode* lane : lanes) operands.push_back(lane->unaryInputs().operand.node);
-        DFGNode* vec = materializeVector(graph, operands, lane_width, concat);
+        DFGNode* vec = materializeVector(graph, operands, lane_width, site);
         wide = graph.bitwiseNot(vec);
     } else {
         std::vector<DFGNode*> lhs, rhs;
@@ -155,33 +177,33 @@ bool tryBitwiseMerge(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& l
             lhs.push_back(inputs.lhs.node);
             rhs.push_back(inputs.rhs.node);
         }
-        DFGNode* lvec = materializeVector(graph, lhs, lane_width, concat);
-        DFGNode* rvec = materializeVector(graph, rhs, lane_width, concat);
+        DFGNode* lvec = materializeVector(graph, lhs, lane_width, site);
+        DFGNode* rvec = materializeVector(graph, rhs, lane_width, site);
         switch (op) {
             case DFGOp::BITWISE_AND:  wide = graph.bitwiseAnd(lvec, rvec); break;
             case DFGOp::BITWISE_OR:   wide = graph.bitwiseOr(lvec, rvec); break;
             case DFGOp::BITWISE_XOR:  wide = graph.bitwiseXor(lvec, rvec); break;
             case DFGOp::BITWISE_XNOR: wide = graph.bitwiseXnor(lvec, rvec); break;
-            default: return false;
+            default: return nullptr;
         }
     }
     wide->type = Type::makeInteger(total, false);
-    adoptIdentity(wide, concat);
-    graph.redirectConsumers(concat, wide);
-    return true;
+    adoptIdentity(wide, site);
+    return wide;
 }
 
 // R3a: every lane is a MUX on one shared selector with identical selector
 // values -> one wide MUX with vectorized arms.
-bool trySharedSelectorMux(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& lanes) {
+DFGNode* buildSharedSelectorMux(DFG& graph, const std::vector<DFGNode*>& lanes,
+                                const DFGNode* site) {
     DFGNode* selector = lanes.front()->muxSelector().node;
     const std::vector<int64_t> values = lanes.front()->muxValues();
     const int lane_width = typedWidth(lanes.front());
-    if (lane_width <= 0) return false;
+    if (lane_width <= 0) return nullptr;
     for (DFGNode* lane : lanes) {
-        if (lane->muxSelector().node != selector) return false;
-        if (lane->muxValues() != values) return false;
-        if (typedWidth(lane) != lane_width) return false;
+        if (lane->muxSelector().node != selector) return nullptr;
+        if (lane->muxValues() != values) return nullptr;
+        if (typedWidth(lane) != lane_width) return nullptr;
     }
 
     const int total = lane_width * static_cast<int>(lanes.size());
@@ -191,26 +213,25 @@ bool trySharedSelectorMux(DFG& graph, DFGNode* concat, const std::vector<DFGNode
         std::vector<DFGNode*> arm_lanes;
         arm_lanes.reserve(lanes.size());
         for (DFGNode* lane : lanes) arm_lanes.push_back(lane->muxArmData(a).node);
-        arm_vectors.push_back(materializeVector(graph, arm_lanes, lane_width, concat));
+        arm_vectors.push_back(materializeVector(graph, arm_lanes, lane_width, site));
     }
     DFGNode* wide = graph.mux(selector, values, arm_vectors);
     wide->type = Type::makeInteger(total, false);
-    adoptIdentity(wide, concat);
-    graph.redirectConsumers(concat, wide);
-    return true;
+    adoptIdentity(wide, site);
+    return wide;
 }
 
 // R3b: every lane is a 2-arm MUX with its own 1-bit selector -> masked merge
 // (mask & taken) | (~mask & fallthrough), expanding the mask per lane bit via
 // a repeated-index SLICE when lanes are wider than one bit.
-bool tryMaskedMerge(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& lanes) {
+DFGNode* buildMaskedMerge(DFG& graph, const std::vector<DFGNode*>& lanes, const DFGNode* site) {
     const int lane_width = typedWidth(lanes.front());
-    if (lane_width <= 0) return false;
+    if (lane_width <= 0) return nullptr;
     for (DFGNode* lane : lanes) {
-        if (!lane->isBinaryMux()) return false;
-        if (typedWidth(lane) != lane_width) return false;
+        if (!lane->isBinaryMux()) return nullptr;
+        if (typedWidth(lane) != lane_width) return nullptr;
         DFGNode* selector = lane->muxSelector().node;
-        if (typedWidth(selector) != 1) return false;
+        if (typedWidth(selector) != 1) return nullptr;
     }
 
     const int total = lane_width * static_cast<int>(lanes.size());
@@ -224,7 +245,7 @@ bool tryMaskedMerge(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& la
         fallthrough.push_back(lane->muxDataForValue(0));
     }
 
-    DFGNode* mask = materializeVector(graph, selectors, 1, concat);
+    DFGNode* mask = materializeVector(graph, selectors, 1, site);
     if (lane_width > 1) {
         std::vector<int64_t> expand;
         expand.reserve(static_cast<size_t>(total));
@@ -233,12 +254,12 @@ bool tryMaskedMerge(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& la
         }
         DFGNode* expanded = graph.slice(mask, std::move(expand));
         expanded->type = Type::makeInteger(total, false);
-        adoptIdentity(expanded, concat);
+        adoptIdentity(expanded, site);
         mask = expanded;
     }
 
-    DFGNode* taken_vec = materializeVector(graph, taken, lane_width, concat);
-    DFGNode* fall_vec = materializeVector(graph, fallthrough, lane_width, concat);
+    DFGNode* taken_vec = materializeVector(graph, taken, lane_width, site);
+    DFGNode* fall_vec = materializeVector(graph, fallthrough, lane_width, site);
     DFGNode* inverted = graph.bitwiseNot(mask);
     inverted->type = Type::makeInteger(total, false);
     DFGNode* on_taken = graph.bitwiseAnd(mask, taken_vec);
@@ -247,8 +268,33 @@ bool tryMaskedMerge(DFG& graph, DFGNode* concat, const std::vector<DFGNode*>& la
     on_fall->type = Type::makeInteger(total, false);
     DFGNode* merged = graph.bitwiseOr(on_taken, on_fall);
     merged->type = Type::makeInteger(total, false);
-    for (DFGNode* fresh : {inverted, on_taken, on_fall, merged}) adoptIdentity(fresh, concat);
-    graph.redirectConsumers(concat, merged);
+    for (DFGNode* fresh : {inverted, on_taken, on_fall, merged}) adoptIdentity(fresh, site);
+    return merged;
+}
+
+// Vectorize a group of same-kind lanes; nullptr when no rule fits.
+DFGNode* buildLaneGroup(DFG& graph, const std::vector<DFGNode*>& lanes, const DFGNode* site) {
+    switch (lanes.front()->kind()) {
+        case DFGOp::SLICE:
+            return buildSliceMerge(graph, lanes, site);
+        case DFGOp::CONST:
+            return buildConstPack(graph, lanes, site);
+        case DFGOp::MUX:
+            if (DFGNode* wide = buildSharedSelectorMux(graph, lanes, site)) return wide;
+            return buildMaskedMerge(graph, lanes, site);
+        default:
+            return buildBitwiseMerge(graph, lanes, site);
+    }
+}
+
+// Segmentation key: lanes are grouped into maximal runs that could merge.
+// SLICE lanes additionally segment by source so multi-source concats split
+// into per-source merges.
+bool sameSegment(const DFGNode* a, const DFGNode* b) {
+    if (a->kind() != b->kind()) return false;
+    if (a->kind() == DFGOp::SLICE) {
+        return a->sliceSource().node == b->sliceSource().node;
+    }
     return true;
 }
 
@@ -256,19 +302,58 @@ bool tryVectorizeConcat(DFG& graph, DFGNode* concat) {
     const auto lanes = lanesOf(concat);
     if (lanes.size() < 2) return false;
     if (!concat->hasType()) return false;
-    const DFGOp op = lanes.front()->kind();
     for (DFGNode* lane : lanes) {
-        if (lane->kind() != op || !lane->hasType()) return false;
+        if (!lane->hasType()) return false;
     }
-    switch (op) {
-        case DFGOp::SLICE:
-            return trySliceMerge(graph, concat, lanes);
-        case DFGOp::MUX:
-            if (trySharedSelectorMux(graph, concat, lanes)) return true;
-            return tryMaskedMerge(graph, concat, lanes);
-        default:
-            return tryBitwiseMerge(graph, concat, lanes);
+
+    // Uniform fast path: the whole concat collapses into one node.
+    bool uniform = true;
+    for (DFGNode* lane : lanes) uniform &= sameSegment(lane, lanes.front());
+    if (uniform && lanes.front()->kind() != DFGOp::CONST) {
+        if (DFGNode* wide = buildLaneGroup(graph, lanes, concat)) {
+            graph.redirectConsumers(concat, wide);
+            return true;
+        }
+        return false;
     }
+
+    // Segmentation: vectorize maximal compatible runs and rebuild a shorter
+    // CONCAT around them. Only rewrite when at least one run actually merged,
+    // so the result is strictly smaller and the fixpoint terminates.
+    std::vector<DFGNode*> new_lanes;
+    bool any_merged = false;
+    size_t i = 0;
+    while (i < lanes.size()) {
+        size_t j = i + 1;
+        while (j < lanes.size() && sameSegment(lanes[j], lanes[i])) ++j;
+        DFGNode* segment = nullptr;
+        if (j - i >= 2) {
+            std::vector<DFGNode*> run(lanes.begin() + static_cast<long>(i),
+                                      lanes.begin() + static_cast<long>(j));
+            segment = buildLaneGroup(graph, run, concat);
+        }
+        if (segment) {
+            new_lanes.push_back(segment);
+            any_merged = true;
+        } else {
+            for (size_t k = i; k < j; ++k) new_lanes.push_back(lanes[k]);
+        }
+        i = j;
+    }
+    if (!any_merged || new_lanes.size() < 2) {
+        if (any_merged && new_lanes.size() == 1) {
+            graph.redirectConsumers(concat, new_lanes.front());
+            return true;
+        }
+        return false;
+    }
+
+    std::vector<DFGNode*> parts(new_lanes.rbegin(), new_lanes.rend());
+    DFGNode* rebuilt = graph.concat(parts);
+    rebuilt->type = concat->type;
+    adoptIdentity(rebuilt, concat);
+    graph.redirectConsumers(concat, rebuilt);
+    return true;
 }
 
 } // namespace

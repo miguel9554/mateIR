@@ -127,6 +127,16 @@ MateStatusCode mate_set_inputs(MateInstance* instance,
                                const MateInputUpdate* updates,
                                int32_t update_count,
                                MateStatus* status);
+/*
+ * Applies updates WITHOUT evaluating. Used to accumulate input changes
+ * within one simulation instant so a single evaluation can run once the
+ * instant is complete (e.g. mate_set_inputs with zero updates); until then
+ * the instance's outputs/observables lag the recorded inputs.
+ */
+MateStatusCode mate_record_inputs(MateInstance* instance,
+                                  const MateInputUpdate* updates,
+                                  int32_t update_count,
+                                  MateStatus* status);
 MateStatusCode mate_apply_clock(MateInstance* instance,
                                 int32_t clock_id,
                                 MateEdge edge,

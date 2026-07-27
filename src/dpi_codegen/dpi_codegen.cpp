@@ -11,8 +11,10 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
+#include <set>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -574,6 +576,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "#include <cstdio>\n";
     out << "#include <cstdlib>\n";
     out << "#include <memory>\n";
+    out << "#include <optional>\n";
     out << "#include <stdexcept>\n";
     out << "#include <utility>\n\n";
     out << "namespace {\n\n";
@@ -666,9 +669,22 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    // Null unless " << config.function_prefix << "_enable_trace was called; "
         << config.function_prefix << "_trace_dump no-ops until then.\n";
     out << "    std::unique_ptr<mate::tracer::Tracer> tracer;\n";
+    out << "    // Simulation instant whose input changes have been recorded (via\n";
+    out << "    // mate_record_inputs) but not yet evaluated and traced. Flushed when a\n";
+    out << "    // later instant arrives, or on destruction for the final instant.\n";
+    out << "    std::optional<uint64_t> pending_trace_time;\n";
     out << "\n";
     out << "    ~Context() {\n";
     out << "        MateStatus status{};\n";
+    out << "        // Final settle flush: the last recorded instant never sees a\n";
+    out << "        // \"time advanced\" signal, so trace it here, while the instance\n";
+    out << "        // is still alive. Errors are swallowed: this is a destructor and\n";
+    out << "        // the trace is best-effort at teardown.\n";
+    out << "        if (tracer && pending_trace_time && instance) {\n";
+    out << "            if (mate_set_inputs(instance, nullptr, 0, &status) == MATE_STATUS_OK) {\n";
+    out << "                try { tracer->dump(*pending_trace_time); } catch (...) {}\n";
+    out << "            }\n";
+    out << "        }\n";
     out << "        if (instance) (void)mate_instance_destroy(instance, &status);\n";
     out << "        if (model) (void)mate_model_destroy(model, &status);\n";
     out << "    }\n";
@@ -750,6 +766,18 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "void " << config.function_prefix << "_trace_dump(void* context_handle, uint64_t time_ns) {\n";
     out << "    Context& context = checkedContext(context_handle);\n";
     out << "    if (!context.tracer) return;\n";
+    out << "    if (context.pending_trace_time) {\n";
+    out << "        // The wrapper's edge block starts with a record call at the\n";
+    out << "        // current instant, so by the time a dump runs, any older pending\n";
+    out << "        // instant has already been flushed and the pending instant must be\n";
+    out << "        // this one. This dump supersedes the pending settle observation:\n";
+    out << "        // the caller just fully evaluated at this same instant.\n";
+    out << "        if (*context.pending_trace_time != time_ns) {\n";
+    out << "            failDpiCall(\"" << config.function_prefix << "_trace_dump\",\n";
+    out << "                        \"pending recorded instant was never flushed (wrapper event-ordering bug)\");\n";
+    out << "        }\n";
+    out << "        context.pending_trace_time.reset();\n";
+    out << "    }\n";
     out << "    try {\n";
     out << "        context.tracer->dump(time_ns);\n";
     out << "    } catch (const std::exception& e) {\n";
@@ -848,6 +876,48 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << ");\n";
     out << "}\n\n";
 
+    // Input recording: stores input values without evaluating. This runs
+    // UNCONDITIONALLY (not trace-gated): clock-edge handlers only pass their
+    // own domain's sync inputs, and rely on instance storage for the rest --
+    // which is how a CDC input classified in domain A gets sampled by domain
+    // B's synchronizer flops. Storage must therefore stay fresh on every
+    // input change, tracing or not.
+    //
+    // When tracing is enabled it additionally batches per simulation
+    // instant: a call arriving with a later time means the pending instant
+    // is complete -- evaluate once with its settled inputs (already in
+    // storage) and trace it at its own timestamp, then record the new one.
+    out << "void " << config.function_prefix << "_record_input_values(void* context_handle";
+    out << ",\n                           uint64_t time_ns";
+    for (LeafIndex index : data_inputs) {
+        const auto& input = inputLeaf(ports, index);
+        out << ",\n                           " << cppDpiType(input.type, false) << " "
+            << leafIdentifier(input.leaf_name);
+    }
+    out << ") {\n";
+    out << "        auto& context = checkedContext(context_handle);\n";
+    out << "        MateStatus status{};\n";
+    out << "        if (context.tracer) {\n";
+    out << "            if (context.pending_trace_time && time_ns < *context.pending_trace_time) {\n";
+    out << "                failDpiCall(\"" << config.function_prefix << "_record_input_values\",\n";
+    out << "                            \"input recording time went backwards\");\n";
+    out << "            }\n";
+    out << "            if (context.pending_trace_time && time_ns > *context.pending_trace_time) {\n";
+    out << "                check(mate_set_inputs(context.instance, nullptr, 0, &status), status, \""
+        << config.function_prefix << "_record_input_values\");\n";
+    out << "                try {\n";
+    out << "                    context.tracer->dump(*context.pending_trace_time);\n";
+    out << "                } catch (const std::exception& e) {\n";
+    out << "                    failDpiCall(\"" << config.function_prefix << "_record_input_values\", e.what());\n";
+    out << "                }\n";
+    out << "            }\n";
+    out << "        }\n";
+    emitUpdateArrayWithCount("input_updates", data_inputs);
+    out << "        check(mate_record_inputs(context.instance, input_updates, input_updates_count, &status), status, \""
+        << config.function_prefix << "_record_input_values\");\n";
+    out << "        if (context.tracer) context.pending_trace_time = time_ns;\n";
+    out << "}\n\n";
+
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs[clock_index];
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
@@ -938,6 +1008,91 @@ void emitSvCallArgs(std::ostringstream& out,
     out << "\n";
 }
 
+// Output leaves with a combinational dependence on a top data input, plus the
+// input ports appearing in any such cone. This shapes the generated wrapper:
+// a comb-dependent output must refresh on (cone) input changes between
+// edges, while a purely registered output only ever changes at clock/reset
+// edges -- so for a fully registered design the input-change evaluation block
+// disappears entirely. Flop boundaries need no special casing in either
+// direction: flop Q sources are producer-less INPUT nodes (backward
+// reachability stops there) and flop D drivers have no DFG users past the D
+// sink (forward reachability stops there).
+struct WrapperCombAnalysis {
+    std::set<std::string> comb_output_leaf_names;
+    std::set<std::string> cone_input_port_names;
+};
+
+WrapperCombAnalysis analyzeWrapperCombDependence(const ModelPorts& ports,
+                                                 const RtlRuntimeModel& model) {
+    WrapperCombAnalysis result;
+    if (!model.top().dfg) {
+        throw CompilerError("mate-dpi-codegen: top module has no DFG");
+    }
+
+    std::map<const DFGNode*, size_t> port_by_data_input_node;
+    std::vector<LeafIndex> data_inputs;
+    data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
+    data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
+    for (LeafIndex index : data_inputs) {
+        const auto& leaf = inputLeaf(ports, index);
+        const auto* input = model.metadata().findInput(leaf.leaf_name);
+        if (!input || !input->node) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: data input leaf '{}' has no runtime input node",
+                leaf.leaf_name));
+        }
+        port_by_data_input_node[input->node] = index.port;
+    }
+
+    std::map<const DFGNode*, bool> reaches_data_input;
+    std::function<bool(const DFGNode*)> reachesDataInput = [&](const DFGNode* node) -> bool {
+        auto it = reaches_data_input.find(node);
+        if (it != reaches_data_input.end()) return it->second;
+        reaches_data_input[node] = false;
+        bool reaches = port_by_data_input_node.contains(node);
+        DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
+            if (!reaches && reachesDataInput(input.node)) reaches = true;
+        });
+        return reaches_data_input[node] = reaches;
+    };
+    for (const auto& output : model.metadata().output_leaves) {
+        if (output.node && reachesDataInput(output.node)) {
+            result.comb_output_leaf_names.insert(output.leaf_name);
+        }
+    }
+
+    std::map<const DFGNode*, std::vector<const DFGNode*>> users;
+    for (const auto& node : model.top().dfg->nodes) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
+            users[input.node].push_back(node.get());
+        });
+    }
+    std::set<const DFGNode*> output_nodes;
+    for (const auto& output : model.metadata().output_leaves) {
+        if (output.node) output_nodes.insert(output.node);
+    }
+    std::map<const DFGNode*, bool> reaches_output;
+    std::function<bool(const DFGNode*)> reachesOutput = [&](const DFGNode* node) -> bool {
+        auto it = reaches_output.find(node);
+        if (it != reaches_output.end()) return it->second;
+        reaches_output[node] = false;
+        bool reaches = output_nodes.contains(node);
+        if (auto users_it = users.find(node); users_it != users.end()) {
+            for (const DFGNode* user : users_it->second) {
+                if (reaches) break;
+                if (reachesOutput(user)) reaches = true;
+            }
+        }
+        return reaches_output[node] = reaches;
+    };
+    for (const auto& [node, port_index] : port_by_data_input_node) {
+        if (reachesOutput(node)) {
+            result.cone_input_port_names.insert(ports.inputs[port_index].name);
+        }
+    }
+    return result;
+}
+
 std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
     const auto input_leaves = allInputLeaves(ports);
@@ -966,6 +1121,15 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_set_input_values(\n";
     emitSvImportArgs(out, sync_inputs, output_leaves, ports);
     out << "    );\n\n";
+
+    out << "    import \"DPI-C\" function void " << config.function_prefix << "_record_input_values(\n";
+    out << "        input chandle ctx,\n";
+    out << "        input longint unsigned time_ns";
+    for (LeafIndex index : sync_inputs) {
+        const auto& input = inputLeaf(ports, index);
+        out << ",\n" << svImportArg("input", input, leafIdentifier(input.leaf_name));
+    }
+    out << "\n    );\n\n";
 
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs[clock_index];
@@ -1155,36 +1319,86 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     out << "            " << config.function_prefix << "_destroy(ctx);\n";
     out << "        end\n";
     out << "    end\n\n";
-    if (!ports.async_inputs.empty() || !ports.sync_inputs.empty()) {
-        out << "    always @(";
-        std::vector<LeafIndex> data_inputs;
-        data_inputs.reserve(ports.async_inputs.size() + ports.sync_inputs.size());
-        data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
-        data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
-        std::vector<std::string> sensitivity_ports;
-        for (LeafIndex index : data_inputs) {
+    std::vector<LeafIndex> data_inputs;
+    data_inputs.reserve(ports.async_inputs.size() + ports.sync_inputs.size());
+    data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
+    data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
+    auto uniquePortNames = [&](const std::vector<LeafIndex>& indices,
+                               const std::set<std::string>* filter) {
+        std::vector<std::string> names;
+        for (LeafIndex index : indices) {
             const std::string& name = ports.inputs[index.port].name;
-            if (std::find(sensitivity_ports.begin(), sensitivity_ports.end(), name) ==
-                sensitivity_ports.end()) {
-                sensitivity_ports.push_back(name);
+            if (filter && !filter->contains(name)) continue;
+            if (std::find(names.begin(), names.end(), name) == names.end()) {
+                names.push_back(name);
             }
         }
-        for (size_t i = 0; i < sensitivity_ports.size(); ++i) {
-            if (i) out << " or ";
-            out << sensitivity_ports.at(i);
+        return names;
+    };
+    auto emitSensitivityList = [&](const std::vector<std::string>& names) {
+        if (names.empty()) {
+            throw CompilerError("mate-dpi-codegen: always block has an empty sensitivity list");
         }
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i) out << " or ";
+            out << names.at(i);
+        }
+    };
+    auto emitRecordCall = [&](std::string_view indent) {
+        out << indent << config.function_prefix << "_record_input_values(\n";
+        out << "                        ctx,\n";
+        out << "                        $time";
+        for (LeafIndex index : data_inputs) {
+            const auto& port = ports.inputs[index.port];
+            const auto& leaf = inputLeaf(ports, index);
+            out << ",\n                        " << svDpiInputSignal(port, leaf);
+        }
+        out << "\n" << indent << ");\n";
+    };
+
+    const WrapperCombAnalysis comb_analysis = analyzeWrapperCombDependence(ports, model);
+    std::vector<LeafIndex> comb_output_leaves;
+    for (LeafIndex index : output_leaves) {
+        if (comb_analysis.comb_output_leaf_names.contains(outputLeaf(ports, index).leaf_name)) {
+            comb_output_leaves.push_back(index);
+        }
+    }
+
+    // Combinational-output refresh: only outputs with a comb dependence on a
+    // data input, fired only by the inputs in some such cone. Purely
+    // registered outputs are written exclusively by the edge block below, so
+    // a fully registered design gets no between-edge evaluation at all --
+    // safe because edge handlers re-send every input and re-evaluate
+    // internally before committing flops.
+    if (!comb_output_leaves.empty()) {
+        out << "    always @(";
+        emitSensitivityList(uniquePortNames(data_inputs, &comb_analysis.cone_input_port_names));
         out << ") begin\n";
         out << "        if (initialized) begin\n";
         out << "            " << config.function_prefix << "_set_input_values(\n";
         emitSvCallArgs(out, data_inputs, output_leaves, ports);
         out << "            );\n";
-        for (LeafIndex index : output_leaves) {
+        for (LeafIndex index : comb_output_leaves) {
             const auto& port = ports.outputs[index.port];
             const auto& output = outputLeaf(ports, index);
             out << "            " << svOutputLeafExpr(output) << " = "
                 << svOutputLeafValueExpr(port, output) << ";\n";
         }
-        out << "            " << config.function_prefix << "_trace_dump(ctx, $time);\n";
+        out << "        end\n";
+        out << "    end\n\n";
+    }
+
+    // Input recording: every data-input change is stored in the model (no
+    // evaluation). Keeps instance storage fresh for edge handlers, which only
+    // pass their own domain's sync inputs (a CDC input classified in another
+    // domain is sampled from storage). When tracing is on, the DPI side also
+    // batches per instant and runs one evaluation when time advances.
+    if (!data_inputs.empty()) {
+        out << "    always @(";
+        emitSensitivityList(uniquePortNames(data_inputs, nullptr));
+        out << ") begin\n";
+        out << "        if (initialized) begin\n";
+        emitRecordCall("            ");
         out << "        end\n";
         out << "    end\n\n";
     }
@@ -1229,6 +1443,13 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         out << "            if (" << reset.name << "_changed) last_" << reset.name << " = " << reset.name << ";\n";
     }
     out << "        end else begin\n";
+    if (!data_inputs.empty()) {
+        // Record the current inputs -- and flush the previous instant's
+        // pending observation -- BEFORE any edge processing commits flops.
+        // This makes trace correctness independent of SV event ordering
+        // between this block and the recording block at a new instant.
+        emitRecordCall("            ");
+    }
 
     auto emitCommitOutputs = [&]() {
         for (LeafIndex index : output_leaves) {

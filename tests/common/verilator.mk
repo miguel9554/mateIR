@@ -69,8 +69,20 @@ GEN_STAMP   = $(DPI_GEN_DIR)/.stamp
 # C++ itself. These are the only two things that step needs to know about our
 # tree: where svdpi.h/our headers live, and which of our own static libraries
 # to fold into the output archive.
-DPI_INCLUDE_DIRS = $(abspath $(PROJECT_ROOT)/src),$(abspath $(PROJECT_ROOT)/external/slang/external/ieee1800)
-DPI_LINK_LIBS = $(abspath $(BUILD_DIR)/libmate-abi-native.a)
+#
+# DPI_LINK_LIB_FILES is the space-separated form, used as a real prerequisite
+# of $(GEN_STAMP) below -- mate --dpi-lib extracts these archives' *current*
+# object code into the merged output, so a content change in any of them
+# (e.g. mate-tracer.a rebuilt from an unrelated source edit that doesn't
+# touch mate's own sources) must invalidate the stamp even when $(BUILD_DIR)/
+# mate itself didn't change. DPI_LINK_LIBS is the same list joined with
+# commas, matching --dpi-link-libs's expected CLI format.
+empty :=
+space := $(empty) $(empty)
+comma := ,
+DPI_INCLUDE_DIRS = $(abspath $(PROJECT_ROOT)/src),$(abspath $(PROJECT_ROOT)/external/slang/external/ieee1800),$(abspath $(PROJECT_ROOT)/external/cpp-vcd-tracer/src)
+DPI_LINK_LIB_FILES = $(abspath $(BUILD_DIR)/libmate-abi-native.a) $(abspath $(BUILD_DIR)/libmate-tracer.a) $(abspath $(BUILD_DIR)/libmate-vcd-tracer.a)
+DPI_LINK_LIBS = $(subst $(space),$(comma),$(DPI_LINK_LIB_FILES))
 
 # Sanitized preset: compile the generated DPI model with the same sanitizer
 # flags as libmate-abi-native (see CMakeLists ENABLE_SANITIZERS), pull the
@@ -101,7 +113,7 @@ $(GEN_TB_OUTPUTS): $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi $(MODULE_NAME)
 endif
 
-$(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate | prep
+$(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate $(DPI_LINK_LIB_FILES) | prep
 	mkdir -p $(DPI_GEN_DIR)
 	$(SANITIZER_ENV) $(BUILD_DIR)/mate \
 		--dpi-lib \

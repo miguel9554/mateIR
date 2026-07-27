@@ -41,10 +41,11 @@ public:
     // build its scope tree from `full_path` here.
     virtual void declareSignals(const std::vector<TracedSignal>& signals) = 0;
 
-    // Called once per dump point. `time` is an opaque, strictly increasing
-    // tick count in whatever unit the harness uses. `changes` holds every
-    // signal that differs from the previous dump (every signal, on the
-    // first dump — the initial full sample).
+    // Called once per dump point. `time` is an opaque, non-decreasing tick
+    // count in whatever unit the harness uses -- consecutive calls may share
+    // the same time (multiple settle points landing at the same instant).
+    // `changes` holds every signal that differs from the previous dump
+    // (every signal, on the first dump — the initial full sample).
     virtual void emitChanges(uint64_t time, std::span<const SignalChange> changes) = 0;
 
     // Called once, after the last dump. Backends that buffer output must

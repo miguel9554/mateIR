@@ -28,12 +28,16 @@ public:
     Tracer(const Tracer&) = delete;
     Tracer& operator=(const Tracer&) = delete;
 
-    // Pull model: the harness calls this once per simulation instant, after
-    // every ABI call that settles state at that instant has been made (e.g.
-    // after both mate_set_inputs and any mate_apply_clock at the same time).
-    // Tracer never reads a clock itself. `time` must strictly increase
-    // across calls; throws std::logic_error otherwise -- this is what keeps
-    // delta-cycle intermediate states out of the trace.
+    // Pull model: the harness calls this once per settle point -- every ABI
+    // call that can change observable state (an input update, a clock or
+    // reset edge) should be followed by a dump(). Multiple settle points can
+    // legitimately share one `time` value (e.g. an async input settling and
+    // a clock edge landing at the same simulation instant); repeated dumps
+    // at the same time are merged into that instant, matching how the
+    // underlying VCD format already handles multiple value changes under one
+    // `#<time>` marker. `time` must never *decrease* across calls, though --
+    // that would mean the harness itself has gone back in time -- and throws
+    // std::logic_error if it does.
     void dump(uint64_t time);
 
     // Flushes and closes the backend. Idempotent. The destructor calls this

@@ -90,9 +90,9 @@ void Tracer::dump(uint64_t time) {
     if (closed_) {
         throw std::logic_error("mate-tracer: dump() called after close()");
     }
-    if (last_dump_time_.has_value() && time <= *last_dump_time_) {
+    if (last_dump_time_.has_value() && time < *last_dump_time_) {
         throw std::logic_error(std::format(
-            "mate-tracer: dump time must strictly increase (previous {}, got {})",
+            "mate-tracer: dump time must not decrease (previous {}, got {})",
             *last_dump_time_, time));
     }
 

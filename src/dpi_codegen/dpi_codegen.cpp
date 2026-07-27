@@ -566,12 +566,15 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     const auto input_leaves = allInputLeaves(ports);
     const auto output_leaves = allOutputLeaves(ports);
     out << "#include \"abi/mate_model_abi.h\"\n";
-    out << "#include \"svdpi.h\"\n\n";
+    out << "#include \"svdpi.h\"\n";
+    out << "#include \"tracer/tracer.h\"\n";
+    out << "#include \"tracer/vcd_backend.h\"\n\n";
     out << "#include <array>\n";
     out << "#include <cstdint>\n";
     out << "#include <cstdio>\n";
     out << "#include <cstdlib>\n";
     out << "#include <memory>\n";
+    out << "#include <stdexcept>\n";
     out << "#include <utility>\n\n";
     out << "namespace {\n\n";
     for (size_t i = 0; i < input_leaves.size(); ++i) {
@@ -660,6 +663,9 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    std::array<int32_t, " << output_leaves.size() << "> outputs{};\n";
     out << "    std::array<int32_t, " << model.metadata().clocks.size() << "> clocks{};\n";
     out << "    std::array<int32_t, " << ports.resets.size() << "> resets{};\n";
+    out << "    // Null unless " << config.function_prefix << "_enable_trace was called; "
+        << config.function_prefix << "_trace_dump no-ops until then.\n";
+    out << "    std::unique_ptr<mate::tracer::Tracer> tracer;\n";
     out << "\n";
     out << "    ~Context() {\n";
     out << "        MateStatus status{};\n";
@@ -729,6 +735,26 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "}\n\n";
     out << "void " << config.function_prefix << "_destroy(void* context_handle) {\n";
     out << "    delete static_cast<Context*>(context_handle);\n";
+    out << "}\n\n";
+    out << "void " << config.function_prefix << "_enable_trace(void* context_handle, const char* path) {\n";
+    out << "    Context& context = checkedContext(context_handle);\n";
+    out << "    try {\n";
+    out << "        auto backend = std::make_unique<mate::tracer::VcdBackend>(path, "
+        << cppString(config.module_name) << ");\n";
+    out << "        context.tracer = std::make_unique<mate::tracer::Tracer>(\n";
+    out << "            context.model, context.instance, std::move(backend));\n";
+    out << "    } catch (const std::exception& e) {\n";
+    out << "        failDpiCall(\"" << config.function_prefix << "_enable_trace\", e.what());\n";
+    out << "    }\n";
+    out << "}\n\n";
+    out << "void " << config.function_prefix << "_trace_dump(void* context_handle, uint64_t time_ns) {\n";
+    out << "    Context& context = checkedContext(context_handle);\n";
+    out << "    if (!context.tracer) return;\n";
+    out << "    try {\n";
+    out << "        context.tracer->dump(time_ns);\n";
+    out << "    } catch (const std::exception& e) {\n";
+    out << "        failDpiCall(\"" << config.function_prefix << "_trace_dump\", e.what());\n";
+    out << "    }\n";
     out << "}\n\n";
 
     auto emitFunctionHeader = [&](std::string_view name,
@@ -921,6 +947,15 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     out << "    import \"DPI-C\" function chandle " << config.function_prefix << "_create_context();\n";
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_destroy(input chandle ctx);\n\n";
 
+    // Waveform tracing of the DPI model itself: opt-in only (enable_trace is
+    // called once, gated behind a plusarg in the wrapper's initial block),
+    // trace_dump is called at every settle point below and no-ops when
+    // tracing was never enabled.
+    out << "    import \"DPI-C\" function void " << config.function_prefix
+        << "_enable_trace(input chandle ctx, input string path);\n";
+    out << "    import \"DPI-C\" function void " << config.function_prefix
+        << "_trace_dump(input chandle ctx, input longint unsigned time_ns);\n\n";
+
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_init_values(\n";
     emitSvImportArgs(out, input_leaves, output_leaves, ports);
     out << "    );\n\n";
@@ -1087,6 +1122,12 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         }
     }
     out << "        ctx = " << config.function_prefix << "_create_context();\n";
+    out << "        begin\n";
+    out << "            string mate_dpi_trace_path;\n";
+    out << "            if ($value$plusargs(\"MATE_DPI_TRACE=%s\", mate_dpi_trace_path)) begin\n";
+    out << "                " << config.function_prefix << "_enable_trace(ctx, mate_dpi_trace_path);\n";
+    out << "            end\n";
+    out << "        end\n";
     out << "        initialized = 1'b0;\n";
     for (size_t index : ports.clocks) {
         const auto& clock = ports.inputs[index];
@@ -1106,6 +1147,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         out << "        " << svOutputLeafExpr(output) << " = "
             << svOutputLeafValueExpr(port, output) << ";\n";
     }
+    out << "        " << config.function_prefix << "_trace_dump(ctx, $time);\n";
     out << "        initialized = 1'b1;\n";
     out << "    end\n\n";
     out << "    final begin\n";
@@ -1142,6 +1184,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
             out << "            " << svOutputLeafExpr(output) << " = "
                 << svOutputLeafValueExpr(port, output) << ";\n";
         }
+        out << "            " << config.function_prefix << "_trace_dump(ctx, $time);\n";
         out << "        end\n";
         out << "    end\n\n";
     }
@@ -1220,6 +1263,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         out << "                    $fatal(1, \"" << config.module_name
             << " only accepts 2-state " << clock.name << " values\");\n";
         out << "                end\n";
+        out << "                " << config.function_prefix << "_trace_dump(ctx, $time);\n";
         emitCommitOutputs();
         out << "            end\n\n";
     }
@@ -1241,6 +1285,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         out << "                    $fatal(1, \"" << config.module_name
             << " only accepts 2-state " << reset.name << " values\");\n";
         out << "                end\n";
+        out << "                " << config.function_prefix << "_trace_dump(ctx, $time);\n";
         emitCommitOutputs();
         out << "            end\n";
     }

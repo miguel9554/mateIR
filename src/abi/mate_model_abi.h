@@ -88,6 +88,22 @@ int32_t mate_observable_id(const MateModel* model, const char* full_path);
 int32_t mate_clock_id(const MateModel* model, const char* display_or_leaf_name);
 int32_t mate_reset_id(const MateModel* model, const char* display_or_leaf_name);
 
+/* Total number of observables (inputs, outputs, internal nodes, flop D/Q),
+ * for enumerating the full set without knowing names in advance. Ids are
+ * dense: valid observable ids are [0, mate_observable_count(model)). */
+int32_t mate_observable_count(const MateModel* model);
+
+/* Valid for the lifetime of `model`; do not free. */
+const char* mate_observable_full_path(const MateModel* model, int32_t observable_id);
+
+/* Word offset of this observable within the mate_get_all_observables buffer.
+ * Aliased observables (distinct names sharing one underlying value) report
+ * the same offset. */
+int32_t mate_observable_snapshot_offset(const MateModel* model, int32_t observable_id);
+
+/* Required buffer size, in words, for mate_get_all_observables. */
+int32_t mate_observable_snapshot_words_total(const MateModel* model);
+
 MateStatusCode mate_input_info(const MateModel* model,
                                int32_t input_id,
                                MatePortInfo* out_info,
@@ -131,6 +147,17 @@ MateStatusCode mate_get_observable(const MateInstance* instance,
                                    uint64_t* words,
                                    int32_t nwords,
                                    MateStatus* status);
+
+/*
+ * Bulk read of every observable's current value in one call, for waveform
+ * capture. `words` must be exactly mate_observable_snapshot_words_total(model)
+ * long; each observable's value starts at its
+ * mate_observable_snapshot_offset(model, id).
+ */
+MateStatusCode mate_get_all_observables(const MateInstance* instance,
+                                        uint64_t* words,
+                                        int32_t nwords,
+                                        MateStatus* status);
 
 #ifdef __cplusplus
 }

@@ -55,6 +55,21 @@ struct GeneratedStorageMetadata {
     bool is_signed = false;
 };
 
+// One entry per observable *name*, as opposed to `GeneratedStorageMetadata`
+// which has one entry per physical storage slot. Multiple names can alias
+// the same slot (e.g. a submodule output port wired straight through to an
+// internal wire) — each keeps its own full_path here but shares
+// storage_index, so the ABI can enumerate every name without duplicating the
+// underlying storage or the codegen write for it.
+struct GeneratedObservableMetadata {
+    GeneratedStorageKind kind = GeneratedStorageKind::Temporary;
+    std::string_view full_path;
+    std::string_view leaf_name;
+    int32_t width = 0;
+    bool is_signed = false;
+    size_t storage_index = 0;
+};
+
 struct NativeWordSlot {
     uint64_t* words = nullptr;
     int32_t nwords = 0;
@@ -94,6 +109,8 @@ struct GeneratedModelMetadata {
     std::vector<GeneratedClockMetadata> clocks;
     std::vector<GeneratedResetMetadata> resets;
     std::vector<GeneratedStorageMetadata> storage;
+    // Every observable name, aliases included; see GeneratedObservableMetadata.
+    std::vector<GeneratedObservableMetadata> observable_names;
     GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
     // Word count of the contiguous scratch buffer for values crossing
     // generated combinational chunk boundaries. The generated code knows each

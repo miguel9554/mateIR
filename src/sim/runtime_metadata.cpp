@@ -58,6 +58,32 @@ std::string observablePath(RuntimeObservableKind kind,
     return std::format("{}:{}", prefix, scopedName(module_path, leaf_name));
 }
 
+// Physical storage slot for a non-I/O observable: shared by every observable
+// with the same (node, kind), so aliased names (e.g. a submodule output port
+// and the internal wire it's wired straight through to) get one storage
+// write in codegen and one physical slot, while each keeps its own identity
+// in the observable list. Input/Output observables never get a slot here —
+// they read from the separate input/output storage instead.
+std::optional<size_t> assignStorageSlot(MateIRRuntimeMetadata& metadata,
+                                        RuntimeObservableKind kind,
+                                        const DFGNode* node) {
+    if (kind == RuntimeObservableKind::Input || kind == RuntimeObservableKind::Output) {
+        return std::nullopt;
+    }
+    auto existing_it = metadata.observables_by_node.find(node);
+    if (existing_it != metadata.observables_by_node.end()) {
+        for (RuntimeObservableId existing_id : existing_it->second) {
+            const auto& existing = metadata.observables.at(existing_id.value);
+            if (existing.kind == kind && existing.storage_slot.has_value()) {
+                return existing.storage_slot;
+            }
+        }
+    }
+    const size_t slot = metadata.storage_slot_owner.size();
+    metadata.storage_slot_owner.push_back(RuntimeObservableId{metadata.observables.size()});
+    return slot;
+}
+
 void addObservable(MateIRRuntimeMetadata& metadata,
                    RuntimeObservableKind kind,
                    const std::string& module_path,
@@ -81,6 +107,7 @@ void addObservable(MateIRRuntimeMetadata& metadata,
         .output = output,
         .flop = flop,
         .leaf_index = leaf_index,
+        .storage_slot = assignStorageSlot(metadata, kind, node),
     };
 
     if (metadata.observable_by_full_path.contains(observable.full_path)) {
@@ -171,13 +198,28 @@ void collectModuleMetadata(const MateIR& ir,
 
     // Submodule input/output ports are debug-visible signals (the VCD/debug
     // tooling traces them) but are not top-level I/O. Register them as internal
-    // observables so every traced module-node leaf resolves to a handle. Top
-    // I/O leaves and ports aliased to an already-observed node are skipped so we
-    // do not duplicate the Input/Output observables built for the top module.
+    // observables so every traced module-node leaf resolves to a handle. Only
+    // a node that is already a genuine top-level Input/Output is skipped, to
+    // avoid a meaningless "internal:x" duplicate of the top "input:x"/
+    // "output:x" observable. A node already registered as Internal/FlopD/FlopQ
+    // (e.g. a port aliasing another submodule's internal wire post-inlining)
+    // still gets this new name registered — both names must stay independently
+    // traceable, sharing one physical storage slot (see assignStorageSlot).
+    auto isTopLevelPortObservable = [&](const DFGNode* node) {
+        auto it = metadata.observables_by_node.find(node);
+        if (it == metadata.observables_by_node.end()) return false;
+        for (RuntimeObservableId id : it->second) {
+            RuntimeObservableKind kind = metadata.observables.at(id.value).kind;
+            if (kind == RuntimeObservableKind::Input || kind == RuntimeObservableKind::Output) {
+                return true;
+            }
+        }
+        return false;
+    };
     auto registerPortLeaves = [&](const ModuleNode& port) {
         for (const auto& leaf : moduleNodeLeafRefs(port)) {
             if (!leaf.node) continue;
-            if (metadata.observables_by_node.contains(leaf.node)) continue;
+            if (isTopLevelPortObservable(leaf.node)) continue;
             Type type = checkedLeafType(
                 std::format("port '{}'", scopedName(module_path, leaf.leaf_name)),
                 port.type, leaf.node);

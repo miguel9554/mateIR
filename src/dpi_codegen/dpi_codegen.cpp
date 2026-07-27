@@ -297,21 +297,22 @@ const RuntimeObservableMetadata* observableForNode(const RtlRuntimeModel& model,
     return nullptr;
 }
 
+// Physical storage slot index for a node's observable of the given kind.
+// Multiple observable names can share one (node, kind) pair (aliasing after
+// inlining); assignStorageSlot (runtime_metadata.cpp) already dedupes them
+// onto one physical slot at metadata-build time, so this is a direct lookup,
+// not a scan.
 std::optional<size_t> storageIndexForObservable(const RtlRuntimeModel& model,
                                                 const DFGNode* node,
                                                 RuntimeObservableKind kind) {
     const auto* observable = observableForNode(model, node, kind);
     if (!observable) return std::nullopt;
-    size_t index = 0;
-    for (const auto& candidate : model.metadata().observables) {
-        if (candidate.kind == RuntimeObservableKind::Input ||
-            candidate.kind == RuntimeObservableKind::Output) {
-            continue;
-        }
-        if (candidate.id == observable->id) return index;
-        ++index;
+    if (!observable->storage_slot.has_value()) {
+        throw CompilerError(std::format(
+            "mate-dpi-codegen: observable '{}' has no assigned storage slot",
+            observable->full_path));
     }
-    throw CompilerError("mate-dpi-codegen: observable storage index was not found");
+    return observable->storage_slot;
 }
 
 void validateDpiSupportedPort(const ModuleNode& node) {
@@ -2111,18 +2112,40 @@ NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeMode
             << edgeAbiName(reset.active_edge) << "},\n";
     }
     out << "    };\n";
+    // One physical slot per distinct (node, kind) — this is what codegen
+    // writes to and what the ABI allocates. Named by its first-registered
+    // observable; aliases sharing the slot are emitted separately below.
     out << "    metadata.storage = {\n";
-    for (const auto& observable : model.metadata().observables) {
-        if (observable.kind == RuntimeObservableKind::Input ||
-            observable.kind == RuntimeObservableKind::Output) {
-            continue;
-        }
+    for (RuntimeObservableId owner_id : model.metadata().storage_slot_owner) {
+        const auto& observable = model.metadata().observables.at(owner_id.value);
         out << "        mate::abi::GeneratedStorageMetadata{"
             << generatedStorageKindName(observable.kind) << ", "
             << cppString(observable.full_path) << ", "
             << cppString(observable.leaf_name) << ", "
             << observable.type.width << ", "
             << (observable.type.isSigned() ? "true" : "false") << "},\n";
+    }
+    out << "    };\n";
+    // Every observable name (aliases included), each pointing at the
+    // physical slot its (node, kind) resolved to above.
+    out << "    metadata.observable_names = {\n";
+    for (const auto& observable : model.metadata().observables) {
+        if (observable.kind == RuntimeObservableKind::Input ||
+            observable.kind == RuntimeObservableKind::Output) {
+            continue;
+        }
+        if (!observable.storage_slot.has_value()) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: observable '{}' has no assigned storage slot",
+                observable.full_path));
+        }
+        out << "        mate::abi::GeneratedObservableMetadata{"
+            << generatedStorageKindName(observable.kind) << ", "
+            << cppString(observable.full_path) << ", "
+            << cppString(observable.leaf_name) << ", "
+            << observable.type.width << ", "
+            << (observable.type.isSigned() ? "true" : "false") << ", "
+            << *observable.storage_slot << "},\n";
     }
     out << "    };\n";
     out << "    metadata.spill_words_count = " << native_code.spill_words_count << ";\n";

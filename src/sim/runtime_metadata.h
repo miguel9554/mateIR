@@ -142,6 +142,13 @@ struct RuntimeObservableMetadata {
     std::optional<RuntimeOutputId> output;
     std::optional<RuntimeFlopId> flop;
     size_t leaf_index = 0;
+    // Physical storage slot this observable's value lives in, shared by
+    // every observable with the same (node, kind) — e.g. a submodule output
+    // port and the internal wire it's wired straight through to. Only
+    // meaningful for Internal/FlopD/FlopQ kinds (Input/Output observables
+    // read from the separate input/output storage instead). Index into
+    // MateIRRuntimeMetadata::storage_slot_owner.
+    std::optional<size_t> storage_slot;
 };
 
 struct MateIRRuntimeMetadata {
@@ -158,6 +165,13 @@ struct MateIRRuntimeMetadata {
     std::unordered_map<std::string, RuntimeObservableId> observable_by_unique_leaf_name;
     std::unordered_set<std::string> ambiguous_observable_leaf_names;
     std::map<const DFGNode*, std::vector<RuntimeObservableId>> observables_by_node;
+    // Physical storage slots for non-I/O observables, in assignment order.
+    // storage_slot_owner[i] is the id of the first-registered observable
+    // naming physical slot i; every observable sharing that (node, kind)
+    // carries storage_slot == i. This is the list codegen uses to allocate
+    // and emit exactly one storage entry per distinct traced value, even
+    // when multiple names alias it.
+    std::vector<RuntimeObservableId> storage_slot_owner;
     std::map<std::string, std::vector<ClockId>> clock_domains_by_top_input;
     std::map<std::string, std::vector<ResetId>> reset_domains_by_top_input;
     std::map<ResetId, std::string> reset_top_input_by_id;

@@ -146,6 +146,7 @@ set(ABI_NATIVE_SOURCES
 
 set(TRACER_SOURCES
     src/tracer/tracer.cpp
+    src/tracer/vcd_backend.cpp
 )
 
 set(VECTOR_SIMULATOR_SOURCES
@@ -197,14 +198,22 @@ target_include_directories(mate-abi-native PUBLIC
 )
 mate_configure_project_target(mate-abi-native)
 
-# Only depends on the public Mate ABI header (mate_model_abi.h), same
-# no-compiler-internals rule as mate-abi-native: any ABI consumer (a
-# Verilator shell, a cocotb/taxi DPI backend, a standalone driver) can link
-# this without pulling in mateir/frontend/yaml-cpp/slang.
+add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)
+target_include_directories(mate-vcd-tracer PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-vcd-tracer/src
+)
+mate_configure_project_target(mate-vcd-tracer)
+
+# Only depends on the public Mate ABI header (mate_model_abi.h) and
+# mate-vcd-tracer (itself dependency-free), same no-compiler-internals rule
+# as mate-abi-native: any ABI consumer (a Verilator shell, a cocotb/taxi DPI
+# backend, a standalone driver) can link this without pulling in
+# mateir/frontend/yaml-cpp/slang.
 add_library(mate-tracer STATIC ${TRACER_SOURCES})
 target_include_directories(mate-tracer PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+target_link_libraries(mate-tracer PUBLIC mate-vcd-tracer)
 mate_configure_project_target(mate-tracer)
 
 add_library(mate-dpi-codegen STATIC src/dpi_codegen/dpi_codegen.cpp src/dpi_codegen/dpi_lib_link.cpp)
@@ -217,12 +226,6 @@ target_link_libraries(mate-dpi-codegen PUBLIC
     slang::slang
 )
 mate_configure_project_target(mate-dpi-codegen)
-
-add_library(mate-vcd-tracer STATIC external/cpp-vcd-tracer/src/vcd_tracer.cpp)
-target_include_directories(mate-vcd-tracer PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-vcd-tracer/src
-)
-mate_configure_project_target(mate-vcd-tracer)
 
 add_library(mate-vector-simulator-lib STATIC ${VECTOR_SIMULATOR_SOURCES})
 target_include_directories(mate-vector-simulator-lib PUBLIC

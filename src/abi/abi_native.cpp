@@ -153,6 +153,11 @@ struct MateInstance {
     std::vector<NativeWordSlot> input_slots;
     std::vector<NativeWordSlot> output_slots;
     std::vector<NativeWordSlot> observable_slots;
+    // Monotonic count of full combinational evaluations run on this instance,
+    // for `mate_evaluate_count`. Every eval is a dense sweep of the whole
+    // design (there is no activity scheduling), so this is the single number
+    // that says how much redundant work a simulation instant is doing.
+    uint64_t evaluate_count = 0;
 };
 
 namespace {
@@ -352,7 +357,11 @@ std::vector<NativeWordSlot> makeWordSlots(FlatWordStorage& storage) {
     return slots;
 }
 
+// The single funnel for running the generated combinational evaluator, so
+// `evaluate_count` cannot drift from reality: every eval in the ABI goes
+// through here.
 void evaluateAndPublish(MateInstance& instance) {
+    ++instance.evaluate_count;
     instance.model->evaluate_combinational(instance.input_slots, instance.output_slots,
                                            instance.observable_slots, instance.spill_words);
 }
@@ -405,8 +414,7 @@ void applyClockEdge(MateInstance& instance,
     }
 
     if (active_edge) {
-        instance.model->evaluate_combinational(instance.input_slots, instance.output_slots,
-                                               instance.observable_slots, instance.spill_words);
+        evaluateAndPublish(instance);
         instance.model->clock_commit.at(clock_id)(instance.input_slots, instance.observable_slots);
     }
     evaluateAndPublish(instance);
@@ -1150,6 +1158,16 @@ MateStatusCode mate_get_output(const MateInstance* instance,
                        checked.output_words.dataAt(output.storage_index),
                        checked.output_words.countAt(output.storage_index),
                        output.width, words, nwords);
+    });
+}
+
+MateStatusCode mate_evaluate_count(const MateInstance* instance,
+                                   uint64_t* out_count,
+                                   MateStatus* status) {
+    return guard(status, [&]() {
+        const MateInstance& checked = checkedInstance(instance);
+        if (!out_count) throw mate::CompilerError("Mate ABI: evaluate-count pointer is null");
+        *out_count = checked.evaluate_count;
     });
 }
 

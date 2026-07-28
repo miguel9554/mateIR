@@ -574,6 +574,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "#include <array>\n";
     out << "#include <cstdint>\n";
     out << "#include <cstdio>\n";
+    out << "#include <cstring>\n";
     out << "#include <cstdlib>\n";
     out << "#include <memory>\n";
     out << "#include <optional>\n";
@@ -673,6 +674,16 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    // mate_record_inputs) but not yet evaluated and traced. Flushed when a\n";
     out << "    // later instant arrives, or on destruction for the final instant.\n";
     out << "    std::optional<uint64_t> pending_trace_time;\n";
+    out << "    // Eval log (+MATE_DPI_EVAL_LOG). Null stream unless enabled.\n";
+    out << "    // Deliberately dumb: one line per evaluation, no aggregation, no\n";
+    out << "    // instant bookkeeping. Only the DPI layer knows simulation time and\n";
+    out << "    // only the ABI counts evaluations, so this pairs the two and writes\n";
+    out << "    // the raw event stream; everything else is a parsing question.\n";
+    out << "    std::FILE* eval_log = nullptr;\n";
+    out << "    bool eval_log_owned = false;\n";
+    out << "    // ABI eval count as of the last line written, so the next check knows\n";
+    out << "    // how many evaluations to emit.\n";
+    out << "    uint64_t eval_log_reported = 0;\n";
     out << "\n";
     out << "    ~Context() {\n";
     out << "        MateStatus status{};\n";
@@ -685,10 +696,33 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "                try { tracer->dump(*pending_trace_time); } catch (...) {}\n";
     out << "            }\n";
     out << "        }\n";
+    out << "        if (eval_log) {\n";
+    out << "            std::fflush(eval_log);\n";
+    out << "            if (eval_log_owned) std::fclose(eval_log);\n";
+    out << "        }\n";
     out << "        if (instance) (void)mate_instance_destroy(instance, &status);\n";
     out << "        if (model) (void)mate_model_destroy(model, &status);\n";
     out << "    }\n";
     out << "};\n\n";
+    // Called right after any ABI call that can evaluate, with the simulation
+    // time that call belongs to. Emits one line per evaluation that has
+    // happened since the previous call. A single DPI call never spans
+    // simulation instants, so every evaluation it triggered carries this same
+    // timestamp -- repeated lines are the point, not a bug: the log stays a
+    // raw event stream and all counting happens at parse time.
+    out << "void logEvals(Context& context, uint64_t time_ns, const char* site) {\n";
+    out << "    if (!context.eval_log) return;\n";
+    out << "    MateStatus status{};\n";
+    out << "    uint64_t total = 0;\n";
+    out << "    if (mate_evaluate_count(context.instance, &total, &status) != MATE_STATUS_OK) {\n";
+    out << "        failDpiCall(\"logEvals\", status.message ? status.message : \"unknown error\");\n";
+    out << "    }\n";
+    out << "    for (uint64_t i = context.eval_log_reported; i < total; ++i) {\n";
+    out << "        std::fprintf(context.eval_log, \"%llu: eval %s\\n\",\n";
+    out << "                     (unsigned long long)time_ns, site);\n";
+    out << "    }\n";
+    out << "    context.eval_log_reported = total;\n";
+    out << "}\n\n";
     out << "Context& checkedContext(void* raw) {\n";
     out << "    if (!raw) failDpiCall(\"checkedContext\", " << cppString(config.module_name + " DPI received null context handle") << ");\n";
     out << "    return *static_cast<Context*>(raw);\n";
@@ -764,6 +798,23 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "        failDpiCall(\"" << config.function_prefix << "_enable_trace\", e.what());\n";
     out << "    }\n";
     out << "}\n\n";
+    out << "void " << config.function_prefix
+        << "_enable_eval_log(void* context_handle, const char* path) {\n";
+    out << "    Context& context = checkedContext(context_handle);\n";
+    out << "    if (context.eval_log) failDpiCall(\"" << config.function_prefix
+        << "_enable_eval_log\", \"eval log already enabled\");\n";
+    out << "    if (!path || path[0] == '\\0') failDpiCall(\"" << config.function_prefix
+        << "_enable_eval_log\", \"eval log path is empty\");\n";
+    out << "    if (std::strcmp(path, \"-\") == 0) {\n";
+    out << "        context.eval_log = stdout;\n";
+    out << "        context.eval_log_owned = false;\n";
+    out << "    } else {\n";
+    out << "        context.eval_log = std::fopen(path, \"w\");\n";
+    out << "        if (!context.eval_log) failDpiCall(\"" << config.function_prefix
+        << "_enable_eval_log\", \"could not open eval log for writing\");\n";
+    out << "        context.eval_log_owned = true;\n";
+    out << "    }\n";
+    out << "}\n\n";
     out << "void " << config.function_prefix << "_trace_dump(void* context_handle, uint64_t time_ns) {\n";
     out << "    Context& context = checkedContext(context_handle);\n";
     out << "    if (!context.tracer) return;\n";
@@ -786,10 +837,15 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    }\n";
     out << "}\n\n";
 
+    // Every entry point below can trigger evaluations, so each takes the
+    // simulation time it belongs to -- purely so the eval log can timestamp
+    // them without the DPI layer having to track instants itself. Unused when
+    // the log is off.
     auto emitFunctionHeader = [&](std::string_view name,
                                   const std::vector<LeafIndex>& input_indices,
                                   bool include_outputs) {
-        out << "void " << config.function_prefix << "_" << name << "(void* context_handle";
+        out << "void " << config.function_prefix << "_" << name
+            << "(void* context_handle,\n                           uint64_t time_ns";
         for (LeafIndex index : input_indices) {
             const auto& input = inputLeaf(ports, index);
             out << ",\n                           " << cppDpiType(input.type, false) << " "
@@ -860,6 +916,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     emitUpdateArrayWithCount("async_updates", init_async_inputs);
     emitUpdateArrayWithCount("sync_updates", ports.sync_inputs);
     out << "        check(mate_instance_init(context.instance, MATE_FLOPS_INITIAL_ZERO, 1, 0, async_updates, async_updates_count, sync_updates, sync_updates_count, &status), status, \"" << config.function_prefix << "_init_values\");\n";
+    out << "        logEvals(context, time_ns, \"init\");\n";
     out << "        writeOutputs(context";
     for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";
@@ -872,6 +929,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     emitUpdateArrayWithCount("input_updates", data_inputs);
     out << "        check(mate_set_inputs(context.instance, input_updates, input_updates_count, &status), status, \""
         << config.function_prefix << "_set_input_values\");\n";
+    out << "        logEvals(context, time_ns, \"input-change\");\n";
     out << "        writeOutputs(context";
     for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";
@@ -906,6 +964,9 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "            if (context.pending_trace_time && time_ns > *context.pending_trace_time) {\n";
     out << "                check(mate_set_inputs(context.instance, nullptr, 0, &status), status, \""
         << config.function_prefix << "_record_input_values\");\n";
+    out << "                // This settle eval belongs to the instant being flushed,\n";
+    out << "                // not to the one now arriving.\n";
+    out << "                logEvals(context, *context.pending_trace_time, \"settle-flush\");\n";
     out << "                try {\n";
     out << "                    context.tracer->dump(*context.pending_trace_time);\n";
     out << "                } catch (const std::exception& e) {\n";
@@ -939,6 +1000,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
                 << clockHandleIdentifier(model.metadata(), runtime_clock) << "), " << edgeAbiName(edge)
                 << ", edge_updates, edge_updates_count, &status), status, \"" << config.function_prefix << "_"
                 << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\");\n";
+            out << "        logEvals(context, time_ns, \"" << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\");\n";
             out << "        writeOutputs(context";
             for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
             out << ");\n";
@@ -957,6 +1019,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
                 << leafIdentifier(reset.leaves.front().leaf_name) << "), " << edgeAbiName(edge)
                 << ", &status), status, \"" << config.function_prefix << "_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "\");\n";
+            out << "        logEvals(context, time_ns, \"" << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "\");\n";
             out << "        writeOutputs(context";
             for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
             out << ");\n";
@@ -979,6 +1042,8 @@ void emitSvImportArgs(std::ostringstream& out,
     };
     comma();
     out << "        input chandle ctx";
+    comma();
+    out << "        input longint unsigned time_ns";
     for (LeafIndex index : inputs) {
         const auto& input = inputLeaf(ports, index);
         comma();
@@ -997,6 +1062,7 @@ void emitSvCallArgs(std::ostringstream& out,
                     const std::vector<LeafIndex>& outputs,
                     const ModelPorts& ports) {
     out << "                        ctx";
+    out << ",\n                        $time";
     for (LeafIndex index : inputs) {
         const auto& port = ports.inputs[index.port];
         const auto& leaf = inputLeaf(ports, index);
@@ -1109,6 +1175,8 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     // tracing was never enabled.
     out << "    import \"DPI-C\" function void " << config.function_prefix
         << "_enable_trace(input chandle ctx, input string path, input bit flat_hierarchy);\n";
+    out << "    import \"DPI-C\" function void " << config.function_prefix
+        << "_enable_eval_log(input chandle ctx, input string path);\n";
     out << "    import \"DPI-C\" function void " << config.function_prefix
         << "_trace_dump(input chandle ctx, input longint unsigned time_ns);\n\n";
 
@@ -1292,6 +1360,13 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     out << "            if ($value$plusargs(\"MATE_DPI_TRACE=%s\", mate_dpi_trace_path)) begin\n";
     out << "                " << config.function_prefix
         << "_enable_trace(ctx, mate_dpi_trace_path, $test$plusargs(\"MATE_DPI_TRACE_FLAT\"));\n";
+    out << "            end\n";
+    out << "        end\n";
+    out << "        begin\n";
+    out << "            string mate_dpi_eval_log_path;\n";
+    out << "            if ($value$plusargs(\"MATE_DPI_EVAL_LOG=%s\", mate_dpi_eval_log_path)) begin\n";
+    out << "                " << config.function_prefix
+        << "_enable_eval_log(ctx, mate_dpi_eval_log_path);\n";
     out << "            end\n";
     out << "        end\n";
     out << "        initialized = 1'b0;\n";

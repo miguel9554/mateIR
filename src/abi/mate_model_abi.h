@@ -193,6 +193,16 @@ MateStatusCode mate_get_output(const MateInstance* instance,
                                uint64_t* words,
                                int32_t nwords,
                                MateStatus* status);
+/*
+ * Number of full combinational evaluations run on this instance since it was
+ * created. Every evaluation sweeps the entire design (there is no activity
+ * scheduling), so the delta across a simulation instant is the honest measure
+ * of how much redundant work that instant cost. Always available -- unlike
+ * observables, this is not affected by --dpi-no-observables.
+ */
+MateStatusCode mate_evaluate_count(const MateInstance* instance,
+                                   uint64_t* out_count,
+                                   MateStatus* status);
 MateStatusCode mate_get_observable(const MateInstance* instance,
                                    int32_t observable_id,
                                    uint64_t* words,

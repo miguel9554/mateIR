@@ -27,6 +27,12 @@ std::vector<TracedSignal> discoverSignals(const MateModel* model) {
             throw std::runtime_error(std::format(
                 "mate-tracer: mate_observable_full_path failed for observable {}", id));
         }
+        const char* leaf_name = mate_observable_leaf_name(model, id);
+        if (!leaf_name) {
+            throw std::runtime_error(std::format(
+                "mate-tracer: mate_observable_leaf_name failed for observable {} ('{}')",
+                id, full_path));
+        }
         MateStatus status{};
         MatePortInfo info{};
         if (mate_observable_info(model, id, &info, &status) != MATE_STATUS_OK) {
@@ -41,6 +47,7 @@ std::vector<TracedSignal> discoverSignals(const MateModel* model) {
         signals.push_back(TracedSignal{
             .id = id,
             .full_path = full_path,
+            .leaf_name = leaf_name,
             .width = info.width,
             .is_signed = info.is_signed != 0,
             .snapshot_offset = offset,

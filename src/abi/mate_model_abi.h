@@ -96,6 +96,11 @@ int32_t mate_observable_count(const MateModel* model);
 /* Valid for the lifetime of `model`; do not free. */
 const char* mate_observable_full_path(const MateModel* model, int32_t observable_id);
 
+/* Bare declared leaf name (no kind prefix, no module path, no D/Q suffix
+ * removed) for this observable -- e.g. "pc_id_i" or "r_gpio_dir.q". Valid
+ * for the lifetime of `model`; do not free. */
+const char* mate_observable_leaf_name(const MateModel* model, int32_t observable_id);
+
 /* Word offset of this observable within the mate_get_all_observables buffer.
  * Aliased observables (distinct names sharing one underlying value) report
  * the same offset. */

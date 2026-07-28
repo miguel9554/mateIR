@@ -18,6 +18,7 @@ namespace mate::tracer {
 struct TracedSignal {
     int32_t id = 0;              // Mate ABI observable id
     std::string full_path;       // e.g. "internal:cs_registers_i.pc_id_i"
+    std::string leaf_name;       // e.g. "pc_id_i", or "r_gpio_dir.q" for a flop Q leaf
     int32_t width = 0;           // bit width
     bool is_signed = false;
     int32_t snapshot_offset = 0; // word offset into the snapshot buffer

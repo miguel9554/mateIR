@@ -23,15 +23,26 @@ public:
     // Opens `path` for writing immediately; throws std::runtime_error if it
     // cannot be opened. `top_name` becomes the VCD's outermost scope name.
     // `time` values passed to emitChanges are interpreted as nanoseconds.
-    VcdBackend(std::string path, std::string top_name);
+    // `flat_hierarchy` selects declareSignals' scope-tree shape; see there.
+    VcdBackend(std::string path, std::string top_name, bool flat_hierarchy = false);
     ~VcdBackend() override;
 
-    // Groups signals into inputs/outputs/signals/flops sub-scopes by
-    // observable kind (the "input:"/"output:"/"internal:"/"flop_d:"/
-    // "flop_q:" prefix on TracedSignal::full_path), nested by the RTL
-    // hierarchy path within each group -- the same grouping style the
-    // legacy VcdWriter used. Throws std::runtime_error on any full_path
-    // that doesn't carry a recognized kind prefix.
+    // Grouped mode (flat_hierarchy == false, the default): groups signals
+    // into inputs/outputs/signals/flops sub-scopes by observable kind (the
+    // "input:"/"output:"/"internal:"/"flop_d:"/"flop_q:" prefix on
+    // TracedSignal::full_path), nested by the RTL hierarchy path within each
+    // group -- the same grouping style the legacy VcdWriter used.
+    //
+    // Flat mode (flat_hierarchy == true): emits a scope tree structurally
+    // identical to real RTL / Verilator's own VCD -- no category
+    // sub-scopes, every signal a direct $var of its owning module's scope,
+    // named by its bare declared name. flop_d observables (no net in real
+    // RTL) are dropped; flop_q observables are emitted under the flop's
+    // declared name (its leaf_name's ".q" suffix stripped).
+    //
+    // Throws std::runtime_error on any full_path that doesn't carry a
+    // recognized kind prefix, or (flat mode) doesn't end with its own
+    // leaf_name.
     void declareSignals(const std::vector<TracedSignal>& signals) override;
     void emitChanges(uint64_t time, std::span<const SignalChange> changes) override;
     void close() override;
@@ -39,10 +50,12 @@ public:
 private:
     std::string path_;
     std::string top_name_;
+    bool flat_hierarchy_;
     std::ofstream out_;
     std::unique_ptr<vcd_tracer::top> top_;
     // Value objects, indexed by observable id (TracedSignal::id is dense and
-    // matches the vector index Tracer discovers them in).
+    // matches the vector index Tracer discovers them in). Flat mode leaves
+    // dropped flop_d entries null.
     std::vector<std::unique_ptr<class WordsVcdValue>> values_;
     bool closed_ = false;
 };

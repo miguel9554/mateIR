@@ -823,6 +823,18 @@ const char* mate_observable_full_path(const MateModel* model, int32_t observable
     }
 }
 
+const char* mate_observable_leaf_name(const MateModel* model, int32_t observable_id) {
+    try {
+        const auto& observables = checkedModel(model).observables;
+        if (observable_id < 0 || static_cast<size_t>(observable_id) >= observables.size()) {
+            return nullptr;
+        }
+        return observables.at(static_cast<size_t>(observable_id)).leaf_name.c_str();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 int32_t mate_observable_snapshot_offset(const MateModel* model, int32_t observable_id) {
     try {
         const auto& checked = checkedModel(model);

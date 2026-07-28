@@ -752,11 +752,12 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "void " << config.function_prefix << "_destroy(void* context_handle) {\n";
     out << "    delete static_cast<Context*>(context_handle);\n";
     out << "}\n\n";
-    out << "void " << config.function_prefix << "_enable_trace(void* context_handle, const char* path) {\n";
+    out << "void " << config.function_prefix
+        << "_enable_trace(void* context_handle, const char* path, svBit flat_hierarchy) {\n";
     out << "    Context& context = checkedContext(context_handle);\n";
     out << "    try {\n";
     out << "        auto backend = std::make_unique<mate::tracer::VcdBackend>(path, "
-        << cppString(config.module_name) << ");\n";
+        << cppString(config.module_name) << ", flat_hierarchy != 0);\n";
     out << "        context.tracer = std::make_unique<mate::tracer::Tracer>(\n";
     out << "            context.model, context.instance, std::move(backend));\n";
     out << "    } catch (const std::exception& e) {\n";
@@ -1107,7 +1108,7 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     // trace_dump is called at every settle point below and no-ops when
     // tracing was never enabled.
     out << "    import \"DPI-C\" function void " << config.function_prefix
-        << "_enable_trace(input chandle ctx, input string path);\n";
+        << "_enable_trace(input chandle ctx, input string path, input bit flat_hierarchy);\n";
     out << "    import \"DPI-C\" function void " << config.function_prefix
         << "_trace_dump(input chandle ctx, input longint unsigned time_ns);\n\n";
 
@@ -1289,7 +1290,8 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     out << "        begin\n";
     out << "            string mate_dpi_trace_path;\n";
     out << "            if ($value$plusargs(\"MATE_DPI_TRACE=%s\", mate_dpi_trace_path)) begin\n";
-    out << "                " << config.function_prefix << "_enable_trace(ctx, mate_dpi_trace_path);\n";
+    out << "                " << config.function_prefix
+        << "_enable_trace(ctx, mate_dpi_trace_path, $test$plusargs(\"MATE_DPI_TRACE_FLAT\"));\n";
     out << "            end\n";
     out << "        end\n";
     out << "        initialized = 1'b0;\n";

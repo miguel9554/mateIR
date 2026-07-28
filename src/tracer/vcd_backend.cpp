@@ -2,7 +2,9 @@
 
 #include <format>
 #include <map>
+#include <optional>
 #include <stdexcept>
+#include <string_view>
 
 namespace mate::tracer {
 
@@ -128,6 +130,77 @@ ParsedSignal parseFullPath(const std::string& full_path) {
     return ParsedSignal{group + "." + rest.substr(0, dot), rest.substr(dot + 1)};
 }
 
+// Flat-hierarchy variant of parseFullPath: emits a scope tree structurally
+// identical to real RTL (and Verilator's own VCD) -- no inputs/outputs/
+// signals/flops grouping, signals nested only by actual module instance
+// path, named by their bare declared name.
+//
+// TracedSignal::full_path is "<kind>:<module_path>.<leaf_name>" (or
+// "<kind>:<leaf_name>" when module_path is empty), where `leaf_name` here is
+// exactly TracedSignal::leaf_name -- both are built from the same source
+// string in runtime_metadata.cpp's addObservable/observablePath. So the
+// module path is recovered by stripping that known leaf_name suffix from the
+// kind-stripped full_path, not by splitting on the last '.' (leaf_name
+// itself may contain dots, e.g. struct field leaves or ".q"/".d" flop
+// suffixes).
+//
+// flop_d has no separate net in real RTL (only the register itself) and is
+// skipped entirely (nullopt). flop_q is emitted under the flop's declared
+// name: leaf_name always ends with the literal ".q" suffix appended in
+// flopLeafRefsImpl (module.cpp), so that suffix is stripped the same
+// known-suffix way rather than by a dot-split.
+std::optional<ParsedSignal> parseFullPathFlat(const std::string& full_path,
+                                              const std::string& leaf_name) {
+    const auto colon = full_path.find(':');
+    if (colon == std::string::npos) {
+        throw std::runtime_error(std::format(
+            "mate-tracer: observable '{}' has no kind prefix", full_path));
+    }
+    const std::string kind = full_path.substr(0, colon);
+    const std::string rest = full_path.substr(colon + 1);
+    if (rest.empty()) {
+        throw std::runtime_error(std::format(
+            "mate-tracer: observable '{}' has an empty name", full_path));
+    }
+
+    if (kind == "flop_d") return std::nullopt;
+
+    std::string declared_name = leaf_name;
+    if (kind == "flop_q") {
+        constexpr std::string_view kQSuffix = ".q";
+        if (declared_name.size() < kQSuffix.size() ||
+            declared_name.compare(declared_name.size() - kQSuffix.size(), kQSuffix.size(),
+                                  kQSuffix) != 0) {
+            throw std::runtime_error(std::format(
+                "mate-tracer: flop_q observable '{}' has leaf name '{}' without the expected "
+                "'.q' suffix",
+                full_path, leaf_name));
+        }
+        declared_name.erase(declared_name.size() - kQSuffix.size());
+    } else if (kind != "input" && kind != "output" && kind != "internal") {
+        throw std::runtime_error(std::format(
+            "mate-tracer: observable '{}' has an unrecognized kind '{}'", full_path, kind));
+    }
+
+    if (rest.size() < leaf_name.size() ||
+        rest.compare(rest.size() - leaf_name.size(), leaf_name.size(), leaf_name) != 0) {
+        throw std::runtime_error(std::format(
+            "mate-tracer: observable '{}' does not end with its leaf name '{}'",
+            full_path, leaf_name));
+    }
+    std::string module_path = rest.substr(0, rest.size() - leaf_name.size());
+    if (!module_path.empty()) {
+        if (module_path.back() != '.') {
+            throw std::runtime_error(std::format(
+                "mate-tracer: observable '{}' has malformed module path before leaf name '{}'",
+                full_path, leaf_name));
+        }
+        module_path.pop_back();
+    }
+
+    return ParsedSignal{std::move(module_path), std::move(declared_name)};
+}
+
 // Lazily creates nested vcd_tracer::module scopes for dot-separated paths,
 // same shape as the legacy VcdWriter's getOrCreateNestedScope.
 class ScopeCache {
@@ -152,8 +225,8 @@ private:
 
 } // namespace
 
-VcdBackend::VcdBackend(std::string path, std::string top_name)
-    : path_(std::move(path)), top_name_(std::move(top_name)) {
+VcdBackend::VcdBackend(std::string path, std::string top_name, bool flat_hierarchy)
+    : path_(std::move(path)), top_name_(std::move(top_name)), flat_hierarchy_(flat_hierarchy) {
     out_.open(path_);
     if (!out_.is_open()) {
         throw std::runtime_error(std::format("mate-tracer: cannot open '{}'", path_));
@@ -177,9 +250,12 @@ void VcdBackend::declareSignals(const std::vector<TracedSignal>& signals) {
             throw std::runtime_error(std::format(
                 "mate-tracer: observable '{}' has out-of-range id {}", signal.full_path, signal.id));
         }
-        const ParsedSignal parsed = parseFullPath(signal.full_path);
+        std::optional<ParsedSignal> parsed = flat_hierarchy_
+            ? parseFullPathFlat(signal.full_path, signal.leaf_name)
+            : std::optional<ParsedSignal>(parseFullPath(signal.full_path));
+        if (!parsed.has_value()) continue; // flat mode: flop_d has no RTL net
         auto value = std::make_unique<WordsVcdValue>(static_cast<unsigned int>(signal.width));
-        value->elaborate(scopes.get(parsed.scope_path).get_add_fn(), parsed.leaf_name);
+        value->elaborate(scopes.get(parsed->scope_path).get_add_fn(), parsed->leaf_name);
         values_[static_cast<size_t>(signal.id)] = std::move(value);
     }
 
@@ -187,15 +263,33 @@ void VcdBackend::declareSignals(const std::vector<TracedSignal>& signals) {
 }
 
 void VcdBackend::emitChanges(uint64_t time, std::span<const SignalChange> changes) {
+    // vcd_tracer::top::time_update_abs flushes whatever is currently marked
+    // dirty (via WordsVcdValue::setWords) *before* printing the new "#time"
+    // marker -- so a value only gets attributed to the correct timestamp if
+    // it was marked dirty by an *earlier* call and is flushed by *this*
+    // one. Calling time_update_abs before marking this call's changes dirty
+    // (rather than after, which would attribute them to the *previous*
+    // timestamp) defers their flush to the next emitChanges call (or
+    // close()), at which point they're correctly stamped under the "#time"
+    // marker this call is about to print.
+    top_->time_update_abs(out_, std::chrono::nanoseconds{static_cast<int64_t>(time)});
     for (const auto& change : changes) {
-        if (change.id < 0 || static_cast<size_t>(change.id) >= values_.size() ||
-            !values_[static_cast<size_t>(change.id)]) {
+        if (change.id < 0 || static_cast<size_t>(change.id) >= values_.size()) {
             throw std::runtime_error(std::format(
                 "mate-tracer: change for undeclared observable id {}", change.id));
         }
+        if (!values_[static_cast<size_t>(change.id)]) {
+            // Flat mode deliberately skips declaring some observables (e.g.
+            // flop_d, which has no RTL net); such ids never appear in
+            // grouped mode, where every observable is declared.
+            if (!flat_hierarchy_) {
+                throw std::runtime_error(std::format(
+                    "mate-tracer: change for undeclared observable id {}", change.id));
+            }
+            continue;
+        }
         values_[static_cast<size_t>(change.id)]->setWords(change.words, change.word_count);
     }
-    top_->time_update_abs(out_, std::chrono::nanoseconds{static_cast<int64_t>(time)});
 }
 
 void VcdBackend::close() {

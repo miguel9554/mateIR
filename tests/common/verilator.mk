@@ -177,4 +177,39 @@ $(WAVES): $(OUT) force
 simulate:
 	$(MAKE) $(WAVES)
 
+# --- DPI tracer vs Verilator VCD comparison -------------------------------
+# Cross-validates the DPI wrapper's own waveform tracer (src/tracer/,
+# +MATE_DPI_TRACE) against Verilator's native RTL trace produced by this
+# same Makefile, using the compiler's own hierarchy.json (emitted under
+# debug_output/ alongside the DPI model) as the source of truth for what
+# must match. Requires DPI=1. Unlike `compare` in tests/common/vcd-diff.mk
+# (legacy custom-sim vs Verilator), this exercises the DPI model's tracer,
+# not the vector-sim path.
+#
+# DPI_TRACE_FLAT selects the tracer's flat-hierarchy mode (see
+# src/tracer/vcd_backend.h) -- it must stay 1 for this comparison to have a
+# chance of matching hierarchy.json; grouped mode (0) nests every signal
+# under a synthetic inputs/outputs/signals/flops sub-scope that hierarchy.json
+# knows nothing about, so it exists here only to sanity-check that
+# dpi-vcd-compare actually fails against the wrong hierarchy shape.
+VCD_COMPARE_BUILD_TARGET ?= dev
+VCD_COMPARE_BUILD_DIR = $(PROJECT_ROOT)/build/vcd-compare/$(VCD_COMPARE_BUILD_TARGET)
+VCD_COMPARE = $(VCD_COMPARE_BUILD_DIR)/vcd-compare
+DPI_TRACE_VCD ?= dpi_trace.vcd
+DPI_TRACE_FLAT ?= 1
+HIERARCHY_JSON = debug_output/$(MODULE_NAME)/hierarchy.json
+DPI_TRACE_TOP_SCOPE = $(MODULE_NAME)_dpi
+RTL_TOP_SCOPE = tb.uut
+
+dpi-vcd-compare:
+ifneq ($(DPI),1)
+	$(error dpi-vcd-compare requires DPI=1)
+endif
+	$(MAKE) $(WAVES) PLUSARGS="+MATE_DPI_TRACE=$(DPI_TRACE_VCD) $(if $(filter 1,$(DPI_TRACE_FLAT)),+MATE_DPI_TRACE_FLAT=1) $(PLUSARGS)"
+	cmake --preset $(VCD_COMPARE_BUILD_TARGET) -S $(PROJECT_ROOT)/tools/vcd-compare
+	cmake --build $(VCD_COMPARE_BUILD_DIR) --parallel
+	$(SANITIZER_ENV) $(VCD_COMPARE) --hierarchy $(HIERARCHY_JSON) \
+		dpi=$(DPI_TRACE_VCD):$(DPI_TRACE_TOP_SCOPE) \
+		verilator=$(WAVES):$(RTL_TOP_SCOPE)
+
 force:

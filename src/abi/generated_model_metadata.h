@@ -125,6 +125,12 @@ struct GeneratedModelMetadata {
     std::vector<GeneratedObservableMetadata> observable_names;
     // Compile-time-constant parameters/localparams; see GeneratedParamMetadata.
     std::vector<GeneratedParamMetadata> params;
+    // False for a compute-only model built with observable writes suppressed
+    // (mate --dpi-no-observables). `storage` and `observable_names` still
+    // describe the full layout -- FlopD/FlopQ slots are still live, since the
+    // compute path itself needs them -- but internal slots are never written,
+    // so every observable *read* must fail rather than hand back stale words.
+    bool observables_enabled = true;
     GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
     // Word count of the contiguous scratch buffer for values crossing
     // generated combinational chunk boundaries. The generated code knows each

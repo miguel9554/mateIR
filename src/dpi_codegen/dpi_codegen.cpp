@@ -1668,7 +1668,8 @@ size_t nativeCombinationalFileCount(size_t chunk_count) {
     return std::max<size_t>(1, std::min(chunk_count, hardware_threads * 2));
 }
 
-NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
+NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model,
+                                                   bool emit_observables) {
     if (!model.top().dfg) {
         throw CompilerError("mate-dpi-codegen: top module has no DFG");
     }
@@ -2075,11 +2076,21 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
             out << "    const auto " << var << " = " << resizeExpr(expr, type) << ";\n";
             local_value_expr[node] = var;
 
-            if (auto storage_index = storageIndexForObservable(
-                    model, node, RuntimeObservableKind::Internal)) {
-                out << "    " << var << ".copyToWords(storage[" << *storage_index
-                    << "].words, storage[" << *storage_index << "].nwords);\n";
+            // Internal observables are write-only as far as compute goes:
+            // nodeValue() only ever loads back inputs, spills and flop Q, so
+            // these copies exist purely to keep the tracer / mate_get_observable
+            // readable. They are the single largest class of stores in a
+            // generated model, hence the opt-out.
+            if (emit_observables) {
+                if (auto storage_index = storageIndexForObservable(
+                        model, node, RuntimeObservableKind::Internal)) {
+                    out << "    " << var << ".copyToWords(storage[" << *storage_index
+                        << "].words, storage[" << *storage_index << "].nwords);\n";
+                }
             }
+            // FlopD, by contrast, is load-bearing: the generated clock-commit
+            // functions read D out of storage to write Q, so this one stays
+            // regardless of observability.
             if (auto storage_index = storageIndexForObservable(
                     model, node, RuntimeObservableKind::FlopD)) {
                 out << "    " << var << ".copyToWords(storage[" << *storage_index
@@ -2136,8 +2147,12 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
     // permanently unwritten (garbage/zero-initialized). Seed those slots
     // explicitly, once per evaluate_combinational call (the underlying
     // input can change every call), independent of chunk boundaries.
+    // Skipped entirely when observables are off -- these slots are only ever
+    // read by the tracer / mate_get_observable, which a compute-only model
+    // refuses to serve.
     std::ostringstream seed_out;
     for (RuntimeObservableId owner_id : model.metadata().storage_slot_owner) {
+        if (!emit_observables) break;
         const auto& observable = model.metadata().observables.at(owner_id.value);
         if (observable.kind != RuntimeObservableKind::Internal) continue;
         const DFGNode* node = observable.node;
@@ -2358,7 +2373,9 @@ struct NativeModelCode {
     std::vector<NativeCombinationalChunkFile> chunk_files;
 };
 
-NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeModel& model) {
+NativeModelCode makeNativeModelCpp(const Config& config,
+                                   const ModelPorts& ports,
+                                   const RtlRuntimeModel& model) {
     std::ostringstream out;
     out << "#include \"abi/abi_native.h\"\n\n";
     out << "#include \"sim/fixed_value.h\"\n";
@@ -2367,7 +2384,8 @@ NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeMode
     out << "#include <span>\n";
     out << "#include <stdexcept>\n";
     out << "#include <vector>\n\n";
-    const NativeCombinationalCode native_code = makeNativeCombinationalCpp(model);
+    const NativeCombinationalCode native_code =
+        makeNativeCombinationalCpp(model, config.emit_observables);
     out << native_code.chunk_declarations;
     out << "\n";
     out << native_code.dispatcher_text;
@@ -2480,6 +2498,7 @@ NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeMode
             << "std::span<const uint64_t>(kParamWords" << i << ")},\n";
     }
     out << "    };\n";
+    out << "    metadata.observables_enabled = " << boolLiteral(config.emit_observables) << ";\n";
     out << "    metadata.spill_words_count = " << native_code.spill_words_count << ";\n";
     out << "    metadata.evaluate_combinational = &evaluateCombinational;\n";
     out << "    metadata.reset_apply = {";
@@ -2523,7 +2542,7 @@ DpiCodegenOutput generateDpiCodegen(const DpiCodegenConfig& config, const RtlRun
     output.dpi_cpp = config.out_dir / (config.module_name + ".cpp");
     writeFile(output.dpi_cpp, makeCpp(config, ports, model));
 
-    const NativeModelCode native_model_code = makeNativeModelCpp(ports, model);
+    const NativeModelCode native_model_code = makeNativeModelCpp(config, ports, model);
     const std::filesystem::path model_cpp_path = config.out_dir / (config.top_module + "_model.cpp");
     writeFile(model_cpp_path, native_model_code.main_cpp_text);
     output.model_cpps.push_back(model_cpp_path);

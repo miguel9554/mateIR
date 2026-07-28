@@ -5,13 +5,16 @@ module tb_common;
 
     initial $timeformat(-9, -12, "ns", 10);
 
+    // Waveform dump is opt-in via +WAVES=<file>. Dumping the whole TB
+    // hierarchy costs more wall time than the design under test, so a run
+    // measuring simulation speed (WAVES_ENABLE=0) omits the plusarg entirely
+    // rather than paying for a VCD nobody reads.
     initial begin
         string database_name;
-        if (!$value$plusargs("WAVES=%s", database_name)) begin
-            $fatal(1, "Please provide WAVES database name");
+        if ($value$plusargs("WAVES=%s", database_name)) begin
+            $dumpfile(database_name);
+            $dumpvars(0, tb);
         end
-        $dumpfile(database_name);
-        $dumpvars(0, tb);
     end
 
     // Periodic simulation-speed progress. Every PROGRESS_STEP_NS of simulation

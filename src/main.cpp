@@ -39,6 +39,9 @@ void printUsage(const char* progName) {
               << "                            generated .cpp/.sv output\n"
               << "  --module-name <name>      SV module name for --dpi-lib generated wrapper\n"
               << "  --function-prefix <name>  C function name prefix for --dpi-lib generated glue\n"
+              << "  --dpi-no-observables      Build a compute-only --dpi-lib model: drop the per-node\n"
+              << "                            internal-signal storage writes. Faster, but the model\n"
+              << "                            cannot be traced (+MATE_DPI_TRACE) or introspected\n"
               << "  --dpi-out-lib <path>      Output path for the --dpi-lib compiled static library\n"
               << "  --dpi-include-dirs <d1,d2,...>\n"
               << "                            Extra -I directories for compiling --dpi-lib output\n"
@@ -135,6 +138,7 @@ int main(int argc, char** argv) {
     bool simulateMode = false;
     bool analyzeMode = false;
     bool dpiLibMode = false;
+    bool dpiObservables = true;
     bool dumpPasses = false;
     std::string frontendName = "systemverilog";
     std::string topModule;
@@ -170,6 +174,8 @@ int main(int argc, char** argv) {
             analyzeMode = true;
         } else if (std::strcmp(argv[i], "--dpi-lib") == 0) {
             dpiLibMode = true;
+        } else if (std::strcmp(argv[i], "--dpi-no-observables") == 0) {
+            dpiObservables = false;
         } else if (std::strcmp(argv[i], "--infer-top-domains") == 0) {
             topDomainMode = TopDomainMode::Infer;
         } else if (std::strcmp(argv[i], "--infer-synchronizers") == 0) {
@@ -270,6 +276,9 @@ int main(int argc, char** argv) {
             }
             if (dpiOutLibStr.empty()) throw CompilerError("--dpi-lib requires --dpi-out-lib <path>");
         }
+        if (!dpiObservables && !dpiLibMode) {
+            throw CompilerError("--dpi-no-observables requires --dpi-lib");
+        }
         if (topDomainMode == TopDomainMode::Infer && !domainFiles.empty()) {
             throw CompilerError("--infer-top-domains cannot be used with --domains");
         }
@@ -368,6 +377,7 @@ int main(int argc, char** argv) {
             dpiConfig.out_dir = outputDir;
             dpiConfig.module_name = moduleName;
             dpiConfig.function_prefix = functionPrefix;
+            dpiConfig.emit_observables = dpiObservables;
             DpiCodegenOutput codegenOutput = generateDpiCodegen(dpiConfig, runtimeModel);
 
             std::cout << "Compiling into " << dpiOutLibStr << "...\n";

@@ -13,6 +13,21 @@ endif
 
 WAVES ?= waves.$(TRACE_EXT)
 
+# WAVES_ENABLE=0 drops Verilator's own waveform dump: the model is built
+# without --trace and the run gets no +WAVES=, which tb_common.sv reads as
+# "skip $dumpvars". Every run otherwise dumps the entire TB hierarchy --
+# RTL DUT, DPI wrapper and checkers -- which dominates wall time and makes
+# any measurement of the DPI model itself meaningless.
+WAVES_ENABLE ?= 1
+ifeq ($(WAVES_ENABLE),0)
+TRACE_FLAG =
+WAVES_ARG =
+else ifeq ($(WAVES_ENABLE),1)
+WAVES_ARG = +WAVES=$(WAVES)
+else
+$(error WAVES_ENABLE must be 0 or 1)
+endif
+
 ROOT_DIR       = ../..
 PROJECT_ROOT   = $(ROOT_DIR)/../..
 RTL_DIR        = $(ROOT_DIR)/rtl
@@ -78,6 +93,21 @@ endif
 endif
 
 ifeq ($(DPI),1)
+
+# DPI_OBSERVABLES=0 builds a compute-only model (mate --dpi-no-observables):
+# the generated code stops copying every internal node's value into its
+# observable storage slot. That makes the model faster but unreadable -- the
+# DPI tracer and any mate_get_observable call throw -- so it is incompatible
+# with dpi-vcd-compare and only makes sense for speed measurement or for a
+# regression run that only checks port-level DPI-vs-RTL equivalence.
+DPI_OBSERVABLES ?= 1
+ifeq ($(DPI_OBSERVABLES),0)
+DPI_OBSERVABLES_ARG = --dpi-no-observables
+else ifeq ($(DPI_OBSERVABLES),1)
+DPI_OBSERVABLES_ARG =
+else
+$(error DPI_OBSERVABLES must be 0 or 1)
+endif
 
 DPI_BUILD_TARGET ?= dev
 # When DPI_BUILD_TARGET=noop (regression pre-builds the tree once upfront),
@@ -159,6 +189,7 @@ $(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate $(DPI_LINK_LIB_FILES
 		--dpi-out-lib $(DPI_LIB) \
 		--dpi-include-dirs $(DPI_INCLUDE_DIRS) \
 		--dpi-link-libs $(DPI_LINK_LIBS) \
+		$(DPI_OBSERVABLES_ARG) \
 		$(DPI_CXX_FLAGS_ARG) \
 		$(RTL_SRCS)
 	touch $(GEN_STAMP)
@@ -214,7 +245,7 @@ PLUSARGS ?=
 
 $(WAVES): $(OUT) force
 	mkdir -p $(CUSTOM_SIM_DIR)/stimuli
-	$(SANITIZER_ENV) ./obj_dir/V$(TOP_MODULE) +WAVES=$(WAVES) $(SEED_ARG) $(PLUSARGS)
+	$(SANITIZER_ENV) ./obj_dir/V$(TOP_MODULE) $(WAVES_ARG) $(SEED_ARG) $(PLUSARGS)
 
 simulate:
 	$(MAKE) $(WAVES)
@@ -246,6 +277,9 @@ RTL_TOP_SCOPE = tb.uut
 dpi-vcd-compare:
 ifneq ($(DPI),1)
 	$(error dpi-vcd-compare requires DPI=1)
+endif
+ifeq ($(DPI_OBSERVABLES),0)
+	$(error dpi-vcd-compare needs a traceable model; drop DPI_OBSERVABLES=0)
 endif
 	$(MAKE) $(WAVES) PLUSARGS="+MATE_DPI_TRACE=$(DPI_TRACE_VCD) $(if $(filter 1,$(DPI_TRACE_FLAT)),+MATE_DPI_TRACE_FLAT=1) $(PLUSARGS)"
 	cmake --preset $(VCD_COMPARE_BUILD_TARGET) -S $(PROJECT_ROOT)/tools/vcd-compare

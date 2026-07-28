@@ -112,6 +112,11 @@ struct MateModel {
     // Aliased observables share the same offset.
     std::vector<size_t> observable_snapshot_offset;
     size_t observable_snapshot_words_total = 0;
+    // See GeneratedModelMetadata::observables_enabled. False means internal
+    // storage slots are never written by the generated code, so reading any
+    // observable would return stale words -- the read entry points throw
+    // instead.
+    bool observables_enabled = true;
     size_t spill_words_count = 0;
     mate::abi::GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
     std::vector<mate::abi::GeneratedResetApplyFn> reset_apply;
@@ -202,6 +207,19 @@ MateInstance& checkedInstance(MateInstance* instance) {
 const MateInstance& checkedInstance(const MateInstance* instance) {
     if (!instance) throw mate::CompilerError("Mate ABI: instance pointer is null");
     return *instance;
+}
+
+// A compute-only model (mate --dpi-no-observables) never writes its internal
+// storage slots, so their words are meaningless. Reading them would silently
+// yield zeros/stale state and, worse, produce a plausible-looking-but-wrong
+// waveform, so every observable read refuses up front.
+void requireObservables(const MateModel& model, const char* entry_point) {
+    if (model.observables_enabled) return;
+    throw mate::CompilerError(std::format(
+        "Mate ABI: {} is unavailable -- this model was generated with observables "
+        "disabled (mate --dpi-no-observables), so internal signal storage is never "
+        "written. Regenerate without that flag to trace or introspect it.",
+        entry_point));
 }
 
 void validateWords(const char* role,
@@ -687,6 +705,7 @@ void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& g
         }
     }
 
+    model.observables_enabled = generated_metadata.observables_enabled;
     model.spill_words_count = generated_metadata.spill_words_count;
     model.evaluate_combinational = generated_metadata.evaluate_combinational;
     model.reset_apply = generated_metadata.reset_apply;
@@ -1141,6 +1160,7 @@ MateStatusCode mate_get_observable(const MateInstance* instance,
                                    MateStatus* status) {
     return guard(status, [&]() {
         const MateInstance& checked = checkedInstance(instance);
+        requireObservables(*checked.model, "mate_get_observable");
         if (observable_id < 0 || static_cast<size_t>(observable_id) >= checked.model->observables.size()) {
             throw mate::CompilerError(std::format("Mate ABI: invalid observable handle {}", observable_id));
         }
@@ -1180,6 +1200,7 @@ MateStatusCode mate_get_all_observables(const MateInstance* instance,
                                         MateStatus* status) {
     return guard(status, [&]() {
         const MateInstance& checked = checkedInstance(instance);
+        requireObservables(*checked.model, "mate_get_all_observables");
         const size_t total = checked.model->observable_snapshot_words_total;
         if (nwords < 0 || static_cast<size_t>(nwords) != total) {
             throw mate::CompilerError(std::format(

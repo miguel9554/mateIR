@@ -178,6 +178,45 @@ MateStatusCode mate_record_inputs(MateInstance* instance,
                                   const MateInputUpdate* updates,
                                   int32_t update_count,
                                   MateStatus* status);
+/*
+ * Commit-only clock/reset edges, plus an explicit settle. Split out of
+ * mate_apply_clock/mate_apply_reset so a caller can process every edge landing
+ * in one simulation instant before evaluating once:
+ *
+ *     mate_settle_if_dirty(...)   // restore the settled invariant, if needed
+ *     for each domain with an edge this instant: mate_commit_clock/reset(...)
+ *     mate_settle(...)
+ *
+ * Two properties fall out of committing with no evaluation in between.
+ * (1) Flop D storage is only ever refreshed by an evaluation, so every domain
+ *     committing in the same instant reads the same pre-edge D snapshot --
+ *     matching RTL, where all non-blocking updates sample pre-edge values --
+ *     and the commit order becomes unobservable.
+ * (2) The pre-edge D snapshot is the one left by the previous settle, so the
+ *     instance must BE settled when the commits run. A caller that records
+ *     inputs without evaluating (mate_record_inputs) breaks that, so it calls
+ *     mate_settle_if_dirty first: that evaluates only when an input write
+ *     actually changed a value, which is once per instant at most and never at
+ *     all for a harness whose inputs settle before the edge. Doing it once,
+ *     ahead of every commit, also keeps property (1) intact.
+ *
+ * mate_apply_clock/mate_apply_reset remain the self-contained form for callers
+ * that drive inputs *as part of* the edge call and need those inputs sampled by
+ * this edge (the vector simulator's inputs_before_edge). They evaluate before
+ * committing and therefore cannot honor (1) across domains.
+ */
+MateStatusCode mate_commit_clock(MateInstance* instance,
+                                 int32_t clock_id,
+                                 MateEdge edge,
+                                 const MateInputUpdate* updates,
+                                 int32_t update_count,
+                                 MateStatus* status);
+MateStatusCode mate_commit_reset(MateInstance* instance,
+                                 int32_t reset_id,
+                                 MateEdge edge,
+                                 MateStatus* status);
+MateStatusCode mate_settle(MateInstance* instance, MateStatus* status);
+MateStatusCode mate_settle_if_dirty(MateInstance* instance, MateStatus* status);
 MateStatusCode mate_apply_clock(MateInstance* instance,
                                 int32_t clock_id,
                                 MateEdge edge,

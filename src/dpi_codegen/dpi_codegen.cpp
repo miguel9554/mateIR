@@ -540,6 +540,33 @@ std::vector<const RuntimeClockMetadata*> runtimeClocksForPort(
     return result;
 }
 
+const RuntimeResetMetadata& runtimeResetForPort(const RtlRuntimeModel& model, const Port& port) {
+    const std::string& source_leaf = port.leaves.front().leaf_name;
+    for (const auto& reset : model.metadata().resets) {
+        const auto& source = model.metadata().input_leaves.at(reset.source_input.value);
+        if (source.leaf_name == source_leaf) return reset;
+    }
+    throw CompilerError(std::format(
+        "mate-dpi-codegen: reset '{}' has no runtime reset domain", port.name));
+}
+
+// DFG node backing a clock/reset port's source signal, for reachability
+// questions about the signal itself (see sourceSignalDrivesLogic).
+const DFGNode* clockSourceNode(const RtlRuntimeModel& model, const Port& port) {
+    const auto clocks = runtimeClocksForPort(model, port);
+    if (clocks.empty()) {
+        throw CompilerError(std::format(
+            "mate-dpi-codegen: clock '{}' has no runtime clock domain", port.name));
+    }
+    return model.metadata().input_leaves.at(clocks.front()->source_input.value).node;
+}
+
+const DFGNode* resetSourceNode(const RtlRuntimeModel& model, const Port& port) {
+    return model.metadata()
+        .input_leaves.at(runtimeResetForPort(model, port).source_input.value)
+        .node;
+}
+
 const RuntimeClockMetadata& runtimeClockForPortEdge(
         const RtlRuntimeModel& model,
         const Port& port,
@@ -991,19 +1018,20 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
                 const auto sync_indices = syncInputsForClockDomain(ports, runtime_clock.domain_id);
                 edge_inputs.insert(edge_inputs.end(), sync_indices.begin(), sync_indices.end());
             }
-            emitFunctionHeader(sanitizeIdentifier(clock.name) + "_" + edgeName(edge), edge_inputs, true);
+            // No input updates: the wrapper's record call already refreshed
+            // every input for this instant, and mate_settle_if_dirty ran
+            // before any commit, so storage and flop D are both current.
+            (void)edge_inputs;
+            emitFunctionHeader("commit_" + sanitizeIdentifier(clock.name) + "_" + edgeName(edge),
+                               {}, false);
             out << " {\n";
             out << "        auto& context = checkedContext(context_handle);\n";
             out << "        MateStatus status{};\n";
-            emitUpdateArrayWithCount("edge_updates", edge_inputs);
-            out << "        check(mate_apply_clock(context.instance, context.clocks.at(kClock_"
+            out << "        (void)time_ns;\n";
+            out << "        check(mate_commit_clock(context.instance, context.clocks.at(kClock_"
                 << clockHandleIdentifier(model.metadata(), runtime_clock) << "), " << edgeAbiName(edge)
-                << ", edge_updates, edge_updates_count, &status), status, \"" << config.function_prefix << "_"
-                << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\");\n";
-            out << "        logEvals(context, time_ns, \"" << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\");\n";
-            out << "        writeOutputs(context";
-            for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
-            out << ");\n";
+                << ", nullptr, 0, &status), status, \"" << config.function_prefix
+                << "_commit_" << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\");\n";
             out << "}\n\n";
         }
     }
@@ -1011,21 +1039,50 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     for (size_t reset_index : ports.resets) {
         const auto& reset = ports.inputs[reset_index];
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
-            emitFunctionHeader(sanitizeIdentifier(reset.name) + "_" + edgeName(edge), {}, true);
+            emitFunctionHeader("commit_" + sanitizeIdentifier(reset.name) + "_" + edgeName(edge),
+                               {}, false);
             out << " {\n";
             out << "        auto& context = checkedContext(context_handle);\n";
             out << "        MateStatus status{};\n";
-            out << "        check(mate_apply_reset(context.instance, context.resets.at(kReset_"
+            out << "        (void)time_ns;\n";
+            out << "        check(mate_commit_reset(context.instance, context.resets.at(kReset_"
                 << leafIdentifier(reset.leaves.front().leaf_name) << "), " << edgeAbiName(edge)
-                << ", &status), status, \"" << config.function_prefix << "_"
+                << ", &status), status, \"" << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "\");\n";
-            out << "        logEvals(context, time_ns, \"" << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "\");\n";
-            out << "        writeOutputs(context";
-            for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
-            out << ");\n";
             out << "}\n\n";
         }
     }
+
+    // Restores the settled invariant before any commit runs, for the case where
+    // an input changed earlier in this instant without triggering an evaluation
+    // (the record block never evaluates, and the comb-refresh block only fires
+    // for inputs that reach an output). No-op when nothing actually changed.
+    emitFunctionHeader("settle_if_dirty", {}, true);
+    out << " {\n";
+    out << "        auto& context = checkedContext(context_handle);\n";
+    out << "        MateStatus status{};\n";
+    out << "        check(mate_settle_if_dirty(context.instance, &status), status, \""
+        << config.function_prefix << "_settle_if_dirty\");\n";
+    out << "        logEvals(context, time_ns, \"pre-edge-settle\");\n";
+    out << "        writeOutputs(context";
+    for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
+    out << ");\n";
+    out << "}\n\n";
+
+    // One settle for every edge that landed in this simulation instant. Kept
+    // separate from the commits above so all of them read the same pre-edge
+    // flop D snapshot; see mate_commit_clock's contract.
+    emitFunctionHeader("settle", {}, true);
+    out << " {\n";
+    out << "        auto& context = checkedContext(context_handle);\n";
+    out << "        MateStatus status{};\n";
+    out << "        check(mate_settle(context.instance, &status), status, \""
+        << config.function_prefix << "_settle\");\n";
+    out << "        logEvals(context, time_ns, \"settle\");\n";
+    out << "        writeOutputs(context";
+    for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
+    out << ");\n";
+    out << "}\n\n";
 
     out << "} // extern \"C\"\n";
     return out.str();
@@ -1088,6 +1145,49 @@ struct WrapperCombAnalysis {
     std::set<std::string> comb_output_leaf_names;
     std::set<std::string> cone_input_port_names;
 };
+
+// Whether a clock/reset source signal is itself readable by the design --
+// clock-as-data, clock gating, a reset level feeding logic. An edge that does
+// NOT commit anything (the inactive edge of a clock, either edge of a reset
+// that is not its active one) changes exactly one thing: that signal's own
+// stored word. If the signal cannot reach an output leaf or a flop D sink,
+// nothing downstream can differ, and the wrapper skips the settle entirely.
+// Reset levels are additionally read directly by the generated clock-commit
+// code for async-reset priority, but that reads input storage, not an
+// evaluated value, so it does not need a settle either.
+bool sourceSignalDrivesLogic(const RtlRuntimeModel& model, const DFGNode* source) {
+    if (!source) return false;
+    if (!model.top().dfg) {
+        throw CompilerError("mate-dpi-codegen: top module has no DFG");
+    }
+    std::map<const DFGNode*, std::vector<const DFGNode*>> users;
+    for (const auto& node : model.top().dfg->nodes) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
+            users[input.node].push_back(node.get());
+        });
+    }
+    std::set<const DFGNode*> targets;
+    for (const auto& output : model.metadata().output_leaves) {
+        if (output.node) targets.insert(output.node);
+    }
+    for (const auto& flop : model.metadata().flops) {
+        for (const auto& leaf : flop.leaves) {
+            if (leaf.d_node) targets.insert(leaf.d_node);
+        }
+    }
+    std::set<const DFGNode*> seen;
+    std::vector<const DFGNode*> stack{source};
+    while (!stack.empty()) {
+        const DFGNode* node = stack.back();
+        stack.pop_back();
+        if (!seen.insert(node).second) continue;
+        if (node != source && targets.contains(node)) return true;
+        if (auto it = users.find(node); it != users.end()) {
+            for (const DFGNode* user : it->second) stack.push_back(user);
+        }
+    }
+    return false;
+}
 
 WrapperCombAnalysis analyzeWrapperCombDependence(const ModelPorts& ports,
                                                  const RtlRuntimeModel& model) {
@@ -1210,9 +1310,10 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
                 const auto sync_indices = syncInputsForClockDomain(ports, runtime_clock.domain_id);
                 event_inputs.insert(event_inputs.end(), sync_indices.begin(), sync_indices.end());
             }
-            out << "    import \"DPI-C\" function void " << config.function_prefix << "_"
+            (void)event_inputs;
+            out << "    import \"DPI-C\" function void " << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "(\n";
-            emitSvImportArgs(out, event_inputs, output_leaves, ports);
+            emitSvImportArgs(out, {}, {}, ports);
             out << "    );\n\n";
         }
     }
@@ -1220,12 +1321,20 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     for (size_t reset_index : ports.resets) {
         const auto& reset = ports.inputs[reset_index];
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
-            out << "    import \"DPI-C\" function void " << config.function_prefix << "_"
+            out << "    import \"DPI-C\" function void " << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "(\n";
-            emitSvImportArgs(out, {}, output_leaves, ports);
+            emitSvImportArgs(out, {}, {}, ports);
             out << "    );\n\n";
         }
     }
+
+    out << "    import \"DPI-C\" function void " << config.function_prefix << "_settle_if_dirty(\n";
+    emitSvImportArgs(out, {}, output_leaves, ports);
+    out << "    );\n\n";
+
+    out << "    import \"DPI-C\" function void " << config.function_prefix << "_settle(\n";
+    emitSvImportArgs(out, {}, output_leaves, ports);
+    out << "    );\n\n";
 
     out << "endpackage\n";
     return out.str();
@@ -1336,6 +1445,13 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
 
     out << "    chandle ctx;\n";
     out << "    logic initialized;\n";
+    // Set when +MATE_DPI_TRACE enabled the tracer. An edge that commits nothing
+    // still has to settle while tracing: a clock/reset signal is re-registered
+    // as its own internal observable in every submodule scope it enters, and
+    // those alias slots are only refreshed by an evaluation, so skipping the
+    // settle would leave them stale in the waveform even though no simulation
+    // state depends on them.
+    out << "    logic trace_active;\n";
     for (size_t index : ports.clocks) out << "    logic last_" << ports.inputs[index].name << ";\n";
     for (size_t index : ports.resets) out << "    logic last_" << ports.inputs[index].name << ";\n";
     out << "\n";
@@ -1355,11 +1471,13 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         }
     }
     out << "        ctx = " << config.function_prefix << "_create_context();\n";
+    out << "        trace_active = 1'b0;\n";
     out << "        begin\n";
     out << "            string mate_dpi_trace_path;\n";
     out << "            if ($value$plusargs(\"MATE_DPI_TRACE=%s\", mate_dpi_trace_path)) begin\n";
     out << "                " << config.function_prefix
         << "_enable_trace(ctx, mate_dpi_trace_path, $test$plusargs(\"MATE_DPI_TRACE_FLAT\"));\n";
+    out << "                trace_active = 1'b1;\n";
     out << "            end\n";
     out << "        end\n";
     out << "        begin\n";
@@ -1500,6 +1618,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         const auto& reset = ports.inputs[index];
         out << "        logic " << reset.name << "_changed;\n";
     }
+    out << "        logic need_settle;\n";
     out << "\n";
     for (size_t index : ports.clocks) {
         const auto& clock = ports.inputs[index];
@@ -1537,56 +1656,86 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         }
     };
 
+    // Every edge in this instant commits first; the single settle below then
+    // evaluates once. Because nothing evaluates between commits, they all read
+    // the pre-edge flop D snapshot left by the previous settle -- which is both
+    // what RTL non-blocking semantics require for coincident edges in different
+    // domains, and what makes the commit order unobservable.
+    //
+    // need_settle is accumulated rather than assumed: an edge that commits
+    // nothing (a clock's inactive edge, a reset's non-active edge) changes only
+    // that signal's own stored word, so it needs a settle only if the design
+    // actually reads that signal (sourceSignalDrivesLogic).
+    out << "            " << config.function_prefix << "_settle_if_dirty(\n";
+    emitSvCallArgs(out, {}, output_leaves, ports);
+    out << "            );\n";
+    out << "            need_settle = trace_active;\n";
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs[clock_index];
+        const bool clock_drives_logic =
+            sourceSignalDrivesLogic(model, clockSourceNode(model, clock));
         out << "            if (" << clock.name << "_changed) begin\n";
         out << "                last_" << clock.name << " = " << clock.name << ";\n";
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             const auto& runtime_clock = runtimeClockForPortEdge(model, clock, edge);
+            const bool active_edge = runtime_clock.edge == edge;
             out << (edge == POSEDGE ? "                if" : "                else if")
                 << " (" << clock.name << " === 1'b" << (edge == POSEDGE ? "1" : "0") << ") begin\n";
-            std::vector<LeafIndex> event_inputs;
-            if (runtime_clock.edge == edge) {
-                event_inputs.insert(event_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
-                const auto sync_indices = syncInputsForClockDomain(ports, runtime_clock.domain_id);
-                event_inputs.insert(event_inputs.end(), sync_indices.begin(), sync_indices.end());
-            }
-            out << "                    " << config.function_prefix << "_"
+            out << "                    " << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "(\n";
-            emitSvCallArgs(out, event_inputs, output_leaves, ports);
+            emitSvCallArgs(out, {}, {}, ports);
             out << "                    );\n";
+            if (active_edge || clock_drives_logic) {
+                out << "                    need_settle = 1'b1;\n";
+            } else {
+                out << "                    // inactive edge and " << clock.name
+                    << " drives no logic: nothing can have changed\n";
+            }
             out << "                end\n";
         }
         out << "                else begin\n";
         out << "                    $fatal(1, \"" << config.module_name
             << " only accepts 2-state " << clock.name << " values\");\n";
         out << "                end\n";
-        out << "                " << config.function_prefix << "_trace_dump(ctx, $time);\n";
-        emitCommitOutputs();
         out << "            end\n\n";
     }
 
     for (size_t reset_index : ports.resets) {
         const auto& reset = ports.inputs[reset_index];
+        const bool reset_drives_logic =
+            sourceSignalDrivesLogic(model, resetSourceNode(model, reset));
+        const edge_t reset_active_edge = runtimeResetForPort(model, reset).active_edge;
         out << "            if (" << reset.name << "_changed) begin\n";
         out << "                last_" << reset.name << " = " << reset.name << ";\n";
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             out << (edge == POSEDGE ? "                if" : "                else if")
                 << " (" << reset.name << " === 1'b" << (edge == POSEDGE ? "1" : "0") << ") begin\n";
-            out << "                    " << config.function_prefix << "_"
+            out << "                    " << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "(\n";
-            emitSvCallArgs(out, {}, output_leaves, ports);
+            emitSvCallArgs(out, {}, {}, ports);
             out << "                    );\n";
+            if (edge == reset_active_edge || reset_drives_logic) {
+                out << "                    need_settle = 1'b1;\n";
+            } else {
+                out << "                    // reset release and " << reset.name
+                    << " drives no logic: nothing can have changed\n";
+            }
             out << "                end\n";
         }
         out << "                else begin\n";
         out << "                    $fatal(1, \"" << config.module_name
             << " only accepts 2-state " << reset.name << " values\");\n";
         out << "                end\n";
-        out << "                " << config.function_prefix << "_trace_dump(ctx, $time);\n";
-        emitCommitOutputs();
-        out << "            end\n";
+        out << "            end\n\n";
     }
+
+    out << "            if (need_settle) begin\n";
+    out << "                " << config.function_prefix << "_settle(\n";
+    emitSvCallArgs(out, {}, output_leaves, ports);
+    out << "                );\n";
+    out << "            end\n";
+    out << "            " << config.function_prefix << "_trace_dump(ctx, $time);\n";
+    emitCommitOutputs();
     out << "        end\n";
     out << "    end\n\n";
     out << "endmodule\n";

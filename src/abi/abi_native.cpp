@@ -158,6 +158,11 @@ struct MateInstance {
     // design (there is no activity scheduling), so this is the single number
     // that says how much redundant work a simulation instant is doing.
     uint64_t evaluate_count = 0;
+    // Set when an input write actually changes a stored value, cleared by every
+    // evaluation. Guards the settled-instance invariant that the commit-only
+    // edge path depends on: flop D is only trustworthy as a pre-edge snapshot
+    // while this is false. See mate_settle_if_dirty.
+    bool inputs_dirty = false;
 };
 
 namespace {
@@ -251,7 +256,11 @@ void validateWords(const char* role,
     }
 }
 
-void copyWordsToStorage(const char* role,
+// Returns whether the stored value actually changed. Callers writing *input*
+// storage use that to maintain MateInstance::inputs_dirty: a harness re-sending
+// an unchanged value (which the DPI wrapper does at every clock edge) must not
+// be mistaken for a reason to re-evaluate.
+bool copyWordsToStorage(const char* role,
                         const std::string& leaf_name,
                         int32_t width,
                         const uint64_t* words,
@@ -265,7 +274,9 @@ void copyWordsToStorage(const char* role,
             "Mate ABI: storage for {} '{}' expected {} words, has {}",
             role, leaf_name, expected, storage_words));
     }
+    const bool changed = !std::equal(words, words + nwords, storage);
     std::copy(words, words + nwords, storage);
+    return changed;
 }
 
 void storageToWords(const std::string& leaf_name,
@@ -362,6 +373,7 @@ std::vector<NativeWordSlot> makeWordSlots(FlatWordStorage& storage) {
 // through here.
 void evaluateAndPublish(MateInstance& instance) {
     ++instance.evaluate_count;
+    instance.inputs_dirty = false;
     instance.model->evaluate_combinational(instance.input_slots, instance.output_slots,
                                            instance.observable_slots, instance.spill_words);
 }
@@ -370,12 +382,13 @@ void evaluateAndPublish(MateInstance& instance) {
 // only, re-evaluate combinational logic so the flop commit sees fresh D
 // values, commit FlopD -> FlopQ for this clock domain, then re-evaluate once
 // more so outputs reflect the new FlopQ state.
-void applyClockEdge(MateInstance& instance,
-                    size_t clock_id,
-                    const AbiClock& clock,
-                    MateEdge edge,
-                    const MateInputUpdate* updates_before_edge,
-                    int32_t update_count) {
+void commitClockEdge(MateInstance& instance,
+                     size_t clock_id,
+                     const AbiClock& clock,
+                     MateEdge edge,
+                     const MateInputUpdate* updates_before_edge,
+                     int32_t update_count,
+                     bool evaluate_before_commit) {
     const bool active_edge = (edge == clock.active_edge);
     if (!active_edge && update_count > 0) {
         throw mate::CompilerError(std::format(
@@ -408,21 +421,28 @@ void applyClockEdge(MateInstance& instance,
                 "Mate ABI: sync input '{}' does not belong to active clock domain {}",
                 input.leaf_name, clock_id));
         }
-        copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
-                           instance.input_words.dataAt(input.storage_index),
-                           instance.input_words.countAt(input.storage_index));
+        if (copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
+                               instance.input_words.dataAt(input.storage_index),
+                               instance.input_words.countAt(input.storage_index))) {
+            instance.inputs_dirty = true;
+        }
     }
 
     if (active_edge) {
-        evaluateAndPublish(instance);
+        // Only for the self-contained mate_apply_clock form, whose caller
+        // expects the inputs it just passed to be sampled by this edge. The
+        // commit-only form relies on the settled-instance invariant instead,
+        // so D already holds the pre-edge values and re-deriving them here
+        // would both waste a full sweep and let an earlier domain's commit
+        // leak into a later one at the same instant.
+        if (evaluate_before_commit) evaluateAndPublish(instance);
         instance.model->clock_commit.at(clock_id)(instance.input_slots, instance.observable_slots);
     }
-    evaluateAndPublish(instance);
 }
 
 // Drive the reset source signal and, on the active edge, apply reset values to
 // this domain's FlopQ storage.
-void applyResetEdge(MateInstance& instance, size_t reset_id, const AbiReset& reset, MateEdge edge) {
+void commitResetEdge(MateInstance& instance, size_t reset_id, const AbiReset& reset, MateEdge edge) {
     const AbiInput& source = instance.model->inputs.at(reset.source_storage_index);
     setStorageFromEdge(instance.model->input_storage.at(source.storage_index), edge,
                        instance.input_words.dataAt(source.storage_index),
@@ -430,7 +450,6 @@ void applyResetEdge(MateInstance& instance, size_t reset_id, const AbiReset& res
     if (edge == reset.active_edge) {
         instance.model->reset_apply.at(reset_id)(instance.observable_slots);
     }
-    evaluateAndPublish(instance);
 }
 
 bool resetDomainActive(const MateInstance& instance, const AbiReset& reset) {
@@ -456,9 +475,11 @@ void applyRawInputUpdates(MateInstance& instance, const MateInputUpdate* updates
                 "Mate ABI: invalid input handle {}", update.input_id));
         }
         const AbiInput& input = instance.model->inputs.at(static_cast<size_t>(update.input_id));
-        copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
-                           instance.input_words.dataAt(input.storage_index),
-                           instance.input_words.countAt(input.storage_index));
+        if (copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
+                               instance.input_words.dataAt(input.storage_index),
+                               instance.input_words.countAt(input.storage_index))) {
+            instance.inputs_dirty = true;
+        }
     }
 }
 
@@ -1112,6 +1133,58 @@ MateStatusCode mate_record_inputs(MateInstance* instance,
     });
 }
 
+const AbiClock& checkedClock(const MateInstance& instance, int32_t clock_id) {
+    if (clock_id < 0 || static_cast<size_t>(clock_id) >= instance.model->clocks.size()) {
+        throw mate::CompilerError(std::format("Mate ABI: invalid clock handle {}", clock_id));
+    }
+    return instance.model->clocks.at(static_cast<size_t>(clock_id));
+}
+
+const AbiReset& checkedReset(const MateInstance& instance, int32_t reset_id) {
+    if (reset_id < 0 || static_cast<size_t>(reset_id) >= instance.model->resets.size()) {
+        throw mate::CompilerError(std::format("Mate ABI: invalid reset handle {}", reset_id));
+    }
+    return instance.model->resets.at(static_cast<size_t>(reset_id));
+}
+
+MateStatusCode mate_commit_clock(MateInstance* instance,
+                                 int32_t clock_id,
+                                 MateEdge edge,
+                                 const MateInputUpdate* updates,
+                                 int32_t update_count,
+                                 MateStatus* status) {
+    return guard(status, [&]() {
+        MateInstance& checked = checkedInstance(instance);
+        commitClockEdge(checked, static_cast<size_t>(clock_id),
+                        checkedClock(checked, clock_id), edge, updates, update_count,
+                        /*evaluate_before_commit=*/false);
+    });
+}
+
+MateStatusCode mate_commit_reset(MateInstance* instance,
+                                 int32_t reset_id,
+                                 MateEdge edge,
+                                 MateStatus* status) {
+    return guard(status, [&]() {
+        MateInstance& checked = checkedInstance(instance);
+        commitResetEdge(checked, static_cast<size_t>(reset_id),
+                        checkedReset(checked, reset_id), edge);
+    });
+}
+
+MateStatusCode mate_settle(MateInstance* instance, MateStatus* status) {
+    return guard(status, [&]() {
+        evaluateAndPublish(checkedInstance(instance));
+    });
+}
+
+MateStatusCode mate_settle_if_dirty(MateInstance* instance, MateStatus* status) {
+    return guard(status, [&]() {
+        MateInstance& checked = checkedInstance(instance);
+        if (checked.inputs_dirty) evaluateAndPublish(checked);
+    });
+}
+
 MateStatusCode mate_apply_clock(MateInstance* instance,
                                 int32_t clock_id,
                                 MateEdge edge,
@@ -1120,12 +1193,11 @@ MateStatusCode mate_apply_clock(MateInstance* instance,
                                 MateStatus* status) {
     return guard(status, [&]() {
         MateInstance& checked = checkedInstance(instance);
-        if (clock_id < 0 || static_cast<size_t>(clock_id) >= checked.model->clocks.size()) {
-            throw mate::CompilerError(std::format("Mate ABI: invalid clock handle {}", clock_id));
-        }
-        applyClockEdge(checked, static_cast<size_t>(clock_id),
-                       checked.model->clocks.at(static_cast<size_t>(clock_id)), edge,
-                       updates_before_edge, update_count);
+        commitClockEdge(checked, static_cast<size_t>(clock_id),
+                        checkedClock(checked, clock_id), edge,
+                        updates_before_edge, update_count,
+                        /*evaluate_before_commit=*/true);
+        evaluateAndPublish(checked);
     });
 }
 
@@ -1135,11 +1207,9 @@ MateStatusCode mate_apply_reset(MateInstance* instance,
                                 MateStatus* status) {
     return guard(status, [&]() {
         MateInstance& checked = checkedInstance(instance);
-        if (reset_id < 0 || static_cast<size_t>(reset_id) >= checked.model->resets.size()) {
-            throw mate::CompilerError(std::format("Mate ABI: invalid reset handle {}", reset_id));
-        }
-        applyResetEdge(checked, static_cast<size_t>(reset_id),
-                       checked.model->resets.at(static_cast<size_t>(reset_id)), edge);
+        commitResetEdge(checked, static_cast<size_t>(reset_id),
+                        checkedReset(checked, reset_id), edge);
+        evaluateAndPublish(checked);
     });
 }
 

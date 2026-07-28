@@ -13,6 +13,21 @@ endif
 
 WAVES ?= waves.$(TRACE_EXT)
 
+# WAVES_ENABLE=0 drops Verilator's own waveform dump: the model is built
+# without --trace and the run gets no +WAVES=, which tb_common.sv reads as
+# "skip $dumpvars". Every run otherwise dumps the entire TB hierarchy --
+# RTL DUT, DPI wrapper and checkers -- which dominates wall time and makes
+# any measurement of the DPI model itself meaningless.
+WAVES_ENABLE ?= 1
+ifeq ($(WAVES_ENABLE),0)
+TRACE_FLAG =
+WAVES_ARG =
+else ifeq ($(WAVES_ENABLE),1)
+WAVES_ARG = +WAVES=$(WAVES)
+else
+$(error WAVES_ENABLE must be 0 or 1)
+endif
+
 ROOT_DIR       = ../..
 PROJECT_ROOT   = $(ROOT_DIR)/../..
 RTL_DIR        = $(ROOT_DIR)/rtl
@@ -36,7 +51,14 @@ OUT          = obj_dir/V$(TOP_MODULE)
 GEN_TB_SCRIPT = $(PROJECT_ROOT)/tools/gen_tb.py
 GEN_TB_OUTPUTS = $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv
 
-VERILATOR_WARNS ?= -Wno-TIMESCALEMOD -Wno-WIDTHTRUNC
+# -Wno-ZERODLY: tb_common.sv's progress-reporting delay (step_ns) is a real
+# variable set from a runtime plusarg (PROGRESS_STEP_NS), so Verilator can
+# never statically know whether it's zero -- this is genuinely unresolvable,
+# not a lint issue in any particular test's RTL, and whether it actually
+# surfaces depends on unrelated scheduling details of the rest of the design
+# (e.g. it's silent with the default tb.sv but not with TB_VARIANT's leaner
+# ones), so it belongs in the blanket default here, not a per-test waiver.
+VERILATOR_WARNS ?= -Wno-TIMESCALEMOD -Wno-WIDTHTRUNC -Wno-ZERODLY
 VERILATOR_WARNS += $(shell cat verilator.warns 2>/dev/null)
 SEED_ARG = $(if $(seed),+verilator+seed+$(seed))
 
@@ -51,7 +73,41 @@ $(error GENERATE_TB must be 0 or 1)
 endif
 endif
 
+# TB_VARIANT selects which single-DUT tb.sv gen_tb.py emits, for isolated
+# simulation-performance measurement of one side at a time (no dual
+# instantiation, no checker_dpi comparison, no stimuli recorder -- see
+# gen_tb.py's gen_tb_solo). Leave empty for the normal DPI=1 (dual RTL+DPI
+# with checker) / DPI=0 (RTL + stimuli recorder, for custom-sim/vector-sim)
+# testbenches.
+#   TB_VARIANT=dpi-only  (requires DPI=1) -- DPI model only
+#   TB_VARIANT=rtl-only  (requires DPI=0) -- RTL module only, no recorder
+# Run both variants on the same module and compare tb_common's [SIM SPEED]
+# report from each run for an apples-to-apples RTL-vs-DPI comparison, e.g.:
+#   make simulate DPI=0 TB_VARIANT=rtl-only
+#   make simulate DPI=1 TB_VARIANT=dpi-only
+TB_VARIANT ?=
+ifneq ($(TB_VARIANT),)
+ifeq ($(filter $(TB_VARIANT),dpi-only rtl-only),)
+$(error TB_VARIANT must be empty, dpi-only, or rtl-only)
+endif
+endif
+
 ifeq ($(DPI),1)
+
+# DPI_OBSERVABLES=0 builds a compute-only model (mate --dpi-no-observables):
+# the generated code stops copying every internal node's value into its
+# observable storage slot. That makes the model faster but unreadable -- the
+# DPI tracer and any mate_get_observable call throw -- so it is incompatible
+# with dpi-vcd-compare and only makes sense for speed measurement or for a
+# regression run that only checks port-level DPI-vs-RTL equivalence.
+DPI_OBSERVABLES ?= 1
+ifeq ($(DPI_OBSERVABLES),0)
+DPI_OBSERVABLES_ARG = --dpi-no-observables
+else ifeq ($(DPI_OBSERVABLES),1)
+DPI_OBSERVABLES_ARG =
+else
+$(error DPI_OBSERVABLES must be 0 or 1)
+endif
 
 DPI_BUILD_TARGET ?= dev
 # When DPI_BUILD_TARGET=noop (regression pre-builds the tree once upfront),
@@ -69,8 +125,20 @@ GEN_STAMP   = $(DPI_GEN_DIR)/.stamp
 # C++ itself. These are the only two things that step needs to know about our
 # tree: where svdpi.h/our headers live, and which of our own static libraries
 # to fold into the output archive.
-DPI_INCLUDE_DIRS = $(abspath $(PROJECT_ROOT)/src),$(abspath $(PROJECT_ROOT)/external/slang/external/ieee1800)
-DPI_LINK_LIBS = $(abspath $(BUILD_DIR)/libmate-abi-native.a)
+#
+# DPI_LINK_LIB_FILES is the space-separated form, used as a real prerequisite
+# of $(GEN_STAMP) below -- mate --dpi-lib extracts these archives' *current*
+# object code into the merged output, so a content change in any of them
+# (e.g. mate-tracer.a rebuilt from an unrelated source edit that doesn't
+# touch mate's own sources) must invalidate the stamp even when $(BUILD_DIR)/
+# mate itself didn't change. DPI_LINK_LIBS is the same list joined with
+# commas, matching --dpi-link-libs's expected CLI format.
+empty :=
+space := $(empty) $(empty)
+comma := ,
+DPI_INCLUDE_DIRS = $(abspath $(PROJECT_ROOT)/src),$(abspath $(PROJECT_ROOT)/external/slang/external/ieee1800),$(abspath $(PROJECT_ROOT)/external/cpp-vcd-tracer/src)
+DPI_LINK_LIB_FILES = $(abspath $(BUILD_DIR)/libmate-abi-native.a) $(abspath $(BUILD_DIR)/libmate-tracer.a) $(abspath $(BUILD_DIR)/libmate-vcd-tracer.a)
+DPI_LINK_LIBS = $(subst $(space),$(comma),$(DPI_LINK_LIB_FILES))
 
 # Sanitized preset: compile the generated DPI model with the same sanitizer
 # flags as libmate-abi-native (see CMakeLists ENABLE_SANITIZERS), pull the
@@ -96,12 +164,20 @@ prep: force
 		$(MAKE) -C $(PROJECT_ROOT) $(DPI_BUILD_TARGET); \
 	fi
 
-ifeq ($(GENERATE_TB),1)
-$(GEN_TB_OUTPUTS): $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
-	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi $(MODULE_NAME)
+ifeq ($(TB_VARIANT),rtl-only)
+$(error TB_VARIANT=rtl-only requires DPI=0)
 endif
 
-$(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate | prep
+ifeq ($(GENERATE_TB),1)
+$(GEN_TB_OUTPUTS): $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
+ifeq ($(TB_VARIANT),dpi-only)
+	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi-only $(MODULE_NAME)
+else
+	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi $(MODULE_NAME)
+endif
+endif
+
+$(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate $(DPI_LINK_LIB_FILES) | prep
 	mkdir -p $(DPI_GEN_DIR)
 	$(SANITIZER_ENV) $(BUILD_DIR)/mate \
 		--dpi-lib \
@@ -113,6 +189,7 @@ $(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate | prep
 		--dpi-out-lib $(DPI_LIB) \
 		--dpi-include-dirs $(DPI_INCLUDE_DIRS) \
 		--dpi-link-libs $(DPI_LINK_LIBS) \
+		$(DPI_OBSERVABLES_ARG) \
 		$(DPI_CXX_FLAGS_ARG) \
 		$(RTL_SRCS)
 	touch $(GEN_STAMP)
@@ -140,9 +217,17 @@ $(info RTL_SRCS=$(RTL_SRCS))
 $(info TB_SRCS=$(TB_SRCS))
 $(info GEN_SRCS=$(GEN_SRCS))
 
+ifeq ($(TB_VARIANT),dpi-only)
+$(error TB_VARIANT=dpi-only requires DPI=1)
+endif
+
 ifeq ($(GENERATE_TB),1)
 $(GEN_TB_OUTPUTS): $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
+ifeq ($(TB_VARIANT),rtl-only)
+	cd $(PROJECT_ROOT) && python tools/gen_tb.py --rtl-only $(MODULE_NAME)
+else
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py $(MODULE_NAME)
+endif
 endif
 
 $(OUT): $(SRCS) $(GEN_DIR)/tb.sv
@@ -160,9 +245,47 @@ PLUSARGS ?=
 
 $(WAVES): $(OUT) force
 	mkdir -p $(CUSTOM_SIM_DIR)/stimuli
-	$(SANITIZER_ENV) ./obj_dir/V$(TOP_MODULE) +WAVES=$(WAVES) $(SEED_ARG) $(PLUSARGS)
+	$(SANITIZER_ENV) ./obj_dir/V$(TOP_MODULE) $(WAVES_ARG) $(SEED_ARG) $(PLUSARGS)
 
 simulate:
 	$(MAKE) $(WAVES)
+
+# --- DPI tracer vs Verilator VCD comparison -------------------------------
+# Cross-validates the DPI wrapper's own waveform tracer (src/tracer/,
+# +MATE_DPI_TRACE) against Verilator's native RTL trace produced by this
+# same Makefile, using the compiler's own hierarchy.json (emitted under
+# debug_output/ alongside the DPI model) as the source of truth for what
+# must match. Requires DPI=1. Unlike `compare` in tests/common/vcd-diff.mk
+# (legacy custom-sim vs Verilator), this exercises the DPI model's tracer,
+# not the vector-sim path.
+#
+# DPI_TRACE_FLAT selects the tracer's flat-hierarchy mode (see
+# src/tracer/vcd_backend.h) -- it must stay 1 for this comparison to have a
+# chance of matching hierarchy.json; grouped mode (0) nests every signal
+# under a synthetic inputs/outputs/signals/flops sub-scope that hierarchy.json
+# knows nothing about, so it exists here only to sanity-check that
+# dpi-vcd-compare actually fails against the wrong hierarchy shape.
+VCD_COMPARE_BUILD_TARGET ?= dev
+VCD_COMPARE_BUILD_DIR = $(PROJECT_ROOT)/build/vcd-compare/$(VCD_COMPARE_BUILD_TARGET)
+VCD_COMPARE = $(VCD_COMPARE_BUILD_DIR)/vcd-compare
+DPI_TRACE_VCD ?= dpi_trace.vcd
+DPI_TRACE_FLAT ?= 1
+HIERARCHY_JSON = debug_output/$(MODULE_NAME)/hierarchy.json
+DPI_TRACE_TOP_SCOPE = $(MODULE_NAME)_dpi
+RTL_TOP_SCOPE = tb.uut
+
+dpi-vcd-compare:
+ifneq ($(DPI),1)
+	$(error dpi-vcd-compare requires DPI=1)
+endif
+ifeq ($(DPI_OBSERVABLES),0)
+	$(error dpi-vcd-compare needs a traceable model; drop DPI_OBSERVABLES=0)
+endif
+	$(MAKE) $(WAVES) PLUSARGS="+MATE_DPI_TRACE=$(DPI_TRACE_VCD) $(if $(filter 1,$(DPI_TRACE_FLAT)),+MATE_DPI_TRACE_FLAT=1) $(PLUSARGS)"
+	cmake --preset $(VCD_COMPARE_BUILD_TARGET) -S $(PROJECT_ROOT)/tools/vcd-compare
+	cmake --build $(VCD_COMPARE_BUILD_DIR) --parallel
+	$(SANITIZER_ENV) $(VCD_COMPARE) --hierarchy $(HIERARCHY_JSON) \
+		dpi=$(DPI_TRACE_VCD):$(DPI_TRACE_TOP_SCOPE) \
+		verilator=$(WAVES):$(RTL_TOP_SCOPE)
 
 force:

@@ -53,6 +53,12 @@ typedef struct MateInputUpdate {
     int32_t nwords;
 } MateInputUpdate;
 
+typedef struct MateParamInfo {
+    int32_t width;
+    int32_t nwords;
+    int32_t is_signed;
+} MateParamInfo;
+
 /*
  * Model-specific symbol. Phase 1 generated model code compiles SV to an
  * interpreted model here; phase 2 generated model code returns a native model.
@@ -88,6 +94,57 @@ int32_t mate_observable_id(const MateModel* model, const char* full_path);
 int32_t mate_clock_id(const MateModel* model, const char* display_or_leaf_name);
 int32_t mate_reset_id(const MateModel* model, const char* display_or_leaf_name);
 
+/* Total number of observables (inputs, outputs, internal nodes, flop D/Q),
+ * for enumerating the full set without knowing names in advance. Ids are
+ * dense: valid observable ids are [0, mate_observable_count(model)). */
+int32_t mate_observable_count(const MateModel* model);
+
+/* Valid for the lifetime of `model`; do not free. */
+const char* mate_observable_full_path(const MateModel* model, int32_t observable_id);
+
+/* Bare declared leaf name (no kind prefix, no module path, no D/Q suffix
+ * removed) for this observable -- e.g. "pc_id_i" or "r_gpio_dir.q". Valid
+ * for the lifetime of `model`; do not free. */
+const char* mate_observable_leaf_name(const MateModel* model, int32_t observable_id);
+
+/* Word offset of this observable within the mate_get_all_observables buffer.
+ * Aliased observables (distinct names sharing one underlying value) report
+ * the same offset. */
+int32_t mate_observable_snapshot_offset(const MateModel* model, int32_t observable_id);
+
+/* Required buffer size, in words, for mate_get_all_observables. */
+int32_t mate_observable_snapshot_words_total(const MateModel* model);
+
+/*
+ * Compile-time-constant parameters/localparams, for debug/waveform tooling
+ * only -- distinct from the observable set above since a param's value
+ * never changes at runtime and has no snapshot storage. Ids are dense:
+ * valid param ids are [0, mate_param_count(model)).
+ */
+int32_t mate_param_count(const MateModel* model);
+
+/* Hierarchy path of the param's owning module ("" for the top module).
+ * Valid for the lifetime of `model`; do not free. */
+const char* mate_param_module_path(const MateModel* model, int32_t param_id);
+
+/* Bare declared leaf name, including any "[i]" array-index suffixes for
+ * unpacked array elements (e.g. "PMPRstAddr[3]"). Valid for the lifetime of
+ * `model`; do not free. */
+const char* mate_param_leaf_name(const MateModel* model, int32_t param_id);
+
+MateStatusCode mate_param_info(const MateModel* model,
+                               int32_t param_id,
+                               MateParamInfo* out_info,
+                               MateStatus* status);
+
+/* Copies the param's fixed value into `words` (exactly
+ * mate_param_info(...).nwords words). The value never changes across calls. */
+MateStatusCode mate_param_value(const MateModel* model,
+                                int32_t param_id,
+                                uint64_t* words,
+                                int32_t nwords,
+                                MateStatus* status);
+
 MateStatusCode mate_input_info(const MateModel* model,
                                int32_t input_id,
                                MatePortInfo* out_info,
@@ -111,6 +168,55 @@ MateStatusCode mate_set_inputs(MateInstance* instance,
                                const MateInputUpdate* updates,
                                int32_t update_count,
                                MateStatus* status);
+/*
+ * Applies updates WITHOUT evaluating. Used to accumulate input changes
+ * within one simulation instant so a single evaluation can run once the
+ * instant is complete (e.g. mate_set_inputs with zero updates); until then
+ * the instance's outputs/observables lag the recorded inputs.
+ */
+MateStatusCode mate_record_inputs(MateInstance* instance,
+                                  const MateInputUpdate* updates,
+                                  int32_t update_count,
+                                  MateStatus* status);
+/*
+ * Commit-only clock/reset edges, plus an explicit settle. Split out of
+ * mate_apply_clock/mate_apply_reset so a caller can process every edge landing
+ * in one simulation instant before evaluating once:
+ *
+ *     mate_settle_if_dirty(...)   // restore the settled invariant, if needed
+ *     for each domain with an edge this instant: mate_commit_clock/reset(...)
+ *     mate_settle(...)
+ *
+ * Two properties fall out of committing with no evaluation in between.
+ * (1) Flop D storage is only ever refreshed by an evaluation, so every domain
+ *     committing in the same instant reads the same pre-edge D snapshot --
+ *     matching RTL, where all non-blocking updates sample pre-edge values --
+ *     and the commit order becomes unobservable.
+ * (2) The pre-edge D snapshot is the one left by the previous settle, so the
+ *     instance must BE settled when the commits run. A caller that records
+ *     inputs without evaluating (mate_record_inputs) breaks that, so it calls
+ *     mate_settle_if_dirty first: that evaluates only when an input write
+ *     actually changed a value, which is once per instant at most and never at
+ *     all for a harness whose inputs settle before the edge. Doing it once,
+ *     ahead of every commit, also keeps property (1) intact.
+ *
+ * mate_apply_clock/mate_apply_reset remain the self-contained form for callers
+ * that drive inputs *as part of* the edge call and need those inputs sampled by
+ * this edge (the vector simulator's inputs_before_edge). They evaluate before
+ * committing and therefore cannot honor (1) across domains.
+ */
+MateStatusCode mate_commit_clock(MateInstance* instance,
+                                 int32_t clock_id,
+                                 MateEdge edge,
+                                 const MateInputUpdate* updates,
+                                 int32_t update_count,
+                                 MateStatus* status);
+MateStatusCode mate_commit_reset(MateInstance* instance,
+                                 int32_t reset_id,
+                                 MateEdge edge,
+                                 MateStatus* status);
+MateStatusCode mate_settle(MateInstance* instance, MateStatus* status);
+MateStatusCode mate_settle_if_dirty(MateInstance* instance, MateStatus* status);
 MateStatusCode mate_apply_clock(MateInstance* instance,
                                 int32_t clock_id,
                                 MateEdge edge,
@@ -126,11 +232,32 @@ MateStatusCode mate_get_output(const MateInstance* instance,
                                uint64_t* words,
                                int32_t nwords,
                                MateStatus* status);
+/*
+ * Number of full combinational evaluations run on this instance since it was
+ * created. Every evaluation sweeps the entire design (there is no activity
+ * scheduling), so the delta across a simulation instant is the honest measure
+ * of how much redundant work that instant cost. Always available -- unlike
+ * observables, this is not affected by --dpi-no-observables.
+ */
+MateStatusCode mate_evaluate_count(const MateInstance* instance,
+                                   uint64_t* out_count,
+                                   MateStatus* status);
 MateStatusCode mate_get_observable(const MateInstance* instance,
                                    int32_t observable_id,
                                    uint64_t* words,
                                    int32_t nwords,
                                    MateStatus* status);
+
+/*
+ * Bulk read of every observable's current value in one call, for waveform
+ * capture. `words` must be exactly mate_observable_snapshot_words_total(model)
+ * long; each observable's value starts at its
+ * mate_observable_snapshot_offset(model, id).
+ */
+MateStatusCode mate_get_all_observables(const MateInstance* instance,
+                                        uint64_t* words,
+                                        int32_t nwords,
+                                        MateStatus* status);
 
 #ifdef __cplusplus
 }

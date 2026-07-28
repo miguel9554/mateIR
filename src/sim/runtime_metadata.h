@@ -131,6 +131,21 @@ struct RuntimeFlopMetadata {
     std::vector<RuntimeFlopLeafMetadata> leaves;
 };
 
+// A compile-time-constant parameter/localparam leaf, for debug/waveform
+// tooling only -- unlike RuntimeObservableMetadata, this is never wired
+// through the runtime snapshot/diffing pipeline (its value can never
+// change), so it carries its value directly rather than a DFGNode/storage
+// slot. Only unpacked array dimensions are expanded into separate leaves
+// (module_path/leaf_name gets a "[i]" suffix per index, matching how real
+// RTL/Verilator dumps one $var per array element); a packed struct stays one
+// leaf with its flattened bit pattern, matching how Verilator dumps it.
+struct RuntimeParamMetadata {
+    std::string module_path;
+    std::string leaf_name;
+    Type type;
+    std::vector<uint64_t> words;
+};
+
 struct RuntimeObservableMetadata {
     RuntimeObservableId id;
     RuntimeObservableKind kind = RuntimeObservableKind::Internal;
@@ -142,6 +157,13 @@ struct RuntimeObservableMetadata {
     std::optional<RuntimeOutputId> output;
     std::optional<RuntimeFlopId> flop;
     size_t leaf_index = 0;
+    // Physical storage slot this observable's value lives in, shared by
+    // every observable with the same (node, kind) — e.g. a submodule output
+    // port and the internal wire it's wired straight through to. Only
+    // meaningful for Internal/FlopD/FlopQ kinds (Input/Output observables
+    // read from the separate input/output storage instead). Index into
+    // MateIRRuntimeMetadata::storage_slot_owner.
+    std::optional<size_t> storage_slot;
 };
 
 struct MateIRRuntimeMetadata {
@@ -151,6 +173,7 @@ struct MateIRRuntimeMetadata {
     std::vector<RuntimeResetMetadata> resets;
     std::vector<RuntimeFlopMetadata> flops;
     std::vector<RuntimeObservableMetadata> observables;
+    std::vector<RuntimeParamMetadata> params;
 
     std::unordered_map<std::string, RuntimeInputId> input_by_leaf_name;
     std::unordered_map<std::string, RuntimeOutputId> output_by_leaf_name;
@@ -158,6 +181,13 @@ struct MateIRRuntimeMetadata {
     std::unordered_map<std::string, RuntimeObservableId> observable_by_unique_leaf_name;
     std::unordered_set<std::string> ambiguous_observable_leaf_names;
     std::map<const DFGNode*, std::vector<RuntimeObservableId>> observables_by_node;
+    // Physical storage slots for non-I/O observables, in assignment order.
+    // storage_slot_owner[i] is the id of the first-registered observable
+    // naming physical slot i; every observable sharing that (node, kind)
+    // carries storage_slot == i. This is the list codegen uses to allocate
+    // and emit exactly one storage entry per distinct traced value, even
+    // when multiple names alias it.
+    std::vector<RuntimeObservableId> storage_slot_owner;
     std::map<std::string, std::vector<ClockId>> clock_domains_by_top_input;
     std::map<std::string, std::vector<ResetId>> reset_domains_by_top_input;
     std::map<ResetId, std::string> reset_top_input_by_id;

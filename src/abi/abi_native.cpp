@@ -83,6 +83,17 @@ struct AbiObservable {
     size_t storage_index = 0;
 };
 
+// Compile-time-constant parameter/localparam leaf. Unlike AbiObservable, its
+// value is fixed at build time -- carried directly here, not via a storage
+// slot -- so it never participates in mate_get_all_observables.
+struct AbiParam {
+    std::string module_path;
+    std::string leaf_name;
+    int32_t width = 0;
+    bool is_signed = false;
+    std::vector<uint64_t> words;
+};
+
 } // namespace
 
 struct MateModel {
@@ -94,6 +105,18 @@ struct MateModel {
     std::vector<AbiStorageSlot> output_storage;
     std::vector<AbiStorageSlot> observable_storage;
     std::vector<AbiObservable> observables;
+    std::vector<AbiParam> params;
+    // Parallel to `observables`: each entry's word offset within the
+    // mate_get_all_observables buffer (input words, then output words, then
+    // storage words — the same order allocateStorage lays out per instance).
+    // Aliased observables share the same offset.
+    std::vector<size_t> observable_snapshot_offset;
+    size_t observable_snapshot_words_total = 0;
+    // See GeneratedModelMetadata::observables_enabled. False means internal
+    // storage slots are never written by the generated code, so reading any
+    // observable would return stale words -- the read entry points throw
+    // instead.
+    bool observables_enabled = true;
     size_t spill_words_count = 0;
     mate::abi::GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
     std::vector<mate::abi::GeneratedResetApplyFn> reset_apply;
@@ -101,17 +124,45 @@ struct MateModel {
     mate::abi::GeneratedFlopsInitFn flops_init = nullptr;
 };
 
+// One contiguous word buffer for a list of storage slots, with a static
+// per-slot word offset (same shape as the generated spill buffer). Avoids a
+// separate heap allocation per signal, which matters both for the
+// unconditional per-node observable writes the generated code already does
+// and for bulk-reading every slot back out for a waveform snapshot.
+struct FlatWordStorage {
+    std::vector<uint64_t> words;
+    std::vector<size_t> offsets;
+    std::vector<int32_t> counts;
+
+    uint64_t* dataAt(size_t index) { return words.data() + offsets.at(index); }
+    const uint64_t* dataAt(size_t index) const { return words.data() + offsets.at(index); }
+    int32_t countAt(size_t index) const { return counts.at(index); }
+    size_t offsetAt(size_t index) const { return offsets.at(index); }
+    size_t totalWords() const { return words.size(); }
+    size_t slotCount() const { return offsets.size(); }
+};
+
 struct MateInstance {
     const MateModel* model = nullptr;
-    std::vector<std::vector<uint64_t>> input_words;
-    std::vector<std::vector<uint64_t>> output_words;
-    std::vector<std::vector<uint64_t>> observable_words;
+    FlatWordStorage input_words;
+    FlatWordStorage output_words;
+    FlatWordStorage observable_words;
     // Contiguous cross-chunk scratch buffer; the generated code addresses it
     // with compile-time offsets.
     std::vector<uint64_t> spill_words;
     std::vector<NativeWordSlot> input_slots;
     std::vector<NativeWordSlot> output_slots;
     std::vector<NativeWordSlot> observable_slots;
+    // Monotonic count of full combinational evaluations run on this instance,
+    // for `mate_evaluate_count`. Every eval is a dense sweep of the whole
+    // design (there is no activity scheduling), so this is the single number
+    // that says how much redundant work a simulation instant is doing.
+    uint64_t evaluate_count = 0;
+    // Set when an input write actually changes a stored value, cleared by every
+    // evaluation. Guards the settled-instance invariant that the commit-only
+    // edge path depends on: flop D is only trustworthy as a pre-edge snapshot
+    // while this is false. See mate_settle_if_dirty.
+    bool inputs_dirty = false;
 };
 
 namespace {
@@ -168,6 +219,19 @@ const MateInstance& checkedInstance(const MateInstance* instance) {
     return *instance;
 }
 
+// A compute-only model (mate --dpi-no-observables) never writes its internal
+// storage slots, so their words are meaningless. Reading them would silently
+// yield zeros/stale state and, worse, produce a plausible-looking-but-wrong
+// waveform, so every observable read refuses up front.
+void requireObservables(const MateModel& model, const char* entry_point) {
+    if (model.observables_enabled) return;
+    throw mate::CompilerError(std::format(
+        "Mate ABI: {} is unavailable -- this model was generated with observables "
+        "disabled (mate --dpi-no-observables), so internal signal storage is never "
+        "written. Regenerate without that flag to trace or introspect it.",
+        entry_point));
+}
+
 void validateWords(const char* role,
                    const char* leaf_name,
                    const uint64_t* words,
@@ -192,24 +256,32 @@ void validateWords(const char* role,
     }
 }
 
-void copyWordsToStorage(const char* role,
+// Returns whether the stored value actually changed. Callers writing *input*
+// storage use that to maintain MateInstance::inputs_dirty: a harness re-sending
+// an unchanged value (which the DPI wrapper does at every clock edge) must not
+// be mistaken for a reason to re-evaluate.
+bool copyWordsToStorage(const char* role,
                         const std::string& leaf_name,
                         int32_t width,
                         const uint64_t* words,
                         int32_t nwords,
-                        std::vector<uint64_t>& storage) {
+                        uint64_t* storage,
+                        int32_t storage_words) {
     validateWords(role, leaf_name.c_str(), words, nwords, width);
     const int32_t expected = wordCount(width);
-    if (storage.size() != static_cast<size_t>(expected)) {
+    if (storage_words != expected) {
         throw mate::CompilerError(std::format(
             "Mate ABI: storage for {} '{}' expected {} words, has {}",
-            role, leaf_name, expected, storage.size()));
+            role, leaf_name, expected, storage_words));
     }
-    std::copy(words, words + nwords, storage.begin());
+    const bool changed = !std::equal(words, words + nwords, storage);
+    std::copy(words, words + nwords, storage);
+    return changed;
 }
 
 void storageToWords(const std::string& leaf_name,
-                    const std::vector<uint64_t>& storage,
+                    const uint64_t* storage,
+                    int32_t storage_words,
                     int32_t width,
                     uint64_t* words,
                     int32_t nwords) {
@@ -223,55 +295,85 @@ void storageToWords(const std::string& leaf_name,
             "Mate ABI: output '{}' expected {} words for width {}, got {}",
             leaf_name, expected, width, nwords));
     }
-    if (storage.size() != static_cast<size_t>(expected)) {
+    if (storage_words != expected) {
         throw mate::CompilerError(std::format(
             "Mate ABI: output '{}' storage expected {} words, has {}",
-            leaf_name, expected, storage.size()));
+            leaf_name, expected, storage_words));
     }
-    std::copy(storage.begin(), storage.end(), words);
+    std::copy(storage, storage + storage_words, words);
 }
 
-void setStorageFromEdge(const AbiStorageSlot& slot, MateEdge edge, std::vector<uint64_t>& storage) {
+void setStorageFromEdge(const AbiStorageSlot& slot, MateEdge edge, uint64_t* storage, int32_t storage_words) {
     const int32_t expected = wordCount(slot.width);
-    if (storage.size() != static_cast<size_t>(expected)) {
+    if (storage_words != expected) {
         throw mate::CompilerError(std::format(
             "Mate ABI: input '{}' expected {} words, has {}",
-            slot.leaf_name, expected, storage.size()));
+            slot.leaf_name, expected, storage_words));
     }
-    std::fill(storage.begin(), storage.end(), uint64_t{0});
-    if (edge == MATE_EDGE_POSEDGE && !storage.empty()) storage[0] = 1;
-    mate::wordops::maskTopWord(storage.data(), storage.size(), slot.width);
+    std::fill(storage, storage + storage_words, uint64_t{0});
+    if (edge == MATE_EDGE_POSEDGE && storage_words > 0) storage[0] = 1;
+    mate::wordops::maskTopWord(storage, static_cast<size_t>(storage_words), slot.width);
 }
 
-bool storageActiveLevel(const std::vector<uint64_t>& storage, const AbiStorageSlot& slot, MateEdge active_edge) {
-    if (storage.empty()) {
+bool storageActiveLevel(const uint64_t* storage, int32_t storage_words, const AbiStorageSlot& slot, MateEdge active_edge) {
+    if (storage_words <= 0) {
         throw mate::CompilerError(std::format("Mate ABI: input '{}' has no storage", slot.leaf_name));
     }
     return ((storage[0] & 1ULL) != 0) == (active_edge == MATE_EDGE_POSEDGE);
 }
 
-std::vector<std::vector<uint64_t>> allocateStorage(const std::vector<AbiStorageSlot>& slots) {
-    std::vector<std::vector<uint64_t>> storage;
-    storage.reserve(slots.size());
+// Per-slot word offset starting at `base`, plus the total word count consumed
+// (base + sum of slot widths). Used to lay out the mate_get_all_observables
+// snapshot buffer (inputs, then outputs, then storage, chained) with the same
+// per-slot arithmetic allocateStorage uses for the matching instance buffers,
+// so the two stay consistent by construction rather than by convention.
+std::vector<size_t> cumulativeWordOffsets(const std::vector<AbiStorageSlot>& slots,
+                                          size_t base,
+                                          size_t& total_after) {
+    std::vector<size_t> offsets;
+    offsets.reserve(slots.size());
+    size_t offset = base;
     for (const auto& slot : slots) {
-        storage.emplace_back(static_cast<size_t>(wordCount(slot.width)), uint64_t{0});
+        offsets.push_back(offset);
+        offset += static_cast<size_t>(wordCount(slot.width));
     }
+    total_after = offset;
+    return offsets;
+}
+
+FlatWordStorage allocateStorage(const std::vector<AbiStorageSlot>& slots) {
+    FlatWordStorage storage;
+    storage.offsets.reserve(slots.size());
+    storage.counts.reserve(slots.size());
+    size_t offset = 0;
+    for (const auto& slot : slots) {
+        const int32_t count = wordCount(slot.width);
+        storage.offsets.push_back(offset);
+        storage.counts.push_back(count);
+        offset += static_cast<size_t>(count);
+    }
+    storage.words.assign(offset, uint64_t{0});
     return storage;
 }
 
-std::vector<NativeWordSlot> makeWordSlots(std::vector<std::vector<uint64_t>>& storage) {
+std::vector<NativeWordSlot> makeWordSlots(FlatWordStorage& storage) {
     std::vector<NativeWordSlot> slots;
-    slots.reserve(storage.size());
-    for (auto& words : storage) {
+    slots.reserve(storage.slotCount());
+    for (size_t i = 0; i < storage.slotCount(); ++i) {
         slots.push_back(NativeWordSlot{
-            .words = words.data(),
-            .nwords = static_cast<int32_t>(words.size()),
+            .words = storage.dataAt(i),
+            .nwords = storage.countAt(i),
         });
     }
     return slots;
 }
 
+// The single funnel for running the generated combinational evaluator, so
+// `evaluate_count` cannot drift from reality: every eval in the ABI goes
+// through here.
 void evaluateAndPublish(MateInstance& instance) {
+    ++instance.evaluate_count;
+    instance.inputs_dirty = false;
     instance.model->evaluate_combinational(instance.input_slots, instance.output_slots,
                                            instance.observable_slots, instance.spill_words);
 }
@@ -280,12 +382,13 @@ void evaluateAndPublish(MateInstance& instance) {
 // only, re-evaluate combinational logic so the flop commit sees fresh D
 // values, commit FlopD -> FlopQ for this clock domain, then re-evaluate once
 // more so outputs reflect the new FlopQ state.
-void applyClockEdge(MateInstance& instance,
-                    size_t clock_id,
-                    const AbiClock& clock,
-                    MateEdge edge,
-                    const MateInputUpdate* updates_before_edge,
-                    int32_t update_count) {
+void commitClockEdge(MateInstance& instance,
+                     size_t clock_id,
+                     const AbiClock& clock,
+                     MateEdge edge,
+                     const MateInputUpdate* updates_before_edge,
+                     int32_t update_count,
+                     bool evaluate_before_commit) {
     const bool active_edge = (edge == clock.active_edge);
     if (!active_edge && update_count > 0) {
         throw mate::CompilerError(std::format(
@@ -295,7 +398,8 @@ void applyClockEdge(MateInstance& instance,
 
     const AbiInput& source = instance.model->inputs.at(clock.source_storage_index);
     setStorageFromEdge(instance.model->input_storage.at(source.storage_index), edge,
-                       instance.input_words.at(source.storage_index));
+                       instance.input_words.dataAt(source.storage_index),
+                       instance.input_words.countAt(source.storage_index));
 
     if (update_count < 0) {
         throw mate::CompilerError(std::format("Mate ABI: negative update count {}", update_count));
@@ -317,33 +421,41 @@ void applyClockEdge(MateInstance& instance,
                 "Mate ABI: sync input '{}' does not belong to active clock domain {}",
                 input.leaf_name, clock_id));
         }
-        copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
-                           instance.input_words.at(input.storage_index));
+        if (copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
+                               instance.input_words.dataAt(input.storage_index),
+                               instance.input_words.countAt(input.storage_index))) {
+            instance.inputs_dirty = true;
+        }
     }
 
     if (active_edge) {
-        instance.model->evaluate_combinational(instance.input_slots, instance.output_slots,
-                                               instance.observable_slots, instance.spill_words);
+        // Only for the self-contained mate_apply_clock form, whose caller
+        // expects the inputs it just passed to be sampled by this edge. The
+        // commit-only form relies on the settled-instance invariant instead,
+        // so D already holds the pre-edge values and re-deriving them here
+        // would both waste a full sweep and let an earlier domain's commit
+        // leak into a later one at the same instant.
+        if (evaluate_before_commit) evaluateAndPublish(instance);
         instance.model->clock_commit.at(clock_id)(instance.input_slots, instance.observable_slots);
     }
-    evaluateAndPublish(instance);
 }
 
 // Drive the reset source signal and, on the active edge, apply reset values to
 // this domain's FlopQ storage.
-void applyResetEdge(MateInstance& instance, size_t reset_id, const AbiReset& reset, MateEdge edge) {
+void commitResetEdge(MateInstance& instance, size_t reset_id, const AbiReset& reset, MateEdge edge) {
     const AbiInput& source = instance.model->inputs.at(reset.source_storage_index);
     setStorageFromEdge(instance.model->input_storage.at(source.storage_index), edge,
-                       instance.input_words.at(source.storage_index));
+                       instance.input_words.dataAt(source.storage_index),
+                       instance.input_words.countAt(source.storage_index));
     if (edge == reset.active_edge) {
         instance.model->reset_apply.at(reset_id)(instance.observable_slots);
     }
-    evaluateAndPublish(instance);
 }
 
 bool resetDomainActive(const MateInstance& instance, const AbiReset& reset) {
     const AbiInput& source = instance.model->inputs.at(reset.source_storage_index);
-    return storageActiveLevel(instance.input_words.at(source.storage_index),
+    return storageActiveLevel(instance.input_words.dataAt(source.storage_index),
+                              instance.input_words.countAt(source.storage_index),
                               instance.model->input_storage.at(source.storage_index),
                               reset.active_edge);
 }
@@ -363,8 +475,11 @@ void applyRawInputUpdates(MateInstance& instance, const MateInputUpdate* updates
                 "Mate ABI: invalid input handle {}", update.input_id));
         }
         const AbiInput& input = instance.model->inputs.at(static_cast<size_t>(update.input_id));
-        copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
-                           instance.input_words.at(input.storage_index));
+        if (copyWordsToStorage("input", input.leaf_name, input.width, update.words, update.nwords,
+                               instance.input_words.dataAt(input.storage_index),
+                               instance.input_words.countAt(input.storage_index))) {
+            instance.inputs_dirty = true;
+        }
     }
 }
 
@@ -515,7 +630,7 @@ std::vector<AbiObservable> buildObservables(const GeneratedModelMetadata& genera
     std::vector<AbiObservable> observables;
     observables.reserve(generated_metadata.inputs.size() +
                         generated_metadata.outputs.size() +
-                        generated_metadata.storage.size());
+                        generated_metadata.observable_names.size());
 
     for (size_t i = 0; i < generated_metadata.inputs.size(); ++i) {
         const auto& input = generated_metadata.inputs[i];
@@ -541,19 +656,41 @@ std::vector<AbiObservable> buildObservables(const GeneratedModelMetadata& genera
         });
     }
 
-    for (size_t i = 0; i < generated_metadata.storage.size(); ++i) {
-        const auto& storage = generated_metadata.storage[i];
+    // One AbiObservable per name (aliases included); storage_index points at
+    // the shared physical slot in generated_metadata.storage /
+    // observable_words, not at a position in this loop.
+    for (const auto& name : generated_metadata.observable_names) {
+        if (name.storage_index >= generated_metadata.storage.size()) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: observable '{}' references out-of-range storage slot {}",
+                name.full_path, name.storage_index));
+        }
         observables.push_back(AbiObservable{
-            .full_path = std::string(storage.full_path),
-            .leaf_name = std::string(storage.leaf_name),
-            .width = storage.width,
-            .is_signed = storage.is_signed,
+            .full_path = std::string(name.full_path),
+            .leaf_name = std::string(name.leaf_name),
+            .width = name.width,
+            .is_signed = name.is_signed,
             .storage_kind = AbiObservableStorageKind::Storage,
-            .storage_index = i,
+            .storage_index = name.storage_index,
         });
     }
 
     return observables;
+}
+
+std::vector<AbiParam> buildParams(const GeneratedModelMetadata& generated_metadata) {
+    std::vector<AbiParam> params;
+    params.reserve(generated_metadata.params.size());
+    for (const auto& param : generated_metadata.params) {
+        params.push_back(AbiParam{
+            .module_path = std::string(param.module_path),
+            .leaf_name = std::string(param.leaf_name),
+            .width = param.width,
+            .is_signed = param.is_signed,
+            .words = std::vector<uint64_t>(param.words.begin(), param.words.end()),
+        });
+    }
+    return params;
 }
 
 void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& generated_metadata) {
@@ -573,6 +710,31 @@ void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& g
     model.output_storage = buildOutputStorage(generated_metadata);
     model.observable_storage = buildObservableStorage(generated_metadata);
     model.observables = buildObservables(generated_metadata);
+    model.params = buildParams(generated_metadata);
+
+    size_t after_inputs = 0;
+    auto input_offsets = cumulativeWordOffsets(model.input_storage, 0, after_inputs);
+    size_t after_outputs = 0;
+    auto output_offsets = cumulativeWordOffsets(model.output_storage, after_inputs, after_outputs);
+    size_t after_storage = 0;
+    auto storage_offsets = cumulativeWordOffsets(model.observable_storage, after_outputs, after_storage);
+    model.observable_snapshot_words_total = after_storage;
+    model.observable_snapshot_offset.reserve(model.observables.size());
+    for (const auto& observable : model.observables) {
+        switch (observable.storage_kind) {
+            case AbiObservableStorageKind::Input:
+                model.observable_snapshot_offset.push_back(input_offsets.at(observable.storage_index));
+                break;
+            case AbiObservableStorageKind::Output:
+                model.observable_snapshot_offset.push_back(output_offsets.at(observable.storage_index));
+                break;
+            case AbiObservableStorageKind::Storage:
+                model.observable_snapshot_offset.push_back(storage_offsets.at(observable.storage_index));
+                break;
+        }
+    }
+
+    model.observables_enabled = generated_metadata.observables_enabled;
     model.spill_words_count = generated_metadata.spill_words_count;
     model.evaluate_combinational = generated_metadata.evaluate_combinational;
     model.reset_apply = generated_metadata.reset_apply;
@@ -717,6 +879,127 @@ int32_t mate_observable_id(const MateModel* model, const char* full_path) {
     }
 }
 
+int32_t mate_observable_count(const MateModel* model) {
+    try {
+        return static_cast<int32_t>(checkedModel(model).observables.size());
+    } catch (...) {
+        return -1;
+    }
+}
+
+const char* mate_observable_full_path(const MateModel* model, int32_t observable_id) {
+    try {
+        const auto& observables = checkedModel(model).observables;
+        if (observable_id < 0 || static_cast<size_t>(observable_id) >= observables.size()) {
+            return nullptr;
+        }
+        return observables.at(static_cast<size_t>(observable_id)).full_path.c_str();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+const char* mate_observable_leaf_name(const MateModel* model, int32_t observable_id) {
+    try {
+        const auto& observables = checkedModel(model).observables;
+        if (observable_id < 0 || static_cast<size_t>(observable_id) >= observables.size()) {
+            return nullptr;
+        }
+        return observables.at(static_cast<size_t>(observable_id)).leaf_name.c_str();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+int32_t mate_observable_snapshot_offset(const MateModel* model, int32_t observable_id) {
+    try {
+        const auto& checked = checkedModel(model);
+        if (observable_id < 0 ||
+            static_cast<size_t>(observable_id) >= checked.observable_snapshot_offset.size()) {
+            return -1;
+        }
+        return static_cast<int32_t>(checked.observable_snapshot_offset.at(static_cast<size_t>(observable_id)));
+    } catch (...) {
+        return -1;
+    }
+}
+
+int32_t mate_observable_snapshot_words_total(const MateModel* model) {
+    try {
+        return static_cast<int32_t>(checkedModel(model).observable_snapshot_words_total);
+    } catch (...) {
+        return -1;
+    }
+}
+
+int32_t mate_param_count(const MateModel* model) {
+    try {
+        return static_cast<int32_t>(checkedModel(model).params.size());
+    } catch (...) {
+        return -1;
+    }
+}
+
+const char* mate_param_module_path(const MateModel* model, int32_t param_id) {
+    try {
+        const auto& params = checkedModel(model).params;
+        if (param_id < 0 || static_cast<size_t>(param_id) >= params.size()) return nullptr;
+        return params.at(static_cast<size_t>(param_id)).module_path.c_str();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+const char* mate_param_leaf_name(const MateModel* model, int32_t param_id) {
+    try {
+        const auto& params = checkedModel(model).params;
+        if (param_id < 0 || static_cast<size_t>(param_id) >= params.size()) return nullptr;
+        return params.at(static_cast<size_t>(param_id)).leaf_name.c_str();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+MateStatusCode mate_param_info(const MateModel* model,
+                               int32_t param_id,
+                               MateParamInfo* out_info,
+                               MateStatus* status) {
+    return guard(status, [&]() {
+        const MateModel& checked = checkedModel(model);
+        if (!out_info) throw mate::CompilerError("Mate ABI: param info output pointer is null");
+        if (param_id < 0 || static_cast<size_t>(param_id) >= checked.params.size()) {
+            throw mate::CompilerError(std::format("Mate ABI: invalid param handle {}", param_id));
+        }
+        const auto& param = checked.params.at(static_cast<size_t>(param_id));
+        *out_info = MateParamInfo{
+            .width = param.width,
+            .nwords = wordCount(param.width),
+            .is_signed = param.is_signed ? 1 : 0,
+        };
+    });
+}
+
+MateStatusCode mate_param_value(const MateModel* model,
+                                int32_t param_id,
+                                uint64_t* words,
+                                int32_t nwords,
+                                MateStatus* status) {
+    return guard(status, [&]() {
+        const MateModel& checked = checkedModel(model);
+        if (param_id < 0 || static_cast<size_t>(param_id) >= checked.params.size()) {
+            throw mate::CompilerError(std::format("Mate ABI: invalid param handle {}", param_id));
+        }
+        const auto& param = checked.params.at(static_cast<size_t>(param_id));
+        validateWords("param", param.leaf_name.c_str(), words, nwords, param.width);
+        if (param.words.size() != static_cast<size_t>(nwords)) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: param '{}' has {} stored words but expected {}",
+                param.leaf_name, param.words.size(), nwords));
+        }
+        std::copy(param.words.begin(), param.words.end(), words);
+    });
+}
+
 int32_t mate_clock_id(const MateModel* model, const char* display_or_leaf_name) {
     try {
         if (!display_or_leaf_name) return -1;
@@ -823,7 +1106,8 @@ MateStatusCode mate_set_input(MateInstance* instance,
         }
         const auto& input = checked.model->inputs.at(static_cast<size_t>(input_id));
         copyWordsToStorage("input", input.leaf_name, input.width, words, nwords,
-                           checked.input_words.at(input.storage_index));
+                           checked.input_words.dataAt(input.storage_index),
+                           checked.input_words.countAt(input.storage_index));
         evaluateAndPublish(checked);
     });
 }
@@ -839,6 +1123,68 @@ MateStatusCode mate_set_inputs(MateInstance* instance,
     });
 }
 
+MateStatusCode mate_record_inputs(MateInstance* instance,
+                                  const MateInputUpdate* updates,
+                                  int32_t update_count,
+                                  MateStatus* status) {
+    return guard(status, [&]() {
+        MateInstance& checked = checkedInstance(instance);
+        applyRawInputUpdates(checked, updates, update_count);
+    });
+}
+
+const AbiClock& checkedClock(const MateInstance& instance, int32_t clock_id) {
+    if (clock_id < 0 || static_cast<size_t>(clock_id) >= instance.model->clocks.size()) {
+        throw mate::CompilerError(std::format("Mate ABI: invalid clock handle {}", clock_id));
+    }
+    return instance.model->clocks.at(static_cast<size_t>(clock_id));
+}
+
+const AbiReset& checkedReset(const MateInstance& instance, int32_t reset_id) {
+    if (reset_id < 0 || static_cast<size_t>(reset_id) >= instance.model->resets.size()) {
+        throw mate::CompilerError(std::format("Mate ABI: invalid reset handle {}", reset_id));
+    }
+    return instance.model->resets.at(static_cast<size_t>(reset_id));
+}
+
+MateStatusCode mate_commit_clock(MateInstance* instance,
+                                 int32_t clock_id,
+                                 MateEdge edge,
+                                 const MateInputUpdate* updates,
+                                 int32_t update_count,
+                                 MateStatus* status) {
+    return guard(status, [&]() {
+        MateInstance& checked = checkedInstance(instance);
+        commitClockEdge(checked, static_cast<size_t>(clock_id),
+                        checkedClock(checked, clock_id), edge, updates, update_count,
+                        /*evaluate_before_commit=*/false);
+    });
+}
+
+MateStatusCode mate_commit_reset(MateInstance* instance,
+                                 int32_t reset_id,
+                                 MateEdge edge,
+                                 MateStatus* status) {
+    return guard(status, [&]() {
+        MateInstance& checked = checkedInstance(instance);
+        commitResetEdge(checked, static_cast<size_t>(reset_id),
+                        checkedReset(checked, reset_id), edge);
+    });
+}
+
+MateStatusCode mate_settle(MateInstance* instance, MateStatus* status) {
+    return guard(status, [&]() {
+        evaluateAndPublish(checkedInstance(instance));
+    });
+}
+
+MateStatusCode mate_settle_if_dirty(MateInstance* instance, MateStatus* status) {
+    return guard(status, [&]() {
+        MateInstance& checked = checkedInstance(instance);
+        if (checked.inputs_dirty) evaluateAndPublish(checked);
+    });
+}
+
 MateStatusCode mate_apply_clock(MateInstance* instance,
                                 int32_t clock_id,
                                 MateEdge edge,
@@ -847,12 +1193,11 @@ MateStatusCode mate_apply_clock(MateInstance* instance,
                                 MateStatus* status) {
     return guard(status, [&]() {
         MateInstance& checked = checkedInstance(instance);
-        if (clock_id < 0 || static_cast<size_t>(clock_id) >= checked.model->clocks.size()) {
-            throw mate::CompilerError(std::format("Mate ABI: invalid clock handle {}", clock_id));
-        }
-        applyClockEdge(checked, static_cast<size_t>(clock_id),
-                       checked.model->clocks.at(static_cast<size_t>(clock_id)), edge,
-                       updates_before_edge, update_count);
+        commitClockEdge(checked, static_cast<size_t>(clock_id),
+                        checkedClock(checked, clock_id), edge,
+                        updates_before_edge, update_count,
+                        /*evaluate_before_commit=*/true);
+        evaluateAndPublish(checked);
     });
 }
 
@@ -862,11 +1207,9 @@ MateStatusCode mate_apply_reset(MateInstance* instance,
                                 MateStatus* status) {
     return guard(status, [&]() {
         MateInstance& checked = checkedInstance(instance);
-        if (reset_id < 0 || static_cast<size_t>(reset_id) >= checked.model->resets.size()) {
-            throw mate::CompilerError(std::format("Mate ABI: invalid reset handle {}", reset_id));
-        }
-        applyResetEdge(checked, static_cast<size_t>(reset_id),
-                       checked.model->resets.at(static_cast<size_t>(reset_id)), edge);
+        commitResetEdge(checked, static_cast<size_t>(reset_id),
+                        checkedReset(checked, reset_id), edge);
+        evaluateAndPublish(checked);
     });
 }
 
@@ -881,8 +1224,20 @@ MateStatusCode mate_get_output(const MateInstance* instance,
             throw mate::CompilerError(std::format("Mate ABI: invalid output handle {}", output_id));
         }
         const auto& output = checked.model->outputs.at(static_cast<size_t>(output_id));
-        storageToWords(output.leaf_name, checked.output_words.at(output.storage_index),
+        storageToWords(output.leaf_name,
+                       checked.output_words.dataAt(output.storage_index),
+                       checked.output_words.countAt(output.storage_index),
                        output.width, words, nwords);
+    });
+}
+
+MateStatusCode mate_evaluate_count(const MateInstance* instance,
+                                   uint64_t* out_count,
+                                   MateStatus* status) {
+    return guard(status, [&]() {
+        const MateInstance& checked = checkedInstance(instance);
+        if (!out_count) throw mate::CompilerError("Mate ABI: evaluate-count pointer is null");
+        *out_count = checked.evaluate_count;
     });
 }
 
@@ -893,20 +1248,25 @@ MateStatusCode mate_get_observable(const MateInstance* instance,
                                    MateStatus* status) {
     return guard(status, [&]() {
         const MateInstance& checked = checkedInstance(instance);
+        requireObservables(*checked.model, "mate_get_observable");
         if (observable_id < 0 || static_cast<size_t>(observable_id) >= checked.model->observables.size()) {
             throw mate::CompilerError(std::format("Mate ABI: invalid observable handle {}", observable_id));
         }
         const auto& observable = checked.model->observables.at(static_cast<size_t>(observable_id));
-        const std::vector<uint64_t>* storage = nullptr;
+        const uint64_t* storage = nullptr;
+        int32_t storage_words = 0;
         switch (observable.storage_kind) {
             case AbiObservableStorageKind::Input:
-                storage = &checked.input_words.at(observable.storage_index);
+                storage = checked.input_words.dataAt(observable.storage_index);
+                storage_words = checked.input_words.countAt(observable.storage_index);
                 break;
             case AbiObservableStorageKind::Output:
-                storage = &checked.output_words.at(observable.storage_index);
+                storage = checked.output_words.dataAt(observable.storage_index);
+                storage_words = checked.output_words.countAt(observable.storage_index);
                 break;
             case AbiObservableStorageKind::Storage:
-                storage = &checked.observable_words.at(observable.storage_index);
+                storage = checked.observable_words.dataAt(observable.storage_index);
+                storage_words = checked.observable_words.countAt(observable.storage_index);
                 break;
         }
         if (!storage) {
@@ -914,10 +1274,35 @@ MateStatusCode mate_get_observable(const MateInstance* instance,
                 "Mate ABI: observable '{}' has no backing storage", observable.full_path));
         }
         storageToWords(observable.full_path,
-                       *storage,
+                       storage,
+                       storage_words,
                        observable.width,
                        words,
                        nwords);
+    });
+}
+
+MateStatusCode mate_get_all_observables(const MateInstance* instance,
+                                        uint64_t* words,
+                                        int32_t nwords,
+                                        MateStatus* status) {
+    return guard(status, [&]() {
+        const MateInstance& checked = checkedInstance(instance);
+        requireObservables(*checked.model, "mate_get_all_observables");
+        const size_t total = checked.model->observable_snapshot_words_total;
+        if (nwords < 0 || static_cast<size_t>(nwords) != total) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: snapshot buffer expected {} words, got {}", total, nwords));
+        }
+        if (!words) {
+            throw mate::CompilerError("Mate ABI: snapshot word pointer is null");
+        }
+        uint64_t* dst = words;
+        std::copy(checked.input_words.words.begin(), checked.input_words.words.end(), dst);
+        dst += checked.input_words.words.size();
+        std::copy(checked.output_words.words.begin(), checked.output_words.words.end(), dst);
+        dst += checked.output_words.words.size();
+        std::copy(checked.observable_words.words.begin(), checked.observable_words.words.end(), dst);
     });
 }
 

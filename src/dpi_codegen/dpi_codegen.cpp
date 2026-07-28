@@ -11,8 +11,10 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
+#include <set>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -297,21 +299,22 @@ const RuntimeObservableMetadata* observableForNode(const RtlRuntimeModel& model,
     return nullptr;
 }
 
+// Physical storage slot index for a node's observable of the given kind.
+// Multiple observable names can share one (node, kind) pair (aliasing after
+// inlining); assignStorageSlot (runtime_metadata.cpp) already dedupes them
+// onto one physical slot at metadata-build time, so this is a direct lookup,
+// not a scan.
 std::optional<size_t> storageIndexForObservable(const RtlRuntimeModel& model,
                                                 const DFGNode* node,
                                                 RuntimeObservableKind kind) {
     const auto* observable = observableForNode(model, node, kind);
     if (!observable) return std::nullopt;
-    size_t index = 0;
-    for (const auto& candidate : model.metadata().observables) {
-        if (candidate.kind == RuntimeObservableKind::Input ||
-            candidate.kind == RuntimeObservableKind::Output) {
-            continue;
-        }
-        if (candidate.id == observable->id) return index;
-        ++index;
+    if (!observable->storage_slot.has_value()) {
+        throw CompilerError(std::format(
+            "mate-dpi-codegen: observable '{}' has no assigned storage slot",
+            observable->full_path));
     }
-    throw CompilerError("mate-dpi-codegen: observable storage index was not found");
+    return observable->storage_slot;
 }
 
 void validateDpiSupportedPort(const ModuleNode& node) {
@@ -537,6 +540,33 @@ std::vector<const RuntimeClockMetadata*> runtimeClocksForPort(
     return result;
 }
 
+const RuntimeResetMetadata& runtimeResetForPort(const RtlRuntimeModel& model, const Port& port) {
+    const std::string& source_leaf = port.leaves.front().leaf_name;
+    for (const auto& reset : model.metadata().resets) {
+        const auto& source = model.metadata().input_leaves.at(reset.source_input.value);
+        if (source.leaf_name == source_leaf) return reset;
+    }
+    throw CompilerError(std::format(
+        "mate-dpi-codegen: reset '{}' has no runtime reset domain", port.name));
+}
+
+// DFG node backing a clock/reset port's source signal, for reachability
+// questions about the signal itself (see sourceSignalDrivesLogic).
+const DFGNode* clockSourceNode(const RtlRuntimeModel& model, const Port& port) {
+    const auto clocks = runtimeClocksForPort(model, port);
+    if (clocks.empty()) {
+        throw CompilerError(std::format(
+            "mate-dpi-codegen: clock '{}' has no runtime clock domain", port.name));
+    }
+    return model.metadata().input_leaves.at(clocks.front()->source_input.value).node;
+}
+
+const DFGNode* resetSourceNode(const RtlRuntimeModel& model, const Port& port) {
+    return model.metadata()
+        .input_leaves.at(runtimeResetForPort(model, port).source_input.value)
+        .node;
+}
+
 const RuntimeClockMetadata& runtimeClockForPortEdge(
         const RtlRuntimeModel& model,
         const Port& port,
@@ -565,12 +595,17 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     const auto input_leaves = allInputLeaves(ports);
     const auto output_leaves = allOutputLeaves(ports);
     out << "#include \"abi/mate_model_abi.h\"\n";
-    out << "#include \"svdpi.h\"\n\n";
+    out << "#include \"svdpi.h\"\n";
+    out << "#include \"tracer/tracer.h\"\n";
+    out << "#include \"tracer/vcd_backend.h\"\n\n";
     out << "#include <array>\n";
     out << "#include <cstdint>\n";
     out << "#include <cstdio>\n";
+    out << "#include <cstring>\n";
     out << "#include <cstdlib>\n";
     out << "#include <memory>\n";
+    out << "#include <optional>\n";
+    out << "#include <stdexcept>\n";
     out << "#include <utility>\n\n";
     out << "namespace {\n\n";
     for (size_t i = 0; i < input_leaves.size(); ++i) {
@@ -659,13 +694,62 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "    std::array<int32_t, " << output_leaves.size() << "> outputs{};\n";
     out << "    std::array<int32_t, " << model.metadata().clocks.size() << "> clocks{};\n";
     out << "    std::array<int32_t, " << ports.resets.size() << "> resets{};\n";
+    out << "    // Null unless " << config.function_prefix << "_enable_trace was called; "
+        << config.function_prefix << "_trace_dump no-ops until then.\n";
+    out << "    std::unique_ptr<mate::tracer::Tracer> tracer;\n";
+    out << "    // Simulation instant whose input changes have been recorded (via\n";
+    out << "    // mate_record_inputs) but not yet evaluated and traced. Flushed when a\n";
+    out << "    // later instant arrives, or on destruction for the final instant.\n";
+    out << "    std::optional<uint64_t> pending_trace_time;\n";
+    out << "    // Eval log (+MATE_DPI_EVAL_LOG). Null stream unless enabled.\n";
+    out << "    // Deliberately dumb: one line per evaluation, no aggregation, no\n";
+    out << "    // instant bookkeeping. Only the DPI layer knows simulation time and\n";
+    out << "    // only the ABI counts evaluations, so this pairs the two and writes\n";
+    out << "    // the raw event stream; everything else is a parsing question.\n";
+    out << "    std::FILE* eval_log = nullptr;\n";
+    out << "    bool eval_log_owned = false;\n";
+    out << "    // ABI eval count as of the last line written, so the next check knows\n";
+    out << "    // how many evaluations to emit.\n";
+    out << "    uint64_t eval_log_reported = 0;\n";
     out << "\n";
     out << "    ~Context() {\n";
     out << "        MateStatus status{};\n";
+    out << "        // Final settle flush: the last recorded instant never sees a\n";
+    out << "        // \"time advanced\" signal, so trace it here, while the instance\n";
+    out << "        // is still alive. Errors are swallowed: this is a destructor and\n";
+    out << "        // the trace is best-effort at teardown.\n";
+    out << "        if (tracer && pending_trace_time && instance) {\n";
+    out << "            if (mate_set_inputs(instance, nullptr, 0, &status) == MATE_STATUS_OK) {\n";
+    out << "                try { tracer->dump(*pending_trace_time); } catch (...) {}\n";
+    out << "            }\n";
+    out << "        }\n";
+    out << "        if (eval_log) {\n";
+    out << "            std::fflush(eval_log);\n";
+    out << "            if (eval_log_owned) std::fclose(eval_log);\n";
+    out << "        }\n";
     out << "        if (instance) (void)mate_instance_destroy(instance, &status);\n";
     out << "        if (model) (void)mate_model_destroy(model, &status);\n";
     out << "    }\n";
     out << "};\n\n";
+    // Called right after any ABI call that can evaluate, with the simulation
+    // time that call belongs to. Emits one line per evaluation that has
+    // happened since the previous call. A single DPI call never spans
+    // simulation instants, so every evaluation it triggered carries this same
+    // timestamp -- repeated lines are the point, not a bug: the log stays a
+    // raw event stream and all counting happens at parse time.
+    out << "void logEvals(Context& context, uint64_t time_ns, const char* site) {\n";
+    out << "    if (!context.eval_log) return;\n";
+    out << "    MateStatus status{};\n";
+    out << "    uint64_t total = 0;\n";
+    out << "    if (mate_evaluate_count(context.instance, &total, &status) != MATE_STATUS_OK) {\n";
+    out << "        failDpiCall(\"logEvals\", status.message ? status.message : \"unknown error\");\n";
+    out << "    }\n";
+    out << "    for (uint64_t i = context.eval_log_reported; i < total; ++i) {\n";
+    out << "        std::fprintf(context.eval_log, \"%llu: eval %s\\n\",\n";
+    out << "                     (unsigned long long)time_ns, site);\n";
+    out << "    }\n";
+    out << "    context.eval_log_reported = total;\n";
+    out << "}\n\n";
     out << "Context& checkedContext(void* raw) {\n";
     out << "    if (!raw) failDpiCall(\"checkedContext\", " << cppString(config.module_name + " DPI received null context handle") << ");\n";
     out << "    return *static_cast<Context*>(raw);\n";
@@ -729,11 +813,66 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     out << "void " << config.function_prefix << "_destroy(void* context_handle) {\n";
     out << "    delete static_cast<Context*>(context_handle);\n";
     out << "}\n\n";
+    out << "void " << config.function_prefix
+        << "_enable_trace(void* context_handle, const char* path, svBit flat_hierarchy) {\n";
+    out << "    Context& context = checkedContext(context_handle);\n";
+    out << "    try {\n";
+    out << "        auto backend = std::make_unique<mate::tracer::VcdBackend>(path, "
+        << cppString(config.module_name) << ", flat_hierarchy != 0);\n";
+    out << "        context.tracer = std::make_unique<mate::tracer::Tracer>(\n";
+    out << "            context.model, context.instance, std::move(backend));\n";
+    out << "    } catch (const std::exception& e) {\n";
+    out << "        failDpiCall(\"" << config.function_prefix << "_enable_trace\", e.what());\n";
+    out << "    }\n";
+    out << "}\n\n";
+    out << "void " << config.function_prefix
+        << "_enable_eval_log(void* context_handle, const char* path) {\n";
+    out << "    Context& context = checkedContext(context_handle);\n";
+    out << "    if (context.eval_log) failDpiCall(\"" << config.function_prefix
+        << "_enable_eval_log\", \"eval log already enabled\");\n";
+    out << "    if (!path || path[0] == '\\0') failDpiCall(\"" << config.function_prefix
+        << "_enable_eval_log\", \"eval log path is empty\");\n";
+    out << "    if (std::strcmp(path, \"-\") == 0) {\n";
+    out << "        context.eval_log = stdout;\n";
+    out << "        context.eval_log_owned = false;\n";
+    out << "    } else {\n";
+    out << "        context.eval_log = std::fopen(path, \"w\");\n";
+    out << "        if (!context.eval_log) failDpiCall(\"" << config.function_prefix
+        << "_enable_eval_log\", \"could not open eval log for writing\");\n";
+    out << "        context.eval_log_owned = true;\n";
+    out << "    }\n";
+    out << "}\n\n";
+    out << "void " << config.function_prefix << "_trace_dump(void* context_handle, uint64_t time_ns) {\n";
+    out << "    Context& context = checkedContext(context_handle);\n";
+    out << "    if (!context.tracer) return;\n";
+    out << "    if (context.pending_trace_time) {\n";
+    out << "        // The wrapper's edge block starts with a record call at the\n";
+    out << "        // current instant, so by the time a dump runs, any older pending\n";
+    out << "        // instant has already been flushed and the pending instant must be\n";
+    out << "        // this one. This dump supersedes the pending settle observation:\n";
+    out << "        // the caller just fully evaluated at this same instant.\n";
+    out << "        if (*context.pending_trace_time != time_ns) {\n";
+    out << "            failDpiCall(\"" << config.function_prefix << "_trace_dump\",\n";
+    out << "                        \"pending recorded instant was never flushed (wrapper event-ordering bug)\");\n";
+    out << "        }\n";
+    out << "        context.pending_trace_time.reset();\n";
+    out << "    }\n";
+    out << "    try {\n";
+    out << "        context.tracer->dump(time_ns);\n";
+    out << "    } catch (const std::exception& e) {\n";
+    out << "        failDpiCall(\"" << config.function_prefix << "_trace_dump\", e.what());\n";
+    out << "    }\n";
+    out << "}\n\n";
 
+    // Every entry point below can trigger evaluations, so each takes the
+    // simulation time it belongs to -- purely so the eval log can timestamp
+    // them without the DPI layer having to track instants itself. Unused when
+    // the log is off.
     auto emitFunctionHeader = [&](std::string_view name,
                                   const std::vector<LeafIndex>& input_indices,
                                   bool include_outputs) {
-        out << "void " << config.function_prefix << "_" << name << "(void* context_handle";
+        out << "void " << config.function_prefix << "_" << name
+            << "(void* context_handle,\n                           uint64_t time_ns";
         for (LeafIndex index : input_indices) {
             const auto& input = inputLeaf(ports, index);
             out << ",\n                           " << cppDpiType(input.type, false) << " "
@@ -804,6 +943,7 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     emitUpdateArrayWithCount("async_updates", init_async_inputs);
     emitUpdateArrayWithCount("sync_updates", ports.sync_inputs);
     out << "        check(mate_instance_init(context.instance, MATE_FLOPS_INITIAL_ZERO, 1, 0, async_updates, async_updates_count, sync_updates, sync_updates_count, &status), status, \"" << config.function_prefix << "_init_values\");\n";
+    out << "        logEvals(context, time_ns, \"init\");\n";
     out << "        writeOutputs(context";
     for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";
@@ -816,9 +956,55 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     emitUpdateArrayWithCount("input_updates", data_inputs);
     out << "        check(mate_set_inputs(context.instance, input_updates, input_updates_count, &status), status, \""
         << config.function_prefix << "_set_input_values\");\n";
+    out << "        logEvals(context, time_ns, \"input-change\");\n";
     out << "        writeOutputs(context";
     for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
     out << ");\n";
+    out << "}\n\n";
+
+    // Input recording: stores input values without evaluating. This runs
+    // UNCONDITIONALLY (not trace-gated): clock-edge handlers only pass their
+    // own domain's sync inputs, and rely on instance storage for the rest --
+    // which is how a CDC input classified in domain A gets sampled by domain
+    // B's synchronizer flops. Storage must therefore stay fresh on every
+    // input change, tracing or not.
+    //
+    // When tracing is enabled it additionally batches per simulation
+    // instant: a call arriving with a later time means the pending instant
+    // is complete -- evaluate once with its settled inputs (already in
+    // storage) and trace it at its own timestamp, then record the new one.
+    out << "void " << config.function_prefix << "_record_input_values(void* context_handle";
+    out << ",\n                           uint64_t time_ns";
+    for (LeafIndex index : data_inputs) {
+        const auto& input = inputLeaf(ports, index);
+        out << ",\n                           " << cppDpiType(input.type, false) << " "
+            << leafIdentifier(input.leaf_name);
+    }
+    out << ") {\n";
+    out << "        auto& context = checkedContext(context_handle);\n";
+    out << "        MateStatus status{};\n";
+    out << "        if (context.tracer) {\n";
+    out << "            if (context.pending_trace_time && time_ns < *context.pending_trace_time) {\n";
+    out << "                failDpiCall(\"" << config.function_prefix << "_record_input_values\",\n";
+    out << "                            \"input recording time went backwards\");\n";
+    out << "            }\n";
+    out << "            if (context.pending_trace_time && time_ns > *context.pending_trace_time) {\n";
+    out << "                check(mate_set_inputs(context.instance, nullptr, 0, &status), status, \""
+        << config.function_prefix << "_record_input_values\");\n";
+    out << "                // This settle eval belongs to the instant being flushed,\n";
+    out << "                // not to the one now arriving.\n";
+    out << "                logEvals(context, *context.pending_trace_time, \"settle-flush\");\n";
+    out << "                try {\n";
+    out << "                    context.tracer->dump(*context.pending_trace_time);\n";
+    out << "                } catch (const std::exception& e) {\n";
+    out << "                    failDpiCall(\"" << config.function_prefix << "_record_input_values\", e.what());\n";
+    out << "                }\n";
+    out << "            }\n";
+    out << "        }\n";
+    emitUpdateArrayWithCount("input_updates", data_inputs);
+    out << "        check(mate_record_inputs(context.instance, input_updates, input_updates_count, &status), status, \""
+        << config.function_prefix << "_record_input_values\");\n";
+    out << "        if (context.tracer) context.pending_trace_time = time_ns;\n";
     out << "}\n\n";
 
     for (size_t clock_index : ports.clocks) {
@@ -832,18 +1018,20 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
                 const auto sync_indices = syncInputsForClockDomain(ports, runtime_clock.domain_id);
                 edge_inputs.insert(edge_inputs.end(), sync_indices.begin(), sync_indices.end());
             }
-            emitFunctionHeader(sanitizeIdentifier(clock.name) + "_" + edgeName(edge), edge_inputs, true);
+            // No input updates: the wrapper's record call already refreshed
+            // every input for this instant, and mate_settle_if_dirty ran
+            // before any commit, so storage and flop D are both current.
+            (void)edge_inputs;
+            emitFunctionHeader("commit_" + sanitizeIdentifier(clock.name) + "_" + edgeName(edge),
+                               {}, false);
             out << " {\n";
             out << "        auto& context = checkedContext(context_handle);\n";
             out << "        MateStatus status{};\n";
-            emitUpdateArrayWithCount("edge_updates", edge_inputs);
-            out << "        check(mate_apply_clock(context.instance, context.clocks.at(kClock_"
+            out << "        (void)time_ns;\n";
+            out << "        check(mate_commit_clock(context.instance, context.clocks.at(kClock_"
                 << clockHandleIdentifier(model.metadata(), runtime_clock) << "), " << edgeAbiName(edge)
-                << ", edge_updates, edge_updates_count, &status), status, \"" << config.function_prefix << "_"
-                << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\");\n";
-            out << "        writeOutputs(context";
-            for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
-            out << ");\n";
+                << ", nullptr, 0, &status), status, \"" << config.function_prefix
+                << "_commit_" << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "\");\n";
             out << "}\n\n";
         }
     }
@@ -851,20 +1039,50 @@ std::string makeCpp(const Config& config, const ModelPorts& ports, const RtlRunt
     for (size_t reset_index : ports.resets) {
         const auto& reset = ports.inputs[reset_index];
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
-            emitFunctionHeader(sanitizeIdentifier(reset.name) + "_" + edgeName(edge), {}, true);
+            emitFunctionHeader("commit_" + sanitizeIdentifier(reset.name) + "_" + edgeName(edge),
+                               {}, false);
             out << " {\n";
             out << "        auto& context = checkedContext(context_handle);\n";
             out << "        MateStatus status{};\n";
-            out << "        check(mate_apply_reset(context.instance, context.resets.at(kReset_"
+            out << "        (void)time_ns;\n";
+            out << "        check(mate_commit_reset(context.instance, context.resets.at(kReset_"
                 << leafIdentifier(reset.leaves.front().leaf_name) << "), " << edgeAbiName(edge)
-                << ", &status), status, \"" << config.function_prefix << "_"
+                << ", &status), status, \"" << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "\");\n";
-            out << "        writeOutputs(context";
-            for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
-            out << ");\n";
             out << "}\n\n";
         }
     }
+
+    // Restores the settled invariant before any commit runs, for the case where
+    // an input changed earlier in this instant without triggering an evaluation
+    // (the record block never evaluates, and the comb-refresh block only fires
+    // for inputs that reach an output). No-op when nothing actually changed.
+    emitFunctionHeader("settle_if_dirty", {}, true);
+    out << " {\n";
+    out << "        auto& context = checkedContext(context_handle);\n";
+    out << "        MateStatus status{};\n";
+    out << "        check(mate_settle_if_dirty(context.instance, &status), status, \""
+        << config.function_prefix << "_settle_if_dirty\");\n";
+    out << "        logEvals(context, time_ns, \"pre-edge-settle\");\n";
+    out << "        writeOutputs(context";
+    for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
+    out << ");\n";
+    out << "}\n\n";
+
+    // One settle for every edge that landed in this simulation instant. Kept
+    // separate from the commits above so all of them read the same pre-edge
+    // flop D snapshot; see mate_commit_clock's contract.
+    emitFunctionHeader("settle", {}, true);
+    out << " {\n";
+    out << "        auto& context = checkedContext(context_handle);\n";
+    out << "        MateStatus status{};\n";
+    out << "        check(mate_settle(context.instance, &status), status, \""
+        << config.function_prefix << "_settle\");\n";
+    out << "        logEvals(context, time_ns, \"settle\");\n";
+    out << "        writeOutputs(context";
+    for (LeafIndex index : output_leaves) out << ", " << leafIdentifier(outputLeaf(ports, index).leaf_name);
+    out << ");\n";
+    out << "}\n\n";
 
     out << "} // extern \"C\"\n";
     return out.str();
@@ -881,6 +1099,8 @@ void emitSvImportArgs(std::ostringstream& out,
     };
     comma();
     out << "        input chandle ctx";
+    comma();
+    out << "        input longint unsigned time_ns";
     for (LeafIndex index : inputs) {
         const auto& input = inputLeaf(ports, index);
         comma();
@@ -899,6 +1119,7 @@ void emitSvCallArgs(std::ostringstream& out,
                     const std::vector<LeafIndex>& outputs,
                     const ModelPorts& ports) {
     out << "                        ctx";
+    out << ",\n                        $time";
     for (LeafIndex index : inputs) {
         const auto& port = ports.inputs[index.port];
         const auto& leaf = inputLeaf(ports, index);
@@ -911,6 +1132,134 @@ void emitSvCallArgs(std::ostringstream& out,
     out << "\n";
 }
 
+// Output leaves with a combinational dependence on a top data input, plus the
+// input ports appearing in any such cone. This shapes the generated wrapper:
+// a comb-dependent output must refresh on (cone) input changes between
+// edges, while a purely registered output only ever changes at clock/reset
+// edges -- so for a fully registered design the input-change evaluation block
+// disappears entirely. Flop boundaries need no special casing in either
+// direction: flop Q sources are producer-less INPUT nodes (backward
+// reachability stops there) and flop D drivers have no DFG users past the D
+// sink (forward reachability stops there).
+struct WrapperCombAnalysis {
+    std::set<std::string> comb_output_leaf_names;
+    std::set<std::string> cone_input_port_names;
+};
+
+// Whether a clock/reset source signal is itself readable by the design --
+// clock-as-data, clock gating, a reset level feeding logic. An edge that does
+// NOT commit anything (the inactive edge of a clock, either edge of a reset
+// that is not its active one) changes exactly one thing: that signal's own
+// stored word. If the signal cannot reach an output leaf or a flop D sink,
+// nothing downstream can differ, and the wrapper skips the settle entirely.
+// Reset levels are additionally read directly by the generated clock-commit
+// code for async-reset priority, but that reads input storage, not an
+// evaluated value, so it does not need a settle either.
+bool sourceSignalDrivesLogic(const RtlRuntimeModel& model, const DFGNode* source) {
+    if (!source) return false;
+    if (!model.top().dfg) {
+        throw CompilerError("mate-dpi-codegen: top module has no DFG");
+    }
+    std::map<const DFGNode*, std::vector<const DFGNode*>> users;
+    for (const auto& node : model.top().dfg->nodes) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
+            users[input.node].push_back(node.get());
+        });
+    }
+    std::set<const DFGNode*> targets;
+    for (const auto& output : model.metadata().output_leaves) {
+        if (output.node) targets.insert(output.node);
+    }
+    for (const auto& flop : model.metadata().flops) {
+        for (const auto& leaf : flop.leaves) {
+            if (leaf.d_node) targets.insert(leaf.d_node);
+        }
+    }
+    std::set<const DFGNode*> seen;
+    std::vector<const DFGNode*> stack{source};
+    while (!stack.empty()) {
+        const DFGNode* node = stack.back();
+        stack.pop_back();
+        if (!seen.insert(node).second) continue;
+        if (node != source && targets.contains(node)) return true;
+        if (auto it = users.find(node); it != users.end()) {
+            for (const DFGNode* user : it->second) stack.push_back(user);
+        }
+    }
+    return false;
+}
+
+WrapperCombAnalysis analyzeWrapperCombDependence(const ModelPorts& ports,
+                                                 const RtlRuntimeModel& model) {
+    WrapperCombAnalysis result;
+    if (!model.top().dfg) {
+        throw CompilerError("mate-dpi-codegen: top module has no DFG");
+    }
+
+    std::map<const DFGNode*, size_t> port_by_data_input_node;
+    std::vector<LeafIndex> data_inputs;
+    data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
+    data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
+    for (LeafIndex index : data_inputs) {
+        const auto& leaf = inputLeaf(ports, index);
+        const auto* input = model.metadata().findInput(leaf.leaf_name);
+        if (!input || !input->node) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: data input leaf '{}' has no runtime input node",
+                leaf.leaf_name));
+        }
+        port_by_data_input_node[input->node] = index.port;
+    }
+
+    std::map<const DFGNode*, bool> reaches_data_input;
+    std::function<bool(const DFGNode*)> reachesDataInput = [&](const DFGNode* node) -> bool {
+        auto it = reaches_data_input.find(node);
+        if (it != reaches_data_input.end()) return it->second;
+        reaches_data_input[node] = false;
+        bool reaches = port_by_data_input_node.contains(node);
+        DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
+            if (!reaches && reachesDataInput(input.node)) reaches = true;
+        });
+        return reaches_data_input[node] = reaches;
+    };
+    for (const auto& output : model.metadata().output_leaves) {
+        if (output.node && reachesDataInput(output.node)) {
+            result.comb_output_leaf_names.insert(output.leaf_name);
+        }
+    }
+
+    std::map<const DFGNode*, std::vector<const DFGNode*>> users;
+    for (const auto& node : model.top().dfg->nodes) {
+        DFGTraversal::forEachInput(node.get(), [&](size_t, const DFGOutput& input) {
+            users[input.node].push_back(node.get());
+        });
+    }
+    std::set<const DFGNode*> output_nodes;
+    for (const auto& output : model.metadata().output_leaves) {
+        if (output.node) output_nodes.insert(output.node);
+    }
+    std::map<const DFGNode*, bool> reaches_output;
+    std::function<bool(const DFGNode*)> reachesOutput = [&](const DFGNode* node) -> bool {
+        auto it = reaches_output.find(node);
+        if (it != reaches_output.end()) return it->second;
+        reaches_output[node] = false;
+        bool reaches = output_nodes.contains(node);
+        if (auto users_it = users.find(node); users_it != users.end()) {
+            for (const DFGNode* user : users_it->second) {
+                if (reaches) break;
+                if (reachesOutput(user)) reaches = true;
+            }
+        }
+        return reaches_output[node] = reaches;
+    };
+    for (const auto& [node, port_index] : port_by_data_input_node) {
+        if (reachesOutput(node)) {
+            result.cone_input_port_names.insert(ports.inputs[port_index].name);
+        }
+    }
+    return result;
+}
+
 std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRuntimeModel& model) {
     std::ostringstream out;
     const auto input_leaves = allInputLeaves(ports);
@@ -919,6 +1268,17 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     out << "package " << pkg_name << ";\n";
     out << "    import \"DPI-C\" function chandle " << config.function_prefix << "_create_context();\n";
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_destroy(input chandle ctx);\n\n";
+
+    // Waveform tracing of the DPI model itself: opt-in only (enable_trace is
+    // called once, gated behind a plusarg in the wrapper's initial block),
+    // trace_dump is called at every settle point below and no-ops when
+    // tracing was never enabled.
+    out << "    import \"DPI-C\" function void " << config.function_prefix
+        << "_enable_trace(input chandle ctx, input string path, input bit flat_hierarchy);\n";
+    out << "    import \"DPI-C\" function void " << config.function_prefix
+        << "_enable_eval_log(input chandle ctx, input string path);\n";
+    out << "    import \"DPI-C\" function void " << config.function_prefix
+        << "_trace_dump(input chandle ctx, input longint unsigned time_ns);\n\n";
 
     out << "    import \"DPI-C\" function void " << config.function_prefix << "_init_values(\n";
     emitSvImportArgs(out, input_leaves, output_leaves, ports);
@@ -931,6 +1291,15 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     emitSvImportArgs(out, sync_inputs, output_leaves, ports);
     out << "    );\n\n";
 
+    out << "    import \"DPI-C\" function void " << config.function_prefix << "_record_input_values(\n";
+    out << "        input chandle ctx,\n";
+    out << "        input longint unsigned time_ns";
+    for (LeafIndex index : sync_inputs) {
+        const auto& input = inputLeaf(ports, index);
+        out << ",\n" << svImportArg("input", input, leafIdentifier(input.leaf_name));
+    }
+    out << "\n    );\n\n";
+
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs[clock_index];
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
@@ -941,9 +1310,10 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
                 const auto sync_indices = syncInputsForClockDomain(ports, runtime_clock.domain_id);
                 event_inputs.insert(event_inputs.end(), sync_indices.begin(), sync_indices.end());
             }
-            out << "    import \"DPI-C\" function void " << config.function_prefix << "_"
+            (void)event_inputs;
+            out << "    import \"DPI-C\" function void " << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "(\n";
-            emitSvImportArgs(out, event_inputs, output_leaves, ports);
+            emitSvImportArgs(out, {}, {}, ports);
             out << "    );\n\n";
         }
     }
@@ -951,12 +1321,20 @@ std::string makeSvPkg(const Config& config, const ModelPorts& ports, const RtlRu
     for (size_t reset_index : ports.resets) {
         const auto& reset = ports.inputs[reset_index];
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
-            out << "    import \"DPI-C\" function void " << config.function_prefix << "_"
+            out << "    import \"DPI-C\" function void " << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "(\n";
-            emitSvImportArgs(out, {}, output_leaves, ports);
+            emitSvImportArgs(out, {}, {}, ports);
             out << "    );\n\n";
         }
     }
+
+    out << "    import \"DPI-C\" function void " << config.function_prefix << "_settle_if_dirty(\n";
+    emitSvImportArgs(out, {}, output_leaves, ports);
+    out << "    );\n\n";
+
+    out << "    import \"DPI-C\" function void " << config.function_prefix << "_settle(\n";
+    emitSvImportArgs(out, {}, output_leaves, ports);
+    out << "    );\n\n";
 
     out << "endpackage\n";
     return out.str();
@@ -1067,6 +1445,13 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
 
     out << "    chandle ctx;\n";
     out << "    logic initialized;\n";
+    // Set when +MATE_DPI_TRACE enabled the tracer. An edge that commits nothing
+    // still has to settle while tracing: a clock/reset signal is re-registered
+    // as its own internal observable in every submodule scope it enters, and
+    // those alias slots are only refreshed by an evaluation, so skipping the
+    // settle would leave them stale in the waveform even though no simulation
+    // state depends on them.
+    out << "    logic trace_active;\n";
     for (size_t index : ports.clocks) out << "    logic last_" << ports.inputs[index].name << ";\n";
     for (size_t index : ports.resets) out << "    logic last_" << ports.inputs[index].name << ";\n";
     out << "\n";
@@ -1086,6 +1471,22 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         }
     }
     out << "        ctx = " << config.function_prefix << "_create_context();\n";
+    out << "        trace_active = 1'b0;\n";
+    out << "        begin\n";
+    out << "            string mate_dpi_trace_path;\n";
+    out << "            if ($value$plusargs(\"MATE_DPI_TRACE=%s\", mate_dpi_trace_path)) begin\n";
+    out << "                " << config.function_prefix
+        << "_enable_trace(ctx, mate_dpi_trace_path, $test$plusargs(\"MATE_DPI_TRACE_FLAT\"));\n";
+    out << "                trace_active = 1'b1;\n";
+    out << "            end\n";
+    out << "        end\n";
+    out << "        begin\n";
+    out << "            string mate_dpi_eval_log_path;\n";
+    out << "            if ($value$plusargs(\"MATE_DPI_EVAL_LOG=%s\", mate_dpi_eval_log_path)) begin\n";
+    out << "                " << config.function_prefix
+        << "_enable_eval_log(ctx, mate_dpi_eval_log_path);\n";
+    out << "            end\n";
+    out << "        end\n";
     out << "        initialized = 1'b0;\n";
     for (size_t index : ports.clocks) {
         const auto& clock = ports.inputs[index];
@@ -1105,6 +1506,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         out << "        " << svOutputLeafExpr(output) << " = "
             << svOutputLeafValueExpr(port, output) << ";\n";
     }
+    out << "        " << config.function_prefix << "_trace_dump(ctx, $time);\n";
     out << "        initialized = 1'b1;\n";
     out << "    end\n\n";
     out << "    final begin\n";
@@ -1112,35 +1514,86 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
     out << "            " << config.function_prefix << "_destroy(ctx);\n";
     out << "        end\n";
     out << "    end\n\n";
-    if (!ports.async_inputs.empty() || !ports.sync_inputs.empty()) {
-        out << "    always @(";
-        std::vector<LeafIndex> data_inputs;
-        data_inputs.reserve(ports.async_inputs.size() + ports.sync_inputs.size());
-        data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
-        data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
-        std::vector<std::string> sensitivity_ports;
-        for (LeafIndex index : data_inputs) {
+    std::vector<LeafIndex> data_inputs;
+    data_inputs.reserve(ports.async_inputs.size() + ports.sync_inputs.size());
+    data_inputs.insert(data_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
+    data_inputs.insert(data_inputs.end(), ports.sync_inputs.begin(), ports.sync_inputs.end());
+    auto uniquePortNames = [&](const std::vector<LeafIndex>& indices,
+                               const std::set<std::string>* filter) {
+        std::vector<std::string> names;
+        for (LeafIndex index : indices) {
             const std::string& name = ports.inputs[index.port].name;
-            if (std::find(sensitivity_ports.begin(), sensitivity_ports.end(), name) ==
-                sensitivity_ports.end()) {
-                sensitivity_ports.push_back(name);
+            if (filter && !filter->contains(name)) continue;
+            if (std::find(names.begin(), names.end(), name) == names.end()) {
+                names.push_back(name);
             }
         }
-        for (size_t i = 0; i < sensitivity_ports.size(); ++i) {
-            if (i) out << " or ";
-            out << sensitivity_ports.at(i);
+        return names;
+    };
+    auto emitSensitivityList = [&](const std::vector<std::string>& names) {
+        if (names.empty()) {
+            throw CompilerError("mate-dpi-codegen: always block has an empty sensitivity list");
         }
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i) out << " or ";
+            out << names.at(i);
+        }
+    };
+    auto emitRecordCall = [&](std::string_view indent) {
+        out << indent << config.function_prefix << "_record_input_values(\n";
+        out << "                        ctx,\n";
+        out << "                        $time";
+        for (LeafIndex index : data_inputs) {
+            const auto& port = ports.inputs[index.port];
+            const auto& leaf = inputLeaf(ports, index);
+            out << ",\n                        " << svDpiInputSignal(port, leaf);
+        }
+        out << "\n" << indent << ");\n";
+    };
+
+    const WrapperCombAnalysis comb_analysis = analyzeWrapperCombDependence(ports, model);
+    std::vector<LeafIndex> comb_output_leaves;
+    for (LeafIndex index : output_leaves) {
+        if (comb_analysis.comb_output_leaf_names.contains(outputLeaf(ports, index).leaf_name)) {
+            comb_output_leaves.push_back(index);
+        }
+    }
+
+    // Combinational-output refresh: only outputs with a comb dependence on a
+    // data input, fired only by the inputs in some such cone. Purely
+    // registered outputs are written exclusively by the edge block below, so
+    // a fully registered design gets no between-edge evaluation at all --
+    // safe because edge handlers re-send every input and re-evaluate
+    // internally before committing flops.
+    if (!comb_output_leaves.empty()) {
+        out << "    always @(";
+        emitSensitivityList(uniquePortNames(data_inputs, &comb_analysis.cone_input_port_names));
         out << ") begin\n";
         out << "        if (initialized) begin\n";
         out << "            " << config.function_prefix << "_set_input_values(\n";
         emitSvCallArgs(out, data_inputs, output_leaves, ports);
         out << "            );\n";
-        for (LeafIndex index : output_leaves) {
+        for (LeafIndex index : comb_output_leaves) {
             const auto& port = ports.outputs[index.port];
             const auto& output = outputLeaf(ports, index);
             out << "            " << svOutputLeafExpr(output) << " = "
                 << svOutputLeafValueExpr(port, output) << ";\n";
         }
+        out << "        end\n";
+        out << "    end\n\n";
+    }
+
+    // Input recording: every data-input change is stored in the model (no
+    // evaluation). Keeps instance storage fresh for edge handlers, which only
+    // pass their own domain's sync inputs (a CDC input classified in another
+    // domain is sampled from storage). When tracing is on, the DPI side also
+    // batches per instant and runs one evaluation when time advances.
+    if (!data_inputs.empty()) {
+        out << "    always @(";
+        emitSensitivityList(uniquePortNames(data_inputs, nullptr));
+        out << ") begin\n";
+        out << "        if (initialized) begin\n";
+        emitRecordCall("            ");
         out << "        end\n";
         out << "    end\n\n";
     }
@@ -1165,6 +1618,7 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         const auto& reset = ports.inputs[index];
         out << "        logic " << reset.name << "_changed;\n";
     }
+    out << "        logic need_settle;\n";
     out << "\n";
     for (size_t index : ports.clocks) {
         const auto& clock = ports.inputs[index];
@@ -1185,6 +1639,13 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         out << "            if (" << reset.name << "_changed) last_" << reset.name << " = " << reset.name << ";\n";
     }
     out << "        end else begin\n";
+    if (!data_inputs.empty()) {
+        // Record the current inputs -- and flush the previous instant's
+        // pending observation -- BEFORE any edge processing commits flops.
+        // This makes trace correctness independent of SV event ordering
+        // between this block and the recording block at a new instant.
+        emitRecordCall("            ");
+    }
 
     auto emitCommitOutputs = [&]() {
         for (LeafIndex index : output_leaves) {
@@ -1195,54 +1656,86 @@ std::string makeSv(const Config& config, const ModelPorts& ports, const RtlRunti
         }
     };
 
+    // Every edge in this instant commits first; the single settle below then
+    // evaluates once. Because nothing evaluates between commits, they all read
+    // the pre-edge flop D snapshot left by the previous settle -- which is both
+    // what RTL non-blocking semantics require for coincident edges in different
+    // domains, and what makes the commit order unobservable.
+    //
+    // need_settle is accumulated rather than assumed: an edge that commits
+    // nothing (a clock's inactive edge, a reset's non-active edge) changes only
+    // that signal's own stored word, so it needs a settle only if the design
+    // actually reads that signal (sourceSignalDrivesLogic).
+    out << "            " << config.function_prefix << "_settle_if_dirty(\n";
+    emitSvCallArgs(out, {}, output_leaves, ports);
+    out << "            );\n";
+    out << "            need_settle = trace_active;\n";
     for (size_t clock_index : ports.clocks) {
         const auto& clock = ports.inputs[clock_index];
+        const bool clock_drives_logic =
+            sourceSignalDrivesLogic(model, clockSourceNode(model, clock));
         out << "            if (" << clock.name << "_changed) begin\n";
         out << "                last_" << clock.name << " = " << clock.name << ";\n";
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             const auto& runtime_clock = runtimeClockForPortEdge(model, clock, edge);
+            const bool active_edge = runtime_clock.edge == edge;
             out << (edge == POSEDGE ? "                if" : "                else if")
                 << " (" << clock.name << " === 1'b" << (edge == POSEDGE ? "1" : "0") << ") begin\n";
-            std::vector<LeafIndex> event_inputs;
-            if (runtime_clock.edge == edge) {
-                event_inputs.insert(event_inputs.end(), ports.async_inputs.begin(), ports.async_inputs.end());
-                const auto sync_indices = syncInputsForClockDomain(ports, runtime_clock.domain_id);
-                event_inputs.insert(event_inputs.end(), sync_indices.begin(), sync_indices.end());
-            }
-            out << "                    " << config.function_prefix << "_"
+            out << "                    " << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(clock.name) << "_" << edgeName(edge) << "(\n";
-            emitSvCallArgs(out, event_inputs, output_leaves, ports);
+            emitSvCallArgs(out, {}, {}, ports);
             out << "                    );\n";
+            if (active_edge || clock_drives_logic) {
+                out << "                    need_settle = 1'b1;\n";
+            } else {
+                out << "                    // inactive edge and " << clock.name
+                    << " drives no logic: nothing can have changed\n";
+            }
             out << "                end\n";
         }
         out << "                else begin\n";
         out << "                    $fatal(1, \"" << config.module_name
             << " only accepts 2-state " << clock.name << " values\");\n";
         out << "                end\n";
-        emitCommitOutputs();
         out << "            end\n\n";
     }
 
     for (size_t reset_index : ports.resets) {
         const auto& reset = ports.inputs[reset_index];
+        const bool reset_drives_logic =
+            sourceSignalDrivesLogic(model, resetSourceNode(model, reset));
+        const edge_t reset_active_edge = runtimeResetForPort(model, reset).active_edge;
         out << "            if (" << reset.name << "_changed) begin\n";
         out << "                last_" << reset.name << " = " << reset.name << ";\n";
         for (edge_t edge : {POSEDGE, NEGEDGE}) {
             out << (edge == POSEDGE ? "                if" : "                else if")
                 << " (" << reset.name << " === 1'b" << (edge == POSEDGE ? "1" : "0") << ") begin\n";
-            out << "                    " << config.function_prefix << "_"
+            out << "                    " << config.function_prefix << "_commit_"
                 << sanitizeIdentifier(reset.name) << "_" << edgeName(edge) << "(\n";
-            emitSvCallArgs(out, {}, output_leaves, ports);
+            emitSvCallArgs(out, {}, {}, ports);
             out << "                    );\n";
+            if (edge == reset_active_edge || reset_drives_logic) {
+                out << "                    need_settle = 1'b1;\n";
+            } else {
+                out << "                    // reset release and " << reset.name
+                    << " drives no logic: nothing can have changed\n";
+            }
             out << "                end\n";
         }
         out << "                else begin\n";
         out << "                    $fatal(1, \"" << config.module_name
             << " only accepts 2-state " << reset.name << " values\");\n";
         out << "                end\n";
-        emitCommitOutputs();
-        out << "            end\n";
+        out << "            end\n\n";
     }
+
+    out << "            if (need_settle) begin\n";
+    out << "                " << config.function_prefix << "_settle(\n";
+    emitSvCallArgs(out, {}, output_leaves, ports);
+    out << "                );\n";
+    out << "            end\n";
+    out << "            " << config.function_prefix << "_trace_dump(ctx, $time);\n";
+    emitCommitOutputs();
     out << "        end\n";
     out << "    end\n\n";
     out << "endmodule\n";
@@ -1399,7 +1892,8 @@ size_t nativeCombinationalFileCount(size_t chunk_count) {
     return std::max<size_t>(1, std::min(chunk_count, hardware_threads * 2));
 }
 
-NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model) {
+NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model,
+                                                   bool emit_observables) {
     if (!model.top().dfg) {
         throw CompilerError("mate-dpi-codegen: top module has no DFG");
     }
@@ -1806,11 +2300,21 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
             out << "    const auto " << var << " = " << resizeExpr(expr, type) << ";\n";
             local_value_expr[node] = var;
 
-            if (auto storage_index = storageIndexForObservable(
-                    model, node, RuntimeObservableKind::Internal)) {
-                out << "    " << var << ".copyToWords(storage[" << *storage_index
-                    << "].words, storage[" << *storage_index << "].nwords);\n";
+            // Internal observables are write-only as far as compute goes:
+            // nodeValue() only ever loads back inputs, spills and flop Q, so
+            // these copies exist purely to keep the tracer / mate_get_observable
+            // readable. They are the single largest class of stores in a
+            // generated model, hence the opt-out.
+            if (emit_observables) {
+                if (auto storage_index = storageIndexForObservable(
+                        model, node, RuntimeObservableKind::Internal)) {
+                    out << "    " << var << ".copyToWords(storage[" << *storage_index
+                        << "].words, storage[" << *storage_index << "].nwords);\n";
+                }
             }
+            // FlopD, by contrast, is load-bearing: the generated clock-commit
+            // functions read D out of storage to write Q, so this one stays
+            // regardless of observability.
             if (auto storage_index = storageIndexForObservable(
                     model, node, RuntimeObservableKind::FlopD)) {
                 out << "    " << var << ".copyToWords(storage[" << *storage_index
@@ -1857,9 +2361,53 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         file_sizes[lightest_file] += chunk_texts[chunk_index].size();
     }
 
+    // Internal/FlopD observables can end up bound to a *source* node (INPUT
+    // or CONST) rather than a computed one -- e.g. a submodule port that's a
+    // pure passthrough of a parent signal (its DFGNode is literally the
+    // parent's INPUT node after inlining), or a tied-off constant. Source
+    // nodes are `continue`'d out of the per-chunk topo loop above -- their
+    // value is only ever read on demand via nodeValue(), never written
+    // anywhere -- so any storage slot backed by one would otherwise stay
+    // permanently unwritten (garbage/zero-initialized). Seed those slots
+    // explicitly, once per evaluate_combinational call (the underlying
+    // input can change every call), independent of chunk boundaries.
+    // Skipped entirely when observables are off -- these slots are only ever
+    // read by the tracer / mate_get_observable, which a compute-only model
+    // refuses to serve.
+    std::ostringstream seed_out;
+    for (RuntimeObservableId owner_id : model.metadata().storage_slot_owner) {
+        if (!emit_observables) break;
+        const auto& observable = model.metadata().observables.at(owner_id.value);
+        if (observable.kind != RuntimeObservableKind::Internal) continue;
+        const DFGNode* node = observable.node;
+        if (!node || (node->kind() != DFGOp::INPUT && node->kind() != DFGOp::CONST)) continue;
+        if (!observable.storage_slot.has_value()) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: observable '{}' has no assigned storage slot",
+                observable.full_path));
+        }
+        const auto& type = checkedType(node);
+        std::string value_expr;
+        if (node->kind() == DFGOp::INPUT) {
+            const auto* input = model.metadata().findInput(node->name);
+            if (!input) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: internal observable '{}' is bound to INPUT node '{}' "
+                    "that is not a top-level input leaf",
+                    observable.full_path, node->name));
+            }
+            value_expr = loadExpr("inputs", input->id.value, type);
+        } else {
+            value_expr = fixedValueFromTypeExpr(node->constValue(), type);
+        }
+        seed_out << "    " << value_expr << ".copyToWords(storage[" << *observable.storage_slot
+                 << "].words, storage[" << *observable.storage_slot << "].nwords);\n";
+    }
+
     std::ostringstream dispatcher_out;
     dispatcher_out << "namespace {\n\n";
     dispatcher_out << "void evaluateCombinational(" << kChunkParams << ") {\n";
+    dispatcher_out << seed_out.str();
     for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
         dispatcher_out << "    " << chunkFnName(chunk_index)
                        << "(inputs, outputs, storage, spills);\n";
@@ -2049,7 +2597,9 @@ struct NativeModelCode {
     std::vector<NativeCombinationalChunkFile> chunk_files;
 };
 
-NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeModel& model) {
+NativeModelCode makeNativeModelCpp(const Config& config,
+                                   const ModelPorts& ports,
+                                   const RtlRuntimeModel& model) {
     std::ostringstream out;
     out << "#include \"abi/abi_native.h\"\n\n";
     out << "#include \"sim/fixed_value.h\"\n";
@@ -2058,7 +2608,8 @@ NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeMode
     out << "#include <span>\n";
     out << "#include <stdexcept>\n";
     out << "#include <vector>\n\n";
-    const NativeCombinationalCode native_code = makeNativeCombinationalCpp(model);
+    const NativeCombinationalCode native_code =
+        makeNativeCombinationalCpp(model, config.emit_observables);
     out << native_code.chunk_declarations;
     out << "\n";
     out << native_code.dispatcher_text;
@@ -2111,12 +2662,12 @@ NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeMode
             << edgeAbiName(reset.active_edge) << "},\n";
     }
     out << "    };\n";
+    // One physical slot per distinct (node, kind) — this is what codegen
+    // writes to and what the ABI allocates. Named by its first-registered
+    // observable; aliases sharing the slot are emitted separately below.
     out << "    metadata.storage = {\n";
-    for (const auto& observable : model.metadata().observables) {
-        if (observable.kind == RuntimeObservableKind::Input ||
-            observable.kind == RuntimeObservableKind::Output) {
-            continue;
-        }
+    for (RuntimeObservableId owner_id : model.metadata().storage_slot_owner) {
+        const auto& observable = model.metadata().observables.at(owner_id.value);
         out << "        mate::abi::GeneratedStorageMetadata{"
             << generatedStorageKindName(observable.kind) << ", "
             << cppString(observable.full_path) << ", "
@@ -2125,6 +2676,53 @@ NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeMode
             << (observable.type.isSigned() ? "true" : "false") << "},\n";
     }
     out << "    };\n";
+    // Every observable name (aliases included), each pointing at the
+    // physical slot its (node, kind) resolved to above.
+    out << "    metadata.observable_names = {\n";
+    for (const auto& observable : model.metadata().observables) {
+        if (observable.kind == RuntimeObservableKind::Input ||
+            observable.kind == RuntimeObservableKind::Output) {
+            continue;
+        }
+        if (!observable.storage_slot.has_value()) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: observable '{}' has no assigned storage slot",
+                observable.full_path));
+        }
+        out << "        mate::abi::GeneratedObservableMetadata{"
+            << generatedStorageKindName(observable.kind) << ", "
+            << cppString(observable.full_path) << ", "
+            << cppString(observable.leaf_name) << ", "
+            << observable.type.width << ", "
+            << (observable.type.isSigned() ? "true" : "false") << ", "
+            << *observable.storage_slot << "},\n";
+    }
+    out << "    };\n";
+    // Compile-time-constant params/localparams: each gets its own static
+    // word array (function-local static, so the GeneratedParamMetadata's
+    // std::span into it stays valid for the model's lifetime) -- unlike
+    // observables, these never touch runtime storage.
+    for (size_t i = 0; i < model.metadata().params.size(); ++i) {
+        const auto& param = model.metadata().params[i];
+        out << "    static constexpr uint64_t kParamWords" << i << "[] = {";
+        for (size_t w = 0; w < param.words.size(); ++w) {
+            if (w) out << ", ";
+            out << param.words[w] << "ULL";
+        }
+        out << "};\n";
+    }
+    out << "    metadata.params = {\n";
+    for (size_t i = 0; i < model.metadata().params.size(); ++i) {
+        const auto& param = model.metadata().params[i];
+        out << "        mate::abi::GeneratedParamMetadata{"
+            << cppString(param.module_path) << ", "
+            << cppString(param.leaf_name) << ", "
+            << param.type.width << ", "
+            << (param.type.isSigned() ? "true" : "false") << ", "
+            << "std::span<const uint64_t>(kParamWords" << i << ")},\n";
+    }
+    out << "    };\n";
+    out << "    metadata.observables_enabled = " << boolLiteral(config.emit_observables) << ";\n";
     out << "    metadata.spill_words_count = " << native_code.spill_words_count << ";\n";
     out << "    metadata.evaluate_combinational = &evaluateCombinational;\n";
     out << "    metadata.reset_apply = {";
@@ -2168,7 +2766,7 @@ DpiCodegenOutput generateDpiCodegen(const DpiCodegenConfig& config, const RtlRun
     output.dpi_cpp = config.out_dir / (config.module_name + ".cpp");
     writeFile(output.dpi_cpp, makeCpp(config, ports, model));
 
-    const NativeModelCode native_model_code = makeNativeModelCpp(ports, model);
+    const NativeModelCode native_model_code = makeNativeModelCpp(config, ports, model);
     const std::filesystem::path model_cpp_path = config.out_dir / (config.top_module + "_model.cpp");
     writeFile(model_cpp_path, native_model_code.main_cpp_text);
     output.model_cpps.push_back(model_cpp_path);

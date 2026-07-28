@@ -643,9 +643,33 @@ def gen_uut_if(module: ModuleInfo) -> str:
     return '\n'.join(lines)
 
 
-def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
+def gen_tb(module: ModuleInfo, include_rtl: bool = True, include_dpi: bool = False,
+           include_recorder: bool = True) -> str:
+    """Generates tb.sv with the RTL module and the DPI model.
+
+    INCLUDE_SOURCE_RTL / INCLUDE_DPI_MODULE / INCLUDE_UUT_RECORDER are
+    declared as localparams set directly from this function's arguments (no
+    derived logic in the SV template), documenting exactly what's in this
+    particular tb.sv. They are NOT used as SV `if` guards around the RTL
+    module's own instantiation, though: Verilator's V3LinkDot cannot resolve
+    a port connection that reaches into a nested interface member (e.g. a
+    modport-typed sub-interface like "my_if.master", one of _if's members
+    for an interface-port module) when that connection crosses a generate
+    block boundary in *either* direction -- confirmed by isolating the
+    failure ("No symbol for interface alias rhs") on tests/struct_top_ports
+    and tests/iface_top_port both when uut alone was wrapped in a generate
+    block referencing an outer _if, and when _if was moved inside the block
+    and referenced from checker_dpi via a hierarchical name instead. So RTL
+    inclusion is decided once, here in Python, by simply not emitting the
+    _if/uut/checker_dpi text at all when include_rtl (or, for checker_dpi,
+    include_rtl and include_dpi together) is False -- the DPI side doesn't
+    hit this because dpi_if and dpi_uut are declared and connected within
+    the same g_dpi scope, never crossing a boundary, so it can stay a true
+    runtime `if (INCLUDE_DPI_MODULE) begin : g_dpi ... end`.
+    """
     lines = []
     has_params = len(module.parameters) > 0
+    include_checker = include_rtl and include_dpi
 
     lines.append('`timescale 1ns/1ps')
     lines.append('')
@@ -654,9 +678,9 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
         lines.append(f'module tb {import_clause};')
     else:
         lines.append('module tb;')
-    dpi_val = '1' if include_dpi else '0'
-    lines.append(f'    localparam bit INCLUDE_DPI_MODULE = {dpi_val};')
-    lines.append('    localparam bit INCLUDE_UUT_RECORDER = !INCLUDE_DPI_MODULE;')
+    lines.append(f'    localparam bit INCLUDE_SOURCE_RTL = {1 if include_rtl else 0};')
+    lines.append(f'    localparam bit INCLUDE_DPI_MODULE = {1 if include_dpi else 0};')
+    lines.append(f'    localparam bit INCLUDE_UUT_RECORDER = {1 if include_recorder else 0};')
 
     inputs = [p for p in module.ports if p.direction == 'input' and not p.iface_member]
     outputs = [p for p in module.ports if p.direction == 'output' and not p.iface_member]
@@ -683,60 +707,61 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
         lines.append(f'    {port_type_str(p)} {p.name}{dim_part};')
     lines.append('')
 
-    # Interface instantiation
-    lines.append('    // Interface and connection to UUT')
-    if has_params:
-        lines.append('    uut_if#(')
-        param_conns = []
-        for p in module.parameters:
-            param_conns.append(f'        .{p.name}({p.name})')
-        lines.append(',\n'.join(param_conns))
-        lines.append('    ) _if();')
-    else:
-        lines.append('    uut_if _if();')
-
-    lines.append('')
-
-    # Input assigns
-    if has_params:
-        lines.append('    // Inputs assign')
-    for p in inputs:
-        lines.append(f'    assign {p.name} = _if.{p.name};')
-
-    lines.append('')
-
-    # Output assigns
-    if has_params:
-        lines.append('    // Outputs assign')
-    for p in outputs:
-        lines.append(f'    assign _if.{p.name} = {p.name};')
-
-    lines.append('')
-
-    # Module instantiations
-    lines.append('    // modules')
-    port_conns = []
-    for p in module.ports:
-        if p.iface_member:
-            continue
-        if p.interface_type:
-            port_conns.append(f'        .{p.name}(_if.{p.name})')
+    # RTL: emitted only when include_rtl (see the function docstring for why
+    # this is a Python-level omission rather than an SV `if` guard). Present
+    # or absent, its shape is otherwise identical to before this file grew
+    # RTL/DPI-only modes -- unconditional top-level declarations, exactly as
+    # a plain testbench would have them.
+    if include_rtl:
+        if has_params:
+            lines.append('    uut_if#(')
+            param_conns = []
+            for p in module.parameters:
+                param_conns.append(f'        .{p.name}({p.name})')
+            lines.append(',\n'.join(param_conns))
+            lines.append('    ) _if();')
         else:
-            port_conns.append(f'        .{p.name}({p.name})')
-    if has_params:
-        param_list = ', '.join(p.name for p in module.parameters)
-        lines.append(f'    {module.name} #({param_list}) uut(')
-    else:
-        lines.append(f'    {module.name} uut(')
-    lines.append(',\n'.join(port_conns))
-    lines.append('    );')
-    lines.append('    uut_tb uut_tb(.*);')
-    lines.append('    if (INCLUDE_UUT_RECORDER) begin : g_recorder')
-    lines.append('        uut_recorder u_recorder(.*);')
-    lines.append('    end')
+            lines.append('    uut_if _if();')
+        lines.append('')
+
+        if has_params:
+            lines.append('    // Inputs assign')
+        for p in inputs:
+            lines.append(f'    assign {p.name} = _if.{p.name};')
+        lines.append('')
+
+        if has_params:
+            lines.append('    // Outputs assign')
+        for p in outputs:
+            lines.append(f'    assign _if.{p.name} = {p.name};')
+        lines.append('')
+
+        lines.append('    // modules')
+        port_conns = []
+        for p in module.ports:
+            if p.iface_member:
+                continue
+            if p.interface_type:
+                port_conns.append(f'        .{p.name}(_if.{p.name})')
+            else:
+                port_conns.append(f'        .{p.name}({p.name})')
+        if has_params:
+            param_list = ', '.join(p.name for p in module.parameters)
+            lines.append(f'    {module.name} #({param_list}) uut(')
+        else:
+            lines.append(f'    {module.name} uut(')
+        lines.append(',\n'.join(port_conns))
+        lines.append('    );')
+        lines.append('    uut_tb uut_tb(.*);')
+        lines.append('    if (INCLUDE_UUT_RECORDER) begin : g_recorder')
+        lines.append('        uut_recorder u_recorder(.*);')
+        lines.append('    end')
     lines.append('    tb_common u_tb_common();')
 
-    # DPI conditional block
+    # DPI: a true runtime `if`, unlike RTL above -- dpi_if and dpi_uut are
+    # declared and connected entirely within this same g_dpi scope, so they
+    # never cross a generate-block boundary and don't hit the Verilator
+    # limitation described in the docstring.
     lines.append('')
     lines.append('    if (INCLUDE_DPI_MODULE) begin : g_dpi')
     if has_params:
@@ -759,11 +784,12 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     lines.append('        );')
     lines.append('')
     lines.append('        uut_tb dpi_tb(._if(dpi_if));')
-    lines.append('')
-    lines.append('        checker_dpi u_checker(')
-    lines.append('            .dpi_if(dpi_if),')
-    lines.append('            .rtl_if(_if)')
-    lines.append('        );')
+    if include_checker:
+        lines.append('')
+        lines.append('        checker_dpi u_checker(')
+        lines.append('            .dpi_if(dpi_if),')
+        lines.append('            .rtl_if(_if)')
+        lines.append('        );')
     lines.append('    end')
 
     lines.append('')
@@ -982,8 +1008,22 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('module_name')
-    parser.add_argument('--dpi', action='store_true', help='Set INCLUDE_DPI_MODULE=1 in tb.sv')
+    parser.add_argument('--dpi', action='store_true',
+                        help='Set INCLUDE_DPI_MODULE=1 in tb.sv: instantiate both RTL and DPI '
+                             'and compare them every cycle via checker_dpi.')
+    parser.add_argument('--dpi-only', action='store_true',
+                        help='Generate a tb.sv with only the DPI model instantiated -- no RTL '
+                             'uut, no stimuli recorder, no checker_dpi comparison. For isolated '
+                             'DPI simulation-performance measurement; pair with --rtl-only run '
+                             'on the same module for an apples-to-apples comparison.')
+    parser.add_argument('--rtl-only', action='store_true',
+                        help='Generate a tb.sv with only the RTL module instantiated and no '
+                             'stimuli recorder -- no DPI, no checker_dpi. For isolated RTL '
+                             'simulation-performance measurement, symmetric with --dpi-only.')
     args = parser.parse_args()
+
+    if sum([args.dpi, args.dpi_only, args.rtl_only]) > 1:
+        parser.error('--dpi, --dpi-only, and --rtl-only are mutually exclusive')
 
     module_name = args.module_name
     project_root = Path(__file__).resolve().parent.parent
@@ -1013,8 +1053,16 @@ def main():
             return
         path.write_text(content)
 
+    if args.dpi_only:
+        tb_content = gen_tb(module, include_rtl=False, include_dpi=True, include_recorder=False)
+    elif args.rtl_only:
+        tb_content = gen_tb(module, include_rtl=True, include_dpi=False, include_recorder=False)
+    else:
+        tb_content = gen_tb(module, include_rtl=True, include_dpi=args.dpi,
+                            include_recorder=not args.dpi)
+
     write(output_dir / 'uut_if.sv', gen_uut_if(module))
-    write(output_dir / 'tb.sv', gen_tb(module, include_dpi=args.dpi))
+    write(output_dir / 'tb.sv', tb_content)
     write(output_dir / 'uut_recorder.sv', gen_recorder(module, domains))
     write(output_dir / 'checker_dpi.sv', gen_dpi_checker(module, domains))
 

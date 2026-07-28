@@ -18,6 +18,15 @@ struct DpiCodegenConfig {
     std::filesystem::path out_dir;
     std::string module_name;
     std::string function_prefix;
+    // Whether the generated model keeps internal-observable storage up to
+    // date. Every internal node's value is normally copied into a storage
+    // slot right after it is computed, purely so the tracer and
+    // mate_get_observable can read it -- the compute path itself only ever
+    // reads back flop Q (and flop D, at commit). Setting this false drops
+    // those writes for a compute-only model; the resulting model cannot be
+    // traced or introspected, and every observable read throws rather than
+    // returning stale words.
+    bool emit_observables = true;
 };
 
 struct DpiCodegenOutput {

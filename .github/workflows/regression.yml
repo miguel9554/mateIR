@@ -31,3 +31,19 @@ jobs:
           name: regression-logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-results/regression
           if-no-files-found: warn
+
+      - name: Run performance sweep
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: >
+          python3 tests/perf_measure.py
+          ibex_core ibex_ex_block apb_gpio uart axi_spi_slave arithmetic_ops
+          --runs 20 --metric verilator
+          --output test-results/perf/perf-${{ github.sha }}.json
+
+      - name: Upload performance results
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/perf/perf-${{ github.sha }}.json
+          if-no-files-found: warn

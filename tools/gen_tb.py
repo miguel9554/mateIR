@@ -773,6 +773,113 @@ def gen_tb(module: ModuleInfo, include_dpi: bool = False) -> str:
     return '\n'.join(lines)
 
 
+def gen_tb_solo(module: ModuleInfo, use_dpi: bool, include_recorder: bool) -> str:
+    """Single-DUT tb.sv variant: exactly one uut instantiation (RTL or DPI),
+    no dual-instantiation and no checker_dpi comparison against the other
+    side. Meant for isolated performance measurement of one side at a time
+    -- run this with use_dpi=False, then again with use_dpi=True, and
+    compare the two runs' [SIM SPEED] reports (tb_common) directly, with
+    neither run paying for the other side's stimulus driving or for
+    checker_dpi's per-cycle comparison overhead.
+
+    include_recorder writes stimuli files via uut_recorder (needed for the
+    legacy custom-sim/vector-sim path); performance runs should pass False
+    to avoid unrelated file-IO overhead skewing the comparison.
+    """
+    lines = []
+    has_params = len(module.parameters) > 0
+
+    lines.append('`timescale 1ns/1ps')
+    lines.append('')
+    import_clause = ' '.join(module.imports)
+    if import_clause:
+        lines.append(f'module tb {import_clause};')
+    else:
+        lines.append('module tb;')
+    lines.append(f'    localparam bit INCLUDE_UUT_RECORDER = {1 if include_recorder else 0};')
+
+    inputs = [p for p in module.ports if p.direction == 'input' and not p.iface_member]
+    outputs = [p for p in module.ports if p.direction == 'output' and not p.iface_member]
+
+    if has_params:
+        lines.append('    // Parameters')
+        for p in module.parameters:
+            type_part = f' {p.type_str}' if p.type_str else ''
+            dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
+            lines.append(f'    parameter{type_part} {p.name}{dim_part} = {p.default};')
+        lines.append('')
+
+    lines.append('    // Inputs')
+    for p in inputs:
+        dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
+        lines.append(f'    {port_type_str(p)} {p.name}{dim_part};')
+    lines.append('')
+
+    lines.append('    // Outputs')
+    for p in outputs:
+        dim_part = f' {p.unpacked_dims}' if p.unpacked_dims else ''
+        lines.append(f'    {port_type_str(p)} {p.name}{dim_part};')
+    lines.append('')
+
+    lines.append('    // Interface and connection to UUT')
+    if has_params:
+        lines.append('    uut_if#(')
+        param_conns = [f'        .{p.name}({p.name})' for p in module.parameters]
+        lines.append(',\n'.join(param_conns))
+        lines.append('    ) _if();')
+    else:
+        lines.append('    uut_if _if();')
+    lines.append('')
+
+    if has_params:
+        lines.append('    // Inputs assign')
+    for p in inputs:
+        lines.append(f'    assign {p.name} = _if.{p.name};')
+    lines.append('')
+
+    if has_params:
+        lines.append('    // Outputs assign')
+    for p in outputs:
+        lines.append(f'    assign _if.{p.name} = {p.name};')
+    lines.append('')
+
+    lines.append('    // modules')
+    port_conns = []
+    for p in module.ports:
+        if p.iface_member:
+            continue
+        if p.interface_type:
+            port_conns.append(f'        .{p.name}(_if.{p.name})')
+        else:
+            port_conns.append(f'        .{p.name}({p.name})')
+    if use_dpi:
+        # The DPI wrapper module is monomorphized for its compiled-in
+        # parameter values (see makeSv's parameter-match $fatal check) --
+        # unlike the plain RTL module, it takes no #(...) override list.
+        dut_inst_name = 'dpi_uut'
+        lines.append(f'    {module.name}_dpi {dut_inst_name}(')
+    else:
+        dut_inst_name = 'uut'
+        if has_params:
+            param_list = ', '.join(p.name for p in module.parameters)
+            lines.append(f'    {module.name} #({param_list}) {dut_inst_name}(')
+        else:
+            lines.append(f'    {module.name} {dut_inst_name}(')
+    lines.append(',\n'.join(port_conns))
+    lines.append('    );')
+    lines.append('    uut_tb uut_tb(.*);')
+    lines.append('    if (INCLUDE_UUT_RECORDER) begin : g_recorder')
+    lines.append('        uut_recorder u_recorder(.*);')
+    lines.append('    end')
+    lines.append('    tb_common u_tb_common();')
+
+    lines.append('')
+    lines.append('endmodule')
+    lines.append('')
+
+    return '\n'.join(lines)
+
+
 def gen_dpi_checker(module: ModuleInfo, domains: DomainConfig) -> str:
     lines = []
     primary_clk = list(domains.clock_domains.keys())[0]
@@ -982,8 +1089,22 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('module_name')
-    parser.add_argument('--dpi', action='store_true', help='Set INCLUDE_DPI_MODULE=1 in tb.sv')
+    parser.add_argument('--dpi', action='store_true',
+                        help='Set INCLUDE_DPI_MODULE=1 in tb.sv: instantiate both RTL and DPI '
+                             'and compare them every cycle via checker_dpi.')
+    parser.add_argument('--dpi-only', action='store_true',
+                        help='Generate a tb.sv with only the DPI model instantiated -- no RTL '
+                             'uut, no stimuli recorder, no checker_dpi comparison. For isolated '
+                             'DPI simulation-performance measurement; pair with --rtl-only run '
+                             'on the same module for an apples-to-apples comparison.')
+    parser.add_argument('--rtl-only', action='store_true',
+                        help='Generate a tb.sv with only the RTL module instantiated and no '
+                             'stimuli recorder -- no DPI, no checker_dpi. For isolated RTL '
+                             'simulation-performance measurement, symmetric with --dpi-only.')
     args = parser.parse_args()
+
+    if sum([args.dpi, args.dpi_only, args.rtl_only]) > 1:
+        parser.error('--dpi, --dpi-only, and --rtl-only are mutually exclusive')
 
     module_name = args.module_name
     project_root = Path(__file__).resolve().parent.parent
@@ -1013,8 +1134,15 @@ def main():
             return
         path.write_text(content)
 
+    if args.dpi_only:
+        tb_content = gen_tb_solo(module, use_dpi=True, include_recorder=False)
+    elif args.rtl_only:
+        tb_content = gen_tb_solo(module, use_dpi=False, include_recorder=False)
+    else:
+        tb_content = gen_tb(module, include_dpi=args.dpi)
+
     write(output_dir / 'uut_if.sv', gen_uut_if(module))
-    write(output_dir / 'tb.sv', gen_tb(module, include_dpi=args.dpi))
+    write(output_dir / 'tb.sv', tb_content)
     write(output_dir / 'uut_recorder.sv', gen_recorder(module, domains))
     write(output_dir / 'checker_dpi.sv', gen_dpi_checker(module, domains))
 

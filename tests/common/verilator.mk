@@ -36,7 +36,14 @@ OUT          = obj_dir/V$(TOP_MODULE)
 GEN_TB_SCRIPT = $(PROJECT_ROOT)/tools/gen_tb.py
 GEN_TB_OUTPUTS = $(GEN_DIR)/tb.sv $(GEN_DIR)/uut_if.sv $(GEN_DIR)/uut_recorder.sv $(GEN_DIR)/checker_dpi.sv
 
-VERILATOR_WARNS ?= -Wno-TIMESCALEMOD -Wno-WIDTHTRUNC
+# -Wno-ZERODLY: tb_common.sv's progress-reporting delay (step_ns) is a real
+# variable set from a runtime plusarg (PROGRESS_STEP_NS), so Verilator can
+# never statically know whether it's zero -- this is genuinely unresolvable,
+# not a lint issue in any particular test's RTL, and whether it actually
+# surfaces depends on unrelated scheduling details of the rest of the design
+# (e.g. it's silent with the default tb.sv but not with TB_VARIANT's leaner
+# ones), so it belongs in the blanket default here, not a per-test waiver.
+VERILATOR_WARNS ?= -Wno-TIMESCALEMOD -Wno-WIDTHTRUNC -Wno-ZERODLY
 VERILATOR_WARNS += $(shell cat verilator.warns 2>/dev/null)
 SEED_ARG = $(if $(seed),+verilator+seed+$(seed))
 
@@ -48,6 +55,25 @@ GENERATE_TB ?= 1
 ifneq ($(GENERATE_TB),0)
 ifneq ($(GENERATE_TB),1)
 $(error GENERATE_TB must be 0 or 1)
+endif
+endif
+
+# TB_VARIANT selects which single-DUT tb.sv gen_tb.py emits, for isolated
+# simulation-performance measurement of one side at a time (no dual
+# instantiation, no checker_dpi comparison, no stimuli recorder -- see
+# gen_tb.py's gen_tb_solo). Leave empty for the normal DPI=1 (dual RTL+DPI
+# with checker) / DPI=0 (RTL + stimuli recorder, for custom-sim/vector-sim)
+# testbenches.
+#   TB_VARIANT=dpi-only  (requires DPI=1) -- DPI model only
+#   TB_VARIANT=rtl-only  (requires DPI=0) -- RTL module only, no recorder
+# Run both variants on the same module and compare tb_common's [SIM SPEED]
+# report from each run for an apples-to-apples RTL-vs-DPI comparison, e.g.:
+#   make simulate DPI=0 TB_VARIANT=rtl-only
+#   make simulate DPI=1 TB_VARIANT=dpi-only
+TB_VARIANT ?=
+ifneq ($(TB_VARIANT),)
+ifeq ($(filter $(TB_VARIANT),dpi-only rtl-only),)
+$(error TB_VARIANT must be empty, dpi-only, or rtl-only)
 endif
 endif
 
@@ -108,9 +134,17 @@ prep: force
 		$(MAKE) -C $(PROJECT_ROOT) $(DPI_BUILD_TARGET); \
 	fi
 
+ifeq ($(TB_VARIANT),rtl-only)
+$(error TB_VARIANT=rtl-only requires DPI=0)
+endif
+
 ifeq ($(GENERATE_TB),1)
 $(GEN_TB_OUTPUTS): $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
+ifeq ($(TB_VARIANT),dpi-only)
+	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi-only $(MODULE_NAME)
+else
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py --dpi $(MODULE_NAME)
+endif
 endif
 
 $(GEN_STAMP): $(RTL_SRCS) $(DOMAINS_YAML) $(BUILD_DIR)/mate $(DPI_LINK_LIB_FILES) | prep
@@ -152,9 +186,17 @@ $(info RTL_SRCS=$(RTL_SRCS))
 $(info TB_SRCS=$(TB_SRCS))
 $(info GEN_SRCS=$(GEN_SRCS))
 
+ifeq ($(TB_VARIANT),dpi-only)
+$(error TB_VARIANT=dpi-only requires DPI=1)
+endif
+
 ifeq ($(GENERATE_TB),1)
 $(GEN_TB_OUTPUTS): $(RTL_SRCS) $(DOMAINS_YAML) $(GEN_TB_SCRIPT) force
+ifeq ($(TB_VARIANT),rtl-only)
+	cd $(PROJECT_ROOT) && python tools/gen_tb.py --rtl-only $(MODULE_NAME)
+else
 	cd $(PROJECT_ROOT) && python tools/gen_tb.py $(MODULE_NAME)
+endif
 endif
 
 $(OUT): $(SRCS) $(GEN_DIR)/tb.sv

@@ -29,7 +29,7 @@ initial begin
 end
 
 initial begin
-    #500ns;
+    #5000ns;
     $finish();
 end
 

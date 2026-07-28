@@ -83,6 +83,17 @@ struct AbiObservable {
     size_t storage_index = 0;
 };
 
+// Compile-time-constant parameter/localparam leaf. Unlike AbiObservable, its
+// value is fixed at build time -- carried directly here, not via a storage
+// slot -- so it never participates in mate_get_all_observables.
+struct AbiParam {
+    std::string module_path;
+    std::string leaf_name;
+    int32_t width = 0;
+    bool is_signed = false;
+    std::vector<uint64_t> words;
+};
+
 } // namespace
 
 struct MateModel {
@@ -94,6 +105,7 @@ struct MateModel {
     std::vector<AbiStorageSlot> output_storage;
     std::vector<AbiStorageSlot> observable_storage;
     std::vector<AbiObservable> observables;
+    std::vector<AbiParam> params;
     // Parallel to `observables`: each entry's word offset within the
     // mate_get_all_observables buffer (input words, then output words, then
     // storage words — the same order allocateStorage lays out per instance).
@@ -619,6 +631,21 @@ std::vector<AbiObservable> buildObservables(const GeneratedModelMetadata& genera
     return observables;
 }
 
+std::vector<AbiParam> buildParams(const GeneratedModelMetadata& generated_metadata) {
+    std::vector<AbiParam> params;
+    params.reserve(generated_metadata.params.size());
+    for (const auto& param : generated_metadata.params) {
+        params.push_back(AbiParam{
+            .module_path = std::string(param.module_path),
+            .leaf_name = std::string(param.leaf_name),
+            .width = param.width,
+            .is_signed = param.is_signed,
+            .words = std::vector<uint64_t>(param.words.begin(), param.words.end()),
+        });
+    }
+    return params;
+}
+
 void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& generated_metadata) {
     if (!generated_metadata.evaluate_combinational) {
         throw mate::CompilerError(
@@ -636,6 +663,7 @@ void populateGeneratedMetadata(MateModel& model, const GeneratedModelMetadata& g
     model.output_storage = buildOutputStorage(generated_metadata);
     model.observable_storage = buildObservableStorage(generated_metadata);
     model.observables = buildObservables(generated_metadata);
+    model.params = buildParams(generated_metadata);
 
     size_t after_inputs = 0;
     auto input_offsets = cumulativeWordOffsets(model.input_storage, 0, after_inputs);
@@ -854,6 +882,74 @@ int32_t mate_observable_snapshot_words_total(const MateModel* model) {
     } catch (...) {
         return -1;
     }
+}
+
+int32_t mate_param_count(const MateModel* model) {
+    try {
+        return static_cast<int32_t>(checkedModel(model).params.size());
+    } catch (...) {
+        return -1;
+    }
+}
+
+const char* mate_param_module_path(const MateModel* model, int32_t param_id) {
+    try {
+        const auto& params = checkedModel(model).params;
+        if (param_id < 0 || static_cast<size_t>(param_id) >= params.size()) return nullptr;
+        return params.at(static_cast<size_t>(param_id)).module_path.c_str();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+const char* mate_param_leaf_name(const MateModel* model, int32_t param_id) {
+    try {
+        const auto& params = checkedModel(model).params;
+        if (param_id < 0 || static_cast<size_t>(param_id) >= params.size()) return nullptr;
+        return params.at(static_cast<size_t>(param_id)).leaf_name.c_str();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+MateStatusCode mate_param_info(const MateModel* model,
+                               int32_t param_id,
+                               MateParamInfo* out_info,
+                               MateStatus* status) {
+    return guard(status, [&]() {
+        const MateModel& checked = checkedModel(model);
+        if (!out_info) throw mate::CompilerError("Mate ABI: param info output pointer is null");
+        if (param_id < 0 || static_cast<size_t>(param_id) >= checked.params.size()) {
+            throw mate::CompilerError(std::format("Mate ABI: invalid param handle {}", param_id));
+        }
+        const auto& param = checked.params.at(static_cast<size_t>(param_id));
+        *out_info = MateParamInfo{
+            .width = param.width,
+            .nwords = wordCount(param.width),
+            .is_signed = param.is_signed ? 1 : 0,
+        };
+    });
+}
+
+MateStatusCode mate_param_value(const MateModel* model,
+                                int32_t param_id,
+                                uint64_t* words,
+                                int32_t nwords,
+                                MateStatus* status) {
+    return guard(status, [&]() {
+        const MateModel& checked = checkedModel(model);
+        if (param_id < 0 || static_cast<size_t>(param_id) >= checked.params.size()) {
+            throw mate::CompilerError(std::format("Mate ABI: invalid param handle {}", param_id));
+        }
+        const auto& param = checked.params.at(static_cast<size_t>(param_id));
+        validateWords("param", param.leaf_name.c_str(), words, nwords, param.width);
+        if (param.words.size() != static_cast<size_t>(nwords)) {
+            throw mate::CompilerError(std::format(
+                "Mate ABI: param '{}' has {} stored words but expected {}",
+                param.leaf_name, param.words.size(), nwords));
+        }
+        std::copy(param.words.begin(), param.words.end(), words);
+    });
 }
 
 int32_t mate_clock_id(const MateModel* model, const char* display_or_leaf_name) {

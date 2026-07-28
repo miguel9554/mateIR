@@ -53,6 +53,12 @@ typedef struct MateInputUpdate {
     int32_t nwords;
 } MateInputUpdate;
 
+typedef struct MateParamInfo {
+    int32_t width;
+    int32_t nwords;
+    int32_t is_signed;
+} MateParamInfo;
+
 /*
  * Model-specific symbol. Phase 1 generated model code compiles SV to an
  * interpreted model here; phase 2 generated model code returns a native model.
@@ -108,6 +114,36 @@ int32_t mate_observable_snapshot_offset(const MateModel* model, int32_t observab
 
 /* Required buffer size, in words, for mate_get_all_observables. */
 int32_t mate_observable_snapshot_words_total(const MateModel* model);
+
+/*
+ * Compile-time-constant parameters/localparams, for debug/waveform tooling
+ * only -- distinct from the observable set above since a param's value
+ * never changes at runtime and has no snapshot storage. Ids are dense:
+ * valid param ids are [0, mate_param_count(model)).
+ */
+int32_t mate_param_count(const MateModel* model);
+
+/* Hierarchy path of the param's owning module ("" for the top module).
+ * Valid for the lifetime of `model`; do not free. */
+const char* mate_param_module_path(const MateModel* model, int32_t param_id);
+
+/* Bare declared leaf name, including any "[i]" array-index suffixes for
+ * unpacked array elements (e.g. "PMPRstAddr[3]"). Valid for the lifetime of
+ * `model`; do not free. */
+const char* mate_param_leaf_name(const MateModel* model, int32_t param_id);
+
+MateStatusCode mate_param_info(const MateModel* model,
+                               int32_t param_id,
+                               MateParamInfo* out_info,
+                               MateStatus* status);
+
+/* Copies the param's fixed value into `words` (exactly
+ * mate_param_info(...).nwords words). The value never changes across calls. */
+MateStatusCode mate_param_value(const MateModel* model,
+                                int32_t param_id,
+                                uint64_t* words,
+                                int32_t nwords,
+                                MateStatus* status);
 
 MateStatusCode mate_input_info(const MateModel* model,
                                int32_t input_id,

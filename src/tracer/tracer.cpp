@@ -57,6 +57,45 @@ std::vector<TracedSignal> discoverSignals(const MateModel* model) {
     return signals;
 }
 
+std::vector<TracedConstant> discoverConstants(const MateModel* model) {
+    const int32_t count = mate_param_count(model);
+    if (count < 0) {
+        throw std::runtime_error("mate-tracer: mate_param_count failed on model");
+    }
+
+    std::vector<TracedConstant> constants;
+    constants.reserve(static_cast<size_t>(count));
+    for (int32_t id = 0; id < count; ++id) {
+        const char* module_path = mate_param_module_path(model, id);
+        if (!module_path) {
+            throw std::runtime_error(std::format(
+                "mate-tracer: mate_param_module_path failed for param {}", id));
+        }
+        const char* leaf_name = mate_param_leaf_name(model, id);
+        if (!leaf_name) {
+            throw std::runtime_error(std::format(
+                "mate-tracer: mate_param_leaf_name failed for param {}", id));
+        }
+        MateStatus status{};
+        MateParamInfo info{};
+        if (mate_param_info(model, id, &info, &status) != MATE_STATUS_OK) {
+            throwAbiError("mate_param_info", status);
+        }
+        std::vector<uint64_t> words(static_cast<size_t>(info.nwords), uint64_t{0});
+        if (mate_param_value(model, id, words.data(), info.nwords, &status) != MATE_STATUS_OK) {
+            throwAbiError("mate_param_value", status);
+        }
+        constants.push_back(TracedConstant{
+            .module_path = module_path,
+            .leaf_name = leaf_name,
+            .width = info.width,
+            .is_signed = info.is_signed != 0,
+            .words = std::move(words),
+        });
+    }
+    return constants;
+}
+
 } // namespace
 
 Tracer::Tracer(const MateModel* model, const MateInstance* instance,
@@ -91,6 +130,7 @@ Tracer::Tracer(const MateModel* model, const MateInstance* instance,
     }
 
     backend_->declareSignals(signals_);
+    backend_->declareConstants(discoverConstants(model_));
 }
 
 void Tracer::dump(uint64_t time) {

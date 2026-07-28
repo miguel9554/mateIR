@@ -201,8 +201,15 @@ std::optional<ParsedSignal> parseFullPathFlat(const std::string& full_path,
     return ParsedSignal{std::move(module_path), std::move(declared_name)};
 }
 
+} // namespace
+
 // Lazily creates nested vcd_tracer::module scopes for dot-separated paths,
-// same shape as the legacy VcdWriter's getOrCreateNestedScope.
+// same shape as the legacy VcdWriter's getOrCreateNestedScope. Declared in
+// mate::tracer (matching the forward declaration in vcd_backend.h), not an
+// anonymous namespace, so VcdBackend's unique_ptr<ScopeCache> resolves to
+// the same type here and in the header -- shared across declareSignals and
+// declareConstants so a scope created by one is reused by the other, not
+// duplicated.
 class ScopeCache {
 public:
     explicit ScopeCache(vcd_tracer::module& root) : root_(root) {}
@@ -223,8 +230,6 @@ private:
     std::map<std::string, std::unique_ptr<vcd_tracer::module>> nested_;
 };
 
-} // namespace
-
 VcdBackend::VcdBackend(std::string path, std::string top_name, bool flat_hierarchy)
     : path_(std::move(path)), top_name_(std::move(top_name)), flat_hierarchy_(flat_hierarchy) {
     out_.open(path_);
@@ -241,7 +246,7 @@ VcdBackend::~VcdBackend() {
 
 void VcdBackend::declareSignals(const std::vector<TracedSignal>& signals) {
     top_ = std::make_unique<vcd_tracer::top>(top_name_);
-    ScopeCache scopes(top_->root);
+    scopes_ = std::make_unique<ScopeCache>(top_->root);
 
     values_.clear();
     values_.resize(signals.size());
@@ -255,8 +260,35 @@ void VcdBackend::declareSignals(const std::vector<TracedSignal>& signals) {
             : std::optional<ParsedSignal>(parseFullPath(signal.full_path));
         if (!parsed.has_value()) continue; // flat mode: flop_d has no RTL net
         auto value = std::make_unique<WordsVcdValue>(static_cast<unsigned int>(signal.width));
-        value->elaborate(scopes.get(parsed->scope_path).get_add_fn(), parsed->leaf_name);
+        value->elaborate(scopes_->get(parsed->scope_path).get_add_fn(), parsed->leaf_name);
         values_[static_cast<size_t>(signal.id)] = std::move(value);
+    }
+    // Header finalization deliberately deferred to declareConstants (always
+    // called right after this by Tracer) so both signals and constants are
+    // declared before the hierarchy locks.
+}
+
+void VcdBackend::declareConstants(const std::vector<TracedConstant>& constants) {
+    if (!top_ || !scopes_) {
+        throw std::runtime_error("mate-tracer: declareConstants called before declareSignals");
+    }
+
+    constant_values_.clear();
+    constant_values_.reserve(constants.size());
+    for (const auto& constant : constants) {
+        const std::string scope_path = flat_hierarchy_
+            ? constant.module_path
+            : (constant.module_path.empty() ? "params" : constant.module_path + ".params");
+        auto value = std::make_unique<WordsVcdValue>(static_cast<unsigned int>(constant.width));
+        value->elaborate(scopes_->get(scope_path).get_add_fn(), constant.leaf_name);
+        // Mark dirty now: constants never appear in emitChanges, so this is
+        // the only write their value ever gets. finalize_header() below
+        // logs "#0" and then flushes whatever is already dirty as part of
+        // its own header-finalization sequence, so this value is written
+        // directly into the file's initial #0 block -- constants get a true
+        // one-time dump at time 0, no per-dump diffing involved at all.
+        value->setWords(constant.words.data(), static_cast<int32_t>(constant.words.size()));
+        constant_values_.push_back(std::move(value));
     }
 
     top_->finalize_header(out_, std::chrono::system_clock::from_time_t(0));

@@ -180,10 +180,68 @@ void validateResetId(const MateIR& ir, ResetId id, const std::string& context) {
     }
 }
 
+// Walks only `type`'s unpacked dimensions (recursing per index, matching
+// declared subscript order), pairing each with the corresponding element of
+// `value`. At the first fully-unpacked-free level, the remaining value --
+// scalar bits or a packed struct/array -- becomes one leaf, flattened to a
+// single bit pattern if it isn't bits already. This deliberately does NOT
+// split packed struct fields into separate leaves (unlike
+// collectAggregateLeafPlan, which does, for DFG-leaf-binding purposes) --
+// real RTL/Verilator dumps a packed struct as one net, so param leaves must
+// match that granularity, not the compiler's internal per-field storage
+// granularity.
+void collectParamLeaves(const Type& type,
+                        const ConstantValue& value,
+                        const std::string& base_name,
+                        std::vector<std::pair<std::string, ConstantValue>>& out) {
+    if (!type.unpacked_dims.empty()) {
+        Type elem_type = type;
+        const auto dim = elem_type.unpacked_dims.front();
+        elem_type.unpacked_dims.erase(elem_type.unpacked_dims.begin());
+        const int step = dim.left <= dim.right ? 1 : -1;
+        size_t position = 0;
+        for (int i = dim.left; step > 0 ? i <= dim.right : i >= dim.right; i += step, ++position) {
+            collectParamLeaves(elem_type, value.element(position),
+                               base_name + "[" + std::to_string(i) + "]", out);
+        }
+        return;
+    }
+    out.emplace_back(base_name, value.isBits() ? value : value.flattenToBits());
+}
+
+void collectParams(const std::vector<Param>& params,
+                   const std::string& module_path,
+                   MateIRRuntimeMetadata& metadata) {
+    for (const auto& param : params) {
+        std::vector<std::pair<std::string, ConstantValue>> leaves;
+        collectParamLeaves(param.type, param.value, param.name, leaves);
+        for (auto& [leaf_name, leaf_value] : leaves) {
+            if (!leaf_value.isBits()) {
+                throw CompilerError(std::format(
+                    "Simulator metadata: param '{}' leaf '{}' did not flatten to a bit vector",
+                    param.name, leaf_name));
+            }
+            if (leaf_value.asBits().words.empty()) {
+                throw CompilerError(std::format(
+                    "Simulator metadata: param '{}' leaf '{}' has no words", param.name, leaf_name));
+            }
+            metadata.params.push_back(RuntimeParamMetadata{
+                .module_path = module_path,
+                .leaf_name = leaf_name,
+                .type = leaf_value.type(),
+                .words = leaf_value.asBits().words,
+            });
+        }
+    }
+}
+
 void collectModuleMetadata(const MateIR& ir,
                            const Module& module,
                            const std::string& module_path,
                            MateIRRuntimeMetadata& metadata) {
+    collectParams(module.parameters, module_path, metadata);
+    collectParams(module.localparams, module_path, metadata);
+
     forEachInternalNode(module, [&](const ModuleNode& internal) {
         for (const auto& leaf : moduleNodeLeafRefs(internal)) {
             if (!leaf.node) continue;
@@ -198,13 +256,20 @@ void collectModuleMetadata(const MateIR& ir,
 
     // Submodule input/output ports are debug-visible signals (the VCD/debug
     // tooling traces them) but are not top-level I/O. Register them as internal
-    // observables so every traced module-node leaf resolves to a handle. Only
-    // a node that is already a genuine top-level Input/Output is skipped, to
-    // avoid a meaningless "internal:x" duplicate of the top "input:x"/
-    // "output:x" observable. A node already registered as Internal/FlopD/FlopQ
-    // (e.g. a port aliasing another submodule's internal wire post-inlining)
-    // still gets this new name registered — both names must stay independently
-    // traceable, sharing one physical storage slot (see assignStorageSlot).
+    // observables so every traced module-node leaf resolves to a handle. In
+    // real RTL a submodule port is its own net even when it's a pure
+    // passthrough of a value driven from higher in the hierarchy (Verilator
+    // dumps it as its own $var), so a submodule port is always registered
+    // here regardless of whether its DFGNode is shared with some other
+    // observable post-inlining -- only the *top* module's own ports are
+    // skipped here, since those are already registered as the genuine
+    // "input:x"/"output:x" observable above (buildMateIRRuntimeMetadata runs
+    // that before recursing into collectModuleMetadata) and a same-scope
+    // "internal:x" duplicate of that would be meaningless. A node already
+    // registered as Internal/FlopD/FlopQ (e.g. a port aliasing another
+    // submodule's internal wire post-inlining) still gets this new name
+    // registered — both names must stay independently traceable, sharing one
+    // physical storage slot (see assignStorageSlot).
     auto isTopLevelPortObservable = [&](const DFGNode* node) {
         auto it = metadata.observables_by_node.find(node);
         if (it == metadata.observables_by_node.end()) return false;
@@ -219,7 +284,7 @@ void collectModuleMetadata(const MateIR& ir,
     auto registerPortLeaves = [&](const ModuleNode& port) {
         for (const auto& leaf : moduleNodeLeafRefs(port)) {
             if (!leaf.node) continue;
-            if (isTopLevelPortObservable(leaf.node)) continue;
+            if (module_path.empty() && isTopLevelPortObservable(leaf.node)) continue;
             Type type = checkedLeafType(
                 std::format("port '{}'", scopedName(module_path, leaf.leaf_name)),
                 port.type, leaf.node);

@@ -131,6 +131,21 @@ struct RuntimeFlopMetadata {
     std::vector<RuntimeFlopLeafMetadata> leaves;
 };
 
+// A compile-time-constant parameter/localparam leaf, for debug/waveform
+// tooling only -- unlike RuntimeObservableMetadata, this is never wired
+// through the runtime snapshot/diffing pipeline (its value can never
+// change), so it carries its value directly rather than a DFGNode/storage
+// slot. Only unpacked array dimensions are expanded into separate leaves
+// (module_path/leaf_name gets a "[i]" suffix per index, matching how real
+// RTL/Verilator dumps one $var per array element); a packed struct stays one
+// leaf with its flattened bit pattern, matching how Verilator dumps it.
+struct RuntimeParamMetadata {
+    std::string module_path;
+    std::string leaf_name;
+    Type type;
+    std::vector<uint64_t> words;
+};
+
 struct RuntimeObservableMetadata {
     RuntimeObservableId id;
     RuntimeObservableKind kind = RuntimeObservableKind::Internal;
@@ -158,6 +173,7 @@ struct MateIRRuntimeMetadata {
     std::vector<RuntimeResetMetadata> resets;
     std::vector<RuntimeFlopMetadata> flops;
     std::vector<RuntimeObservableMetadata> observables;
+    std::vector<RuntimeParamMetadata> params;
 
     std::unordered_map<std::string, RuntimeInputId> input_by_leaf_name;
     std::unordered_map<std::string, RuntimeOutputId> output_by_leaf_name;

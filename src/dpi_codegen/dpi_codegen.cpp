@@ -2126,9 +2126,49 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model)
         file_sizes[lightest_file] += chunk_texts[chunk_index].size();
     }
 
+    // Internal/FlopD observables can end up bound to a *source* node (INPUT
+    // or CONST) rather than a computed one -- e.g. a submodule port that's a
+    // pure passthrough of a parent signal (its DFGNode is literally the
+    // parent's INPUT node after inlining), or a tied-off constant. Source
+    // nodes are `continue`'d out of the per-chunk topo loop above -- their
+    // value is only ever read on demand via nodeValue(), never written
+    // anywhere -- so any storage slot backed by one would otherwise stay
+    // permanently unwritten (garbage/zero-initialized). Seed those slots
+    // explicitly, once per evaluate_combinational call (the underlying
+    // input can change every call), independent of chunk boundaries.
+    std::ostringstream seed_out;
+    for (RuntimeObservableId owner_id : model.metadata().storage_slot_owner) {
+        const auto& observable = model.metadata().observables.at(owner_id.value);
+        if (observable.kind != RuntimeObservableKind::Internal) continue;
+        const DFGNode* node = observable.node;
+        if (!node || (node->kind() != DFGOp::INPUT && node->kind() != DFGOp::CONST)) continue;
+        if (!observable.storage_slot.has_value()) {
+            throw CompilerError(std::format(
+                "mate-dpi-codegen: observable '{}' has no assigned storage slot",
+                observable.full_path));
+        }
+        const auto& type = checkedType(node);
+        std::string value_expr;
+        if (node->kind() == DFGOp::INPUT) {
+            const auto* input = model.metadata().findInput(node->name);
+            if (!input) {
+                throw CompilerError(std::format(
+                    "mate-dpi-codegen: internal observable '{}' is bound to INPUT node '{}' "
+                    "that is not a top-level input leaf",
+                    observable.full_path, node->name));
+            }
+            value_expr = loadExpr("inputs", input->id.value, type);
+        } else {
+            value_expr = fixedValueFromTypeExpr(node->constValue(), type);
+        }
+        seed_out << "    " << value_expr << ".copyToWords(storage[" << *observable.storage_slot
+                 << "].words, storage[" << *observable.storage_slot << "].nwords);\n";
+    }
+
     std::ostringstream dispatcher_out;
     dispatcher_out << "namespace {\n\n";
     dispatcher_out << "void evaluateCombinational(" << kChunkParams << ") {\n";
+    dispatcher_out << seed_out.str();
     for (size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
         dispatcher_out << "    " << chunkFnName(chunk_index)
                        << "(inputs, outputs, storage, spills);\n";
@@ -2414,6 +2454,30 @@ NativeModelCode makeNativeModelCpp(const ModelPorts& ports, const RtlRuntimeMode
             << observable.type.width << ", "
             << (observable.type.isSigned() ? "true" : "false") << ", "
             << *observable.storage_slot << "},\n";
+    }
+    out << "    };\n";
+    // Compile-time-constant params/localparams: each gets its own static
+    // word array (function-local static, so the GeneratedParamMetadata's
+    // std::span into it stays valid for the model's lifetime) -- unlike
+    // observables, these never touch runtime storage.
+    for (size_t i = 0; i < model.metadata().params.size(); ++i) {
+        const auto& param = model.metadata().params[i];
+        out << "    static constexpr uint64_t kParamWords" << i << "[] = {";
+        for (size_t w = 0; w < param.words.size(); ++w) {
+            if (w) out << ", ";
+            out << param.words[w] << "ULL";
+        }
+        out << "};\n";
+    }
+    out << "    metadata.params = {\n";
+    for (size_t i = 0; i < model.metadata().params.size(); ++i) {
+        const auto& param = model.metadata().params[i];
+        out << "        mate::abi::GeneratedParamMetadata{"
+            << cppString(param.module_path) << ", "
+            << cppString(param.leaf_name) << ", "
+            << param.type.width << ", "
+            << (param.type.isSigned() ? "true" : "false") << ", "
+            << "std::span<const uint64_t>(kParamWords" << i << ")},\n";
     }
     out << "    };\n";
     out << "    metadata.spill_words_count = " << native_code.spill_words_count << ";\n";

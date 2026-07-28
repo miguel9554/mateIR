@@ -55,6 +55,18 @@ struct GeneratedStorageMetadata {
     bool is_signed = false;
 };
 
+// A compile-time-constant parameter/localparam leaf, for debug/waveform
+// tooling only. Unlike GeneratedObservableMetadata, this never changes at
+// runtime and has no storage slot -- `words` is the value itself, generated
+// as a static array by codegen.
+struct GeneratedParamMetadata {
+    std::string_view module_path;
+    std::string_view leaf_name;
+    int32_t width = 0;
+    bool is_signed = false;
+    std::span<const uint64_t> words;
+};
+
 // One entry per observable *name*, as opposed to `GeneratedStorageMetadata`
 // which has one entry per physical storage slot. Multiple names can alias
 // the same slot (e.g. a submodule output port wired straight through to an
@@ -111,6 +123,8 @@ struct GeneratedModelMetadata {
     std::vector<GeneratedStorageMetadata> storage;
     // Every observable name, aliases included; see GeneratedObservableMetadata.
     std::vector<GeneratedObservableMetadata> observable_names;
+    // Compile-time-constant parameters/localparams; see GeneratedParamMetadata.
+    std::vector<GeneratedParamMetadata> params;
     GeneratedCombinationalEvaluateFn evaluate_combinational = nullptr;
     // Word count of the contiguous scratch buffer for values crossing
     // generated combinational chunk boundaries. The generated code knows each

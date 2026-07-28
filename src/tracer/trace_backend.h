@@ -33,6 +33,18 @@ struct SignalChange {
     int32_t word_count = 0;
 };
 
+// A compile-time-constant parameter/localparam leaf, as discovered from the
+// model's param metadata. Unlike TracedSignal, this never changes at
+// runtime and carries its value directly rather than a snapshot offset --
+// it never appears in a SignalChange.
+struct TracedConstant {
+    std::string module_path; // hierarchy path of the owning module, "" for top
+    std::string leaf_name;   // bare declared name, incl. any "[i]" suffixes
+    int32_t width = 0;
+    bool is_signed = false;
+    std::vector<uint64_t> words;
+};
+
 class TraceBackend {
 public:
     virtual ~TraceBackend() = default;
@@ -41,6 +53,15 @@ public:
     // discovery order. A backend that needs a hierarchy (VCD/FST) should
     // build its scope tree from `full_path` here.
     virtual void declareSignals(const std::vector<TracedSignal>& signals) = 0;
+
+    // Called once, before the first dump (order relative to declareSignals
+    // is unspecified), with every compile-time-constant param/localparam.
+    // These never change, so a backend should declare and record their
+    // value once here -- no corresponding entry ever appears in emitChanges.
+    // Default no-op: backends that don't care about params (or future
+    // formats without a natural way to represent them) aren't forced to
+    // implement this.
+    virtual void declareConstants(const std::vector<TracedConstant>& /*constants*/) {}
 
     // Called once per dump point. `time` is an opaque, non-decreasing tick
     // count in whatever unit the harness uses -- consecutive calls may share

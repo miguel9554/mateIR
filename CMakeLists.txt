@@ -89,6 +89,7 @@ endif()
 set(MATEIR_SOURCES
     src/mateir/constant_value.cpp
     src/mateir/dfg.cpp
+    src/mateir/dfg_eval.cpp
     src/mateir/lang_metadata.cpp
     src/mateir/module.cpp
     src/mateir/types.cpp
@@ -158,7 +159,7 @@ set(VECTOR_SIMULATOR_SOURCES
 
 add_library(mate-mateir STATIC ${MATEIR_SOURCES})
 target_include_directories(mate-mateir PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mate-mateir PRIVATE slang::slang)
+target_link_libraries(mate-mateir PUBLIC mate-sim-value PRIVATE slang::slang)
 mate_configure_project_target(mate-mateir)
 
 add_library(mate-systemverilog-frontend STATIC ${SYSTEMVERILOG_FRONTEND_SOURCES})
@@ -275,6 +276,11 @@ add_executable(mate-fixed-value-diff-test tests/unit/fixed_value_diff_test.cpp)
 target_include_directories(mate-fixed-value-diff-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mate-fixed-value-diff-test PRIVATE mate-sim-value)
 mate_configure_project_target(mate-fixed-value-diff-test)
+
+add_executable(mate-pass-unit-test tests/unit/constant_fold_test.cpp)
+target_include_directories(mate-pass-unit-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mate-pass-unit-test PRIVATE mate-systemverilog-frontend)
+mate_configure_project_target(mate-pass-unit-test)
 
 # Print build configuration
 message(STATUS "")

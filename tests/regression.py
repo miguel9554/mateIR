@@ -17,7 +17,11 @@ MANIFEST = TESTS_DIR / "regression_tests.txt"
 DFG_API_GUARD = TESTS_DIR / "check_dfg_api_surface.py"
 MODULE_NODE_API_GUARD = TESTS_DIR / "check_module_node_api_surface.py"
 LANG_METADATA_CHECK = TESTS_DIR / "check_lang_metadata.py"
-FIXED_VALUE_DIFF_TEST = "mate-fixed-value-diff-test"
+# (summary step key, binary under build/<preset>/, display name)
+UNIT_TEST_BINARIES = [
+    ("fixed_value_diff_test", "mate-fixed-value-diff-test", "FixedValue differential test"),
+    ("pass_unit_test", "mate-pass-unit-test", "Pass unit tests"),
+]
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -215,9 +219,9 @@ def ensure_simulator(build_target):
     return result.returncode == 0, output
 
 
-def run_fixed_value_diff_test(build_target):
-    """Run the FixedValue-vs-SimValue differential test binary."""
-    test_binary = REPO_ROOT / "build" / build_target / FIXED_VALUE_DIFF_TEST
+def run_unit_test_binary(build_target, binary):
+    """Run a C++ unit test binary; it exits non-zero on failure."""
+    test_binary = REPO_ROOT / "build" / build_target / binary
     result = subprocess.run(
         [str(test_binary)],
         capture_output=True,
@@ -461,24 +465,25 @@ def main():
         print(output)
         sys.exit(1)
 
-    print("Running FixedValue differential test...", flush=True)
-    ok, output = run_fixed_value_diff_test(args.build)
-    summary["steps"]["fixed_value_diff_test"] = {
-        "log": str((run_logs_dir / "fixed_value_diff_test.log").relative_to(REPO_ROOT)),
-        "ok": ok,
-    }
-    write_text_log(
-        run_logs_dir / "fixed_value_diff_test.log",
-        "FixedValue differential test",
-        output,
-        ok=ok,
-        metadata={"binary": FIXED_VALUE_DIFF_TEST, "step": "fixed_value_diff_test"},
-    )
-    if not ok:
-        write_summary(run_logs_dir, summary)
-        print(f"{RED}FixedValue differential test failed{RESET}")
-        print(output)
-        sys.exit(1)
+    for step, binary, display_name in UNIT_TEST_BINARIES:
+        print(f"Running {display_name}...", flush=True)
+        ok, output = run_unit_test_binary(args.build, binary)
+        summary["steps"][step] = {
+            "log": str((run_logs_dir / f"{step}.log").relative_to(REPO_ROOT)),
+            "ok": ok,
+        }
+        write_text_log(
+            run_logs_dir / f"{step}.log",
+            display_name,
+            output,
+            ok=ok,
+            metadata={"binary": binary, "step": step},
+        )
+        if not ok:
+            write_summary(run_logs_dir, summary)
+            print(f"{RED}{display_name} failed{RESET}")
+            print(output)
+            sys.exit(1)
 
     print("Checking language-metadata sidecar artifacts...", flush=True)
     ok, output = run_lang_metadata_check(mate_binary)

@@ -2088,6 +2088,9 @@ NativeCombinationalCode makeNativeCombinationalCpp(const RtlRuntimeModel& model,
                 continue;
             }
 
+            // Per-op lowering must match the reference semantics in
+            // mateir/dfg_eval.cpp, which compile-time rewrites
+            // (constant_fold) evaluate through.
             std::string expr;
             switch (kind) {
                 case DFGOp::SIGNAL:

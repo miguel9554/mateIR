@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mateir/mateir.h"
-#include "sim/sim_value.h"
+#include "util/bit_vector_value.h"
 
 #include <cstddef>
 #include <map>
@@ -67,7 +67,7 @@ enum class FlopsInitial {
 
 struct RuntimeInputUpdate {
     RuntimeInputId input;
-    SimValue value;
+    BitVectorValue value;
 };
 
 struct RuntimeInputLeafMetadata {

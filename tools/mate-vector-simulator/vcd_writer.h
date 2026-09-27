@@ -2,7 +2,7 @@
 
 #include "mateir/mateir.h"
 #include "sim/runtime_metadata.h"
-#include "sim/sim_value.h"
+#include "util/bit_vector_value.h"
 #include "vcd_tracer.hpp"
 
 #include <fstream>
@@ -21,7 +21,7 @@ public:
     explicit SimVcdValue(unsigned int bit_size);
     SimVcdValue(unsigned int bit_size, std::vector<size_t> aggregate_path);
 
-    void set(const SimValue& value);
+    void set(const BitVectorValue& value);
     void unknown() override;
     void undriven() override;
     void set_uint64(uint64_t v) override;

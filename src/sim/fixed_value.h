@@ -1,9 +1,9 @@
 #pragma once
 
-#include "sim/word_ops.h"
+#include "util/word_ops.h"
 
-#ifdef MATE_FIXED_VALUE_ENABLE_SIMVALUE_INTEROP
-#include "sim/sim_value.h"
+#ifdef MATE_FIXED_VALUE_ENABLE_BIT_VECTOR_VALUE_INTEROP
+#include "util/bit_vector_value.h"
 #endif
 
 #include <algorithm>
@@ -91,13 +91,13 @@ struct FixedValue {
         }
     }
 
-#ifdef MATE_FIXED_VALUE_ENABLE_SIMVALUE_INTEROP
-    static FixedValue fromSimValue(const SimValue& value) {
+#ifdef MATE_FIXED_VALUE_ENABLE_BIT_VECTOR_VALUE_INTEROP
+    static FixedValue fromBitVectorValue(const BitVectorValue& value) {
         if (value.isAggregate()) {
-            throw std::invalid_argument("FixedValue cannot convert aggregate SimValue");
+            throw std::invalid_argument("FixedValue cannot convert aggregate BitVectorValue");
         }
         if (value.width() != Width) {
-            throw std::invalid_argument("FixedValue SimValue width mismatch");
+            throw std::invalid_argument("FixedValue BitVectorValue width mismatch");
         }
         FixedValue result;
         for (int bit = 0; bit < Width; ++bit) {
@@ -106,8 +106,8 @@ struct FixedValue {
         return result;
     }
 
-    SimValue toSimValue() const {
-        SimValue result = SimValue::zero(Width, Signed);
+    BitVectorValue toBitVectorValue() const {
+        BitVectorValue result = BitVectorValue::zero(Width, Signed);
         for (int bit = 0; bit < Width; ++bit) {
             if (getBit(bit)) result.setBit(bit, true);
         }

@@ -25,8 +25,8 @@ SimVcdValue::SimVcdValue(unsigned int bit_size, std::vector<size_t> aggregate_pa
 {
 }
 
-void SimVcdValue::set(const SimValue& value) {
-    const SimValue* selected = &value;
+void SimVcdValue::set(const BitVectorValue& value) {
+    const BitVectorValue* selected = &value;
     for (size_t index : aggregate_path_) {
         if (!selected->isAggregate() || index >= selected->elements().size()) {
             unknown();
@@ -61,7 +61,7 @@ void SimVcdValue::undriven() {
 }
 
 void SimVcdValue::set_uint64(uint64_t v) {
-    set(SimValue::fromU64(v, static_cast<int>(bit_size_), false));
+    set(BitVectorValue::fromU64(v, static_cast<int>(bit_size_), false));
 }
 
 void SimVcdValue::set_double(double v) {
@@ -133,10 +133,10 @@ void collectFlopBackedAggregateRoots(const Module& mod,
     }
 }
 
-SimValue constantValueToSimValue(const ConstantValue& value) {
+BitVectorValue constantValueToBitVectorValue(const ConstantValue& value) {
     if (value.isBits()) {
         const auto& bits = value.asBits();
-        SimValue out = SimValue::zero(bits.width, bits.is_signed);
+        BitVectorValue out = BitVectorValue::zero(bits.width, bits.is_signed);
         for (int bit = 0; bit < bits.width; ++bit) {
             const auto& word = bits.words[static_cast<size_t>(bit / 64)];
             out.setBit(bit, ((word >> (bit % 64)) & 1ULL) != 0);
@@ -145,11 +145,11 @@ SimValue constantValueToSimValue(const ConstantValue& value) {
     }
 
     if (value.isAggregate()) {
-        std::vector<SimValue> elements;
+        std::vector<BitVectorValue> elements;
         elements.reserve(value.asAggregate().elements.size());
         for (const auto& element : value.asAggregate().elements)
-            elements.push_back(constantValueToSimValue(element));
-        return SimValue::aggregate(std::move(elements));
+            elements.push_back(constantValueToBitVectorValue(element));
+        return BitVectorValue::aggregate(std::move(elements));
     }
 
     throw CompilerError("VcdWriter: real-valued parameters are not supported in VCD emission");
@@ -193,7 +193,7 @@ void emitParamValue(vcd_tracer::module& scope,
     unsigned int w = type.width > 0 ? static_cast<unsigned int>(type.width) : 1;
     auto v = std::make_unique<SimVcdValue>(w);
     v->elaborate(scope.get_add_fn(), name);
-    v->set(constantValueToSimValue(packed));
+    v->set(constantValueToBitVectorValue(packed));
     storage.push_back(std::move(v));
 }
 

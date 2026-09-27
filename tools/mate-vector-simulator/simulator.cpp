@@ -136,7 +136,7 @@ void Simulator::buildTimeline() {
                             "Simulator: async array file '{}' line has fewer values than "
                             "expected (got {} of {}): {}", path, i, leaves.size(), line));
                     try {
-                        SimValue val = SimValue::fromHexString(
+                        BitVectorValue val = BitVectorValue::fromHexString(
                             hex_token, elem_type.width, elem_type.isSigned());
                         timeline_.push_back({time, leaves[i].leaf_name, std::move(val)});
                     } catch (const std::invalid_argument&) {
@@ -169,7 +169,7 @@ void Simulator::buildTimeline() {
                         throw CompilerError(std::format(
                             "Simulator: bad line in async file '{}': {}", path, line));
                     try {
-                        SimValue val = SimValue::fromHexString(
+                        BitVectorValue val = BitVectorValue::fromHexString(
                             value_token, leafType.width, leafType.isSigned());
                         int64_t time = parseTimeWithUnit(time_token, path, line);
                         timeline_.push_back({time, leaf.leaf_name, std::move(val)});
@@ -211,7 +211,7 @@ void Simulator::loadSyncInputs() {
                     "Simulator: sync array input '{}' element has no type width", input.name));
 
             // Collect per-leaf value vectors indexed by leaf index
-            std::vector<std::vector<SimValue>> per_leaf(leaves.size());
+            std::vector<std::vector<BitVectorValue>> per_leaf(leaves.size());
             std::string line;
             while (std::getline(file, line)) {
                 if (line.empty() || line[0] == '#') continue;
@@ -223,7 +223,7 @@ void Simulator::loadSyncInputs() {
                             "Simulator: sync array file '{}' line has fewer values than "
                             "expected (got {} of {}): {}", path, i, leaves.size(), line));
                     try {
-                        per_leaf[i].push_back(SimValue::fromHexString(
+                        per_leaf[i].push_back(BitVectorValue::fromHexString(
                             hex_token, elem_type.width, elem_type.isSigned()));
                     } catch (const std::invalid_argument&) {
                         throw CompilerError(std::format(
@@ -251,7 +251,7 @@ void Simulator::loadSyncInputs() {
                     throw CompilerError(std::format(
                         "Simulator: cannot open sync input file '{}'", path));
 
-                std::vector<SimValue> values;
+                std::vector<BitVectorValue> values;
                 std::string line;
                 while (std::getline(file, line)) {
                     if (line.empty() || line[0] == '#') continue;
@@ -267,7 +267,7 @@ void Simulator::loadSyncInputs() {
                         if (leafType.width <= 0)
                             throw CompilerError(std::format(
                                 "Simulator: sync input '{}' has no resolved type width", name));
-                        values.push_back(SimValue::fromHexString(
+                        values.push_back(BitVectorValue::fromHexString(
                             hex_text, leafType.width, leafType.isSigned()));
                     } catch (const std::invalid_argument&) {
                         throw CompilerError(std::format(
@@ -340,7 +340,7 @@ std::optional<edge_t> Simulator::updateAsyncInputAndDetectEdge(
             input.leaf_name, time_ns));
     }
 
-    const SimValue old_value = value_it->second;
+    const BitVectorValue old_value = value_it->second;
     value_it->second = update.value;
 
     if (!isClockOrResetSource(input.leaf_name)) {
@@ -398,7 +398,7 @@ void Simulator::writeOutputFiles() {
             throw CompilerError(std::format(
                 "Simulator: cannot open output file '{}'", filepath));
         }
-        for (const SimValue& v : values) {
+        for (const BitVectorValue& v : values) {
             out << v.toBinaryString() << "\n";
         }
     }

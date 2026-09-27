@@ -2,7 +2,7 @@
 
 #include "mateir/module.h"
 #include "sim/runtime_model.h"
-#include "sim/word_ops.h"
+#include "util/word_ops.h"
 #include "util/source_loc.h"
 
 #include <algorithm>
@@ -2606,7 +2606,7 @@ NativeModelCode makeNativeModelCpp(const Config& config,
     std::ostringstream out;
     out << "#include \"abi/abi_native.h\"\n\n";
     out << "#include \"sim/fixed_value.h\"\n";
-    out << "#include \"sim/word_ops.h\"\n\n";
+    out << "#include \"util/word_ops.h\"\n\n";
     out << "#include <random>\n";
     out << "#include <span>\n";
     out << "#include <stdexcept>\n";

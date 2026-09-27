@@ -19,9 +19,9 @@ const Type& evaluableType(const DFGNode* node) {
     return *node->type;
 }
 
-SimValue operand(const DFGNode* node, const DFGOperandValueFn& operandValue) {
+BitVectorValue operand(const DFGNode* node, const DFGOperandValueFn& operandValue) {
     const Type& type = evaluableType(node);
-    SimValue value = operandValue(node);
+    BitVectorValue value = operandValue(node);
     if (value.isAggregate() || value.width() != type.width ||
         value.isSigned() != type.isSigned()) {
         throw CompilerError(std::format(
@@ -30,8 +30,8 @@ SimValue operand(const DFGNode* node, const DFGOperandValueFn& operandValue) {
     return value;
 }
 
-SimValue bit(bool value) {
-    return SimValue::fromU64(value ? 1 : 0, 1, false);
+BitVectorValue bit(bool value) {
+    return BitVectorValue::fromU64(value ? 1 : 0, 1, false);
 }
 
 // Mirrors dpi_codegen compareIsSigned: an operation is signed only when both
@@ -41,7 +41,7 @@ bool bothSigned(const DFGNode* lhs, const DFGNode* rhs) {
 }
 
 // Result of `node`'s own operation before the final resize to its type.
-SimValue evaluateOp(const DFGNode& node, const DFGOperandValueFn& operandValue) {
+BitVectorValue evaluateOp(const DFGNode& node, const DFGOperandValueFn& operandValue) {
     auto value = [&](const DFGNode* n) { return operand(n, operandValue); };
     const DFGOp kind = node.kind();
     switch (kind) {
@@ -69,8 +69,8 @@ SimValue evaluateOp(const DFGNode& node, const DFGOperandValueFn& operandValue) 
             const auto inputs = node.binaryInputs();
             const int width = node.type->width;
             const bool is_signed = bothSigned(inputs.lhs.node, inputs.rhs.node);
-            const SimValue lhs = value(inputs.lhs.node).resized(width, is_signed);
-            const SimValue rhs = value(inputs.rhs.node).resized(width, is_signed);
+            const BitVectorValue lhs = value(inputs.lhs.node).resized(width, is_signed);
+            const BitVectorValue rhs = value(inputs.rhs.node).resized(width, is_signed);
             if (kind == DFGOp::ADD) return lhs.add(rhs);
             if (kind == DFGOp::SUB) return lhs.sub(rhs);
             return lhs.mul(rhs);
@@ -86,10 +86,10 @@ SimValue evaluateOp(const DFGNode& node, const DFGOperandValueFn& operandValue) 
         case DFGOp::GT:
         case DFGOp::GE: {
             const auto inputs = node.binaryInputs();
-            const SimValue lhs = value(inputs.lhs.node);
-            const SimValue rhs = value(inputs.rhs.node);
+            const BitVectorValue lhs = value(inputs.lhs.node);
+            const BitVectorValue rhs = value(inputs.rhs.node);
             const bool is_signed = bothSigned(inputs.lhs.node, inputs.rhs.node);
-            auto less = [&](const SimValue& a, const SimValue& b) {
+            auto less = [&](const BitVectorValue& a, const BitVectorValue& b) {
                 return is_signed ? a.signedLt(b) : a.unsignedLt(b);
             };
             if (kind == DFGOp::LT) return bit(less(lhs, rhs));
@@ -102,7 +102,7 @@ SimValue evaluateOp(const DFGNode& node, const DFGOperandValueFn& operandValue) 
         case DFGOp::SHR:
         case DFGOp::ASR: {
             const auto inputs = node.binaryInputs();
-            const SimValue lhs = value(inputs.lhs.node);
+            const BitVectorValue lhs = value(inputs.lhs.node);
             const uint64_t amount = value(inputs.rhs.node).lowU64();
             if (kind == DFGOp::SHL) return lhs.shl(amount);
             return lhs.shr(amount, kind == DFGOp::ASR);
@@ -131,8 +131,8 @@ SimValue evaluateOp(const DFGNode& node, const DFGOperandValueFn& operandValue) 
         case DFGOp::BITWISE_XOR:
         case DFGOp::BITWISE_XNOR: {
             const auto inputs = node.binaryInputs();
-            const SimValue lhs = value(inputs.lhs.node);
-            const SimValue rhs = value(inputs.rhs.node);
+            const BitVectorValue lhs = value(inputs.lhs.node);
+            const BitVectorValue rhs = value(inputs.rhs.node);
             if (kind == DFGOp::BITWISE_AND) return lhs.bitwiseAnd(rhs);
             if (kind == DFGOp::BITWISE_OR) return lhs.bitwiseOr(rhs);
             if (kind == DFGOp::BITWISE_XOR) return lhs.bitwiseXor(rhs);
@@ -156,9 +156,9 @@ SimValue evaluateOp(const DFGNode& node, const DFGOperandValueFn& operandValue) 
             // Result bit j = source bit indices[j], as an unsigned vector of
             // indices.size() bits (slice / gatherAffine / gatherBits).
             const DFGNode* source_node = node.sliceSource().node;
-            const SimValue source = value(source_node);
+            const BitVectorValue source = value(source_node);
             const auto& indices = node.sliceIndices();
-            SimValue result = SimValue::zero(static_cast<int>(indices.size()), false);
+            BitVectorValue result = BitVectorValue::zero(static_cast<int>(indices.size()), false);
             for (size_t j = 0; j < indices.size(); ++j) {
                 if (indices[j] < 0 || indices[j] >= source.width()) {
                     throw CompilerError(std::format(
@@ -171,10 +171,10 @@ SimValue evaluateOp(const DFGNode& node, const DFGOperandValueFn& operandValue) 
         }
 
         case DFGOp::CONCAT: {
-            std::vector<SimValue> parts;
+            std::vector<BitVectorValue> parts;
             parts.reserve(node.concatParts().size());
             for (const auto& part : node.concatParts()) parts.push_back(value(part.node));
-            return SimValue::concat(parts);
+            return BitVectorValue::concat(parts);
         }
     }
     throw CompilerError(std::format("evaluateDFGNode: unhandled op in {}", node.str()), &node);
@@ -186,20 +186,20 @@ bool isEvaluableBitVectorType(const Type& type) {
     return type.width > 0 && type.unpacked_dims.empty() && !type.isStruct();
 }
 
-SimValue constNodeValue(const DFGNode& node) {
+BitVectorValue constNodeValue(const DFGNode& node) {
     if (node.kind() != DFGOp::CONST) {
         throw CompilerError(std::format("constNodeValue: {} is not CONST", node.str()), &node);
     }
     const Type& type = evaluableType(&node);
-    return SimValue::fromI64(node.constValue(), type.width, type.isSigned());
+    return BitVectorValue::fromI64(node.constValue(), type.width, type.isSigned());
 }
 
-SimValue evaluateDFGNode(const DFGNode& node, const DFGOperandValueFn& operandValue) {
+BitVectorValue evaluateDFGNode(const DFGNode& node, const DFGOperandValueFn& operandValue) {
     const Type& type = evaluableType(&node);
     return evaluateOp(node, operandValue).resized(type.width, type.isSigned());
 }
 
-std::optional<int64_t> constPayloadFor(const SimValue& value, const Type& type) {
+std::optional<int64_t> constPayloadFor(const BitVectorValue& value, const Type& type) {
     if (!isEvaluableBitVectorType(type) || value.isAggregate() ||
         value.width() != type.width) {
         throw CompilerError("constPayloadFor: value does not match its type");

@@ -55,7 +55,7 @@ static bool isConstZero(const DFGNode* n) {
 // True when CONST `n`, extended the way an ADD/SUB/MUL of `width` and
 // signedness `is_signed` extends its operands, equals `expected`.
 static bool constOperandEquals(const DFGNode* n, int width, bool is_signed,
-                               const SimValue& expected) {
+                               const BitVectorValue& expected) {
     if (!isConst(n) || !hasEvaluableType(n)) return false;
     return constNodeValue(*n).resized(width, is_signed).eq(expected);
 }
@@ -72,7 +72,7 @@ static std::pair<DFGNode*, DFGNode*> binaryNodes(const DFGNode* n) {
 // Rewrite typed `n` in place to the CONST holding `value` at n's type.
 // Returns false, leaving `n` untouched, when the value does not fit a CONST
 // payload.
-static bool rewriteToConstValue(DFGNode* n, const SimValue& value) {
+static bool rewriteToConstValue(DFGNode* n, const BitVectorValue& value) {
     auto payload = constPayloadFor(value, *n->type);
     if (!payload) return false;
     n->rewriteToConst(*payload);
@@ -83,18 +83,18 @@ static bool rewriteToConstValue(DFGNode* n, const SimValue& value) {
 // the resize every node applies to its type) is `opResult`. Comparisons
 // produce 1-bit unsigned results; resizing matters because a wider signed
 // node type sign-extends that bit.
-static bool makeConstFromOpResult(DFGNode* n, const SimValue& opResult) {
+static bool makeConstFromOpResult(DFGNode* n, const BitVectorValue& opResult) {
     if (!n->hasType()) inferNodeType(n);
     if (!hasEvaluableType(n)) return false;
     return rewriteToConstValue(n, opResult.resized(n->type->width, n->type->isSigned()));
 }
 
 static bool makeZero(DFGNode* n) {
-    return makeConstFromOpResult(n, SimValue::zero(1, false));
+    return makeConstFromOpResult(n, BitVectorValue::zero(1, false));
 }
 
 static bool makeCompareResult(DFGNode* n, bool value) {
-    return makeConstFromOpResult(n, SimValue::fromU64(value ? 1 : 0, 1, false));
+    return makeConstFromOpResult(n, BitVectorValue::fromU64(value ? 1 : 0, 1, false));
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +156,7 @@ static bool tryConstantFold(DFGNode* node) {
     if (!node->hasType()) inferNodeType(node);
     if (!hasEvaluableType(node)) return false;
 
-    const SimValue value = evaluateDFGNode(
+    const BitVectorValue value = evaluateDFGNode(
         *node, [](const DFGNode* operand) { return constNodeValue(*operand); });
     return rewriteToConstValue(node, value);
 }
@@ -249,8 +249,8 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
         case DFGOp::MUL: {
             auto [lhs, rhs] = binaryNodes(node);
             const bool is_signed = bothSigned(lhs, rhs);
-            const SimValue one = SimValue::fromU64(1, width, is_signed);
-            const SimValue allOnes = SimValue::ones(width, is_signed);
+            const BitVectorValue one = BitVectorValue::fromU64(1, width, is_signed);
+            const BitVectorValue allOnes = BitVectorValue::ones(width, is_signed);
             // x * 0 or 0 * x -> 0
             if ((isConstZero(rhs) || isConstZero(lhs)) && makeZero(node)) return true;
             // x * 1 -> x, 1 * x -> x
@@ -350,7 +350,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
                             const size_t minority_arm = first_arm_for_key.at(minority_key);
                             const size_t majority_arm = first_arm_for_key.at(majority_key);
                             auto code = constPayloadFor(
-                                SimValue::fromI64(node->muxArmValue(minority_arm), selWidth,
+                                BitVectorValue::fromI64(node->muxArmValue(minority_arm), selWidth,
                                                   sel->type->isSigned()),
                                 *sel->type);
                             DFGNode* code_const = graph.constant(*code);

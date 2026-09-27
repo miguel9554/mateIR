@@ -1,6 +1,6 @@
-#define MATE_FIXED_VALUE_ENABLE_SIMVALUE_INTEROP
+#define MATE_FIXED_VALUE_ENABLE_BIT_VECTOR_VALUE_INTEROP
 #include "sim/fixed_value.h"
-#include "sim/sim_value.h"
+#include "util/bit_vector_value.h"
 
 #include <array>
 #include <cstdint>
@@ -23,12 +23,12 @@ void requireEqual(const A& actual, const B& expected, const std::string& context
 
 template <int Width, bool Signed>
 void requireValueEq(const mate::FixedValue<Width, Signed>& fixed,
-                    const mate::SimValue& sim,
+                    const mate::BitVectorValue& sim,
                     const std::string& context) {
     if (sim.width() != Width) {
         throw std::runtime_error(context + ": oracle width mismatch");
     }
-    const mate::SimValue actual = fixed.toSimValue();
+    const mate::BitVectorValue actual = fixed.toBitVectorValue();
     if (!actual.eq(sim)) {
         throw std::runtime_error(context + ": fixed=" + actual.toBinaryString() +
                                  " sim=" + sim.toBinaryString());
@@ -70,14 +70,14 @@ std::vector<mate::FixedValue<Width, Signed>> makeValues() {
 }
 
 template <int NewWidth, bool NewSigned, int Width, bool Signed>
-void checkResizeOne(const mate::FixedValue<Width, Signed>& value, const mate::SimValue& sim) {
+void checkResizeOne(const mate::FixedValue<Width, Signed>& value, const mate::BitVectorValue& sim) {
     requireValueEq(value.template resized<NewWidth, NewSigned>(),
                    sim.resized(NewWidth, NewSigned),
                    "resize");
 }
 
 template <int Width, bool Signed>
-void checkResizeSet(const mate::FixedValue<Width, Signed>& value, const mate::SimValue& sim) {
+void checkResizeSet(const mate::FixedValue<Width, Signed>& value, const mate::BitVectorValue& sim) {
     checkResizeOne<1, false>(value, sim);
     checkResizeOne<1, true>(value, sim);
     checkResizeOne<7, false>(value, sim);
@@ -93,14 +93,14 @@ void checkResizeSet(const mate::FixedValue<Width, Signed>& value, const mate::Si
 }
 
 template <int High, int Low, int Width, bool Signed>
-void checkSliceOne(const mate::FixedValue<Width, Signed>& value, const mate::SimValue& sim) {
+void checkSliceOne(const mate::FixedValue<Width, Signed>& value, const mate::BitVectorValue& sim) {
     requireValueEq(value.template slice<High, Low>(),
                    sim.slice(High, Low),
                    "slice");
 }
 
 template <int Width, bool Signed>
-void checkSlices(const mate::FixedValue<Width, Signed>& value, const mate::SimValue& sim) {
+void checkSlices(const mate::FixedValue<Width, Signed>& value, const mate::BitVectorValue& sim) {
     checkSliceOne<0, 0>(value, sim);
     checkSliceOne<Width - 1, 0>(value, sim);
     if constexpr (Width >= 7) checkSliceOne<6, 1>(value, sim);
@@ -123,9 +123,9 @@ void checkUnaryWidth() {
     };
 
     for (const Value& value : values) {
-        const mate::SimValue sim = value.toSimValue();
+        const mate::BitVectorValue sim = value.toBitVectorValue();
 
-        requireValueEq(Value::fromSimValue(sim), sim, "fromSimValue");
+        requireValueEq(Value::fromBitVectorValue(sim), sim, "fromBitVectorValue");
 
         std::array<uint64_t, Value::kWords + 2> copied{};
         value.copyToWords(copied.data(), copied.size());
@@ -158,9 +158,9 @@ void checkPair() {
     const auto rhs_values = makeValues<RWidth, RSigned>();
 
     for (const auto& lhs : lhs_values) {
-        const mate::SimValue lhs_sim = lhs.toSimValue();
+        const mate::BitVectorValue lhs_sim = lhs.toBitVectorValue();
         for (const auto& rhs : rhs_values) {
-            const mate::SimValue rhs_sim = rhs.toSimValue();
+            const mate::BitVectorValue rhs_sim = rhs.toBitVectorValue();
 
             requireValueEq(lhs.bitwiseAnd(rhs), lhs_sim.bitwiseAnd(rhs_sim), "bitwiseAnd");
             requireValueEq(lhs.bitwiseOr(rhs), lhs_sim.bitwiseOr(rhs_sim), "bitwiseOr");
@@ -182,10 +182,10 @@ void checkConcat() {
     const auto b = makeValues<BWidth, BSigned>().back();
     const auto c = makeValues<CWidth, CSigned>().back();
     const auto fixed = mate::FixedValue<1>::concat(a, b, c);
-    const std::array<mate::SimValue, 3> sim_parts = {
-        a.toSimValue(), b.toSimValue(), c.toSimValue()
+    const std::array<mate::BitVectorValue, 3> sim_parts = {
+        a.toBitVectorValue(), b.toBitVectorValue(), c.toBitVectorValue()
     };
-    const mate::SimValue sim = mate::SimValue::concat(std::span<const mate::SimValue>(
+    const mate::BitVectorValue sim = mate::BitVectorValue::concat(std::span<const mate::BitVectorValue>(
         sim_parts.data(), sim_parts.size()));
     requireValueEq(fixed, sim, "concat");
 }

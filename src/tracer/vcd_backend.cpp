@@ -11,7 +11,7 @@ namespace mate::tracer {
 // value_base subclass that stores/dumps a bit string built directly from ABI
 // words. Mirrors the legacy SimVcdValue's dirty-tracking and VCD line format
 // (tools/mate-vector-simulator/vcd_writer.cpp) but sources raw words instead
-// of a SimValue, so it has no interpreter dependency. Declared in
+// of a BitVectorValue, so it has no interpreter dependency. Declared in
 // mate::tracer (matching the forward declaration in vcd_backend.h), not an
 // anonymous namespace, so VcdBackend's unique_ptr<WordsVcdValue> resolves to
 // the same type here and in the header.

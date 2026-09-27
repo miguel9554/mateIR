@@ -56,14 +56,14 @@ DFGNode* output(DFG& graph, const std::string& name, DFGNode* driver) {
     return output(graph, name, driver, driver->type->width, driver->type->isSigned());
 }
 
-using InputValues = std::map<const DFGNode*, SimValue>;
+using InputValues = std::map<const DFGNode*, BitVectorValue>;
 
 // Reference interpreter: evaluates `node` with dfg_eval.h semantics.
-SimValue evaluate(const DFGNode* node, const InputValues& inputs) {
-    std::map<const DFGNode*, SimValue> memo;
-    std::function<SimValue(const DFGNode*)> value = [&](const DFGNode* n) -> SimValue {
+BitVectorValue evaluate(const DFGNode* node, const InputValues& inputs) {
+    std::map<const DFGNode*, BitVectorValue> memo;
+    std::function<BitVectorValue(const DFGNode*)> value = [&](const DFGNode* n) -> BitVectorValue {
         if (auto it = memo.find(n); it != memo.end()) return it->second;
-        SimValue result = n->kind() == DFGOp::INPUT
+        BitVectorValue result = n->kind() == DFGOp::INPUT
             ? inputs.at(n)
             : evaluateDFGNode(*n, value);
         memo.emplace(n, result);
@@ -72,19 +72,19 @@ SimValue evaluate(const DFGNode* node, const InputValues& inputs) {
     return value(node);
 }
 
-SimValue u(uint64_t value, int width) { return SimValue::fromU64(value, width, false); }
-SimValue s(int64_t value, int width) { return SimValue::fromI64(value, width, true); }
+BitVectorValue u(uint64_t value, int width) { return BitVectorValue::fromU64(value, width, false); }
+BitVectorValue s(int64_t value, int width) { return BitVectorValue::fromI64(value, width, true); }
 
-std::string bits(const SimValue& value) { return value.toBinaryString(); }
+std::string bits(const BitVectorValue& value) { return value.toBinaryString(); }
 
-void requireSameValue(const SimValue& actual, const SimValue& expected, const std::string& what) {
+void requireSameValue(const BitVectorValue& actual, const BitVectorValue& expected, const std::string& what) {
     require(actual.width() == expected.width() && actual.eq(expected),
             what + ": got " + bits(actual) + ", expected " + bits(expected));
 }
 
 // Runs the pass and requires `out`'s driver to have become a CONST holding
 // `expected`.
-void requireFoldsTo(DFG& graph, DFGNode* out, const SimValue& expected) {
+void requireFoldsTo(DFG& graph, DFGNode* out, const BitVectorValue& expected) {
     constantFold(graph);
     graph.validate();
     const DFGNode* driver = out->driver()->node;
@@ -96,7 +96,7 @@ void requireFoldsTo(DFG& graph, DFGNode* out, const SimValue& expected) {
 // Runs the pass and requires `out` to compute the same value as before it
 // for every given input assignment.
 void requirePreserved(DFG& graph, DFGNode* out, const std::vector<InputValues>& assignments) {
-    std::vector<SimValue> before;
+    std::vector<BitVectorValue> before;
     for (const auto& inputs : assignments) before.push_back(evaluate(out, inputs));
     constantFold(graph);
     graph.validate();
@@ -109,7 +109,7 @@ void requirePreserved(DFG& graph, DFGNode* out, const std::vector<InputValues>& 
 std::vector<InputValues> allValues(const DFGNode* in) {
     std::vector<InputValues> result;
     for (uint64_t v = 0; v < (uint64_t{1} << in->type->width); ++v) {
-        result.push_back({{in, SimValue::fromU64(v, in->type->width, in->type->isSigned())}});
+        result.push_back({{in, BitVectorValue::fromU64(v, in->type->width, in->type->isSigned())}});
     }
     return result;
 }
@@ -201,7 +201,7 @@ void wideResultThatDoesNotFitStaysUnfolded() {
     constantFold(g);
     g.validate();
     require(out->driver()->node->kind() == DFGOp::ADD, "wide ADD must not be folded");
-    SimValue expected = SimValue::zero(128, false);
+    BitVectorValue expected = BitVectorValue::zero(128, false);
     expected.setBit(64, true);
     requireSameValue(evaluate(out, {}), expected, "wide ADD value");
 }
@@ -431,14 +431,14 @@ struct RandomGraphBuilder {
     }
 };
 
-SimValue randomValue(std::mt19937_64& rng, const Type& type) {
-    SimValue v = SimValue::random(type.width, type.isSigned(), rng);
+BitVectorValue randomValue(std::mt19937_64& rng, const Type& type) {
+    BitVectorValue v = BitVectorValue::random(type.width, type.isSigned(), rng);
     // Mix in edge values: zero, all ones, only the top bit.
     switch (rng() % 5) {
-        case 0: return SimValue::zero(type.width, type.isSigned());
-        case 1: return SimValue::ones(type.width, type.isSigned());
+        case 0: return BitVectorValue::zero(type.width, type.isSigned());
+        case 1: return BitVectorValue::ones(type.width, type.isSigned());
         case 2: {
-            SimValue top = SimValue::zero(type.width, type.isSigned());
+            BitVectorValue top = BitVectorValue::zero(type.width, type.isSigned());
             top.setBit(type.width - 1, true);
             return top;
         }
@@ -463,9 +463,9 @@ void randomGraphsPreserveSemantics() {
             for (auto* in : builder.inputs) values.emplace(in, randomValue(rng, *in->type));
             assignments.push_back(std::move(values));
         }
-        std::vector<std::vector<SimValue>> before;
+        std::vector<std::vector<BitVectorValue>> before;
         for (const auto& values : assignments) {
-            std::vector<SimValue> row;
+            std::vector<BitVectorValue> row;
             for (auto* out : outputs) row.push_back(evaluate(out, values));
             before.push_back(std::move(row));
         }
@@ -485,7 +485,7 @@ void randomGraphsPreserveSemantics() {
 
         for (size_t a = 0; a < assignments.size(); ++a) {
             for (size_t o = 0; o < outputs.size(); ++o) {
-                const SimValue after = evaluate(outputs[o], assignments[a]);
+                const BitVectorValue after = evaluate(outputs[o], assignments[a]);
                 if (!after.eq(before[a][o]) || after.width() != before[a][o].width()) {
                     throw TestFailure("seed " + std::to_string(seed) + ", output " +
                                       outputs[o]->name + ": before " + bits(before[a][o]) +

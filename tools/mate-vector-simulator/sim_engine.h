@@ -3,7 +3,7 @@
 #include "dpi_codegen/dpi_codegen.h"
 #include "abi/mate_model_abi.h"
 #include "sim/runtime_model.h"
-#include "sim/sim_value.h"
+#include "util/bit_vector_value.h"
 
 #include <filesystem>
 #include <memory>
@@ -36,8 +36,8 @@ public:
                                 std::span<const RuntimeInputUpdate> inputs_before_edge) = 0;
     virtual void applyResetEdge(ResetId reset, edge_t edge) = 0;
 
-    virtual SimValue getOutput(RuntimeOutputId output) const = 0;
-    virtual SimValue getObservable(RuntimeObservableId observable) const = 0;
+    virtual BitVectorValue getOutput(RuntimeOutputId output) const = 0;
+    virtual BitVectorValue getObservable(RuntimeObservableId observable) const = 0;
 };
 
 class NativeSimEngine final : public SimEngine {
@@ -58,8 +58,8 @@ public:
                         std::span<const RuntimeInputUpdate> inputs_before_edge) override;
     void applyResetEdge(ResetId reset, edge_t edge) override;
 
-    SimValue getOutput(RuntimeOutputId output) const override;
-    SimValue getObservable(RuntimeObservableId observable) const override;
+    BitVectorValue getOutput(RuntimeOutputId output) const override;
+    BitVectorValue getObservable(RuntimeObservableId observable) const override;
 
 private:
     struct PreparedUpdates;
@@ -119,7 +119,7 @@ private:
                         MateClockIdFn clock_id,
                         MateResetIdFn reset_id);
     PreparedUpdates prepareUpdates(std::span<const RuntimeInputUpdate> inputs) const;
-    SimValue getWordsAsValue(int32_t handle,
+    BitVectorValue getWordsAsValue(int32_t handle,
                              const Type& type,
                              const char* role,
                              MateGetOutputFn get_output) const;

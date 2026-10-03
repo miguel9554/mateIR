@@ -1,16 +1,23 @@
 #include "frontends/systemverilog/passes/constant_fold.h"
 #include "frontends/systemverilog/passes/type_propagation.h"
 
+#include "mateir/dfg_eval.h"
 #include "util/source_loc.h"
 
 #include <map>
-#include <stdexcept>
+#include <optional>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace mate {
+
+// Every value this pass computes goes through the reference semantics in
+// mateir/dfg_eval.h, so folding and simplification can never change what the
+// generated model observes. A rewrite that cannot be proven equivalent under
+// those semantics (typically because it would change a width or signedness
+// seen by consumers) is skipped, never approximated.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -20,28 +27,37 @@ static bool isConst(const DFGNode* n) {
     return n->kind() == DFGOp::CONST;
 }
 
-static int64_t getConst(const DFGNode* n) {
-    return n->constValue();
+static bool hasEvaluableType(const DFGNode* n) {
+    return n->hasType() && isEvaluableBitVectorType(*n->type);
 }
 
-static int64_t normalizeToTypeWidth(int64_t value, const Type& type) {
-    const int width = type.width;
-    if (width <= 0 || width >= 63) {
-        return value;
-    }
+static int widthOf(const DFGNode* n) {
+    return n->type->width;
+}
 
-    const uint64_t mask = (uint64_t{1} << width) - 1;
-    uint64_t truncated = static_cast<uint64_t>(value) & mask;
-    if (!type.isSigned()) {
-        return static_cast<int64_t>(truncated);
-    }
+// Replacing every use of `node` by `replacement` preserves semantics only
+// when both carry the same type: each node resizes its own result to its
+// type, and consumers extend operands by the operand's width and signedness.
+static bool sameValueType(const DFGNode* node, const DFGNode* replacement) {
+    return hasEvaluableType(node) && hasEvaluableType(replacement) &&
+           node->type->width == replacement->type->width &&
+           node->type->isSigned() == replacement->type->isSigned();
+}
 
-    const uint64_t signBit = uint64_t{1} << (width - 1);
-    if ((truncated & signBit) == 0) {
-        return static_cast<int64_t>(truncated);
-    }
-    truncated |= ~mask;
-    return static_cast<int64_t>(truncated);
+static bool bothSigned(const DFGNode* a, const DFGNode* b) {
+    return a->type->isSigned() && b->type->isSigned();
+}
+
+static bool isConstZero(const DFGNode* n) {
+    return isConst(n) && hasEvaluableType(n) && constNodeValue(*n).isZero();
+}
+
+// True when CONST `n`, extended the way an ADD/SUB/MUL of `width` and
+// signedness `is_signed` extends its operands, equals `expected`.
+static bool constOperandEquals(const DFGNode* n, int width, bool is_signed,
+                               const BitVectorValue& expected) {
+    if (!isConst(n) || !hasEvaluableType(n)) return false;
+    return constNodeValue(*n).resized(width, is_signed).eq(expected);
 }
 
 static DFGNode* unaryNode(const DFGNode* n) {
@@ -53,15 +69,32 @@ static std::pair<DFGNode*, DFGNode*> binaryNodes(const DFGNode* n) {
     return {inputs.lhs.node, inputs.rhs.node};
 }
 
-static void makeConst(DFGNode* n, int64_t value) {
-    // If the node has no type yet (e.g. early fold before type_propagation),
-    // infer it from the inputs now, before they are cleared.
-    if (!n->type.has_value())
-        inferNodeType(n);
-    if (n->type.has_value()) {
-        value = normalizeToTypeWidth(value, *n->type);
-    }
-    n->rewriteToConst(value);
+// Rewrite typed `n` in place to the CONST holding `value` at n's type.
+// Returns false, leaving `n` untouched, when the value does not fit a CONST
+// payload.
+static bool rewriteToConstValue(DFGNode* n, const BitVectorValue& value) {
+    auto payload = constPayloadFor(value, *n->type);
+    if (!payload) return false;
+    n->rewriteToConst(*payload);
+    return true;
+}
+
+// Rewrite `n` to the CONST its op produces when the op's own result (before
+// the resize every node applies to its type) is `opResult`. Comparisons
+// produce 1-bit unsigned results; resizing matters because a wider signed
+// node type sign-extends that bit.
+static bool makeConstFromOpResult(DFGNode* n, const BitVectorValue& opResult) {
+    if (!n->hasType()) inferNodeType(n);
+    if (!hasEvaluableType(n)) return false;
+    return rewriteToConstValue(n, opResult.resized(n->type->width, n->type->isSigned()));
+}
+
+static bool makeZero(DFGNode* n) {
+    return makeConstFromOpResult(n, BitVectorValue::zero(1, false));
+}
+
+static bool makeCompareResult(DFGNode* n, bool value) {
+    return makeConstFromOpResult(n, BitVectorValue::fromU64(value ? 1 : 0, 1, false));
 }
 
 // ---------------------------------------------------------------------------
@@ -103,376 +136,167 @@ static std::vector<DFGNode*> buildPostOrder(
 // ---------------------------------------------------------------------------
 
 static bool tryConstantFold(DFGNode* node) {
-    // Skip nodes that are already constants or have no inputs
-    if (node->kind() == DFGOp::CONST || node->kind() == DFGOp::INPUT)
-        return false;
-
-    // CONCAT with all-constant inputs: fold by bit-concatenation (MSB-first)
-    if (node->kind() == DFGOp::CONCAT) {
-        if (node->concatParts().empty()) return false;
-        for (const auto& inp : node->concatParts()) {
-            if (!isConst(inp.node)) return false;
-            if (!inp.node->hasType()) return false;  // need width for each segment
-        }
-        int64_t result = 0;
-        for (const auto& inp : node->concatParts()) {
-            result = (result << inp.node->type->width) | getConst(inp.node);
-        }
-        makeConst(node, result);
-        return true;
-    }
-
-    // Check if all inputs are constants
-    if (!DFGTraversal::hasInputs(node)) return false;
-    bool allInputsConst = true;
-    DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
-        if (!isConst(input.node)) allInputsConst = false;
-    });
-    if (!allInputsConst) return false;
-
-    int64_t result;
-    auto unaryConst = [&]() { return getConst(unaryNode(node)); };
-    auto binaryConst = [&]() {
-        auto [lhs, rhs] = binaryNodes(node);
-        return std::pair<int64_t, int64_t>{getConst(lhs), getConst(rhs)};
-    };
-
     switch (node->kind()) {
-        case DFGOp::ADD: {
-            auto [lhs, rhs] = binaryConst();
-            result = lhs + rhs;
-            break;
-        }
-        case DFGOp::SUB: {
-            auto [lhs, rhs] = binaryConst();
-            result = lhs - rhs;
-            break;
-        }
-        case DFGOp::MUL: {
-            auto [lhs, rhs] = binaryConst();
-            result = lhs * rhs;
-            break;
-        }
-        case DFGOp::EQ: {
-            auto [lhs, rhs] = binaryConst();
-            result = (lhs == rhs) ? 1 : 0;
-            break;
-        }
-        case DFGOp::LT: {
-            auto [lhs, rhs] = binaryConst();
-            result = (lhs < rhs) ? 1 : 0;
-            break;
-        }
-        case DFGOp::LE: {
-            auto [lhs, rhs] = binaryConst();
-            result = (lhs <= rhs) ? 1 : 0;
-            break;
-        }
-        case DFGOp::GT: {
-            auto [lhs, rhs] = binaryConst();
-            result = (lhs > rhs) ? 1 : 0;
-            break;
-        }
-        case DFGOp::GE: {
-            auto [lhs, rhs] = binaryConst();
-            result = (lhs >= rhs) ? 1 : 0;
-            break;
-        }
-        case DFGOp::SHL: {
-            auto [lhs, rhs] = binaryConst();
-            result = lhs << rhs;
-            break;
-        }
-        case DFGOp::SHR: {
-            auto [lhs, rhs] = binaryConst();
-            result = static_cast<int64_t>(static_cast<uint64_t>(lhs) >> rhs);
-            break;
-        }
-        case DFGOp::ASR: {
-            auto [lhs, rhs] = binaryConst();
-            result = lhs >> rhs;
-            break;
-        }
-        case DFGOp::MUX: {
-            int64_t sel = getConst(node->muxSelector().node);
-            if (node->muxSelector().node->hasType()) {
-                sel = normalizeToTypeWidth(sel, *node->muxSelector().node->type);
-            }
-            auto* selected = node->muxDataForValue(sel);
-            if (!selected) {
-                throw CompilerError(
-                    std::format("Constant fold: MUX {} has no arm for selector value {}", node->str(), sel),
-                    node);
-            }
-            result = getConst(selected);
-            break;
-        }
-        case DFGOp::UNARY_NEGATE:
-            result = -unaryConst();
-            break;
-        case DFGOp::BITWISE_NOT:
-            result = ~unaryConst();
-            break;
-        case DFGOp::BITWISE_AND: {
-            auto [lhs, rhs] = binaryConst();
-            result = lhs & rhs;
-            break;
-        }
-        case DFGOp::BITWISE_OR: {
-            auto [lhs, rhs] = binaryConst();
-            result = lhs | rhs;
-            break;
-        }
-        case DFGOp::BITWISE_XOR: {
-            auto [lhs, rhs] = binaryConst();
-            result = lhs ^ rhs;
-            break;
-        }
-        case DFGOp::BITWISE_XNOR: {
-            auto [lhs, rhs] = binaryConst();
-            result = ~(lhs ^ rhs);
-            break;
-        }
-        case DFGOp::REDUCTION_AND:
-            // For constant folding, treat as: result is 1 if all bits are 1 (value == -1 for signed), else 0
-            // Without bit-width info, we check if value is non-zero and all bits set
-            result = (unaryConst() == -1) ? 1 : 0;
-            break;
-        case DFGOp::REDUCTION_NAND:
-            result = (unaryConst() == -1) ? 0 : 1;
-            break;
-        case DFGOp::REDUCTION_OR:
-            result = (unaryConst() != 0) ? 1 : 0;
-            break;
-        case DFGOp::REDUCTION_NOR:
-            result = (unaryConst() != 0) ? 0 : 1;
-            break;
-        case DFGOp::REDUCTION_XOR: {
-            // Parity: count number of set bits
-            uint64_t v = static_cast<uint64_t>(unaryConst());
-            int bits = 0;
-            while (v) { bits ^= 1; v &= v - 1; }
-            result = bits;
-            break;
-        }
-        case DFGOp::SLICE: {
-            // Runtime semantics: result bit j = source bit indices[j]. Only
-            // fold when the folded value round-trips through int64 storage
-            // and the node's type (once known) agrees with the index count —
-            // element-peel-typed slices can be typed wider than their index
-            // count (the open NZB inconsistency) and must stay unfolded.
-            const DFGNode* source = node->sliceSource().node;
-            if (!source->hasType()) return false;
-            const auto& indices = node->sliceIndices();
-            if (indices.size() > 63) return false;
-            if (node->hasType()) {
-                if (node->type->width != static_cast<int>(indices.size())) return false;
-            } else if (source->type->packed_dims.size() > 1) {
-                return false;
-            }
-            const uint64_t value = static_cast<uint64_t>(getConst(source));
-            uint64_t folded = 0;
-            for (size_t j = 0; j < indices.size(); ++j) {
-                if (indices[j] > 62) return false;
-                folded |= ((value >> indices[j]) & 1) << j;
-            }
-            result = static_cast<int64_t>(folded);
-            break;
-        }
-        case DFGOp::REDUCTION_XNOR: {
-            uint64_t v = static_cast<uint64_t>(unaryConst());
-            int bits = 0;
-            while (v) { bits ^= 1; v &= v - 1; }
-            result = bits ? 0 : 1;
-            break;
-        }
-        default:
+        case DFGOp::INPUT:
+        case DFGOp::OUTPUT:
+        case DFGOp::SIGNAL:
+        case DFGOp::CONST:
+        case DFGOp::X:
             return false;
+        default:
+            break;
     }
+    if (!DFGTraversal::hasInputs(node)) return false;
+    bool foldable = true;
+    DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
+        if (!isConst(input.node) || !hasEvaluableType(input.node)) foldable = false;
+    });
+    if (!foldable) return false;
 
-    makeConst(node, result);
-    return true;
+    if (!node->hasType()) inferNodeType(node);
+    if (!hasEvaluableType(node)) return false;
+
+    const BitVectorValue value = evaluateDFGNode(
+        *node, [](const DFGNode* operand) { return constNodeValue(*operand); });
+    return rewriteToConstValue(node, value);
 }
 
 // ---------------------------------------------------------------------------
 // Algebraic simplification
 // ---------------------------------------------------------------------------
 
+static bool hasSimplificationRules(DFGOp op) {
+    switch (op) {
+        case DFGOp::ADD:
+        case DFGOp::SUB:
+        case DFGOp::MUL:
+        case DFGOp::EQ:
+        case DFGOp::LT:
+        case DFGOp::LE:
+        case DFGOp::GT:
+        case DFGOp::GE:
+        case DFGOp::SHL:
+        case DFGOp::SHR:
+        case DFGOp::ASR:
+        case DFGOp::MUX:
+        case DFGOp::UNARY_NEGATE:
+        case DFGOp::BITWISE_NOT:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
-    if (!DFGTraversal::hasInputs(node)) return false;
+    if (!hasSimplificationRules(node->kind())) return false;
+    if (!node->hasType()) inferNodeType(node);
+    if (!hasEvaluableType(node)) return false;
+    bool operandsTyped = true;
+    DFGTraversal::forEachInput(node, [&](size_t, const DFGOutput& input) {
+        if (!hasEvaluableType(input.node)) operandsTyped = false;
+    });
+    if (!operandsTyped) return false;
+
+    // Redirect all consumers of `node` to `replacement` when that is
+    // provably equivalent.
+    auto redirectTo = [&](DFGNode* replacement) {
+        if (!sameValueType(node, replacement)) return false;
+        graph.redirectConsumers(node, replacement);
+        return true;
+    };
+    const int width = widthOf(node);
 
     switch (node->kind()) {
         case DFGOp::ADD: {
             auto [lhs, rhs] = binaryNodes(node);
-            // x + 0 -> x
-            if (isConst(rhs) && getConst(rhs) == 0) {
-                graph.redirectConsumers(node, lhs);
-                return true;
-            }
-            // 0 + x -> x
-            if (isConst(lhs) && getConst(lhs) == 0) {
-                graph.redirectConsumers(node, rhs);
-                return true;
-            }
-            // x + UNARY_NEGATE(x) -> 0
-            if (rhs->kind() == DFGOp::UNARY_NEGATE && unaryNode(rhs) == lhs) {
-                makeConst(node, 0);
-                return true;
-            }
-            if (lhs->kind() == DFGOp::UNARY_NEGATE && unaryNode(lhs) == rhs) {
-                makeConst(node, 0);
-                return true;
-            }
+            // x + 0 -> x, 0 + x -> x
+            if (isConstZero(rhs) && redirectTo(lhs)) return true;
+            if (isConstZero(lhs) && redirectTo(rhs)) return true;
+            // x + UNARY_NEGATE(x) -> 0, when no operand is extended: the
+            // negation happens at x's width, the addition at the node's.
+            auto cancels = [&](const DFGNode* neg, const DFGNode* x) {
+                return neg->kind() == DFGOp::UNARY_NEGATE && unaryNode(neg) == x &&
+                       widthOf(x) == width && widthOf(neg) == width;
+            };
+            if ((cancels(rhs, lhs) || cancels(lhs, rhs)) && makeZero(node)) return true;
             break;
         }
         case DFGOp::SUB: {
             auto [lhs, rhs] = binaryNodes(node);
             // x - 0 -> x
-            if (isConst(rhs) && getConst(rhs) == 0) {
-                graph.redirectConsumers(node, lhs);
-                return true;
-            }
+            if (isConstZero(rhs) && redirectTo(lhs)) return true;
             // x - x -> 0
-            if (lhs == rhs) {
-                makeConst(node, 0);
-                return true;
-            }
-            // 0 - x -> UNARY_NEGATE(x)
-            if (isConst(lhs) && getConst(lhs) == 0) {
+            if (lhs == rhs && makeZero(node)) return true;
+            // 0 - x -> UNARY_NEGATE(x): negation runs at x's width, so x
+            // must already be as wide as the subtraction.
+            if (isConstZero(lhs) && widthOf(rhs) == width) {
                 node->rewriteToUnary(DFGOp::UNARY_NEGATE, DFGOutput(rhs));
                 return true;
             }
-            // x - UNARY_NEGATE(y) -> x + y
+            // x - UNARY_NEGATE(y) -> x + y: y and its negation must be as wide
+            // as the node, and x must extend the same way under both ops.
             if (rhs->kind() == DFGOp::UNARY_NEGATE) {
-                node->rewriteToBinary(DFGOp::ADD, DFGOutput(lhs), DFGOutput(unaryNode(rhs)));
-                return true;
+                DFGNode* y = unaryNode(rhs);
+                const bool xExtendsSame =
+                    widthOf(lhs) >= width || bothSigned(lhs, rhs) == bothSigned(lhs, y);
+                if (widthOf(y) == width && widthOf(rhs) == width && xExtendsSame) {
+                    node->rewriteToBinary(DFGOp::ADD, DFGOutput(lhs), DFGOutput(y));
+                    return true;
+                }
             }
             break;
         }
         case DFGOp::MUL: {
             auto [lhs, rhs] = binaryNodes(node);
+            const bool is_signed = bothSigned(lhs, rhs);
+            const BitVectorValue one = BitVectorValue::fromU64(1, width, is_signed);
+            const BitVectorValue allOnes = BitVectorValue::ones(width, is_signed);
             // x * 0 or 0 * x -> 0
-            if (isConst(rhs) && getConst(rhs) == 0) {
-                makeConst(node, 0);
-                return true;
-            }
-            if (isConst(lhs) && getConst(lhs) == 0) {
-                makeConst(node, 0);
-                return true;
-            }
-            // x * 1 -> x
-            if (isConst(rhs) && getConst(rhs) == 1) {
-                graph.redirectConsumers(node, lhs);
-                return true;
-            }
-            // 1 * x -> x
-            if (isConst(lhs) && getConst(lhs) == 1) {
-                graph.redirectConsumers(node, rhs);
-                return true;
-            }
-            // x * -1 -> UNARY_NEGATE(x)
-            if (isConst(rhs) && getConst(rhs) == -1) {
+            if ((isConstZero(rhs) || isConstZero(lhs)) && makeZero(node)) return true;
+            // x * 1 -> x, 1 * x -> x
+            if (constOperandEquals(rhs, width, is_signed, one) && redirectTo(lhs)) return true;
+            if (constOperandEquals(lhs, width, is_signed, one) && redirectTo(rhs)) return true;
+            // x * -1 -> UNARY_NEGATE(x), -1 * x -> UNARY_NEGATE(x): negation
+            // runs at x's width, so x must be as wide as the product.
+            if (constOperandEquals(rhs, width, is_signed, allOnes) && widthOf(lhs) == width) {
                 node->rewriteToUnary(DFGOp::UNARY_NEGATE, DFGOutput(lhs));
                 return true;
             }
-            // -1 * x -> UNARY_NEGATE(x)
-            if (isConst(lhs) && getConst(lhs) == -1) {
+            if (constOperandEquals(lhs, width, is_signed, allOnes) && widthOf(rhs) == width) {
                 node->rewriteToUnary(DFGOp::UNARY_NEGATE, DFGOutput(rhs));
                 return true;
             }
             break;
         }
-        case DFGOp::EQ: {
-            auto [lhs, rhs] = binaryNodes(node);
-            if (lhs == rhs) {
-                makeConst(node, 1);
-                return true;
-            }
-            break;
-        }
-        case DFGOp::LT: {
-            auto [lhs, rhs] = binaryNodes(node);
-            if (lhs == rhs) {
-                makeConst(node, 0);
-                return true;
-            }
-            break;
-        }
-        case DFGOp::LE: {
-            auto [lhs, rhs] = binaryNodes(node);
-            if (lhs == rhs) {
-                makeConst(node, 1);
-                return true;
-            }
-            break;
-        }
-        case DFGOp::GT: {
-            auto [lhs, rhs] = binaryNodes(node);
-            if (lhs == rhs) {
-                makeConst(node, 0);
-                return true;
-            }
-            break;
-        }
+        case DFGOp::EQ:
+        case DFGOp::LE:
         case DFGOp::GE: {
             auto [lhs, rhs] = binaryNodes(node);
-            if (lhs == rhs) {
-                makeConst(node, 1);
-                return true;
-            }
+            if (lhs == rhs && makeCompareResult(node, true)) return true;
             break;
         }
-        case DFGOp::SHL: {
+        case DFGOp::LT:
+        case DFGOp::GT: {
             auto [lhs, rhs] = binaryNodes(node);
-            // x << 0 -> x
-            if (isConst(rhs) && getConst(rhs) == 0) {
-                graph.redirectConsumers(node, lhs);
-                return true;
-            }
-            // 0 << x -> 0
-            if (isConst(lhs) && getConst(lhs) == 0) {
-                makeConst(node, 0);
-                return true;
-            }
+            if (lhs == rhs && makeCompareResult(node, false)) return true;
             break;
         }
-        case DFGOp::SHR: {
-            auto [lhs, rhs] = binaryNodes(node);
-            // x >> 0 -> x
-            if (isConst(rhs) && getConst(rhs) == 0) {
-                graph.redirectConsumers(node, lhs);
-                return true;
-            }
-            // 0 >> x -> 0
-            if (isConst(lhs) && getConst(lhs) == 0) {
-                makeConst(node, 0);
-                return true;
-            }
-            break;
-        }
+        case DFGOp::SHL:
+        case DFGOp::SHR:
         case DFGOp::ASR: {
             auto [lhs, rhs] = binaryNodes(node);
-            // x >>> 0 -> x
-            if (isConst(rhs) && getConst(rhs) == 0) {
-                graph.redirectConsumers(node, lhs);
-                return true;
-            }
-            // 0 >>> x -> 0
-            if (isConst(lhs) && getConst(lhs) == 0) {
-                makeConst(node, 0);
-                return true;
-            }
+            // x << 0 -> x, x >> 0 -> x, x >>> 0 -> x
+            if (isConstZero(rhs) && redirectTo(lhs)) return true;
+            // 0 << x -> 0, 0 >> x -> 0, 0 >>> x -> 0
+            if (isConstZero(lhs) && makeZero(node)) return true;
             break;
         }
         case DFGOp::MUX: {
             auto* sel = node->muxSelector().node;
             if (isConst(sel)) {
-                int64_t selValue = getConst(sel);
-                if (sel->hasType()) {
-                    selValue = normalizeToTypeWidth(selValue, *sel->type);
-                }
-                if (auto* selected = node->muxDataForValue(selValue)) {
-                    graph.redirectConsumers(node, selected);
+                // Same selector code the generated switch compares.
+                const int64_t code = static_cast<int64_t>(constNodeValue(*sel).lowU64());
+                if (auto* selected = node->muxDataForValue(code); selected && redirectTo(selected)) {
                     return true;
                 }
             }
@@ -485,19 +309,7 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
                     break;
                 }
             }
-            if (allSame) {
-                graph.redirectConsumers(node, first);
-                return true;
-            }
-
-            if (node->isBinaryMux()) {
-                auto* tval = node->muxDataForValue(1);
-                auto* fval = node->muxDataForValue(0);
-                if (tval && fval && tval == fval) {
-                    graph.redirectConsumers(node, tval);
-                    return true;
-                }
-            }
+            if (allSame && redirectTo(first)) return true;
 
             // A wide decode mux whose arms take exactly two distinct values,
             // one of them on a single selector code, is an equality compare
@@ -537,9 +349,11 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
                             const ArmKey& majority_key = count_a == 1 ? key_b : key_a;
                             const size_t minority_arm = first_arm_for_key.at(minority_key);
                             const size_t majority_arm = first_arm_for_key.at(majority_key);
-                            const int64_t code = normalizeToTypeWidth(
-                                node->muxArmValue(minority_arm), *sel->type);
-                            DFGNode* code_const = graph.constant(code);
+                            auto code = constPayloadFor(
+                                BitVectorValue::fromI64(node->muxArmValue(minority_arm), selWidth,
+                                                  sel->type->isSigned()),
+                                *sel->type);
+                            DFGNode* code_const = graph.constant(*code);
                             code_const->type = sel->type;
                             code_const->loc = node->loc;
                             DFGNode* is_code = graph.eq(sel, code_const);
@@ -560,21 +374,15 @@ static bool tryAlgebraicSimplify(DFG& graph, DFGNode* node) {
             }
             break;
         }
-        case DFGOp::UNARY_NEGATE: {
-            auto* inner = unaryNode(node);
-            // -(-x) -> x
-            if (inner->kind() == DFGOp::UNARY_NEGATE) {
-                graph.redirectConsumers(node, unaryNode(inner));
-                return true;
-            }
-            break;
-        }
+        case DFGOp::UNARY_NEGATE:
         case DFGOp::BITWISE_NOT: {
+            // -(-x) -> x, ~(~x) -> x, when no step changes the width.
             auto* inner = unaryNode(node);
-            // ~(~x) -> x
-            if (inner->kind() == DFGOp::BITWISE_NOT) {
-                graph.redirectConsumers(node, unaryNode(inner));
-                return true;
+            if (inner->kind() == node->kind()) {
+                DFGNode* x = unaryNode(inner);
+                if (hasEvaluableType(inner) && widthOf(inner) == widthOf(x) && redirectTo(x)) {
+                    return true;
+                }
             }
             break;
         }

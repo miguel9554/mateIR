@@ -1,6 +1,6 @@
 #include "abi/abi_native.h"
 
-#include "sim/word_ops.h"
+#include "util/word_ops.h"
 #include "util/source_loc.h"
 
 #include <algorithm>

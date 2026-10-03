@@ -7,7 +7,7 @@ Move the generated DPI wrapper off compiler/runtime C++ types so a testbench can
 - the current MateIR interpreter engine in phase 1, or
 - a generated native model engine in phase 2.
 
-The stable boundary is a C ABI. `SimValue`, `RuntimeInputUpdate`, `RtlRuntimeModel`,
+The stable boundary is a C ABI. `BitVectorValue`, `RuntimeInputUpdate`, `RtlRuntimeModel`,
 frontend types, STL containers, and C++ exceptions must not cross it.
 
 ## Phase 1: Freeze And Use The ABI With The Interpreter
@@ -15,7 +15,7 @@ frontend types, STL containers, and C++ exceptions must not cross it.
 Phase 1 is not only a header freeze. The ABI itself is frozen in this phase, and the
 existing interpreter is moved behind it. The generated DPI glue must include only the
 public ABI plus `svdpi.h`; it must stop depending on `mate::dpi::DpiInstanceContext`,
-`DpiInputBinding`, `SimValue`, `RuntimeInputUpdate`, or frontend config types.
+`DpiInputBinding`, `BitVectorValue`, `RuntimeInputUpdate`, or frontend config types.
 
 Implementation steps:
 
@@ -68,12 +68,12 @@ Current architecture:
   `GeneratedResetMetadata`, `GeneratedStorageMetadata`,
   `GeneratedCombinationalEvaluateFn`, `GeneratedResetApplyFn`,
   `GeneratedClockCommitFn`, `GeneratedFlopsInitFn`, `GeneratedModelMetadata`).
-  This header only includes `mate_model_abi.h` and `sim/sim_value.h` — no
+  This header only includes `mate_model_abi.h` and `util/bit_vector_value.h` — no
   mateir/frontend/slang — and is shared by both ABI backends below.
 - Two ABI backends, same public entry points (`mate_model_create`,
   `mate_apply_clock`, ...), never linked into the same binary:
   - **Native backend**: `src/abi/abi_native.h` + `src/abi/abi_native.cpp`
-    (library `mate-abi-native`, depends only on `mate-sim-value`). Builds
+    (library `mate-abi-native`, depends only on `mate-bit-vector-value`). Builds
     `MateModel`/`MateInstance` purely from `GeneratedModelMetadata` — no
     `RtlRuntimeModel`/`RtlRuntimeInstance`, no SV compilation, ever. This is
     the backend linked into DPI simulation binaries
@@ -84,9 +84,9 @@ Current architecture:
     `compileRtlRuntimeModel` inside `mate_model_create`/`createInterpreterModel`.
     Kept for the (currently unused) interpreter-only `createInterpreterModel`
     path; not exercised by generated code or the DPI link anymore.
-- `mate-sim-value` (`src/sim/sim_value.{h,cpp}`) was split out of
+- `mate-bit-vector-value` (`src/util/bit_vector_value.{h,cpp}`) was split out of
   `mate-rtl-runtime` specifically so the native backend could depend on
-  `SimValue` without pulling in `mate-mateir` (and, transitively via its
+  `BitVectorValue` without pulling in `mate-mateir` (and, transitively via its
   private link to `slang::slang`, slang itself) at DPI link time.
 - Generated DPI glue: `<module>_dpi.cpp`.
   - Includes only `abi/mate_model_abi.h` and `svdpi.h`.
@@ -147,15 +147,15 @@ Current architecture:
     native (there is no interpreter fallback in this file at all) — same
     logic as the native branches added to `abi_interpreter.cpp` in Phase 2D,
     ported over.
-  - Low-level word/SimValue packing helpers (`wordsToSimValue`,
-    `copyWordsToStorage`, `simValueToStorage`, `storageToWords`, `wordCount`,
+  - Low-level word/BitVectorValue packing helpers (`wordsToBitVectorValue`,
+    `copyWordsToStorage`, `bitVectorValueToStorage`, `storageToWords`, `wordCount`,
     `guard`/`setOk`/`setError`) are intentionally duplicated from
     `abi_interpreter.cpp` rather than shared: the interpreter version is keyed
     on `mate::Type` (mateir), and sharing it here would have pulled mateir
     back into the native link. The native version uses plain
     `(int32_t width, bool is_signed)` pairs instead.
 - `tests/common/verilator.mk`'s `MATE_LIBS` (used by every DPI test) now
-  links only `libmate-abi-native.a`, `libmate-sim-value.a`, and
+  links only `libmate-abi-native.a`, `libmate-bit-vector-value.a`, and
   `libfmt.a` — `libmate-abi-interpreter.a`, `libmate-rtl-runtime-compiler.a`,
   `libmate-systemverilog-frontend.a`, `libmate-rtl-runtime.a`,
   `libmate-mateir.a`, `yaml-cpp`, and slang are gone from the DPI simulation
@@ -202,7 +202,7 @@ What changed:
 - New: `mate --dpi-lib` also compiles the generated `<module>_dpi.cpp` and
   `<top_module>_model.cpp` and combines their object files with the object
   members of caller-specified static libraries (`--dpi-link-libs`, typically
-  `libmate-abi-native.a` + `libmate-sim-value.a`) into **one** self-contained
+  `libmate-abi-native.a` + `libmate-bit-vector-value.a`) into **one** self-contained
   output static library (`--dpi-out-lib`), via `src/dpi_codegen/dpi_lib_link.{h,cpp}`
   (`linkDpiLib`). Compilation and archiving are done by shelling out to
   `$CXX`/`$AR` (`--cxx`/`--ar`, default `c++`/`ar`); library objects are
@@ -226,7 +226,7 @@ What changed:
 Validation: `arithmetic_ops` end-to-end via a manual `mate --dpi-lib` +
 `make simulate DPI=1` invocation (confirmed the produced `.a` has exactly the
 expected four object members: `dpi.o`, `model.o`, `abi_native.cpp.o`,
-`sim_value.cpp.o`, and that Verilator's own link line references only that
+`bit_vector_value.cpp.o`, and that Verilator's own link line references only that
 one `.a`), then full regression: `126/126 passed` under
 `python tests/regression.py --mode verilator-dpi`, `138/138 passed` under
 `make regression`, and `ibex_core` separately at 100% DPI-vs-RTL match — now
@@ -267,13 +267,13 @@ small designs don't get more files than functions):
 - `dpi_lib_link.cpp`'s `linkDpiLib` compiles every source concurrently via
   `std::async(std::launch::async, ...)` per file rather than sequentially,
   then archives all resulting objects (plus the extracted `mate-abi-native`/
-  `mate-sim-value` members) into the same single output `.a` as before —
+  `mate-bit-vector-value` members) into the same single output `.a` as before —
   the caller-facing contract (`mate --dpi-lib` in, one `.a` out) is unchanged.
   Needs `Threads::Threads` linked into `mate` (added to `CMakeLists.txt`).
 
 Validation: `arithmetic_ops` manual run confirmed 4 chunk files (on the local
 14-core dev machine, `2*nproc` capped by actual chunk count) plus
-`dpi.o`/`model.o`/`abi_native.cpp.o`/`sim_value.cpp.o` in the final archive,
+`dpi.o`/`model.o`/`abi_native.cpp.o`/`bit_vector_value.cpp.o` in the final archive,
 and 100% DPI-vs-RTL match. Full regression: `126/126` under `--mode verilator-dpi`,
 `138/138` under `make regression`. `ibex_core` (30 generated `.cpp` files: 28
 chunk files + dpi.cpp + model.cpp) end-to-end in **~1m41s**, down from ~2.3

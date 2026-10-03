@@ -2,7 +2,7 @@
 
 #include "mateir/mateir.h"
 #include "sim_engine.h"
-#include "sim/sim_value.h"
+#include "util/bit_vector_value.h"
 #include "vcd_writer.h"
 
 #include <fstream>
@@ -31,7 +31,7 @@ struct SimConfig {
 struct AsyncEvent {
     int64_t time;
     std::string signal_name;
-    SimValue value;
+    BitVectorValue value;
 };
 
 struct SyncInputTransition {
@@ -58,10 +58,10 @@ private:
     std::set<std::string> async_inputs_;
     // Sync input -> clock domain
     std::map<std::string, ClockId> sync_input_clock_;
-    std::map<std::string, std::vector<SimValue>> sync_input_data_;
+    std::map<std::string, std::vector<BitVectorValue>> sync_input_data_;
     std::map<std::string, size_t> sync_input_pos_;
-    std::map<std::string, SimValue> async_input_values_;
-    std::map<std::string, std::vector<SimValue>> recorded_values_;
+    std::map<std::string, BitVectorValue> async_input_values_;
+    std::map<std::string, std::vector<BitVectorValue>> recorded_values_;
 
     std::unique_ptr<VcdWriter> vcd_;
 

@@ -65,10 +65,10 @@ void runCommand(const std::string& description, const std::vector<std::string>& 
     }
 }
 
-std::vector<uint64_t> simValueToWords(const SimValue& raw, const Type& type) {
+std::vector<uint64_t> bitVectorValueToWords(const BitVectorValue& raw, const Type& type) {
     const int32_t nwords = wordCount(type.width);
     std::vector<uint64_t> words(static_cast<size_t>(nwords), 0);
-    const SimValue value = raw.resized(type.width, type.isSigned());
+    const BitVectorValue value = raw.resized(type.width, type.isSigned());
     for (int32_t bit = 0; bit < type.width; ++bit) {
         if (value.getBit(bit)) {
             words[static_cast<size_t>(bit / 64)] |= uint64_t{1} << (bit % 64);
@@ -77,8 +77,8 @@ std::vector<uint64_t> simValueToWords(const SimValue& raw, const Type& type) {
     return words;
 }
 
-SimValue wordsToSimValue(const uint64_t* words, const Type& type) {
-    SimValue value = SimValue::zero(type.width, type.isSigned());
+BitVectorValue wordsToBitVectorValue(const uint64_t* words, const Type& type) {
+    BitVectorValue value = BitVectorValue::zero(type.width, type.isSigned());
     for (int32_t bit = 0; bit < type.width; ++bit) {
         if ((words[bit / 64] >> (bit % 64)) & 1ULL) {
             value.setBit(bit, true);
@@ -267,7 +267,7 @@ NativeSimEngine::PreparedUpdates NativeSimEngine::prepareUpdates(
                 "native simulator: invalid input handle {}", update.input.value));
         }
         const auto& input = metadata_.input_leaves.at(update.input.value);
-        prepared.words.push_back(simValueToWords(update.value, input.type));
+        prepared.words.push_back(bitVectorValueToWords(update.value, input.type));
         const auto& words = prepared.words.back();
         prepared.updates.push_back(MateInputUpdate{
             .input_id = input_handles_.at(update.input.value),
@@ -350,7 +350,7 @@ void NativeSimEngine::applyResetEdge(ResetId reset, edge_t edge) {
                 "mate_apply_reset");
 }
 
-SimValue NativeSimEngine::getOutput(RuntimeOutputId output) const {
+BitVectorValue NativeSimEngine::getOutput(RuntimeOutputId output) const {
     if (output.value >= metadata_.output_leaves.size()) {
         throw CompilerError(std::format("native simulator: invalid output handle {}", output.value));
     }
@@ -365,10 +365,10 @@ SimValue NativeSimEngine::getOutput(RuntimeOutputId output) const {
                                  &status),
                 status,
                 "mate_get_output");
-    return wordsToSimValue(words.data(), output_metadata.type);
+    return wordsToBitVectorValue(words.data(), output_metadata.type);
 }
 
-SimValue NativeSimEngine::getObservable(RuntimeObservableId observable) const {
+BitVectorValue NativeSimEngine::getObservable(RuntimeObservableId observable) const {
     if (observable.value >= metadata_.observables.size()) {
         throw CompilerError(std::format(
             "native simulator: invalid observable handle {}", observable.value));
@@ -384,7 +384,7 @@ SimValue NativeSimEngine::getObservable(RuntimeObservableId observable) const {
                                      &status),
                 status,
                 "mate_get_observable");
-    return wordsToSimValue(words.data(), observable_metadata.type);
+    return wordsToBitVectorValue(words.data(), observable_metadata.type);
 }
 
 } // namespace mate

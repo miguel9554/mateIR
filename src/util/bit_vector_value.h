@@ -8,34 +8,34 @@
 
 namespace mate {
 
-// Word storage for SimValue with inline capacity for one 64-bit word, so
+// Word storage for BitVectorValue with inline capacity for one 64-bit word, so
 // values up to 64 bits wide (the overwhelmingly common case in generated
 // models) never touch the heap.
-class SimWords {
+class BitVectorWords {
 public:
-    SimWords() = default;
-    explicit SimWords(size_t count) : size_(count) {
+    BitVectorWords() = default;
+    explicit BitVectorWords(size_t count) : size_(count) {
         if (count > kInline) {
             heap_ = new uint64_t[count]();
         }
     }
-    SimWords(const SimWords& other) { copyFrom(other); }
-    SimWords& operator=(const SimWords& other) {
+    BitVectorWords(const BitVectorWords& other) { copyFrom(other); }
+    BitVectorWords& operator=(const BitVectorWords& other) {
         if (this != &other) {
             release();
             copyFrom(other);
         }
         return *this;
     }
-    SimWords(SimWords&& other) noexcept { moveFrom(other); }
-    SimWords& operator=(SimWords&& other) noexcept {
+    BitVectorWords(BitVectorWords&& other) noexcept { moveFrom(other); }
+    BitVectorWords& operator=(BitVectorWords&& other) noexcept {
         if (this != &other) {
             release();
             moveFrom(other);
         }
         return *this;
     }
-    ~SimWords() { release(); }
+    ~BitVectorWords() { release(); }
 
     size_t size() const { return size_; }
     bool empty() const { return size_ == 0; }
@@ -50,7 +50,7 @@ public:
     const uint64_t* begin() const { return data(); }
     const uint64_t* end() const { return data() + size_; }
 
-    bool operator==(const SimWords& other) const {
+    bool operator==(const BitVectorWords& other) const {
         if (size_ != other.size_) return false;
         const uint64_t* a = data();
         const uint64_t* b = other.data();
@@ -66,7 +66,7 @@ private:
     uint64_t inline_[kInline] = {0};
     uint64_t* heap_ = nullptr;
 
-    void copyFrom(const SimWords& other) {
+    void copyFrom(const BitVectorWords& other) {
         size_ = other.size_;
         if (size_ > kInline) {
             heap_ = new uint64_t[size_];
@@ -76,7 +76,7 @@ private:
             for (size_t i = 0; i < kInline; ++i) inline_[i] = other.inline_[i];
         }
     }
-    void moveFrom(SimWords& other) {
+    void moveFrom(BitVectorWords& other) {
         size_ = other.size_;
         heap_ = other.heap_;
         for (size_t i = 0; i < kInline; ++i) inline_[i] = other.inline_[i];
@@ -89,50 +89,50 @@ private:
     }
 };
 
-class SimValue {
+class BitVectorValue {
 public:
-    SimValue() = default;
+    BitVectorValue() = default;
 
-    static SimValue zero(int width, bool is_signed = false);
-    static SimValue ones(int width, bool is_signed = false);
-    static SimValue fromU64(uint64_t value, int width, bool is_signed = false);
-    static SimValue fromI64(int64_t value, int width, bool is_signed = false);
-    static SimValue fromDecimalString(const std::string& text, int width, bool is_signed = false);
-    static SimValue fromHexString(const std::string& text, int width, bool is_signed = false);
-    static SimValue random(int width, bool is_signed, std::mt19937_64& rng);
-    static SimValue concat(std::span<const SimValue> parts);
-    static SimValue aggregate(std::vector<SimValue> elements);
+    static BitVectorValue zero(int width, bool is_signed = false);
+    static BitVectorValue ones(int width, bool is_signed = false);
+    static BitVectorValue fromU64(uint64_t value, int width, bool is_signed = false);
+    static BitVectorValue fromI64(int64_t value, int width, bool is_signed = false);
+    static BitVectorValue fromDecimalString(const std::string& text, int width, bool is_signed = false);
+    static BitVectorValue fromHexString(const std::string& text, int width, bool is_signed = false);
+    static BitVectorValue random(int width, bool is_signed, std::mt19937_64& rng);
+    static BitVectorValue concat(std::span<const BitVectorValue> parts);
+    static BitVectorValue aggregate(std::vector<BitVectorValue> elements);
 
     int width() const { return width_; }
     bool isSigned() const { return signed_; }
     bool isAggregate() const { return aggregate_; }
-    const std::vector<SimValue>& elements() const { return elements_; }
-    const SimValue& element(size_t index) const;
+    const std::vector<BitVectorValue>& elements() const { return elements_; }
+    const BitVectorValue& element(size_t index) const;
     bool isZero() const;
     uint64_t lowU64() const;
 
     bool getBit(int bit) const;
     void setBit(int bit, bool value);
 
-    SimValue resized(int width, bool is_signed) const;
-    SimValue slice(int high, int low) const;
-    SimValue shl(uint64_t amount) const;
-    SimValue shr(uint64_t amount, bool arithmetic) const;
-    SimValue negated() const;
+    BitVectorValue resized(int width, bool is_signed) const;
+    BitVectorValue slice(int high, int low) const;
+    BitVectorValue shl(uint64_t amount) const;
+    BitVectorValue shr(uint64_t amount, bool arithmetic) const;
+    BitVectorValue negated() const;
 
-    SimValue bitwiseNot() const;
-    SimValue bitwiseAnd(const SimValue& rhs) const;
-    SimValue bitwiseOr(const SimValue& rhs) const;
-    SimValue bitwiseXor(const SimValue& rhs) const;
-    SimValue bitwiseXnor(const SimValue& rhs) const;
+    BitVectorValue bitwiseNot() const;
+    BitVectorValue bitwiseAnd(const BitVectorValue& rhs) const;
+    BitVectorValue bitwiseOr(const BitVectorValue& rhs) const;
+    BitVectorValue bitwiseXor(const BitVectorValue& rhs) const;
+    BitVectorValue bitwiseXnor(const BitVectorValue& rhs) const;
 
-    SimValue add(const SimValue& rhs) const;
-    SimValue sub(const SimValue& rhs) const;
-    SimValue mul(const SimValue& rhs) const;
+    BitVectorValue add(const BitVectorValue& rhs) const;
+    BitVectorValue sub(const BitVectorValue& rhs) const;
+    BitVectorValue mul(const BitVectorValue& rhs) const;
 
-    bool eq(const SimValue& rhs) const;
-    bool unsignedLt(const SimValue& rhs) const;
-    bool signedLt(const SimValue& rhs) const;
+    bool eq(const BitVectorValue& rhs) const;
+    bool unsignedLt(const BitVectorValue& rhs) const;
+    bool signedLt(const BitVectorValue& rhs) const;
 
     bool reductionAnd() const;
     bool reductionOr() const;
@@ -144,15 +144,15 @@ private:
     int width_ = 0;
     bool signed_ = false;
     bool aggregate_ = false;
-    SimWords words_;
-    std::vector<SimValue> elements_;
+    BitVectorWords words_;
+    std::vector<BitVectorValue> elements_;
 
-    explicit SimValue(int width, bool is_signed);
+    explicit BitVectorValue(int width, bool is_signed);
 
     static size_t wordCount(int width);
     void maskTopWord();
     void mulAddSmall(uint32_t mul, uint32_t add);
-    void copyBitsFrom(const SimValue& src, int src_start, int dst_start, int count);
+    void copyBitsFrom(const BitVectorValue& src, int src_start, int dst_start, int count);
 };
 
 } // namespace mate

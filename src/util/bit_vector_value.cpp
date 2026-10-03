@@ -1,5 +1,5 @@
-#include "sim/sim_value.h"
-#include "sim/word_ops.h"
+#include "util/bit_vector_value.h"
+#include "util/word_ops.h"
 
 #include <algorithm>
 #include <cctype>
@@ -7,29 +7,29 @@
 
 namespace mate {
 
-SimValue::SimValue(int width, bool is_signed)
+BitVectorValue::BitVectorValue(int width, bool is_signed)
     : width_(std::max(width, 0)),
       signed_(is_signed),
       words_(wordCount(width_))
 {
 }
 
-size_t SimValue::wordCount(int width) {
+size_t BitVectorValue::wordCount(int width) {
     return wordops::wordCount(width);
 }
 
-SimValue SimValue::zero(int width, bool is_signed) {
-    return SimValue(width, is_signed);
+BitVectorValue BitVectorValue::zero(int width, bool is_signed) {
+    return BitVectorValue(width, is_signed);
 }
 
-SimValue SimValue::ones(int width, bool is_signed) {
-    SimValue value(width, is_signed);
+BitVectorValue BitVectorValue::ones(int width, bool is_signed) {
+    BitVectorValue value(width, is_signed);
     wordops::fillOnes(value.words_.data(), value.words_.size(), value.width_);
     return value;
 }
 
-SimValue SimValue::fromU64(uint64_t raw, int width, bool is_signed) {
-    SimValue value(width, is_signed);
+BitVectorValue BitVectorValue::fromU64(uint64_t raw, int width, bool is_signed) {
+    BitVectorValue value(width, is_signed);
     if (!value.words_.empty()) {
         value.words_[0] = raw;
     }
@@ -37,11 +37,11 @@ SimValue SimValue::fromU64(uint64_t raw, int width, bool is_signed) {
     return value;
 }
 
-SimValue SimValue::fromI64(int64_t raw, int width, bool is_signed) {
+BitVectorValue BitVectorValue::fromI64(int64_t raw, int width, bool is_signed) {
     return fromU64(static_cast<uint64_t>(raw), width, is_signed);
 }
 
-SimValue SimValue::fromDecimalString(const std::string& text, int width, bool is_signed) {
+BitVectorValue BitVectorValue::fromDecimalString(const std::string& text, int width, bool is_signed) {
     size_t pos = 0;
     while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
 
@@ -51,7 +51,7 @@ SimValue SimValue::fromDecimalString(const std::string& text, int width, bool is
         pos++;
     }
 
-    SimValue value = zero(width, is_signed);
+    BitVectorValue value = zero(width, is_signed);
     bool saw_digit = false;
     for (; pos < text.size(); pos++) {
         unsigned char c = static_cast<unsigned char>(text[pos]);
@@ -72,7 +72,7 @@ SimValue SimValue::fromDecimalString(const std::string& text, int width, bool is
     return value.resized(width, is_signed);
 }
 
-SimValue SimValue::fromHexString(const std::string& text, int width, bool is_signed) {
+BitVectorValue BitVectorValue::fromHexString(const std::string& text, int width, bool is_signed) {
     size_t pos = 0;
     while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) pos++;
 
@@ -82,7 +82,7 @@ SimValue SimValue::fromHexString(const std::string& text, int width, bool is_sig
     }
     pos += 2;
 
-    SimValue value = zero(width, is_signed);
+    BitVectorValue value = zero(width, is_signed);
     bool saw_digit = false;
     for (; pos < text.size(); pos++) {
         unsigned char c = static_cast<unsigned char>(text[pos]);
@@ -106,8 +106,8 @@ SimValue SimValue::fromHexString(const std::string& text, int width, bool is_sig
     return value.resized(width, is_signed);
 }
 
-SimValue SimValue::random(int width, bool is_signed, std::mt19937_64& rng) {
-    SimValue value(width, is_signed);
+BitVectorValue BitVectorValue::random(int width, bool is_signed, std::mt19937_64& rng) {
+    BitVectorValue value(width, is_signed);
     for (auto& word : value.words_) {
         word = rng();
     }
@@ -115,11 +115,11 @@ SimValue SimValue::random(int width, bool is_signed, std::mt19937_64& rng) {
     return value;
 }
 
-SimValue SimValue::concat(std::span<const SimValue> parts) {
+BitVectorValue BitVectorValue::concat(std::span<const BitVectorValue> parts) {
     int total_width = 0;
     for (const auto& part : parts) total_width += part.width();
 
-    SimValue result(total_width, false);
+    BitVectorValue result(total_width, false);
     int dst = total_width;
     for (const auto& part : parts) {
         dst -= part.width();
@@ -129,224 +129,224 @@ SimValue SimValue::concat(std::span<const SimValue> parts) {
     return result;
 }
 
-SimValue SimValue::aggregate(std::vector<SimValue> elements) {
-    SimValue value;
+BitVectorValue BitVectorValue::aggregate(std::vector<BitVectorValue> elements) {
+    BitVectorValue value;
     value.aggregate_ = true;
     value.elements_ = std::move(elements);
     return value;
 }
 
-const SimValue& SimValue::element(size_t index) const {
-    if (!aggregate_) throw std::runtime_error("SimValue is not an aggregate");
+const BitVectorValue& BitVectorValue::element(size_t index) const {
+    if (!aggregate_) throw std::runtime_error("BitVectorValue is not an aggregate");
     if (index >= elements_.size()) throw std::out_of_range("aggregate element index");
     return elements_[index];
 }
 
-void SimValue::maskTopWord() {
+void BitVectorValue::maskTopWord() {
     wordops::maskTopWord(words_.data(), words_.size(), width_);
 }
 
-bool SimValue::isZero() const {
+bool BitVectorValue::isZero() const {
     if (aggregate_) {
         return std::all_of(elements_.begin(), elements_.end(),
-            [](const SimValue& element) { return element.isZero(); });
+            [](const BitVectorValue& element) { return element.isZero(); });
     }
     return wordops::isZero(words_.data(), words_.size(), width_);
 }
 
-uint64_t SimValue::lowU64() const {
+uint64_t BitVectorValue::lowU64() const {
     if (aggregate_) return elements_.empty() ? 0 : elements_.front().lowU64();
     return words_.empty() ? 0 : words_[0];
 }
 
-bool SimValue::getBit(int bit) const {
+bool BitVectorValue::getBit(int bit) const {
     return wordops::getBit(words_.data(), words_.size(), width_, bit);
 }
 
-void SimValue::setBit(int bit, bool value) {
+void BitVectorValue::setBit(int bit, bool value) {
     wordops::setBit(words_.data(), words_.size(), width_, bit, value);
 }
 
-SimValue SimValue::resized(int width, bool is_signed) const {
+BitVectorValue BitVectorValue::resized(int width, bool is_signed) const {
     if (width == width_) {
-        SimValue result = *this;
+        BitVectorValue result = *this;
         result.signed_ = is_signed;
         return result;
     }
-    SimValue result(width, is_signed);
+    BitVectorValue result(width, is_signed);
     wordops::resize(result.words_.data(), result.words_.size(), result.width_,
                     words_.data(), words_.size(), width_, is_signed);
     return result;
 }
 
-SimValue SimValue::slice(int high, int low) const {
+BitVectorValue BitVectorValue::slice(int high, int low) const {
     if (high < low) return zero(0);
-    SimValue result(high - low + 1, false);
+    BitVectorValue result(high - low + 1, false);
     wordops::slice(result.words_.data(), result.words_.size(), result.width_,
                    words_.data(), words_.size(), width_, low);
     return result;
 }
 
-SimValue SimValue::shl(uint64_t amount) const {
-    SimValue result(width_, signed_);
+BitVectorValue BitVectorValue::shl(uint64_t amount) const {
+    BitVectorValue result(width_, signed_);
     wordops::shiftLeft(result.words_.data(), words_.data(), words_.size(), width_, amount);
     return result;
 }
 
-SimValue SimValue::shr(uint64_t amount, bool arithmetic) const {
-    SimValue result(width_, signed_);
+BitVectorValue BitVectorValue::shr(uint64_t amount, bool arithmetic) const {
+    BitVectorValue result(width_, signed_);
     wordops::shiftRight(result.words_.data(), words_.data(), words_.size(), width_,
                         amount, arithmetic, signed_);
     return result;
 }
 
-SimValue SimValue::negated() const {
-    SimValue result(width_, signed_);
+BitVectorValue BitVectorValue::negated() const {
+    BitVectorValue result(width_, signed_);
     wordops::negate(result.words_.data(), words_.data(), words_.size(), width_);
     return result;
 }
 
-SimValue SimValue::bitwiseNot() const {
-    SimValue result(width_, signed_);
+BitVectorValue BitVectorValue::bitwiseNot() const {
+    BitVectorValue result(width_, signed_);
     wordops::bitwiseNot(result.words_.data(), words_.data(), words_.size(), width_);
     return result;
 }
 
-SimValue SimValue::bitwiseAnd(const SimValue& rhs) const {
+BitVectorValue BitVectorValue::bitwiseAnd(const BitVectorValue& rhs) const {
     if (width_ == rhs.width_) {
-        SimValue result(width_, signed_ && rhs.signed_);
+        BitVectorValue result(width_, signed_ && rhs.signed_);
         wordops::bitwiseAnd(result.words_.data(), words_.data(), rhs.words_.data(),
                             result.words_.size(), result.width_);
         return result;
     }
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, signed_);
-    SimValue b = rhs.resized(width, rhs.signed_);
-    SimValue result(width, signed_ && rhs.signed_);
+    BitVectorValue a = resized(width, signed_);
+    BitVectorValue b = rhs.resized(width, rhs.signed_);
+    BitVectorValue result(width, signed_ && rhs.signed_);
     wordops::bitwiseAnd(result.words_.data(), a.words_.data(), b.words_.data(),
                         result.words_.size(), result.width_);
     return result;
 }
 
-SimValue SimValue::bitwiseOr(const SimValue& rhs) const {
+BitVectorValue BitVectorValue::bitwiseOr(const BitVectorValue& rhs) const {
     if (width_ == rhs.width_) {
-        SimValue result(width_, signed_ && rhs.signed_);
+        BitVectorValue result(width_, signed_ && rhs.signed_);
         wordops::bitwiseOr(result.words_.data(), words_.data(), rhs.words_.data(),
                            result.words_.size(), result.width_);
         return result;
     }
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, signed_);
-    SimValue b = rhs.resized(width, rhs.signed_);
-    SimValue result(width, signed_ && rhs.signed_);
+    BitVectorValue a = resized(width, signed_);
+    BitVectorValue b = rhs.resized(width, rhs.signed_);
+    BitVectorValue result(width, signed_ && rhs.signed_);
     wordops::bitwiseOr(result.words_.data(), a.words_.data(), b.words_.data(),
                        result.words_.size(), result.width_);
     return result;
 }
 
-SimValue SimValue::bitwiseXor(const SimValue& rhs) const {
+BitVectorValue BitVectorValue::bitwiseXor(const BitVectorValue& rhs) const {
     if (width_ == rhs.width_) {
-        SimValue result(width_, signed_ && rhs.signed_);
+        BitVectorValue result(width_, signed_ && rhs.signed_);
         wordops::bitwiseXor(result.words_.data(), words_.data(), rhs.words_.data(),
                             result.words_.size(), result.width_);
         return result;
     }
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, signed_);
-    SimValue b = rhs.resized(width, rhs.signed_);
-    SimValue result(width, signed_ && rhs.signed_);
+    BitVectorValue a = resized(width, signed_);
+    BitVectorValue b = rhs.resized(width, rhs.signed_);
+    BitVectorValue result(width, signed_ && rhs.signed_);
     wordops::bitwiseXor(result.words_.data(), a.words_.data(), b.words_.data(),
                         result.words_.size(), result.width_);
     return result;
 }
 
-SimValue SimValue::bitwiseXnor(const SimValue& rhs) const {
+BitVectorValue BitVectorValue::bitwiseXnor(const BitVectorValue& rhs) const {
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, signed_);
-    SimValue b = rhs.resized(width, rhs.signed_);
-    SimValue result(width, signed_ && rhs.signed_);
+    BitVectorValue a = resized(width, signed_);
+    BitVectorValue b = rhs.resized(width, rhs.signed_);
+    BitVectorValue result(width, signed_ && rhs.signed_);
     wordops::bitwiseXnor(result.words_.data(), a.words_.data(), b.words_.data(),
                          result.words_.size(), result.width_);
     return result;
 }
 
-SimValue SimValue::add(const SimValue& rhs) const {
+BitVectorValue BitVectorValue::add(const BitVectorValue& rhs) const {
     if (width_ == rhs.width_) {
-        SimValue result(width_, signed_ && rhs.signed_);
+        BitVectorValue result(width_, signed_ && rhs.signed_);
         wordops::add(result.words_.data(), words_.data(), rhs.words_.data(),
                      result.words_.size(), result.width_);
         return result;
     }
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, signed_);
-    SimValue b = rhs.resized(width, rhs.signed_);
-    SimValue result(width, signed_ && rhs.signed_);
+    BitVectorValue a = resized(width, signed_);
+    BitVectorValue b = rhs.resized(width, rhs.signed_);
+    BitVectorValue result(width, signed_ && rhs.signed_);
     wordops::add(result.words_.data(), a.words_.data(), b.words_.data(),
                  result.words_.size(), result.width_);
     return result;
 }
 
-SimValue SimValue::sub(const SimValue& rhs) const {
+BitVectorValue BitVectorValue::sub(const BitVectorValue& rhs) const {
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, signed_);
-    SimValue b = rhs.resized(width, rhs.signed_);
-    SimValue result(width, signed_ && rhs.signed_);
+    BitVectorValue a = resized(width, signed_);
+    BitVectorValue b = rhs.resized(width, rhs.signed_);
+    BitVectorValue result(width, signed_ && rhs.signed_);
     wordops::sub(result.words_.data(), a.words_.data(), b.words_.data(),
                  result.words_.size(), result.width_);
     return result;
 }
 
-SimValue SimValue::mul(const SimValue& rhs) const {
+BitVectorValue BitVectorValue::mul(const BitVectorValue& rhs) const {
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, false);
-    SimValue b = rhs.resized(width, false);
-    SimValue result(width, signed_ && rhs.signed_);
+    BitVectorValue a = resized(width, false);
+    BitVectorValue b = rhs.resized(width, false);
+    BitVectorValue result(width, signed_ && rhs.signed_);
     wordops::mul(result.words_.data(), a.words_.data(), b.words_.data(),
                  result.words_.size(), result.width_);
     return result;
 }
 
-bool SimValue::eq(const SimValue& rhs) const {
+bool BitVectorValue::eq(const BitVectorValue& rhs) const {
     if (width_ == rhs.width_) {
         return wordops::eq(words_.data(), rhs.words_.data(), words_.size(), width_);
     }
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, signed_);
-    SimValue b = rhs.resized(width, rhs.signed_);
+    BitVectorValue a = resized(width, signed_);
+    BitVectorValue b = rhs.resized(width, rhs.signed_);
     return wordops::eq(a.words_.data(), b.words_.data(), a.words_.size(), width);
 }
 
-bool SimValue::unsignedLt(const SimValue& rhs) const {
+bool BitVectorValue::unsignedLt(const BitVectorValue& rhs) const {
     if (width_ == rhs.width_) {
         return wordops::unsignedLt(words_.data(), rhs.words_.data(), words_.size(), width_);
     }
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, false);
-    SimValue b = rhs.resized(width, false);
+    BitVectorValue a = resized(width, false);
+    BitVectorValue b = rhs.resized(width, false);
     return wordops::unsignedLt(a.words_.data(), b.words_.data(), a.words_.size(), width);
 }
 
-bool SimValue::signedLt(const SimValue& rhs) const {
+bool BitVectorValue::signedLt(const BitVectorValue& rhs) const {
     int width = std::max(width_, rhs.width_);
-    SimValue a = resized(width, true);
-    SimValue b = rhs.resized(width, true);
+    BitVectorValue a = resized(width, true);
+    BitVectorValue b = rhs.resized(width, true);
     return wordops::signedLt(a.words_.data(), b.words_.data(), a.words_.size(), width);
 }
 
-bool SimValue::reductionAnd() const {
+bool BitVectorValue::reductionAnd() const {
     return wordops::reductionAnd(words_.data(), words_.size(), width_);
 }
 
-bool SimValue::reductionOr() const {
+bool BitVectorValue::reductionOr() const {
     if (aggregate_) return !isZero();
     return wordops::reductionOr(words_.data(), words_.size(), width_);
 }
 
-bool SimValue::reductionXor() const {
+bool BitVectorValue::reductionXor() const {
     return wordops::reductionXor(words_.data(), words_.size(), width_);
 }
 
-std::string SimValue::toBinaryString() const {
+std::string BitVectorValue::toBinaryString() const {
     if (aggregate_) {
         std::string result;
         for (const auto& element : elements_) {
@@ -363,11 +363,11 @@ std::string SimValue::toBinaryString() const {
     return result;
 }
 
-void SimValue::mulAddSmall(uint32_t mul, uint32_t add) {
+void BitVectorValue::mulAddSmall(uint32_t mul, uint32_t add) {
     wordops::mulAddSmall(words_.data(), words_.size(), width_, mul, add);
 }
 
-void SimValue::copyBitsFrom(const SimValue& src, int src_start, int dst_start, int count) {
+void BitVectorValue::copyBitsFrom(const BitVectorValue& src, int src_start, int dst_start, int count) {
     wordops::copyBits(words_.data(), words_.size(), width_, dst_start,
                       src.words_.data(), src.words_.size(), src.width_, src_start, count);
 }
